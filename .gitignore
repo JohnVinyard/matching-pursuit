@@ -1,0 +1,5 @@
+*.wav
+__pycache__
+audio
+sparse_coded
+.ipynb_checkpoints
