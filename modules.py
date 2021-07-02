@@ -146,7 +146,7 @@ class Encoder(Module):
         x = self.net(x)
         x = self.final(x)
 
-
+        # TODO: Replace this with a shuffle and then RNN
         x = torch.mean(x, dim=0, keepdim=True)
         return ae, time, mag, x
 
