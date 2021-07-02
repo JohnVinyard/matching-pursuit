@@ -10,65 +10,65 @@ import soundfile
 from matplotlib import pyplot as plt
 
 
-n_bands = 6
+# n_bands = 6
 
-atom_sizes = [(512, 512)] * n_bands
+# atom_sizes = [(512, 512)] * n_bands
 
-# number of examples to train on at a time
-batch_size = 128
+# # number of examples to train on at a time
+# batch_size = 128
 
-# signal size when testing encoding/decoding for quality evaluation
-signal_size = 2**15
+# # signal size when testing encoding/decoding for quality evaluation
+# signal_size = 2**15
 
-# size of signal we train on
-segment_size = 1024
+# # size of signal we train on
+# segment_size = 1024
 
-# sparse code iterations during training
-sparse_code_iterations = 32
+# # sparse code iterations during training
+# sparse_code_iterations = 32
 
-# where to find training examples
-path = '/home/john/workspace/audio-data/musicnet/train_data'
-pattern = '*.wav'
+# # where to find training examples
+# path = '/hdd/musicnet/train_data'
+# pattern = '*.wav'
 
 
 def initialize_multilevel_dictionary(shapes: 'list[tuple(int, int)]'):
     return {i: initialize_dictionary(*shape) for i, shape in enumerate(shapes)}
 
 
-def interactive_multilevel_sparse_encode(d: 'dict[int, np.ndarray]'):
+# def interactive_multilevel_sparse_encode(d: 'dict[int, np.ndarray]'):
 
-    sr = 22050
+#     sr = 22050
 
-    batch = next(batch_stream(path, pattern, 1, signal_size))
-    batch /= np.max(np.abs(batch), axis=-1, keepdims=True) + 1e-12
+#     batch = next(batch_stream(path, pattern, 1, signal_size))
+#     batch /= np.max(np.abs(batch), axis=-1, keepdims=True) + 1e-12
 
-    soundfile.write('orig.wav', batch.squeeze(), sr)
+#     soundfile.write('orig.wav', batch.squeeze(), sr)
 
-    encoding = defaultdict(dict)
+#     encoding = defaultdict(dict)
 
-    bands = freq_decompose(batch, n_bands)
-    band_sizes = sorted(bands.keys())
-    bands = {i: bands[k] for i, k in enumerate(band_sizes)}
+#     bands = freq_decompose(batch, n_bands)
+#     band_sizes = sorted(bands.keys())
+#     bands = {i: bands[k] for i, k in enumerate(band_sizes)}
 
-    while True:
-        for i in bands.keys():
-            sig_size = bands[i].shape[1]
-            b = bands[i]
-            dct = d[i]
-            atom_size = dct.shape[1]
-            b = np.pad(b, [(0, 0), (atom_size, atom_size)])
-            instances, residual = sparse_encode(50, sig_size, b, dct)
-            encoding[i].update(instances)
-            bands[i] = residual[:, atom_size:-atom_size]
+#     while True:
+#         for i in bands.keys():
+#             sig_size = bands[i].shape[1]
+#             b = bands[i]
+#             dct = d[i]
+#             atom_size = dct.shape[1]
+#             b = np.pad(b, [(0, 0), (atom_size, atom_size)])
+#             instances, residual = sparse_encode(50, sig_size, b, dct)
+#             encoding[i].update(instances)
+#             bands[i] = residual[:, atom_size:-atom_size]
 
-        decoded = multilevel_sparse_decode(1, band_sizes, d, encoding)
-        decoded = {size: v for size, v in zip(band_sizes, decoded.values())}
-        signal = freq_recompose(decoded)
+#         decoded = multilevel_sparse_decode(1, band_sizes, d, encoding)
+#         decoded = {size: v for size, v in zip(band_sizes, decoded.values())}
+#         signal = freq_recompose(decoded)
 
-        # re normalize
-        signal /= np.max(np.abs(signal), axis=-1, keepdims=True) + 1e-12
-        soundfile.write('listen.wav', signal.squeeze(), sr)
-        input('Listen....')
+#         # re normalize
+#         signal /= np.max(np.abs(signal), axis=-1, keepdims=True) + 1e-12
+#         soundfile.write('listen.wav', signal.squeeze(), sr)
+#         input('Listen....')
 
 
 def multilevel_sparse_encode(
@@ -147,7 +147,7 @@ def encode(signal, n_bands, d):
                 yield size, atom, pos, mag
 
 
-def preview(path, pattern, signal_size, d):
+def preview(path, pattern, signal_size, d, n_bands):
     sr = 22050
 
     batch = next(batch_stream(path, pattern, 1, signal_size))
@@ -209,17 +209,17 @@ def learn_multilevel_dict(
                 iteration)
 
         if iteration % 5 == 0:
-            preview(path, pattern, signal_size, d)
+            preview(path, pattern, signal_size, d, n_bands)
 
     return d
 
 
-if __name__ == '__main__':
-    learn_multilevel_dict(
-        atom_sizes,
-        batch_size,
-        signal_size,
-        segment_size,
-        path,
-        pattern,
-        sparse_code_iterations)
+# if __name__ == '__main__':
+#     learn_multilevel_dict(
+#         atom_sizes,
+#         batch_size,
+#         signal_size,
+#         segment_size,
+#         path,
+#         pattern,
+#         sparse_code_iterations)

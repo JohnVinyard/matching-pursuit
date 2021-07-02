@@ -1,7 +1,7 @@
 import os
 from datastore import audio, iter_chunks
 from multilevel_sparse import encode, learn_multilevel_dict
-from conjure import cache, LmdbCollection, clear_cache, dump_pickle, hash_args, load_pickle
+from conjure import cache, LmdbCollection, clear_cache, dump_pickle, hash_args, hash_function, load_pickle
 import numpy as np
 from multiprocessing.pool import ThreadPool
 
@@ -22,7 +22,7 @@ segment_size = 1024
 sparse_code_iterations = 32
 
 # where to find training examples
-path = '/home/john/workspace/audio-data/musicnet/train_data'
+path = '/hdd/musicnet/train_data'
 pattern = '*.wav'
 
 collection = LmdbCollection('sparse_coded')
@@ -67,11 +67,25 @@ def encode_chunk(path, start, stop, d):
     return encoded
 
 
+def iter_training_examples():
+    while True:
+        for txn, key in collection.iter_prefix(encode_chunk.func_hash):
+            raw = txn.get(key)
+            encoded = load_pickle(raw, txn)
+            yield encoded
+
 if __name__ == '__main__':
     sparse_dict = learn_dict()
 
-    # interactive_multilevel_sparse_encode(sparse_dict)
+    for example in iter_training_examples():
+        print(len(example))
 
-    pool = ThreadPool(processes=8)
-    pool.map(lambda x: encode_chunk(*x, sparse_dict),
-             iter_chunks(path, pattern, signal_size))
+    # for i, chunk in enumerate(iter_chunks(path, pattern, signal_size)):
+    #     print('==============================================')
+    #     print(chunk)
+    #     encoded = encode_chunk(*chunk, sparse_dict)
+    #     print(i, len(encoded))
+
+    # pool = ThreadPool(processes=8)
+    # pool.map(lambda x: encode_chunk(*x, sparse_dict),
+    #          iter_chunks(path, pattern, signal_size))

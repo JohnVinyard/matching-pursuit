@@ -3,8 +3,12 @@ from collections import defaultdict
 from scipy.fft import rfft, irfft
 from multiprocessing.pool import ThreadPool
 from matplotlib import pyplot as plt
+import torch
 
 pool = ThreadPool(processes=8)
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(device)
 
 
 def unit_norm(x):
@@ -23,7 +27,7 @@ def unit_norm(x):
     return x / (norms + 1e-8)
 
 
-def batch_fft_convolve1d(signal, d):
+def batch_fft_convolve1d(signal, d, use_gpu=True):
     """
     Convolves the dictionary/filterbank `d` with `signal`
 
@@ -49,12 +53,35 @@ def batch_fft_convolve1d(signal, d):
     px = np.pad(signal, [(0, 0), (half_width, half_width)])
     py = np.pad(d, [(0, 0), (0, px.shape[1] - atom_size)])
 
-    fpx = rfft(px, axis=-1)
-    fpy = rfft(py[..., ::-1], axis=-1)
+    if use_gpu:
+        px = torch.from_numpy(px).to(device).float()
+        py = torch.from_numpy(py).to(device).float()
 
-    c = fpx[:, None, :] * fpy[None, :, :]
+        fpx = torch.rfft(px, signal_ndim=1)[:, None, ...]
 
-    c = irfft(c, axis=-1)
+        fpy = torch.rfft(
+            torch.flip(py, dims=(-1,)), 
+            signal_ndim=1)[None, ...]
+
+        # print(fpx.shape, fpy.shape)
+
+        real = (fpx[..., 0] * fpy[..., 0]) - (fpx[..., 1] * fpy[..., 1])
+        imag = (fpx[..., 0] * fpy[..., 1]) + (fpx[..., 1] * fpy[..., 0])
+
+        # print(real.shape, imag.shape)
+        # TODO: This is wrong!
+        # c = fpx[:, None, ...] * fpy[None, ...]
+        c = torch.cat([real[..., None], imag[..., None]], dim=-1)
+
+        # raise Exception()
+        new_size = (c.shape[-2] - 1) * 2
+        c = torch.irfft(c, signal_ndim=1, signal_sizes=(new_size,))
+        c = c.data.cpu().numpy()
+    else:
+        fpx = rfft(px, axis=-1)
+        fpy = rfft(py[..., ::-1], axis=-1)
+        c = fpx[:, None, :] * fpy[None, :, :]
+        c = irfft(c, axis=-1)
 
     c = np.roll(c, signal_size - diff, axis=-1)
     c = c[..., atom_size - 1:-1]
@@ -65,8 +92,8 @@ def batch_fft_convolve1d(signal, d):
 def fft_convolve(signal, d):
     if signal.shape[0] == 1:
         return batch_fft_convolve1d(signal, d)
-    
-    results = pool.map(
+
+    results=pool.map(
         lambda x: batch_fft_convolve1d(x, d),
         [signal[i: i + 8, :] for i in range(0, len(signal), 8)])
     return np.concatenate(results, axis=0)
@@ -84,20 +111,20 @@ def activations(signal, d):
     activations - A list of 3-tuples of `(atom_index, atom_location, coefficient)`
     """
 
-    batch_size, signal_size = signal.shape
-    _, atom_size = d.shape
+    batch_size, signal_size=signal.shape
+    _, atom_size=d.shape
 
-    fm = fft_convolve(signal, d)
+    fm=fft_convolve(signal, d)
 
     # find the max atom and position for each example
-    flattened = fm.reshape((batch_size, -1))
-    mx = np.argmax(flattened, axis=1)
+    flattened=fm.reshape((batch_size, -1))
+    mx=np.argmax(flattened, axis=1)
 
-    activation = flattened[np.arange(batch_size), mx]
+    activation=flattened[np.arange(batch_size), mx]
 
     # TODO: This should likely be signal_size instead
-    atom = mx // signal_size
-    time = mx % signal_size
+    atom=mx // signal_size
+    time=mx % signal_size
 
     return zip(atom, time, activation)
 
@@ -121,9 +148,9 @@ def apply_atom(signal, signal_size, atom, position, activation, op):
     segment - the specific segment where the atom was applied
     """
 
-    atom_size = len(atom)
-    expected = signal_size + (len(atom) * 2)
-    actual = len(signal)
+    atom_size=len(atom)
+    expected=signal_size + (len(atom) * 2)
+    actual=len(signal)
 
     # print(len(signal), signal_size, len(atom))
 
@@ -133,13 +160,13 @@ def apply_atom(signal, signal_size, atom, position, activation, op):
 
     # the signal is padded by atom_size and the position is relative to
     # the atom's center
-    translated_start_pos = (position + atom_size) - (atom_size // 2)
-    end_pos = translated_start_pos + atom_size
+    translated_start_pos=(position + atom_size) - (atom_size // 2)
+    end_pos=translated_start_pos + atom_size
 
     # TODO: Consider just using the `out` parameter here to avoid
     # the second line
-    result = op(signal[translated_start_pos: end_pos], atom * activation)
-    signal[translated_start_pos: end_pos] = result
+    result=op(signal[translated_start_pos: end_pos], atom * activation)
+    signal[translated_start_pos: end_pos]=result
 
     return signal, result
 
@@ -150,26 +177,26 @@ def dict_learning_step(
         sparse_code_iterations: int,
         signal_size: int,
         d: np.ndarray,
-        iteration: int = 0):
+        iteration: int=0):
 
-    start_norm = np.linalg.norm(batch, axis=-1).mean()
+    start_norm=np.linalg.norm(batch, axis=-1).mean()
 
     # zero pad the batch
-    batch = np.pad(batch, [(0, 0), (atom_size, atom_size)])
+    batch=np.pad(batch, [(0, 0), (atom_size, atom_size)])
 
     # record positions and strengths of all atoms
-    instances = defaultdict(list)
+    instances=defaultdict(list)
 
     # TODO: Refactor to use sparse encoding step
     # sparse coding
     for _ in range(sparse_code_iterations):
         # acts is a batch-size-length list of three-tuples of
         # `(atom, location, coeff)`
-        acts = activations(batch[:, atom_size:-atom_size], d)
+        acts=activations(batch[:, atom_size:-atom_size], d)
 
         for i, act in enumerate(acts):
             # remove the best atom from each signal in the batch
-            atom, location, coeff = act
+            atom, location, coeff=act
 
             # atom_counts[atom] += 1
 
@@ -177,7 +204,7 @@ def dict_learning_step(
             instances[atom].append(act + (i,))
 
             # remove the atom from the signal
-            batch[i], _ = apply_atom(
+            batch[i], _=apply_atom(
                 batch[i], signal_size, d[atom], location, coeff, np.subtract)
 
         # print(np.linalg.norm(
@@ -185,28 +212,28 @@ def dict_learning_step(
 
     print(
         f'{iteration}: {start_norm} -> {np.linalg.norm(batch[:, atom_size:-atom_size], axis=-1).mean()}')
-    
+
     # batch is now our residual
 
     # update each atom that was used in the sparse coding phase
     # of the current batch, one atom at a time
     for atom_index, acts in instances.items():
-        segments = np.zeros((len(acts), atom_size))
-        coeffs = np.zeros((len(acts)))
+        segments=np.zeros((len(acts), atom_size))
+        coeffs=np.zeros((len(acts)))
 
         for i, act in enumerate(acts):
-            atom, location, coeff, batch_num = act
+            atom, location, coeff, batch_num=act
             # add the atom back
-            batch[batch_num], segment = apply_atom(
+            batch[batch_num], segment=apply_atom(
                 batch[batch_num], signal_size, d[atom], location, coeff, np.add)
-            segments[i] = segment
-            coeffs[i] = coeff
+            segments[i]=segment
+            coeffs[i]=coeff
 
         # update the atom and give it unit norm
-        d[atom_index, :] = unit_norm(np.dot(segments.T, coeffs))
+        d[atom_index, :]=unit_norm(np.dot(segments.T, coeffs))
 
         # finally subtract the updated atom from the residual
         for i, act in enumerate(acts):
-            atom, location, coeff, batch_num = act
-            batch[batch_num], _ = apply_atom(
+            atom, location, coeff, batch_num=act
+            batch[batch_num], _=apply_atom(
                 batch[batch_num], signal_size, d[atom], location, coeff, np.subtract)

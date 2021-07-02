@@ -16,6 +16,12 @@ def pos_encode(domain, n_samples, n_freqs):
     return np.concatenate(x, axis=0)
 
 
+def get_best_matches(basis, recon):
+    dist = torch.cdist(basis, recon)
+    indices = torch.argmin(dist, dim=0)
+    return indices
+
+
 class PositionalEncoding(Module):
     """
     Take the appropriate slices from a positional encoding
@@ -33,6 +39,12 @@ class PositionalEncoding(Module):
         self.register_buffer('pos_encode', pe)
 
         self.l1 = Linear(1 + n_freqs * 2, self.out_channels)
+
+    def get_positions(self, embeddings):
+        """
+        Given embeddings, return continuous positions in the range [0 - 1]
+        """
+        return get_best_matches(self.pos_encode, embeddings) / float(self.n_samples)
 
     def forward(self, x):
         """
@@ -75,9 +87,12 @@ class Encoder(Module):
         self.domain = domain
 
         self.atom_embedding = Embedding(512 * 6, 128)
-        self.magnitude_embedding = Embedding(256, 128)
-        self.positional_encoding = PositionalEncoding(
-            self.domain, n_samples, n_freqs, 128)
+        # self.magnitude_embedding = Embedding(256, 128)
+        # self.positional_encoding = PositionalEncoding(
+        #     self.domain, n_samples, n_freqs, 128)
+
+        self.magnitude_embedding = Linear(1, 128)
+        self.positional_encoding = Linear(1, 128)
 
         self.reduce = Linear(128 * 3, 128)
 
@@ -90,12 +105,40 @@ class Encoder(Module):
 
         self.final = Linear(128, 128)
 
+    def get_magnitude_keys(self, embeddings):
+        """
+        Return discretized magnitudes
+        """
+        return get_best_matches(self.magnitude_embedding.weight, embeddings)
+
+    def get_atom_keys(self, embeddings):
+        """
+        Return atom indices
+        """
+        return get_best_matches(self.atom_embedding.weight, embeddings)
+
+    def get_positions(self, embeddings):
+        """
+        Return continuous positions in range [0 - 1]
+        """
+        return self.positional_encoding.get_positions(embeddings)
+
+    def get_embeddings(self, x):
+        atom, time, mag = x
+        ae = self.atom_embedding(atom)
+        # pe, te = self.positional_encoding(time)
+        # me = self.magnitude_embedding(mag)
+        return torch.cat([ae, time.view(-1, 1), mag.view(-1, 1)], dim=-1)
+
     def forward(self, x):
         atom, time, mag = x
 
         ae = self.atom_embedding(atom)
-        pe, te = self.positional_encoding(time)
-        me = self.magnitude_embedding(mag)
+        # pe, te = self.positional_encoding(time)
+        # me = self.magnitude_embedding(mag)
+
+        te = self.positional_encoding(time.view(-1, 1))
+        me = self.magnitude_embedding(mag.view(-1, 1))
 
         x = torch.cat([ae, te, me], dim=-1)
         x = self.reduce(x)
@@ -103,8 +146,9 @@ class Encoder(Module):
         x = self.net(x)
         x = self.final(x)
 
+
         x = torch.mean(x, dim=0, keepdim=True)
-        return ae, pe, me, x
+        return ae, time, mag, x
 
 
 class Decoder(Module):
@@ -121,16 +165,16 @@ class Decoder(Module):
             Linear(128, 128)
         )
 
-        self.to_magnitude = Sequential(
-            ResidualBlock(128),
-            ResidualBlock(128),
-            Linear(128, 128)
-        )
-
         self.to_pos = Sequential(
             ResidualBlock(128),
             ResidualBlock(128),
-            Linear(128, 33)
+            Linear(128, 1)
+        )
+
+        self.to_magnitude = Sequential(
+            ResidualBlock(128),
+            ResidualBlock(128),
+            Linear(128, 1)
         )
 
     def forward(self, x, n_steps):
@@ -138,54 +182,84 @@ class Decoder(Module):
         # hidden in shape (num_rnn_layers, batch, hidden_dim)
 
         inp = torch.zeros((1, 1, 128)).float().to(x.device)
-        hid = torch.zeros((self.n_layers, 1, 128))
-        hid[0, 0, :] = x.view(128)
+        hid = torch.zeros((self.n_layers, 1, 128)).to(x.device)
+        inp[:] = x.view(1, 1, 128)
 
         encodings = []
 
         for i in range(n_steps):
             inp, hid = self.rnn.forward(inp, hid)
-            encodings.append(hid[-1:, ...].view(1, 128))
-        
+            encodings.append(inp.view(1, 128))
+
         encodings = torch.cat(encodings, dim=0)
 
         atoms = self.to_atom(encodings)
-        pos = self.to_pos(encodings)
+        pos = torch.clamp(self.to_pos(encodings), 0, 1)
         mags = self.to_magnitude(encodings)
+
         return [atoms, pos, mags]
-        
-        
+
+
+def loss_func(a, b):
+    dist = torch.cdist(a, b)
+    indices = torch.argmin(dist, dim=0)
+    return F.mse_loss(a[indices], b)
+
+
+class AutoEncoder(Module):
+    def __init__(
+            self,
+            domain=1,
+            n_samples=32768,
+            n_embedding_freqs=16,
+            n_layers=4):
+
+        super().__init__()
+        self.encoder = Encoder(domain, n_samples, n_embedding_freqs)
+        self.decoder = Decoder(n_layers)
+
+    def get_embeddings(self, x):
+        with torch.no_grad():
+            return self.encoder.get_embeddings(x)
+
+    def forward(self, x):
+        # TODO: Having to explicitly provide the number
+        # of steps here is a problem
+        n_steps = x[0].shape[0]
+        _, _, _, z = self.encoder(x)
+        a, p, m = self.decoder(z, n_steps)
+        return a, p, m, z
+
 
 # TODO: How do I perform alignment and compute loss?
 if __name__ == '__main__':
-    # pe = pos_encode(1, 256, 8)
-    # print(pe.shape)
-    # plt.matshow(pe)
-    # plt.show()
-
-    encoder = Encoder(domain=1)
-    decoder = Decoder()
-
-    # atom, time, mag
-    atoms = torch.from_numpy(np.random.randint(0, 6 * 512, 256)).long()
-    times = torch.from_numpy(np.random.uniform(0, 1, 256)).float()
-    mags = torch.from_numpy(np.random.randint(0, 256, 256)).long()
-
-    x = [atoms, times, mags]
-    ae, te, me, encoded = encoder.forward(x)
-    decoded = decoder.forward(encoded, n_steps=256)
-    ad, pd, md = decoded
-
-    enc = torch.cat([ae, te, me], dim=1).view(1, 256, -1)
-    print(enc.shape)
-    dec = torch.cat([ad, pd, md], dim=1).view(1, 256, -1)
-    print(dec.shape)
-
-    # the norm of this distance matrix is the loss
-    mat = torch.cdist(enc, dec).squeeze()
-    plt.matshow(mat.data.cpu().numpy())
+    pe = pos_encode(1, 32768, 16)
+    print(pe.shape)
+    plt.matshow(pe[:, :1024])
     plt.show()
 
-    # to decode, look up the best-matching embeddings for 
-    # time, magnitude and position
+    # encoder = Encoder(domain=1)
+    # decoder = Decoder()
 
+    # # atom, time, mag
+    # atoms = torch.from_numpy(np.random.randint(0, 6 * 512, 256)).long()
+    # times = torch.from_numpy(np.random.uniform(0, 1, 256)).float()
+    # mags = torch.from_numpy(np.random.randint(0, 256, 256)).long()
+
+    # x = [atoms, times, mags]
+    # ae, te, me, encoded = encoder.forward(x)
+    # decoded = decoder.forward(encoded, n_steps=256)
+    # ad, pd, md = decoded
+
+    # enc = torch.cat([ae, te, me], dim=1).view(1, 256, -1)
+    # print(enc.shape)
+    # dec = torch.cat([ad, pd, md], dim=1).view(1, 256, -1)
+    # print(dec.shape)
+
+    # # the norm of this distance matrix is the loss
+    # mat = torch.cdist(enc, dec).squeeze()
+    # plt.matshow(mat.data.cpu().numpy())
+    # plt.show()
+
+    # to decode, look up the best-matching embeddings for
+    # time, magnitude and position
