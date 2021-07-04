@@ -231,7 +231,6 @@ class AutoEncoder(Module):
         return a, p, m, z
 
 
-# TODO: How do I perform alignment and compute loss?
 if __name__ == '__main__':
     pe = pos_encode(1, 32768, 16)
     print(pe.shape)
