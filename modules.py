@@ -105,6 +105,15 @@ class Encoder(Module):
 
         self.final = Linear(128, 128)
 
+        self.reduce_global = Linear(128 * 2, 128)
+        self.with_global = Sequential(
+            ResidualBlock(128),
+            ResidualBlock(128),
+            ResidualBlock(128),
+            ResidualBlock(128),
+        )
+        self.global_final = Linear(128, 128)
+
     def get_magnitude_keys(self, embeddings):
         """
         Return discretized magnitudes
@@ -133,21 +142,26 @@ class Encoder(Module):
     def forward(self, x):
         atom, time, mag = x
 
+        # embed individual points independently
         ae = self.atom_embedding(atom)
-        # pe, te = self.positional_encoding(time)
-        # me = self.magnitude_embedding(mag)
-
         te = self.positional_encoding(time.view(-1, 1))
         me = self.magnitude_embedding(mag.view(-1, 1))
-
         x = torch.cat([ae, te, me], dim=-1)
         x = self.reduce(x)
-
         x = self.net(x)
         x = self.final(x)
 
-        # TODO: Replace this with a shuffle and then RNN
-        x = torch.mean(x, dim=0, keepdim=True)
+        # embed points with added global context
+        cardinality = x.shape[0]
+        individual = x
+        x = torch.sum(x, dim=0, keepdim=True)
+        x = torch.cat([individual, x.repeat(cardinality, 1)], dim=-1)
+        x = self.reduce_global(x)
+        x = self.with_global(x)
+        x = self.global_final(x)
+
+        # summarize into a single vector
+        x = torch.sum(x, dim=0, keepdim=True)
         return ae, time, mag, x
 
 
@@ -177,7 +191,9 @@ class Decoder(Module):
             Linear(128, 1)
         )
 
-    def forward(self, x, n_steps):
+        self.is_constituent = Linear(128, 1)
+
+    def forward(self, x, max_steps):
         # input in shape (sequence_length, batch_size, input_dim)
         # hidden in shape (num_rnn_layers, batch, hidden_dim)
 
@@ -187,9 +203,14 @@ class Decoder(Module):
 
         encodings = []
 
-        for i in range(n_steps):
+        for _ in range(max_steps):
             inp, hid = self.rnn.forward(inp, hid)
-            encodings.append(inp.view(1, 128))
+            e = inp.view(1, 128)
+            encodings.append(e)
+            c = F.relu(self.is_constituent(e))
+            zl = torch.zeros_like(c)
+            if torch.all(c == zl):
+                break
 
         encodings = torch.cat(encodings, dim=0)
 
@@ -201,6 +222,17 @@ class Decoder(Module):
 
 
 def loss_func(a, b):
+    """
+    Align points/atoms with their best matches from the
+    decoded signal and compute overall distance
+    """
+    l = max(a.shape[0], b.shape[0])
+    a_diff = l - a.shape[0]
+    b_diff = l - b.shape[0]
+
+    a = torch.pad(a, ((0, 0), (0, a_diff)))
+    b = torch.pad(b, ((0, 0), (0, b_diff)))
+
     dist = torch.cdist(a, b)
     indices = torch.argmin(dist, dim=0)
     return F.mse_loss(a[indices], b)
