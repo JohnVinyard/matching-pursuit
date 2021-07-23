@@ -1,8 +1,21 @@
 import torch
-from torch.nn import Module, Embedding, Linear, Sequential, GRU
+from torch.nn import Module, Embedding, Linear, Sequential, GRU, BatchNorm1d, MaxPool1d, RNN
 from torch.nn import functional as F
 import numpy as np
 from matplotlib import pyplot as plt
+from torch.nn.modules.conv import Conv1d
+
+
+def activation(x):
+    return F.leaky_relu(x, 0.2)
+
+
+class Activation(Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        return activation(x)
 
 
 def pos_encode(domain, n_samples, n_freqs):
@@ -20,6 +33,73 @@ def get_best_matches(basis, recon):
     dist = torch.cdist(basis, recon)
     indices = torch.argmin(dist, dim=0)
     return indices
+
+
+def init_weights(p):
+    # with torch.no_grad():
+    #     try:
+    #         p.weight.uniform_(-0.02, 0.02)
+    #     except AttributeError:
+    #         pass
+
+    #     try:
+    #         p.bias.fill_(0)
+    #     except AttributeError:
+    #         pass
+    pass
+
+
+class RecursiveNet(Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.channels = channels
+        self.net = Conv1d(channels * 2, channels, 2, 1)
+        self.pool = MaxPool1d(2, 2)
+        self.depth = Embedding(32, 128)
+        self.apply(init_weights)
+
+    def forward(self, x):
+        indices = torch.randperm(x.shape[0])
+        x = x[indices]
+
+        x = x.permute(1, 0).view(1, self.channels, -1)
+
+        i = 0
+        while x.shape[-1] > 1:
+            e = self.depth(torch.LongTensor([i]).to(x.device)).view(
+                1, 128, 1).repeat(1, 1, x.shape[-1])
+            x = torch.cat([x, e], dim=1)
+            x = self.net(x)
+            x = activation(x)
+            if x.shape[-1] == 1:
+                break
+            x = self.pool(x)
+            i += 1
+
+        x = x.view(self.channels, 1).permute(1, 0)
+        return x
+
+
+class ReducerNet(Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.channels = channels
+        self.net = GRU(channels, channels, 4)
+        self.apply(init_weights)
+
+    def forward(self, x):
+        indices = torch.randperm(x.shape[0])
+        x = x[indices]
+
+        inp = x.view(-1, 1, self.channels)
+        hid = torch.zeros(4, 1, self.channels).to(x.device)
+
+        inp, hid = self.net(inp, hid)
+        hid = hid.view(4, 1, self.channels)
+
+        x = hid[-1, 0, :]
+
+        return x
 
 
 class PositionalEncoding(Module):
@@ -60,16 +140,39 @@ class ResidualBlock(Module):
     def __init__(self, channels):
         super().__init__()
         self.channels = channels
-        self.l1 = Linear(channels, channels)
-        self.l2 = Linear(channels, channels)
+        self.l1 = Linear(channels, channels, bias=False)
+        self.l2 = Linear(channels, channels, bias=False)
+        self.apply(init_weights)
 
     def forward(self, x):
         shortcut = x
         x = self.l1(x)
-        x = F.leaky_relu(x, 0.2)
+        x = activation(x)
         x = self.l2(x)
-        x = F.leaky_relu(shortcut + x, 0.2)
+        x = activation(shortcut + x)
         return x
+
+
+class ResidualStack(Module):
+    def __init__(self, channels, layers):
+        super().__init__()
+        self.channels = channels
+        self.layers = layers
+        self.net = Sequential(
+            *[ResidualBlock(channels) for _ in range(layers)]
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+def abs_max(x):
+    return torch.sum(x, dim=0, keepdim=True)
+
+    # dim = x.shape[1]
+    # mx, indices = torch.max(torch.abs(x), dim=0)
+    # x = x[indices, torch.arange(0, dim)]
+    # return x
 
 
 class Encoder(Module):
@@ -86,83 +189,100 @@ class Encoder(Module):
         super().__init__()
         self.domain = domain
 
-        self.atom_embedding = Embedding(512 * 6, 128)
-        # self.magnitude_embedding = Embedding(256, 128)
-        # self.positional_encoding = PositionalEncoding(
-        #     self.domain, n_samples, n_freqs, 128)
+        self.rnn = RNN(128, 128, 4, batch_first=False, nonlinearity='relu')
 
-        self.magnitude_embedding = Linear(1, 128)
-        self.positional_encoding = Linear(1, 128)
+        self.atom_embedding = Embedding(512 * 6, 8)
+        self.reduce = Linear(8 + 2, 128)
 
-        self.reduce = Linear(128 * 3, 128)
+        self.independent = ResidualStack(128, 3)
+        self.ind = Linear(128, 128)
 
-        self.net = Sequential(
-            ResidualBlock(128),
-            ResidualBlock(128),
-            ResidualBlock(128),
-            ResidualBlock(128),
-        )
+        self.reduce2 = Linear(128 * 2, 128)
+        self.context = ResidualStack(128, 3)
+        self.ctxt = Linear(128, 128)
 
-        self.final = Linear(128, 128)
+        self.attn = Linear(128, 128)
+        self.attn2 = Linear(128, 128)
 
-        self.reduce_global = Linear(128 * 2, 128)
-        self.with_global = Sequential(
-            ResidualBlock(128),
-            ResidualBlock(128),
-            ResidualBlock(128),
-            ResidualBlock(128),
-        )
-        self.global_final = Linear(128, 128)
+        self.encode = Linear(128, 128)
 
-    def get_magnitude_keys(self, embeddings):
-        """
-        Return discretized magnitudes
-        """
-        return get_best_matches(self.magnitude_embedding.weight, embeddings)
+        self.apply(init_weights)
+
+    # def get_magnitude_keys(self, embeddings):
+    #     """
+    #     Return discretized magnitudes
+    #     """
+    #     return get_best_matches(self.magnitude_embedding.weight, embeddings)
 
     def get_atom_keys(self, embeddings):
         """
         Return atom indices
         """
+        print(embeddings.shape, self.atom_embedding.weight.shape)
         return get_best_matches(self.atom_embedding.weight, embeddings)
 
-    def get_positions(self, embeddings):
-        """
-        Return continuous positions in range [0 - 1]
-        """
-        return self.positional_encoding.get_positions(embeddings)
+    # def get_positions(self, embeddings):
+    #     """
+    #     Return continuous positions in range [0 - 1]
+    #     """
+    #     return self.positional_encoding.get_positions(embeddings)
 
     def get_embeddings(self, x):
         atom, time, mag = x
-        ae = self.atom_embedding(atom)
+        ae = self.atom_embedding(atom).view(-1, 8)
+        pe = time.view(-1, 1)
+        me = mag.view(-1, 1)
+
         # pe, te = self.positional_encoding(time)
         # me = self.magnitude_embedding(mag)
-        return torch.cat([ae, time.view(-1, 1), mag.view(-1, 1)], dim=-1)
 
-    def forward(self, x):
-        atom, time, mag = x
+        return torch.cat([ae, pe, me], dim=-1)
 
-        # embed individual points independently
-        ae = self.atom_embedding(atom)
-        te = self.positional_encoding(time.view(-1, 1))
-        me = self.magnitude_embedding(mag.view(-1, 1))
-        x = torch.cat([ae, te, me], dim=-1)
+    def forward(self, x, return_embeddings=False):
+
+        x = self.get_embeddings(x)
+
+        # input in shape (sequence_length, batch_size, input_dim)
+        # hidden in shape (num_rnn_layers, batch, hidden_dim)
+
         x = self.reduce(x)
-        x = self.net(x)
-        x = self.final(x)
 
-        # embed points with added global context
-        cardinality = x.shape[0]
-        individual = x
-        x = torch.sum(x, dim=0, keepdim=True)
-        x = torch.cat([individual, x.repeat(cardinality, 1)], dim=-1)
-        x = self.reduce_global(x)
-        x = self.with_global(x)
-        x = self.global_final(x)
+        inp = x.view(-1, 1, 128)
+        hid = torch.zeros(4, 1, 128).to(inp.device)
 
-        # summarize into a single vector
-        x = torch.sum(x, dim=0, keepdim=True)
-        return ae, time, mag, x
+        inp, hid = self.rnn(inp, hid)
+
+        x = hid[-1, :, :].view(1, 128)
+        x = self.encode(x)
+        return x
+
+        # n_points = x.shape[0]
+
+        # x = self.reduce(x)
+
+        # # embed independently
+        # x = self.independent(x)
+        # x = self.ind(x)
+
+        # # x, _ = torch.max(torch.abs(x), dim=0, keepdim=True)
+        # # embedded = x
+
+        # attn = torch.sigmoid(self.attn(x))
+        # # .sum(dim=0, keepdim=True) / n_points
+        # embedded = abs_max(x * attn).view(1, 128)
+
+        # x = torch.cat([x, embedded.repeat(x.shape[0], 1)], dim=1)
+
+        # # embed with context
+        # x = self.reduce2(x)
+        # x = self.context(x)
+        # x = self.ctxt(x)
+
+        # attn = torch.sigmoid(self.attn2(x))
+        # # .sum(dim=0, keepdim=True) / n_points
+        # x = abs_max(x * attn).view(1, 128)
+
+        # return x
 
 
 class Decoder(Module):
@@ -171,12 +291,17 @@ class Decoder(Module):
         super().__init__()
         self.n_layers = n_layers
         # https://pytorch.org/docs/stable/generated/torch.nn.GRU.html#torch.nn.GRU
-        self.rnn = GRU(128, 128, num_layers=n_layers, batch_first=False)
+        self.rnn = RNN(
+            128,
+            128,
+            num_layers=n_layers,
+            batch_first=False,
+            nonlinearity='relu')
 
         self.to_atom = Sequential(
             ResidualBlock(128),
             ResidualBlock(128),
-            Linear(128, 128)
+            Linear(128, 8)
         )
 
         self.to_pos = Sequential(
@@ -193,13 +318,15 @@ class Decoder(Module):
 
         self.is_constituent = Linear(128, 1)
 
+        self.apply(init_weights)
+
     def forward(self, x, max_steps):
         # input in shape (sequence_length, batch_size, input_dim)
         # hidden in shape (num_rnn_layers, batch, hidden_dim)
 
         inp = torch.zeros((1, 1, 128)).float().to(x.device)
         hid = torch.zeros((self.n_layers, 1, 128)).to(x.device)
-        inp[:] = x.view(1, 1, 128)
+        hid[0, 0, :] = x
 
         encodings = []
 
@@ -207,18 +334,19 @@ class Decoder(Module):
             inp, hid = self.rnn.forward(inp, hid)
             e = inp.view(1, 128)
             encodings.append(e)
-            c = F.relu(self.is_constituent(e))
-            zl = torch.zeros_like(c)
-            if torch.all(c == zl):
-                break
+            # c = F.relu(self.is_constituent(e))
+            # zl = torch.zeros_like(c)
+            # if torch.all(c == zl):
+            #     break
 
         encodings = torch.cat(encodings, dim=0)
 
         atoms = self.to_atom(encodings)
-        pos = torch.clamp(self.to_pos(encodings), 0, 1)
+        pos = self.to_pos(encodings)
         mags = self.to_magnitude(encodings)
 
-        return [atoms, pos, mags]
+        recon = torch.cat([atoms, pos, mags], dim=-1)
+        return recon
 
 
 def loss_func(a, b):
@@ -230,9 +358,15 @@ def loss_func(a, b):
     a_diff = l - a.shape[0]
     b_diff = l - b.shape[0]
 
-    a = torch.pad(a, ((0, 0), (0, a_diff)))
-    b = torch.pad(b, ((0, 0), (0, b_diff)))
+    # a = F.pad(a, ((0, 0), (0, a_diff)))
+    # b = F.pad(b, ((0, 0), (0, b_diff)))
 
+    a = F.pad(a, (0, 0, 0, a_diff))
+    b = F.pad(b, (0, 0, 0, b_diff))
+
+    return F.mse_loss(a, b)
+
+    # align by atom embedding
     dist = torch.cdist(a, b)
     indices = torch.argmin(dist, dim=0)
     return F.mse_loss(a[indices], b)
@@ -254,13 +388,20 @@ class AutoEncoder(Module):
         with torch.no_grad():
             return self.encoder.get_embeddings(x)
 
+    def get_atom_keys(self, embeddings):
+        """
+        Return atom indices
+        """
+        keys = self.encoder.get_atom_keys(embeddings)
+        return keys
+
     def forward(self, x):
         # TODO: Having to explicitly provide the number
         # of steps here is a problem
         n_steps = x[0].shape[0]
-        _, _, _, z = self.encoder(x)
-        a, p, m = self.decoder(z, n_steps)
-        return a, p, m, z
+        z = self.encoder(x)
+        recon = self.decoder(z, n_steps)
+        return recon, z
 
 
 if __name__ == '__main__':

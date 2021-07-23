@@ -1,5 +1,6 @@
 from collections import defaultdict
-from modules import AutoEncoder, loss_func
+from modules import loss_func
+from modules import AutoEncoder
 from sparse2 import freq_recompose
 from multilevel_sparse import multilevel_sparse_decode
 from get_encoded import iter_training_examples, learn_dict
@@ -8,14 +9,16 @@ import numpy as np
 import torch
 from torch.optim import Adam
 from itertools import cycle
+from torch.nn.utils.clip_grad import clip_grad_value_
+
 
 sr = zounds.SR22050()
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
 network = AutoEncoder().to(device)
-optim = Adam(network.parameters(), lr=1e-4)
-
 signal_sizes = [1024, 2048, 4096, 8192, 16384, 32768]
+
+
+optim = Adam(network.parameters(), lr=1e-4)
 
 
 class Digitizer(object):
@@ -32,6 +35,10 @@ class Digitizer(object):
     @property
     def mean(self):
         return self.data.mean()
+
+    @property
+    def max(self):
+        return self.data.max()
 
     def __repr__(self):
         return f'''
@@ -60,6 +67,9 @@ def decode(encoded, sparse_dict, return_audio=False):
 
     batch_size = 1
     batch_num = 0
+
+    # sort by time
+    encoded = sorted(encoded, key=lambda item: item[-1], reverse=True)
 
     for sig_size, atom, pos, mag in encoded:
         key = sig_size_indices[sig_size]
@@ -98,6 +108,8 @@ def build_digitizers(bins=256, n_examples=20):
 
 
 digitizers = build_digitizers()
+for k, v in digitizers.items():
+    print(k, v.mean, v.std)
 
 
 def nn_encode(encoded, digitizers):
@@ -120,11 +132,15 @@ def nn_encode(encoded, digitizers):
                 atoms.append(512 * band_index + atom)
                 positions.append(pos / float(signal_size))
                 # mags.extend(digitizers[signal_size].forward([mag]))
-                mags.append(mag)
+                mags.append(mag / digitizers[signal_size].max)
 
     atoms = np.array(atoms)
     positions = np.array(positions)
     mags = np.array(mags)
+
+    atoms = torch.from_numpy(atoms).long().to(device)
+    positions = torch.from_numpy(positions).float().to(device)
+    mags = torch.from_numpy(mags).float().to(device)
 
     return atoms, positions, mags
 
@@ -133,17 +149,20 @@ def nn_decode(encoded):
     """
     Transform the neural network encoding into one 
     """
-    a, p, m = encoded
 
+    # encoded = network.flatten(encoded)
+
+    if isinstance(encoded, list):
+        a, p, m = encoded
+    else:
+        a, p, m = encoded[:, :8], encoded[:, 8:9], encoded[:, 9:]
 
     keys = sorted(digitizers.keys())
 
-    atom_indices = network.encoder.get_atom_keys(a).data.cpu().numpy()
-    # pos = network.encoder.get_positions(p).data.cpu().numpy()
-    # print(pos)
-    # mags = network.encoder.get_magnitude_keys(m).data.cpu().numpy()
-    m = m.data.cpu().numpy().squeeze()
-    pos = p.data.cpu().numpy().squeeze()
+    atom_indices = network.get_atom_keys(a).data.cpu().numpy()
+    pos = np.clip(p.data.cpu().numpy().squeeze(), 0, 1)
+    # mags = network.get_magnitude_keys(m).data.cpu().numpy()
+    mags = m.data.cpu().numpy().squeeze()
 
     band_indices = atom_indices // 512
     atom_indices = atom_indices % 512
@@ -152,18 +171,24 @@ def nn_decode(encoded):
 
     sample_pos = (pos * band_keys).astype(np.int32)
 
-    # cmags = []
-    # for m, k in zip(mags, band_keys):
-    #     d = digitizers[k]
-    #     indices = d.backward(m)
-    #     cmags.append(indices)
+    cmags = []
+    for m, k in zip(mags, band_keys):
+        d = digitizers[k]
+        # indices = d.backward(m)
+        cmags.append(m * d.max)
 
-    for b, a, m, p in zip(band_indices, atom_indices, m, sample_pos):
+    for b, a, m, p in zip(band_indices, atom_indices, cmags, sample_pos):
         yield (keys[b], a, p, m)
 
 
 def listen():
-    encoded = list(nn_decode([pa, pp, pm]))
+    encoded = list(nn_decode(recon))
+    decoded = decode(encoded, sparse_dict, return_audio=True)
+    return decoded
+
+
+def real():
+    encoded = list(nn_decode(orig))
     decoded = decode(encoded, sparse_dict, return_audio=True)
     return decoded
 
@@ -174,32 +199,36 @@ if __name__ == '__main__':
     app = zounds.ZoundsApp(locals=locals(), globals=globals())
     app.start_in_thread(9999)
 
-    for i, example in enumerate(iter_training_examples()):
+    overfit = cycle([next(iter_training_examples())])
+
+    # TODO: Pre-embed atoms
+    for i, example in enumerate(overfit):
         optim.zero_grad()
 
         encoded = decode(example, sparse_dict)
 
         a, p, m = nn_encode(encoded, digitizers)
 
-        a = torch.from_numpy(a).to(device).long()
-        p = torch.from_numpy(p).to(device).float()
-        m = torch.from_numpy(m).to(device).float()
+        # print('N ATOMS', a.shape, len(set(a.data.cpu().numpy())))
 
-        pa, pp, pm, z = network([a, p, m])
+        if a.shape[0] == 0:
+            print('WARNING 0 length')
+            continue
 
-        # o = torch.cat([a, p, m], dim=-1).data.cpu().numpy()
-
-        latent = z.data.cpu().numpy()
-
+        recon, latent = network([a, p, m])
         orig = network.get_embeddings([a, p, m])
-        recon = torch.cat([pa, pp, pm], dim=-1)
 
-        r = recon.data.cpu().numpy()
         o = orig.data.cpu().numpy()
+        r = recon.data.cpu().numpy()
 
-        loss = loss_func(
-            recon, torch.clone(orig).detach())
+        z = latent.data.cpu().numpy()
+
+        loss = loss_func(recon, orig)
 
         loss.backward()
+
+        # clip_grad_value_(network.parameters(), 0.5)
+
         optim.step()
+
         print(loss.item())
