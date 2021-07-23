@@ -68,7 +68,7 @@ def decode(encoded, sparse_dict, return_audio=False):
     batch_size = 1
     batch_num = 0
 
-    # sort by time
+    # sort by magnitude descending
     encoded = sorted(encoded, key=lambda item: item[-1], reverse=True)
 
     for sig_size, atom, pos, mag in encoded:
@@ -162,7 +162,7 @@ def nn_decode(encoded):
     atom_indices = network.get_atom_keys(a).data.cpu().numpy()
     pos = np.clip(p.data.cpu().numpy().squeeze(), 0, 1)
     # mags = network.get_magnitude_keys(m).data.cpu().numpy()
-    mags = m.data.cpu().numpy().squeeze()
+    mags = np.clip(m.data.cpu().numpy().squeeze(), 0, 1)
 
     band_indices = atom_indices // 512
     atom_indices = atom_indices % 512
@@ -199,10 +199,10 @@ if __name__ == '__main__':
     app = zounds.ZoundsApp(locals=locals(), globals=globals())
     app.start_in_thread(9999)
 
-    overfit = cycle([next(iter_training_examples())])
+    # overfit = cycle([next(iter_training_examples())])
 
     # TODO: Pre-embed atoms
-    for i, example in enumerate(overfit):
+    for i, example in enumerate(iter_training_examples()):
         optim.zero_grad()
 
         encoded = decode(example, sparse_dict)
@@ -218,8 +218,8 @@ if __name__ == '__main__':
         recon, latent = network([a, p, m])
         orig = network.get_embeddings([a, p, m])
 
-        o = orig.data.cpu().numpy()
-        r = recon.data.cpu().numpy()
+        o = orig.data.cpu().numpy()[:128]
+        r = recon.data.cpu().numpy()[:128]
 
         z = latent.data.cpu().numpy()
 
@@ -227,7 +227,7 @@ if __name__ == '__main__':
 
         loss.backward()
 
-        # clip_grad_value_(network.parameters(), 0.5)
+        clip_grad_value_(network.parameters(), 0.5)
 
         optim.step()
 
