@@ -350,32 +350,7 @@ class Decoder(Module):
         return recon
 
 
-def loss_func(a, b):
-    """
-    Align points/atoms with their best matches from the
-    decoded signal and compute overall distance
-    """
-    window_size = 8
-    step = 6
 
-    l = max(a.shape[0], b.shape[0], window_size)
-    a_diff = l - a.shape[0]
-    b_diff = l - b.shape[0]
-
-    # a = F.pad(a, ((0, 0), (0, a_diff)))
-    # b = F.pad(b, ((0, 0), (0, b_diff)))
-
-    a = F.pad(a, (0, 0, 0, a_diff))
-    b = F.pad(b, (0, 0, 0, b_diff))
-
-    # return F.mse_loss(a, b)
-
-    # align by atom embedding
-    # dist = torch.cdist(a, b)
-    # indices = torch.argmin(dist, dim=0)
-    # return F.mse_loss(a[indices], b)
-
-    return dtw_loss(a, b, window_size, step)
 
 
 class AutoEncoder(Module):

@@ -1,6 +1,5 @@
 from collections import defaultdict
-from modules import loss_func
-from modules import AutoEncoder
+from modules2 import AutoEncoder
 from sparse2 import freq_recompose
 from multilevel_sparse import multilevel_sparse_decode
 from get_encoded import iter_training_examples, learn_dict
@@ -9,16 +8,17 @@ import numpy as np
 import torch
 from torch.optim import Adam
 from itertools import cycle
-from torch.nn.utils.clip_grad import clip_grad_value_
+from random import shuffle
+from torch.nn import functional as F
 
 
 sr = zounds.SR22050()
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-network = AutoEncoder().to(device)
+network = AutoEncoder(128).to(device)
 signal_sizes = [1024, 2048, 4096, 8192, 16384, 32768]
 
 
-optim = Adam(network.parameters(), lr=1e-4)
+optim = Adam(network.parameters(), lr=1e-3)
 
 
 class Digitizer(object):
@@ -69,7 +69,8 @@ def decode(encoded, sparse_dict, return_audio=False):
     batch_num = 0
 
     # sort by magnitude descending
-    encoded = sorted(encoded, key=lambda item: item[-1], reverse=True)
+    # encoded = sorted(encoded, key=lambda item: item[-1], reverse=True)
+    shuffle(encoded)
 
     for sig_size, atom, pos, mag in encoded:
         key = sig_size_indices[sig_size]
@@ -175,7 +176,7 @@ def nn_decode(encoded):
     for m, k in zip(mags, band_keys):
         d = digitizers[k]
         # indices = d.backward(m)
-        cmags.append(m * d.max)
+        cmags.append(d.edges[int(m * 256)])
 
     for b, a, m, p in zip(band_indices, atom_indices, cmags, sample_pos):
         yield (keys[b], a, p, m)
@@ -193,16 +194,73 @@ def real():
     return decoded
 
 
+def break_apart(x):
+    indices = network.get_atom_keys(x[:, :8])
+    buckets = indices // 512
+
+    d = {}
+    for i, ss in enumerate(signal_sizes):
+        idx = buckets == i
+        d[ss] = x[idx]
+    return d
+
+def multiband_loss(a, b):
+    ad = break_apart(a)
+    bd = break_apart(b)
+
+    l = 0
+    for x, y in zip(ad.values(), bd.values()):
+        l = l + loss_func(x, y)
+    
+    
+    return l
+
+
+def loss_func(a, b):
+    """
+    Align points/atoms with their best matches from the
+    decoded signal and compute overall distance
+    """
+
+    l = max(a.shape[0], b.shape[0])
+    a_diff = l - a.shape[0]
+    b_diff = l - b.shape[0]
+
+
+    a = F.pad(a, (0, 0, 0, a_diff))
+    b = F.pad(b, (0, 0, 0, b_diff))
+
+    bands = network.get_atom_keys(b[:, :8]) // 512
+    stds = np.array([digitizers[signal_sizes[b]].std for b in bands])
+    stds = torch.from_numpy(stds)[..., None].to(a.device)
+
+    # align by atom embedding
+    dist = torch.cdist(a, b)
+    indices = torch.argmin(dist, dim=0)
+    
+
+    # l = (((a[indices] - b) ** 2) * stds).mean()
+    # return l
+
+    return F.mse_loss(a[indices], b)
+
+
+# def weight_loss():
+#     w = network.encoder.atom_embedding.weight
+#     n = torch.norm(w, dim=1)
+#     l = ((n - 1) ** 2).mean()
+#     return l
+
 if __name__ == '__main__':
     sparse_dict = learn_dict()
 
     app = zounds.ZoundsApp(locals=locals(), globals=globals())
     app.start_in_thread(9999)
 
-    # overfit = cycle([next(iter_training_examples())])
+    overfit = cycle([next(iter_training_examples())])
 
     # TODO: Pre-embed atoms
-    for i, example in enumerate(iter_training_examples()):
+    for i, example in enumerate(overfit):
         optim.zero_grad()
 
         encoded = decode(example, sparse_dict)
@@ -218,16 +276,18 @@ if __name__ == '__main__':
         recon, latent = network([a, p, m])
         orig = network.get_embeddings([a, p, m])
 
+
         o = orig.data.cpu().numpy()[:128]
         r = recon.data.cpu().numpy()[:128]
 
         z = latent.data.cpu().numpy()
 
         loss = loss_func(recon, orig)
+        # loss = multiband_loss(recon, orig)
 
         loss.backward()
 
-        clip_grad_value_(network.parameters(), 0.5)
+        # clip_grad_value_(network.parameters(), 0.5)
 
         optim.step()
 

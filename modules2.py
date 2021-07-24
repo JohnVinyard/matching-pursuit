@@ -1,49 +1,127 @@
 from torch import nn
 import torch
 from torch.nn import functional as F
+from modules import ResidualStack, get_best_matches
+
+
+def init_weights(p):
+    with torch.no_grad():
+        try:
+            p.weight.uniform_(-0.1, 0.1)
+        except AttributeError:
+            pass
+
+        try:
+            p.bias.fill_(0)
+        except AttributeError:
+            pass
+
+
+class Dilated(nn.Module):
+    def __init__(self, channels, dilation):
+        super().__init__()
+        self.channels = channels
+        self.dilation = dilation
+        self.net = nn.Conv1d(
+            channels,
+            channels,
+            kernel_size=2,
+            stride=1,
+            dilation=dilation,
+            bias=False)
+
+    def forward(self, x):
+        x = F.pad(x, (self.dilation, 0))
+        x = self.net(x)
+        x = F.leaky_relu(x, 0.2)
+        return x
+
+
+class SequenceGenerator(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.channels = channels
+        self.net = nn.Sequential(
+            Dilated(channels, dilation=1),
+            Dilated(channels, dilation=2),
+            Dilated(channels, dilation=4),
+            Dilated(channels, dilation=8),
+        )
+
+        self.translate = nn.Sequential(
+            ResidualStack(channels, 2),
+            nn.Linear(channels, channels)
+        )
+
+    def forward(self, x, n_steps):
+        context = x.view(1, self.channels, 1)
+
+        x = torch.zeros(1, self.channels, 16).to(x.device)
+
+        seq = []
+        for _ in range(n_steps):
+            z = self.net(x)
+            z = z[..., -1:]
+            z = self.translate((context + z).view(1, self.channels))
+            seq.append(z)
+            x = torch.cat([x[..., 1:], z[..., None]], dim=-1)
+
+        seq = torch.cat(seq, dim=0)
+        return seq
 
 
 class GlobalContext(nn.Module):
     def __init__(self, channels):
         super().__init__()
         self.channels = channels
-        self.contr = nn.Linear(channels, 1)
-        
-    
+        self.contr = nn.Linear(channels, 1, bias=False)
+        self.reduce = nn.Linear(channels, channels, bias=False)
+
     def forward(self, x):
         n_elements = x.shape[0]
         x = x.view(-1, self.channels)
+
+        # outer concatenate
         x = x[None, :] + x[:, None]
+
         x = x.view(n_elements, n_elements, self.channels)
+
+        x = self.reduce(x)
+
         z = self.contr(x)
         x = x * z
         x = torch.sum(x, dim=1)
         return x
 
+
 class Cluster(nn.Module):
     def __init__(
-        self, 
-        channels, 
-        n_clusters, 
-        aggregate=lambda x: torch.mean(x, dim=0, keepdim=True)):
+            self,
+            channels,
+            n_clusters,
+            aggregate=lambda x: torch.sum(x, dim=0)):
 
         super().__init__()
         self.channels = channels
         self.n_clusters = n_clusters
 
-        self.assign = nn.Linear(channels, n_clusters)
+        self.assign = nn.Linear(channels, n_clusters, bias=False)
         self.aggregate = aggregate
-        
+
     def forward(self, x):
-        x = self.assign
-        x = F.softmax(x)
-        indices = torch.max(x, dim=1)
+        orig = x
+
+        x = self.assign(x)
+        z = F.softmax(x, dim=-1)
+        mx, indices = torch.max(z, dim=1)
 
         output = torch.zeros(self.n_clusters, self.channels).to(x.device)
+
         for i in range(self.n_clusters):
             indx = indices == i
-            output[i] = self.aggregate(x[indx])
-        
+            aggregated = self.aggregate(orig[indx])
+            output[i] = aggregated
+
         return output
 
 
@@ -52,19 +130,198 @@ class Reducer(nn.Module):
         super().__init__()
         self.channels = channels
         self.factor = factor
-        # TODO: How to do learned clustering with fixed cluster sizes?
+        self.reduce = nn.Linear(factor * self.channels, channels, bias=False)
 
-    
     def forward(self, x):
-        pass
+        x = x.view(-1, self.channels * self.factor)
+        x = self.reduce(x)
+        return x
+
+
+class Expander(nn.Module):
+    def __init__(self, channels, factor):
+        super().__init__()
+        self.channels = channels
+        self.factor = factor
+        self.expand = nn.Linear(
+            self.channels, self.channels * factor, bias=False)
+
+    def forward(self, x):
+        x = x.view(-1, self.channels)
+        x = self.expand(x)
+        x = x.view(-1, self.channels)
+        return x
+
+
+class VariableExpander(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.channels = channels
+        self.is_member = nn.Linear(channels, 1, bias=False)
+        self.seq_gen = SequenceGenerator(channels)
+
+        # self.rnn_layers = 3
+
+        # self.rnn = nn.RNN(
+        #     channels,
+        #     channels,
+        #     self.rnn_layers,
+        #     batch_first=False,
+        #     nonlinearity='relu',
+        #     bias=False)
+
+    def forward(self, x):
+
+        x = x.view(1, self.channels)
+
+        x = self.seq_gen.forward(x, 35)
+
+        # input in shape (sequence_length, batch_size, input_dim)
+        # hidden in shape (num_rnn_layers, batch, hidden_dim)
+        # inp = torch.zeros(1, 1, self.channels).to(x.device)
+        # hid = torch.zeros(self.rnn_layers, 1, self.channels).to(x.device)
+        # hid[0, :, :] = x
+
+        # seq = []
+        # for i in range(35):
+        #     inp, hid = self.rnn.forward(inp, hid)
+        #     x = inp.view(1, self.channels)
+        #     seq.append(x)
+
+        #     # member = self.is_member(x).view(1).item()
+        #     # if member < 0.5:
+        #     #     break
+
+        # seq = torch.cat(seq, dim=0)
+        # return seq
+
+        return x
+
+
+class Encoder(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.atom_embedding = nn.Embedding(512 * 6, 8)
+        self.reduce = nn.Linear(8 + 2, 128, bias=False)
+        self.channels = channels
+
+        self.net = nn.Sequential(
+            GlobalContext(channels),
+            Cluster(channels, n_clusters=16),  # 16
+            ResidualStack(channels, 1),
+            Reducer(channels, factor=4),  # 4
+            ResidualStack(channels, 1),
+            Reducer(channels, factor=4),  # 1
+            ResidualStack(channels, 1),
+            nn.Linear(channels, channels)
+        )
+
+    def get_atom_keys(self, embeddings):
+        """
+        Return atom indices
+        """
+        nw = self.atom_embedding.weight
+        nw = torch.norm(self.atom_embedding.weight, dim=-1, keepdim=True)
+        nw = self.atom_embedding.weight / (nw + 1e-12)
+        return get_best_matches(nw, embeddings)
+
+    def get_embeddings(self, x):
+        atom, time, mag = x
+        ae = self.atom_embedding(atom).view(-1, 8)
+
+        norms = torch.norm(ae, dim=-1, keepdim=True)
+        ae = ae / (norms + 1e-12)
+
+        pe = time.view(-1, 1)
+        me = mag.view(-1, 1)
+
+        return torch.cat([ae, pe, me], dim=-1)
+
+    def forward(self, x):
+        x = self.get_embeddings(x)
+        x = self.reduce(x)
+        x = self.net(x)
+        norms = torch.norm(x, dim=-1, keepdim=True)
+        x = x / (norms + 1e-12)
+        return x
+
+
+class Decoder(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.channels = channels
+
+        self.net = nn.Sequential(
+            Expander(channels, factor=4),  # 4
+            ResidualStack(channels, layers=1),
+            Expander(channels, factor=4),  # 16
+            ResidualStack(channels, layers=1),
+        )
+
+        self.to_atom = nn.Sequential(
+            ResidualStack(channels, layers=1),
+            nn.Linear(128, 8, bias=False)
+        )
+
+        self.to_pos = nn.Sequential(
+            ResidualStack(channels, layers=1),
+            nn.Linear(128, 1, bias=False)
+        )
+
+        self.to_magnitude = nn.Sequential(
+            ResidualStack(channels, layers=1),
+            nn.Linear(128, 1, bias=False)
+        )
+
+        self.variable = VariableExpander(channels)
+
+    def forward(self, x):
+        x = self.net(x)
+        output = []
+        for i in range(x.shape[0]):
+            seq = self.variable(x[i])
+            output.append(seq)
+
+        encodings = torch.cat(output, dim=0).view(-1, self.channels)
+
+        atoms = self.to_atom(encodings)
+        pos = self.to_pos(encodings)
+        mags = F.relu(self.to_magnitude(encodings))
+
+        recon = torch.cat([atoms, pos, mags], dim=-1)
+        return recon
+
+
+class AutoEncoder(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.channels = channels
+        self.encoder = Encoder(channels)
+        self.decoder = Decoder(channels)
+
+        self.apply(init_weights)
+
+    def get_embeddings(self, x):
+        with torch.no_grad():
+            return self.encoder.get_embeddings(x)
+
+    def get_atom_keys(self, embeddings):
+        """
+        Return atom indices
+        """
+        keys = self.encoder.get_atom_keys(embeddings)
+        return keys
+
+    def forward(self, x):
+
+        z = self.encoder(x)
+        recon = self.decoder(z)
+        return recon, z
 
 
 if __name__ == '__main__':
-    t = torch.FloatTensor(13, 5).normal_(0, 1)
+    embedding = torch.FloatTensor(1, 128)
+    net = SequenceGenerator(128)
 
-    gc = GlobalContext(5)
-
-    x = gc.forward(t)
-
+    x = net.forward(embedding, 14)
     print(x.shape)
-
