@@ -141,8 +141,8 @@ class ResidualBlock(Module):
     def __init__(self, channels):
         super().__init__()
         self.channels = channels
-        self.l1 = Linear(channels, channels, bias=False)
-        self.l2 = Linear(channels, channels, bias=False)
+        self.l1 = Linear(channels, channels)
+        self.l2 = Linear(channels, channels)
         self.apply(init_weights)
 
     def forward(self, x):

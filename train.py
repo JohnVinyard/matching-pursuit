@@ -18,7 +18,7 @@ network = AutoEncoder(128).to(device)
 signal_sizes = [1024, 2048, 4096, 8192, 16384, 32768]
 
 
-optim = Adam(network.parameters(), lr=1e-3)
+optim = Adam(network.parameters(), lr=1e-4)
 
 
 class Digitizer(object):
@@ -67,10 +67,6 @@ def decode(encoded, sparse_dict, return_audio=False):
 
     batch_size = 1
     batch_num = 0
-
-    # sort by magnitude descending
-    # encoded = sorted(encoded, key=lambda item: item[-1], reverse=True)
-    shuffle(encoded)
 
     for sig_size, atom, pos, mag in encoded:
         key = sig_size_indices[sig_size]
@@ -139,6 +135,7 @@ def nn_encode(encoded, digitizers):
     positions = np.array(positions)
     mags = np.array(mags)
 
+
     atoms = torch.from_numpy(atoms).long().to(device)
     positions = torch.from_numpy(positions).float().to(device)
     mags = torch.from_numpy(mags).float().to(device)
@@ -164,6 +161,7 @@ def nn_decode(encoded):
     pos = np.clip(p.data.cpu().numpy().squeeze(), 0, 1)
     # mags = network.get_magnitude_keys(m).data.cpu().numpy()
     mags = np.clip(m.data.cpu().numpy().squeeze(), 0, 1)
+    # cmags = mags
 
     band_indices = atom_indices // 512
     atom_indices = atom_indices % 512
@@ -231,18 +229,33 @@ def loss_func(a, b):
     b = F.pad(b, (0, 0, 0, b_diff))
 
     bands = network.get_atom_keys(b[:, :8]) // 512
-    stds = np.array([digitizers[signal_sizes[b]].std for b in bands])
-    stds = torch.from_numpy(stds)[..., None].to(a.device)
+    maxes = np.array([digitizers[signal_sizes[b]].max for b in bands])
+    maxes = torch.from_numpy(maxes)[..., None].to(a.device)
 
-    # align by atom embedding
+
+    # greedy alignment by point
     dist = torch.cdist(a, b)
-    indices = torch.argmin(dist, dim=0)
-    
 
-    # l = (((a[indices] - b) ** 2) * stds).mean()
-    # return l
+    indices = []
+    rows = set()
+    cols = set()
+    srt = np.argsort(dist.data.cpu().numpy(), axis=None)
+    row = srt // a.shape[0]
+    col = srt % a.shape[0]
 
-    return F.mse_loss(a[indices], b)
+
+    for r, c in zip(row, col):
+        if c not in cols and r not in rows:
+            indices.append(c)
+            rows.add(r)
+            cols.add(c)
+        
+    assert len(indices) == a.shape[0]    
+
+    l = (((a[indices] - b) ** 2) * maxes).mean()
+    return l
+
+    # return F.mse_loss(a[indices], b)
 
 
 # def weight_loss():
@@ -257,10 +270,12 @@ if __name__ == '__main__':
     app = zounds.ZoundsApp(locals=locals(), globals=globals())
     app.start_in_thread(9999)
 
-    overfit = cycle([next(iter_training_examples())])
+    # overfit = cycle([next(iter_training_examples())])
+
+    starting = network.encoder.atom_embedding.weight.data.cpu().numpy().squeeze()
 
     # TODO: Pre-embed atoms
-    for i, example in enumerate(overfit):
+    for i, example in enumerate(iter_training_examples()):
         optim.zero_grad()
 
         encoded = decode(example, sparse_dict)
@@ -284,6 +299,8 @@ if __name__ == '__main__':
 
         loss = loss_func(recon, orig)
         # loss = multiband_loss(recon, orig)
+
+        w = network.encoder.atom_embedding.weight.data.cpu().numpy().squeeze()
 
         loss.backward()
 

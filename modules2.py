@@ -7,7 +7,7 @@ from modules import ResidualStack, get_best_matches
 def init_weights(p):
     with torch.no_grad():
         try:
-            p.weight.uniform_(-0.1, 0.1)
+            p.weight.uniform_(-0.02, 0.02)
         except AttributeError:
             pass
 
@@ -27,13 +27,13 @@ class Dilated(nn.Module):
             channels,
             kernel_size=2,
             stride=1,
-            dilation=dilation,
-            bias=False)
+            dilation=dilation)
 
     def forward(self, x):
+        orig = x
         x = F.pad(x, (self.dilation, 0))
         x = self.net(x)
-        x = F.leaky_relu(x, 0.2)
+        x = F.leaky_relu(x + orig, 0.2)
         return x
 
 
@@ -74,8 +74,8 @@ class GlobalContext(nn.Module):
     def __init__(self, channels):
         super().__init__()
         self.channels = channels
-        self.contr = nn.Linear(channels, 1, bias=False)
-        self.reduce = nn.Linear(channels, channels, bias=False)
+        self.contr = nn.Linear(channels, 1)
+        self.reduce = nn.Linear(channels, channels)
 
     def forward(self, x):
         n_elements = x.shape[0]
@@ -105,7 +105,7 @@ class Cluster(nn.Module):
         self.channels = channels
         self.n_clusters = n_clusters
 
-        self.assign = nn.Linear(channels, n_clusters, bias=False)
+        self.assign = nn.Linear(channels, n_clusters)
         self.aggregate = aggregate
 
     def forward(self, x):
@@ -130,7 +130,7 @@ class Reducer(nn.Module):
         super().__init__()
         self.channels = channels
         self.factor = factor
-        self.reduce = nn.Linear(factor * self.channels, channels, bias=False)
+        self.reduce = nn.Linear(factor * self.channels, channels)
 
     def forward(self, x):
         x = x.view(-1, self.channels * self.factor)
@@ -144,7 +144,7 @@ class Expander(nn.Module):
         self.channels = channels
         self.factor = factor
         self.expand = nn.Linear(
-            self.channels, self.channels * factor, bias=False)
+            self.channels, self.channels * factor)
 
     def forward(self, x):
         x = x.view(-1, self.channels)
@@ -157,7 +157,7 @@ class VariableExpander(nn.Module):
     def __init__(self, channels):
         super().__init__()
         self.channels = channels
-        self.is_member = nn.Linear(channels, 1, bias=False)
+        self.is_member = nn.Linear(channels, 1)
         self.seq_gen = SequenceGenerator(channels)
 
         # self.rnn_layers = 3
@@ -167,14 +167,13 @@ class VariableExpander(nn.Module):
         #     channels,
         #     self.rnn_layers,
         #     batch_first=False,
-        #     nonlinearity='relu',
-        #     bias=False)
+        #     nonlinearity='relu')
 
     def forward(self, x):
-
         x = x.view(1, self.channels)
-
         x = self.seq_gen.forward(x, 35)
+        return x
+
 
         # input in shape (sequence_length, batch_size, input_dim)
         # hidden in shape (num_rnn_layers, batch, hidden_dim)
@@ -195,14 +194,13 @@ class VariableExpander(nn.Module):
         # seq = torch.cat(seq, dim=0)
         # return seq
 
-        return x
 
 
 class Encoder(nn.Module):
     def __init__(self, channels):
         super().__init__()
         self.atom_embedding = nn.Embedding(512 * 6, 8)
-        self.reduce = nn.Linear(8 + 2, 128, bias=False)
+        self.reduce = nn.Linear(8 + 2, 128)
         self.channels = channels
 
         self.net = nn.Sequential(
@@ -241,8 +239,8 @@ class Encoder(nn.Module):
         x = self.get_embeddings(x)
         x = self.reduce(x)
         x = self.net(x)
-        norms = torch.norm(x, dim=-1, keepdim=True)
-        x = x / (norms + 1e-12)
+        # norms = torch.norm(x, dim=-1, keepdim=True)
+        # x = x / (norms + 1e-12)
         return x
 
 
@@ -260,17 +258,17 @@ class Decoder(nn.Module):
 
         self.to_atom = nn.Sequential(
             ResidualStack(channels, layers=1),
-            nn.Linear(128, 8, bias=False)
+            nn.Linear(128, 8)
         )
 
         self.to_pos = nn.Sequential(
             ResidualStack(channels, layers=1),
-            nn.Linear(128, 1, bias=False)
+            nn.Linear(128, 1)
         )
 
         self.to_magnitude = nn.Sequential(
             ResidualStack(channels, layers=1),
-            nn.Linear(128, 1, bias=False)
+            nn.Linear(128, 1)
         )
 
         self.variable = VariableExpander(channels)
@@ -286,7 +284,7 @@ class Decoder(nn.Module):
 
         atoms = self.to_atom(encodings)
         pos = self.to_pos(encodings)
-        mags = F.relu(self.to_magnitude(encodings))
+        mags = self.to_magnitude(encodings)
 
         recon = torch.cat([atoms, pos, mags], dim=-1)
         return recon
