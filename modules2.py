@@ -5,9 +5,16 @@ from modules import ResidualStack, get_best_matches
 
 
 def init_weights(p):
+    try:
+        if not p.requires_grad:
+            print('NO INIT FOR', p)
+            return
+    except AttributeError:
+        pass
+
     with torch.no_grad():
         try:
-            p.weight.uniform_(-0.02, 0.02)
+            p.weight.uniform_(-0.07, 0.07)
         except AttributeError:
             pass
 
@@ -68,6 +75,32 @@ class SequenceGenerator(nn.Module):
 
         seq = torch.cat(seq, dim=0)
         return seq
+
+
+class BatShitSequenceGenerator(nn.Module):
+    def __init__(self, channels, length):
+        super().__init__()
+        self.channels = channels
+        self.length = length
+        self.permutations = [torch.randperm(channels) for _ in range(length)]
+        self.factors = nn.Parameter(torch.FloatTensor(length, channels).normal_(0, 0.02))
+        self.bias = nn.Parameter(torch.FloatTensor(length, channels).normal_(0, 0.02))
+        self.net = nn.Sequential(
+            ResidualStack(channels, 4),
+            nn.Linear(channels, channels)
+        )
+    
+    def forward(self, x, length):
+        x = x.view(1, self.channels)
+        x = (x * self.factors) + self.bias
+
+        # perms = []
+        # for perm in self.permutations:
+        #     perms.append(x[perm][None, :])
+        # perms = torch.cat(perms, dim=0)
+        x = self.net(x)
+        return x
+
 
 
 class GlobalContext(nn.Module):
@@ -158,10 +191,10 @@ class VariableExpander(nn.Module):
         super().__init__()
         self.channels = channels
         self.is_member = nn.Linear(channels, 1)
-        self.seq_gen = SequenceGenerator(channels)
+        # self.seq_gen = SequenceGenerator(channels)
+        self.seq_gen = BatShitSequenceGenerator(channels, 35)
 
         # self.rnn_layers = 3
-
         # self.rnn = nn.RNN(
         #     channels,
         #     channels,
@@ -177,29 +210,36 @@ class VariableExpander(nn.Module):
 
         # input in shape (sequence_length, batch_size, input_dim)
         # hidden in shape (num_rnn_layers, batch, hidden_dim)
-        # inp = torch.zeros(1, 1, self.channels).to(x.device)
-        # hid = torch.zeros(self.rnn_layers, 1, self.channels).to(x.device)
-        # hid[0, :, :] = x
+        inp = torch.zeros(1, 1, self.channels).to(x.device)
+        hid = torch.zeros(self.rnn_layers, 1, self.channels).to(x.device)
+        hid[0, :, :] = x
 
-        # seq = []
-        # for i in range(35):
-        #     inp, hid = self.rnn.forward(inp, hid)
-        #     x = inp.view(1, self.channels)
-        #     seq.append(x)
+        seq = []
+        for i in range(35):
+            inp, hid = self.rnn.forward(inp, hid)
+            x = inp.view(1, self.channels)
+            seq.append(x)
 
-        #     # member = self.is_member(x).view(1).item()
-        #     # if member < 0.5:
-        #     #     break
+            # member = self.is_member(x).view(1).item()
+            # if member < 0.5:
+            #     break
 
-        # seq = torch.cat(seq, dim=0)
-        # return seq
+        seq = torch.cat(seq, dim=0)
+        return seq
 
 
 
 class Encoder(nn.Module):
-    def __init__(self, channels):
+    def __init__(self, channels, embedding_weights):
         super().__init__()
+
         self.atom_embedding = nn.Embedding(512 * 6, 8)
+
+        with torch.no_grad():
+            self.atom_embedding.weight.data = torch.from_numpy(embedding_weights)
+        
+        self.atom_embedding.requires_grad = False
+
         self.reduce = nn.Linear(8 + 2, 128)
         self.channels = channels
 
@@ -219,16 +259,16 @@ class Encoder(nn.Module):
         Return atom indices
         """
         nw = self.atom_embedding.weight
-        nw = torch.norm(self.atom_embedding.weight, dim=-1, keepdim=True)
-        nw = self.atom_embedding.weight / (nw + 1e-12)
+        # nw = torch.norm(self.atom_embedding.weight, dim=-1, keepdim=True)
+        # nw = self.atom_embedding.weight / (nw + 1e-12)
         return get_best_matches(nw, embeddings)
 
     def get_embeddings(self, x):
         atom, time, mag = x
         ae = self.atom_embedding(atom).view(-1, 8)
 
-        norms = torch.norm(ae, dim=-1, keepdim=True)
-        ae = ae / (norms + 1e-12)
+        # norms = torch.norm(ae, dim=-1, keepdim=True)
+        # ae = ae / (norms + 1e-12)
 
         pe = time.view(-1, 1)
         me = mag.view(-1, 1)
@@ -291,10 +331,10 @@ class Decoder(nn.Module):
 
 
 class AutoEncoder(nn.Module):
-    def __init__(self, channels):
+    def __init__(self, channels, embedding_weights):
         super().__init__()
         self.channels = channels
-        self.encoder = Encoder(channels)
+        self.encoder = Encoder(channels, embedding_weights)
         self.decoder = Decoder(channels)
 
         self.apply(init_weights)

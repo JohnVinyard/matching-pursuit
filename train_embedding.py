@@ -1,3 +1,4 @@
+from re import M
 from train import decode, nn_encode, digitizers
 from get_encoded import iter_training_examples, learn_dict
 import torch
@@ -8,16 +9,25 @@ from torch.optim import Adam
 import zounds
 
 segment_duration = 0.1
-
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 embedding = nn.Embedding(3072, 8).to(device)
-optim = Adam(embedding.parameters(), lr=1e-4)
-loss = nn.MarginRankingLoss().to(device)
+
+with torch.no_grad():
+    embedding.weight.normal_(0, 1)
+
+optim = Adam(embedding.parameters(), lr=1e-2)
+loss = nn.TripletMarginLoss(margin=0.01).to(device)
+
+
+def get_trained_weights():
+    with open('embedding.dat') as f:
+        embedding.load_state_dict(torch.load(f))
+        return embedding.weight.data
 
 
 def iter_sorted_by_time():
     sparse_dict = learn_dict()
-    for i, example in enumerate(iter_training_examples()):
+    for example in iter_training_examples():
         encoded = decode(example, sparse_dict)
         a, p, m = nn_encode(encoded, digitizers)
 
@@ -34,6 +44,9 @@ def iter_sorted_by_time():
 
 def iter_examples():
     b = []
+
+    prev = None
+
     for a, p, m in iter_sorted_by_time():
         start = np.random.random()
         stop = start + segment_duration
@@ -46,12 +59,16 @@ def iter_examples():
             continue
 
         if len(b) == 0:
+            # anchor and positive example
             b.extend(np.random.choice(atoms, 2))
         elif len(b) == 2:
+            # negative example
             b.append(np.random.choice(atoms))
         else:
             yield b
             b = []
+            b.extend(np.random.choice(atoms, 2))
+
 
 def iter_batches(batch_size=128):
     anchor = []
@@ -73,19 +90,19 @@ def iter_batches(batch_size=128):
             positive = []
             negative = []
 
+
 if __name__ == '__main__':
     app = zounds.ZoundsApp(locals=locals(), globals=globals())
     app.start_in_thread(9999)
 
-    for anchor, positive, negative in iter_batches(batch_size=32):
+    for anchor, positive, negative in iter_batches(batch_size=128):
+        optim.zero_grad()
+
         a = embedding.forward(anchor)
         p = embedding.forward(positive)
         n = embedding.forward(negative)
 
-        pos_dist = ((a - p) ** 2).mean()
-        neg_dist = ((n - p) ** 2).mean()
-
-        l = loss.forward(a, n, p)
+        l = loss.forward(a, p, n)
         l.backward()
         optim.step()
         print(l.item())

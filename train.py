@@ -10,15 +10,28 @@ from torch.optim import Adam
 from itertools import cycle
 from random import shuffle
 from torch.nn import functional as F
+from torch.nn import Embedding
+from torch.nn.utils.clip_grad import clip_grad_value_
 
 
 sr = zounds.SR22050()
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-network = AutoEncoder(128).to(device)
+
+
+def get_trained_weights():
+    with open('embedding.dat', 'rb') as f:
+        embedding = Embedding(3072, 8).to(device)
+        embedding.load_state_dict(torch.load(f))
+        return embedding.weight.data.cpu().numpy()
+
+
+network = AutoEncoder(128, get_trained_weights()).to(device)
+
+
 signal_sizes = [1024, 2048, 4096, 8192, 16384, 32768]
 
 
-optim = Adam(network.parameters(), lr=1e-4)
+optim = Adam(network.parameters(), lr=1e-4, betas=(0, 0.9))
 
 
 class Digitizer(object):
@@ -130,11 +143,17 @@ def nn_encode(encoded, digitizers):
                 positions.append(pos / float(signal_size))
                 # mags.extend(digitizers[signal_size].forward([mag]))
                 mags.append(mag / digitizers[signal_size].max)
+                # mags.append(mag / 20)
 
     atoms = np.array(atoms)
     positions = np.array(positions)
     mags = np.array(mags)
 
+    # sort by time
+    indices = np.argsort(positions)
+    atoms = atoms[indices]
+    positions = positions[indices]
+    mags = mags[indices]
 
     atoms = torch.from_numpy(atoms).long().to(device)
     positions = torch.from_numpy(positions).float().to(device)
@@ -161,7 +180,7 @@ def nn_decode(encoded):
     pos = np.clip(p.data.cpu().numpy().squeeze(), 0, 1)
     # mags = network.get_magnitude_keys(m).data.cpu().numpy()
     mags = np.clip(m.data.cpu().numpy().squeeze(), 0, 1)
-    # cmags = mags
+    # cmags = mags * 20
 
     band_indices = atom_indices // 512
     atom_indices = atom_indices % 512
@@ -202,6 +221,7 @@ def break_apart(x):
         d[ss] = x[idx]
     return d
 
+
 def multiband_loss(a, b):
     ad = break_apart(a)
     bd = break_apart(b)
@@ -209,10 +229,30 @@ def multiband_loss(a, b):
     l = 0
     for x, y in zip(ad.values(), bd.values()):
         l = l + loss_func(x, y)
-    
-    
+
     return l
 
+def alignment_loss(a, b):
+    
+    # TODO: try aligning by atom only
+    dist = torch.cdist(a, b)
+
+    indices = torch.argmin(dist, dim=0)
+
+    # indices = []
+    # rows = set()
+    # cols = set()
+    # srt = np.argsort(dist.data.cpu().numpy(), axis=None)
+    # row = srt // a.shape[0]
+    # col = srt % a.shape[0]
+
+    # for r, c in zip(row, col):
+    #     if c not in cols and r not in rows:
+    #         indices.append(r)
+    #         rows.add(r)
+    #         cols.add(c)
+
+    return F.mse_loss(a, b[indices])
 
 def loss_func(a, b):
     """
@@ -224,45 +264,26 @@ def loss_func(a, b):
     a_diff = l - a.shape[0]
     b_diff = l - b.shape[0]
 
-
     a = F.pad(a, (0, 0, 0, a_diff))
     b = F.pad(b, (0, 0, 0, b_diff))
 
-    bands = network.get_atom_keys(b[:, :8]) // 512
-    maxes = np.array([digitizers[signal_sizes[b]].max for b in bands])
-    maxes = torch.from_numpy(maxes)[..., None].to(a.device)
+    # return F.mse_loss(a, b)
+
+    loss = None
+
+    aw = a.unfold(0, 16, 12).permute(0, 2, 1)
+    bw = b.unfold(0, 16, 12).permute(0, 2, 1)
+
+    for x, y in zip(aw, bw):
+        l = alignment_loss(x, y)
+        if loss is None:
+            loss = l
+        else:
+            loss += l
+
+    return loss
 
 
-    # greedy alignment by point
-    dist = torch.cdist(a, b)
-
-    indices = []
-    rows = set()
-    cols = set()
-    srt = np.argsort(dist.data.cpu().numpy(), axis=None)
-    row = srt // a.shape[0]
-    col = srt % a.shape[0]
-
-
-    for r, c in zip(row, col):
-        if c not in cols and r not in rows:
-            indices.append(c)
-            rows.add(r)
-            cols.add(c)
-        
-    assert len(indices) == a.shape[0]    
-
-    l = (((a[indices] - b) ** 2) * maxes).mean()
-    return l
-
-    # return F.mse_loss(a[indices], b)
-
-
-# def weight_loss():
-#     w = network.encoder.atom_embedding.weight
-#     n = torch.norm(w, dim=1)
-#     l = ((n - 1) ** 2).mean()
-#     return l
 
 if __name__ == '__main__':
     sparse_dict = learn_dict()
@@ -270,12 +291,12 @@ if __name__ == '__main__':
     app = zounds.ZoundsApp(locals=locals(), globals=globals())
     app.start_in_thread(9999)
 
-    # overfit = cycle([next(iter_training_examples())])
+    overfit = cycle([next(iter_training_examples())])
 
     starting = network.encoder.atom_embedding.weight.data.cpu().numpy().squeeze()
 
     # TODO: Pre-embed atoms
-    for i, example in enumerate(iter_training_examples()):
+    for i, example in enumerate(overfit):
         optim.zero_grad()
 
         encoded = decode(example, sparse_dict)
@@ -290,7 +311,6 @@ if __name__ == '__main__':
 
         recon, latent = network([a, p, m])
         orig = network.get_embeddings([a, p, m])
-
 
         o = orig.data.cpu().numpy()[:128]
         r = recon.data.cpu().numpy()[:128]
