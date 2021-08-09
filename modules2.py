@@ -1,8 +1,10 @@
 from torch import nn
 import torch
 from torch.nn import functional as F
-from modules import ResidualStack, get_best_matches
+from modules import PositionalEncoding, ResidualStack, get_best_matches
+from os import environ
 
+# environ['CUDA_LAUNCH_BLOCKING'] = '1'
 
 def init_weights(p):
     try:
@@ -82,22 +84,25 @@ class BatShitSequenceGenerator(nn.Module):
         super().__init__()
         self.channels = channels
         self.length = length
-        self.permutations = [torch.randperm(channels) for _ in range(length)]
-        self.factors = nn.Parameter(torch.FloatTensor(length, channels).normal_(0, 0.02))
-        self.bias = nn.Parameter(torch.FloatTensor(length, channels).normal_(0, 0.02))
+        self.pos = PositionalEncoding(1, length, 8, 128)
+
+
+        self.rs = nn.Linear(128 * 2, 128)
+        
         self.net = nn.Sequential(
             ResidualStack(channels, 4),
             nn.Linear(channels, channels)
         )
     
     def forward(self, x, length):
-        x = x.view(1, self.channels)
-        x = (x * self.factors) + self.bias
+        # TODO: Predict the part of the domain to use embeddings from!
+        # TODO: Predict the cluster size
 
-        # perms = []
-        # for perm in self.permutations:
-        #     perms.append(x[perm][None, :])
-        # perms = torch.cat(perms, dim=0)
+        x = x.view(1, self.channels)
+        x = x.repeat(length, 1)
+        p, p2 = self.pos(torch.linspace(0, 0.9999, self.length).to(x.device))
+        x = torch.cat([x, p2], dim=1)
+        x = self.rs(x)
         x = self.net(x)
         return x
 
@@ -138,22 +143,24 @@ class Cluster(nn.Module):
         self.channels = channels
         self.n_clusters = n_clusters
 
-        self.assign = nn.Linear(channels, n_clusters)
+        self.clusters = nn.Sequential(*[nn.Linear(channels, 1) for _ in range(n_clusters)])
+
+        # self.assign = nn.Linear(channels, n_clusters)
         self.aggregate = aggregate
 
     def forward(self, x):
         orig = x
 
-        x = self.assign(x)
-        z = F.softmax(x, dim=-1)
-        mx, indices = torch.max(z, dim=1)
+        # x = self.assign(x)
+        # z = F.softmax(x, dim=-1)
+        # mx, indices = torch.max(z, dim=1)
 
         output = torch.zeros(self.n_clusters, self.channels).to(x.device)
 
         for i in range(self.n_clusters):
-            indx = indices == i
-            aggregated = self.aggregate(orig[indx])
-            output[i] = aggregated
+            with_factor = self.clusters[i](orig)
+            output[i] = self.aggregate(orig * with_factor)
+            
 
         return output
 
