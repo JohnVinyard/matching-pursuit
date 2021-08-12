@@ -138,11 +138,11 @@ class PositionalEncoding(Module):
 
 
 class ResidualBlock(Module):
-    def __init__(self, channels):
+    def __init__(self, channels, bias=True):
         super().__init__()
         self.channels = channels
-        self.l1 = Linear(channels, channels)
-        self.l2 = Linear(channels, channels)
+        self.l1 = Linear(channels, channels, bias)
+        self.l2 = Linear(channels, channels, bias)
         self.apply(init_weights)
 
     def forward(self, x):
@@ -155,12 +155,12 @@ class ResidualBlock(Module):
 
 
 class ResidualStack(Module):
-    def __init__(self, channels, layers):
+    def __init__(self, channels, layers, bias=True):
         super().__init__()
         self.channels = channels
         self.layers = layers
         self.net = Sequential(
-            *[ResidualBlock(channels) for _ in range(layers)]
+            *[ResidualBlock(channels, bias) for _ in range(layers)]
         )
 
     def forward(self, x):

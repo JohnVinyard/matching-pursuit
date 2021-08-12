@@ -1,4 +1,5 @@
 from collections import defaultdict
+from gan_modules import Discriminator, Generator
 from modules2 import AutoEncoder
 from sparse2 import freq_recompose
 from multilevel_sparse import multilevel_sparse_decode
@@ -25,13 +26,23 @@ def get_trained_weights():
         return embedding.weight.data.cpu().numpy()
 
 
-network = AutoEncoder(128, get_trained_weights()).to(device)
+# network = AutoEncoder(128, get_trained_weights()).to(device)
 
 
 signal_sizes = [1024, 2048, 4096, 8192, 16384, 32768]
 
 
-optim = Adam(network.parameters(), lr=1e-4, betas=(0, 0.9))
+# optim = Adam(network.parameters(), lr=1e-4, betas=(0, 0.9))
+
+gen = Generator(128).to(device)
+gen_optim = Adam(gen.parameters(), lr=1e-4, betas=(0, 0.9))
+
+disc = Discriminator(128, get_trained_weights()).to(device)
+disc_optim = Adam(disc.parameters(), lr=1e-4, betas=(0, 0.9))
+
+
+def latent():
+    return torch.FloatTensor(1, 128).normal_(0, 1).to(device)
 
 
 class Digitizer(object):
@@ -150,7 +161,8 @@ def nn_encode(encoded, digitizers):
     mags = np.array(mags)
 
     # sort by time
-    indices = np.argsort(positions)
+    # indices = np.argsort(positions)
+    indices = np.random.permutation(atoms.shape[0])
     atoms = atoms[indices]
     positions = positions[indices]
     mags = mags[indices]
@@ -176,7 +188,7 @@ def nn_decode(encoded):
 
     keys = sorted(digitizers.keys())
 
-    atom_indices = network.get_atom_keys(a).data.cpu().numpy()
+    atom_indices = disc.get_atom_keys(a).data.cpu().numpy()
     pos = np.clip(p.data.cpu().numpy().squeeze(), 0, 1)
     # mags = network.get_magnitude_keys(m).data.cpu().numpy()
     mags = np.clip(m.data.cpu().numpy().squeeze(), 0, 1)
@@ -232,8 +244,9 @@ def multiband_loss(a, b):
 
     return l
 
+
 def alignment_loss(a, b):
-    
+
     # TODO: try aligning by atom only
     dist = torch.cdist(a, b)
 
@@ -252,7 +265,8 @@ def alignment_loss(a, b):
     #         rows.add(r)
     #         cols.add(c)
 
-    return F.mse_loss(a, b[indices])
+    return F.mse_loss(a, b[indices]) + -F.cosine_similarity(a, b[indices]).mean()
+
 
 def loss_func(a, b):
     """
@@ -267,7 +281,7 @@ def loss_func(a, b):
     a = F.pad(a, (0, 0, 0, a_diff))
     b = F.pad(b, (0, 0, 0, b_diff))
 
-    # return F.mse_loss(a, b)
+    return -F.cosine_similarity(a, b).mean()
 
     loss = None
 
@@ -284,49 +298,95 @@ def loss_func(a, b):
     return loss
 
 
-
-
 if __name__ == '__main__':
     sparse_dict = learn_dict()
 
     app = zounds.ZoundsApp(locals=locals(), globals=globals())
     app.start_in_thread(9999)
 
-    overfit = cycle([next(iter_training_examples())])
+    for i, example in enumerate(iter_training_examples()):
+        disc_optim.zero_grad()
+        gen_optim.zero_grad()
 
-    starting = network.encoder.atom_embedding.weight.data.cpu().numpy().squeeze()
+        if i % 2 == 0:
+            # train disc
+            encoded = decode(example, sparse_dict)
+            a, p, m = nn_encode(encoded, digitizers)
+            rl = torch.FloatTensor([a.shape[0] / 768]).to(device)
 
-    # TODO: Pre-embed atoms
-    for i, example in enumerate(overfit):
-        optim.zero_grad()
+            with torch.no_grad():
+                z = latent()
+                recon, l = gen.forward(z)
 
-        encoded = decode(example, sparse_dict)
+            rj = disc.forward([a, p, m], rl)
+            fj = disc.forward(recon, l)
+            loss = (torch.abs(rj - 1) + torch.abs(fj - 0)).mean()
+            loss.backward()
+            # clip_grad_value_(disc.parameters(), 0.5)
+            disc_optim.step()
+            print('Disc: ', loss.item(), a.shape[0], recon.shape[0])
+        else:
+            # train gen
+            encoded = decode(example, sparse_dict)
+            a, p, m = nn_encode(encoded, digitizers)
 
-        a, p, m = nn_encode(encoded, digitizers)
+            # do two
+            z = latent()
+            recon, l = gen.forward(z)
+            fj = disc.forward(recon, l)
+            l1 = torch.abs(fj - 1).mean()
 
-        # print('N ATOMS', a.shape, len(set(a.data.cpu().numpy())))
+            z = latent()
+            recon2, l2 = gen.forward(z)
+            fj = disc.forward(recon2, l2)
+            l2 = torch.abs(fj - 1).mean()
 
-        if a.shape[0] == 0:
-            print('WARNING 0 length')
-            continue
+            loss = torch.cat([l1.view(-1), l2.view(-1)]).mean()
 
-        recon, latent = network([a, p, m])
-        orig = network.get_embeddings([a, p, m])
+            loss.backward()
+            # clip_grad_value_(gen.parameters(), 0.5)
+            gen_optim.step()
+            print('Gen: ', loss.item(), a.shape[0], recon.shape[0])
 
+        orig = disc.get_embeddings([a, p, m])
         o = orig.data.cpu().numpy()[:128]
         r = recon.data.cpu().numpy()[:128]
 
-        z = latent.data.cpu().numpy()
+    # overfit = cycle([next(iter_training_examples())])
 
-        loss = loss_func(recon, orig)
-        # loss = multiband_loss(recon, orig)
+    # starting = network.encoder.atom_embedding.weight.data.cpu().numpy().squeeze()
 
-        w = network.encoder.atom_embedding.weight.data.cpu().numpy().squeeze()
+    # # TODO: Pre-embed atoms
+    # for i, example in enumerate(iter_training_examples()):
+    #     optim.zero_grad()
 
-        loss.backward()
+    #     encoded = decode(example, sparse_dict)
 
-        # clip_grad_value_(network.parameters(), 0.5)
+    #     a, p, m = nn_encode(encoded, digitizers)
 
-        optim.step()
+    #     # print('N ATOMS', a.shape, len(set(a.data.cpu().numpy())))
 
-        print(loss.item())
+    #     if a.shape[0] == 0:
+    #         print('WARNING 0 length')
+    #         continue
+
+    #     recon, latent = network([a, p, m])
+    #     orig = network.get_embeddings([a, p, m])
+
+    #     o = orig.data.cpu().numpy()[:128]
+    #     r = recon.data.cpu().numpy()[:128]
+
+    #     z = latent.data.cpu().numpy()
+
+    #     loss = loss_func(recon, orig)
+    #     # loss = multiband_loss(recon, orig)
+
+    #     w = network.encoder.atom_embedding.weight.data.cpu().numpy().squeeze()
+
+    #     loss.backward()
+
+    #     # clip_grad_value_(network.parameters(), 0.5)
+
+    #     optim.step()
+
+    #     print(loss.item())

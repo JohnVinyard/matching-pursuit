@@ -16,7 +16,7 @@ def init_weights(p):
 
     with torch.no_grad():
         try:
-            p.weight.uniform_(-0.07, 0.07)
+            p.weight.uniform_(-0.1, 0.1)
         except AttributeError:
             pass
 
@@ -128,8 +128,12 @@ class GlobalContext(nn.Module):
 
         z = self.contr(x)
         x = x * z
-        x = torch.sum(x, dim=1)
+
+        # TODO: only aggregate over upper diagonal
+        x = torch.max(x, dim=1)[0]
         return x
+
+
 
 
 class Cluster(nn.Module):
@@ -137,7 +141,7 @@ class Cluster(nn.Module):
             self,
             channels,
             n_clusters,
-            aggregate=lambda x: torch.sum(x, dim=0)):
+            aggregate=lambda x: torch.max(x, dim=0)[0]):
 
         super().__init__()
         self.channels = channels
@@ -200,6 +204,7 @@ class VariableExpander(nn.Module):
         self.is_member = nn.Linear(channels, 1)
         # self.seq_gen = SequenceGenerator(channels)
         self.seq_gen = BatShitSequenceGenerator(channels, 35)
+
 
         # self.rnn_layers = 3
         # self.rnn = nn.RNN(
