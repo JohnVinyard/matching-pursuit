@@ -6,6 +6,7 @@ from os import environ
 
 # environ['CUDA_LAUNCH_BLOCKING'] = '1'
 
+
 def init_weights(p):
     try:
         if not p.requires_grad:
@@ -86,14 +87,13 @@ class BatShitSequenceGenerator(nn.Module):
         self.length = length
         self.pos = PositionalEncoding(1, length, 8, 128)
 
-
         self.rs = nn.Linear(128 * 2, 128)
-        
+
         self.net = nn.Sequential(
             ResidualStack(channels, 4),
             nn.Linear(channels, channels)
         )
-    
+
     def forward(self, x, length):
         # TODO: Predict the part of the domain to use embeddings from!
         # TODO: Predict the cluster size
@@ -105,7 +105,6 @@ class BatShitSequenceGenerator(nn.Module):
         x = self.rs(x)
         x = self.net(x)
         return x
-
 
 
 class GlobalContext(nn.Module):
@@ -126,14 +125,12 @@ class GlobalContext(nn.Module):
 
         x = self.reduce(x)
 
-        z = self.contr(x)
+        z = torch.sigmoid(self.contr(x))
         x = x * z
 
         # TODO: only aggregate over upper diagonal
-        x = torch.max(x, dim=1)[0]
+        x = torch.mean(x, dim=1)
         return x
-
-
 
 
 class Cluster(nn.Module):
@@ -141,13 +138,14 @@ class Cluster(nn.Module):
             self,
             channels,
             n_clusters,
-            aggregate=lambda x: torch.max(x, dim=0)[0]):
+            aggregate=lambda x: torch.mean(x, dim=0)):
 
         super().__init__()
         self.channels = channels
         self.n_clusters = n_clusters
 
-        self.clusters = nn.Sequential(*[nn.Linear(channels, 1) for _ in range(n_clusters)])
+        self.clusters = nn.Sequential(
+            *[nn.Linear(channels, 1) for _ in range(n_clusters)])
 
         # self.assign = nn.Linear(channels, n_clusters)
         self.aggregate = aggregate
@@ -162,9 +160,8 @@ class Cluster(nn.Module):
         output = torch.zeros(self.n_clusters, self.channels).to(x.device)
 
         for i in range(self.n_clusters):
-            with_factor = self.clusters[i](orig)
+            with_factor = torch.sigmoid(self.clusters[i](orig))
             output[i] = self.aggregate(orig * with_factor)
-            
 
         return output
 
@@ -205,7 +202,6 @@ class VariableExpander(nn.Module):
         # self.seq_gen = SequenceGenerator(channels)
         self.seq_gen = BatShitSequenceGenerator(channels, 35)
 
-
         # self.rnn_layers = 3
         # self.rnn = nn.RNN(
         #     channels,
@@ -218,7 +214,6 @@ class VariableExpander(nn.Module):
         x = x.view(1, self.channels)
         x = self.seq_gen.forward(x, 35)
         return x
-
 
         # input in shape (sequence_length, batch_size, input_dim)
         # hidden in shape (num_rnn_layers, batch, hidden_dim)
@@ -240,7 +235,6 @@ class VariableExpander(nn.Module):
         return seq
 
 
-
 class Encoder(nn.Module):
     def __init__(self, channels, embedding_weights):
         super().__init__()
@@ -248,8 +242,9 @@ class Encoder(nn.Module):
         self.atom_embedding = nn.Embedding(512 * 6, 8)
 
         with torch.no_grad():
-            self.atom_embedding.weight.data = torch.from_numpy(embedding_weights)
-        
+            self.atom_embedding.weight.data = torch.from_numpy(
+                embedding_weights)
+
         self.atom_embedding.requires_grad = False
 
         self.reduce = nn.Linear(8 + 2, 128)
