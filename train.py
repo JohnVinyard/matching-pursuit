@@ -12,6 +12,7 @@ from itertools import cycle
 from random import shuffle
 from torch.nn import functional as F
 from torch.nn import Embedding
+from torch.nn.utils.clip_grad import clip_grad_value_
 
 
 sr = zounds.SR22050()
@@ -321,6 +322,7 @@ if __name__ == '__main__':
             fj = disc.forward(recon, l)
             loss = (torch.abs(rj - 1) + torch.abs(fj - 0)).mean()
             loss.backward()
+            clip_grad_value_(disc.parameters(), 0.5)
             disc_optim.step()
             print('Disc: ', loss.item(), a.shape[0], recon.shape[0])
         else:
@@ -342,6 +344,7 @@ if __name__ == '__main__':
             loss = torch.cat([l1.view(-1), l2.view(-1)]).mean()
 
             loss.backward()
+            clip_grad_value_(gen.parameters(), 0.5)
             gen_optim.step()
             print('Gen: ', loss.item(), a.shape[0], recon.shape[0])
 

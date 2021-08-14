@@ -80,6 +80,7 @@ class Discriminator(nn.Module):
         if isinstance(x, list):
             x = self.get_embeddings(x)
         
+        # judge each atom individually
         aj = self.atom_j(x).mean()
 
         c = self.cardinality(l.view(1, 1))
