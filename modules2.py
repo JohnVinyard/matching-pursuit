@@ -118,6 +118,8 @@ class GlobalContext(nn.Module):
         n_elements = x.shape[0]
         x = x.view(-1, self.channels)
 
+        # TODO: possibly zero pad so this is really concatenation
+        # and not addition
         # outer concatenate
         x = x[None, :] + x[:, None]
 

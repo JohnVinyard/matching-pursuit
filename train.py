@@ -298,6 +298,14 @@ def loss_func(a, b):
     return loss
 
 
+def least_squares_generator_loss(j):
+    return 0.5 * ((j - 1) ** 2).mean()
+
+
+def least_squares_disc_loss(r_j, f_j):
+    return 0.5 * (((r_j - 1) ** 2).mean() + (f_j ** 2).mean())
+
+
 if __name__ == '__main__':
     sparse_dict = learn_dict()
 
@@ -320,9 +328,10 @@ if __name__ == '__main__':
 
             rj = disc.forward([a, p, m], rl)
             fj = disc.forward(recon, l)
-            loss = (torch.abs(rj - 1) + torch.abs(fj - 0)).mean()
+            # loss = (torch.abs(rj - 1) + torch.abs(fj - 0)).mean()
+            loss = least_squares_disc_loss(rj, fj)
             loss.backward()
-            clip_grad_value_(disc.parameters(), 0.5)
+            # clip_grad_value_(disc.parameters(), 0.5)
             disc_optim.step()
             print('Disc: ', loss.item(), a.shape[0], recon.shape[0])
         else:
@@ -333,18 +342,16 @@ if __name__ == '__main__':
             # do two
             z = latent()
             recon, l = gen.forward(z)
-            fj = disc.forward(recon, l)
-            l1 = torch.abs(fj - 1).mean()
+            fj1 = disc.forward(recon, l)
 
             z = latent()
             recon2, l2 = gen.forward(z)
-            fj = disc.forward(recon2, l2)
-            l2 = torch.abs(fj - 1).mean()
+            fj2 = disc.forward(recon2, l2)
 
-            loss = torch.cat([l1.view(-1), l2.view(-1)]).mean()
+            loss = least_squares_generator_loss(torch.cat([fj1, fj2]))
 
             loss.backward()
-            clip_grad_value_(gen.parameters(), 0.5)
+            # clip_grad_value_(gen.parameters(), 0.5)
             gen_optim.step()
             print('Gen: ', loss.item(), a.shape[0], recon.shape[0])
 

@@ -20,7 +20,8 @@ class RecursiveExpander(nn.Module):
         x = x.view(-1, self.channels)
         i = 0
         while x.shape[0] < size:
-            x = self.net(torch.cat([x, self.depth_embedding[i]], dim=1))
+            e = self.depth_embedding[i].repeat(x.shape[0], 1)
+            x = self.net(torch.cat([x, e], dim=1))
             x = x.view(-1, self.channels)
             i += 1
         return x[:size]
@@ -103,7 +104,7 @@ class BatShitSequenceGenerator(nn.Module):
 
         self.expander = RecursiveExpander(128)
 
-        self.rs = nn.Linear(128 * 2, 128)
+        self.rs = nn.Linear(128 * 3, 128)
 
         self.net = nn.Sequential(
             ResidualStack(channels, 4),
@@ -119,12 +120,12 @@ class BatShitSequenceGenerator(nn.Module):
         positions = torch.clamp(
             torch.abs(self.positions(x)), 0, 0.9999).view(-1)[:length]
 
-        # exp = self.expander(x, length)
+        exp = self.expander(x, length)
 
         x = x.view(1, self.channels)
         x = x.repeat(length, 1)
         p, p2 = self.pos(positions)
-        x = torch.cat([x, p2], dim=1)
+        x = torch.cat([x, exp, p2], dim=1)
         x = self.rs(x)
         x = self.net(x)
         return x
