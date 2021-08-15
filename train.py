@@ -1,6 +1,5 @@
 from collections import defaultdict
-from gan_modules import Discriminator, Generator
-from modules2 import AutoEncoder
+from modules3 import Discriminator, Generator
 from sparse2 import freq_recompose
 from multilevel_sparse import multilevel_sparse_decode
 from get_encoded import iter_training_examples, learn_dict
@@ -331,7 +330,7 @@ if __name__ == '__main__':
             # loss = (torch.abs(rj - 1) + torch.abs(fj - 0)).mean()
             loss = least_squares_disc_loss(rj, fj)
             loss.backward()
-            # clip_grad_value_(disc.parameters(), 0.5)
+            clip_grad_value_(disc.parameters(), 0.5)
             disc_optim.step()
             print('Disc: ', loss.item(), a.shape[0], recon.shape[0])
         else:
@@ -351,7 +350,7 @@ if __name__ == '__main__':
             loss = least_squares_generator_loss(torch.cat([fj1, fj2]))
 
             loss.backward()
-            # clip_grad_value_(gen.parameters(), 0.5)
+            clip_grad_value_(gen.parameters(), 0.5)
             gen_optim.step()
             print('Gen: ', loss.item(), a.shape[0], recon.shape[0])
 
