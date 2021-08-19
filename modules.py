@@ -1,6 +1,6 @@
 from dtw import dtw_loss
 import torch
-from torch.nn import Module, Embedding, Linear, Sequential, GRU, BatchNorm1d, MaxPool1d, RNN
+from torch.nn import Module, Embedding, Linear, Sequential, GRU, BatchNorm1d, MaxPool1d, RNN, LayerNorm
 from torch.nn import functional as F
 import numpy as np
 from matplotlib import pyplot as plt
@@ -115,11 +115,13 @@ class PositionalEncoding(Module):
         self.n_freqs = n_freqs
         self.out_channels = out_channels
 
+        self.freq_channels = 1 + n_freqs * 2
+
         pe = torch.from_numpy(pos_encode(
             self.domain, self.n_samples, self.n_freqs)).float().permute(1, 0)
         self.register_buffer('pos_encode', pe)
 
-        self.l1 = Linear(1 + n_freqs * 2, self.out_channels)
+        self.l1 = Linear(self.freq_channels, self.out_channels, bias=False)
 
     def get_positions(self, embeddings):
         """

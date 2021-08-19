@@ -4,7 +4,7 @@ from torch.nn import functional as F
 from modules import PositionalEncoding, ResidualStack, get_best_matches
 from os import environ
 
-# environ['CUDA_LAUNCH_BLOCKING'] = '1'
+environ['CUDA_LAUNCH_BLOCKING'] = '1'
 
 
 def init_weights(p):
@@ -140,7 +140,7 @@ class Cluster(nn.Module):
             self,
             channels,
             n_clusters,
-            aggregate=lambda x: torch.mean(x, dim=0)):
+            aggregate=lambda x: torch.max(x, dim=0)[0]):
 
         super().__init__()
         self.channels = channels
@@ -162,7 +162,7 @@ class Cluster(nn.Module):
         output = torch.zeros(self.n_clusters, self.channels).to(x.device)
 
         for i in range(self.n_clusters):
-            with_factor = torch.sigmoid(self.clusters[i](orig))
+            with_factor = self.clusters[i](orig)
             output[i] = self.aggregate(orig * with_factor)
 
         return output

@@ -1,3 +1,6 @@
+from modules2 import Dilated
+from torch.nn.modules.container import Sequential
+from gan_modules import RecursiveExpander
 from torch import nn
 import torch
 import numpy as np
@@ -6,12 +9,14 @@ from modules import PositionalEncoding, ResidualStack, get_best_matches, init_we
 
 
 class Attention(nn.Module):
-    def __init__(self, channels):
+    def __init__(self, channels, layer_norm=True):
         super().__init__()
         self.channels = channels
         self.query = nn.Linear(channels, channels)
         self.key = nn.Linear(channels, channels)
         self.value = nn.Linear(channels, channels)
+        self.layer_norm = layer_norm
+        self.norm = nn.LayerNorm(channels)
 
     def forward(self, x):
         x = x.view(-1, self.channels)
@@ -23,6 +28,8 @@ class Attention(nn.Module):
         attn = attn / np.sqrt(attn.numel())
         attn = torch.softmax(attn.view(-1), dim=0).view(l, l)
         x = torch.matmul(attn, v)
+        if self.layer_norm:
+            x = self.norm(x)
         return x
 
 
@@ -50,6 +57,22 @@ class LinearOutputStack(nn.Module):
         return x
 
 
+class ToThreeD(nn.Module):
+    def __init__(self):
+        super().__init__()
+    
+    def forward(self, x):
+        return x.permute(1, 0)[None, ...]
+
+class ToTwoD(nn.Module):
+    def __init__(self):
+        super().__init__()
+    
+    def forward(self, x):
+        t = x.shape[-1]
+        x = x.permute(0, 2, 1).reshape(t, -1)
+        return x
+
 class Discriminator(nn.Module):
     def __init__(self, channels, embedding_weights):
         super().__init__()
@@ -71,7 +94,7 @@ class Discriminator(nn.Module):
         self.length = LinearOutputStack(channels, 2, in_channels=1)
         self.judge = LinearOutputStack(channels * 2, 1, 1)
 
-        self.atom_j = LinearOutputStack(channels, 3, out_channels=1, in_channels=10)
+
 
         self.apply(init_weights)
     
@@ -98,12 +121,10 @@ class Discriminator(nn.Module):
         n = x.shape[0]
         l = self.length(l.view(1, 1)).repeat(n, 1)
 
-        aj = self.atom_j(x)
-
         x = self.seq(x)
         x = torch.cat([l, x], dim=1)
         x = self.judge(x)
-        return torch.cat([x, aj], dim=1)
+        return x
 
 
 class Generator(nn.Module):
@@ -113,11 +134,14 @@ class Generator(nn.Module):
         self.max_atoms = 768
         self.length = LinearOutputStack(channels, 2, 1)
         self.pos = PositionalEncoding(1, 16384, 8, channels)
-        self.input = LinearOutputStack(channels, 3, in_channels=128 * 3)
+        self.input = LinearOutputStack(channels, 3, in_channels=channels + 3)
         self.attn = Attention(channels)
         self.output = LinearOutputStack(channels, 3)
 
         self.positions = LinearOutputStack(channels, 3, out_channels=self.max_atoms + 1)
+
+        self.expand = RecursiveExpander(channels)
+
 
         self.to_atom = nn.Sequential(
             ResidualStack(channels, layers=1),
@@ -134,6 +158,8 @@ class Generator(nn.Module):
             nn.Linear(128, 1, bias=False)
         )
 
+        self.long_shot = LinearOutputStack(channels, 3, out_channels=(self.max_atoms + 1) * 3)
+
         self.apply(init_weights)
 
     def forward(self, x):
@@ -141,18 +167,19 @@ class Generator(nn.Module):
         l = torch.clamp(torch.abs(self.length(x)), 0, 1)
         count = int(l * self.max_atoms) + 1
 
-        p = torch.clamp(self.positions(x).view(-1)[:count], 0, 0.9999)
+        z = self.long_shot(x).reshape(self.max_atoms + 1, 3)
+        z = z[:count, :]
 
+        # exp = self.expand(x, count)
         latent = x.repeat(count, 1)
-        noise = torch.zeros_like(latent).normal_(0, 1)
 
-        
-        _, pos = self.pos(p)
-        x = torch.cat([latent, noise, pos], dim=1)
+        x = torch.cat([latent, z], dim=1)
+
         x = self.input(x)
         x = self.attn(x)
         encodings = x = self.output(x)
-        
+
+
         atoms = self.to_atom(encodings)
         pos = self.to_pos(encodings)
         mags = self.to_magnitude(encodings)

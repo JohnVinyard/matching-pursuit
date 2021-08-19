@@ -1,5 +1,5 @@
 from collections import defaultdict
-from modules3 import Discriminator, Generator
+from modules4 import Discriminator, Generator
 from sparse2 import freq_recompose
 from multilevel_sparse import multilevel_sparse_decode
 from get_encoded import iter_training_examples, learn_dict
@@ -152,8 +152,8 @@ def nn_encode(encoded, digitizers):
                 atoms.append(512 * band_index + atom)
                 positions.append(pos / float(signal_size))
                 # mags.extend(digitizers[signal_size].forward([mag]))
-                # mags.append(mag / digitizers[signal_size].max)
-                mags.append(mag / 20)
+                mags.append(mag / digitizers[signal_size].max)
+                # mags.append(mag / 20)
 
     atoms = np.array(atoms)
     positions = np.array(positions)
@@ -191,7 +191,7 @@ def nn_decode(encoded):
     pos = np.clip(p.data.cpu().numpy().squeeze(), 0, 1)
     # mags = network.get_magnitude_keys(m).data.cpu().numpy()
     mags = np.clip(m.data.cpu().numpy().squeeze(), 0, 1)
-    cmags = mags * 20
+    # cmags = mags * 20
 
     band_indices = atom_indices // 512
     atom_indices = atom_indices % 512
@@ -200,11 +200,11 @@ def nn_decode(encoded):
 
     sample_pos = (pos * band_keys).astype(np.int32)
 
-    # cmags = []
-    # for m, k in zip(mags, band_keys):
-    #     d = digitizers[k]
-    #     # indices = d.backward(m)
-    #     cmags.append(d.edges[int(m * 256)])
+    cmags = []
+    for m, k in zip(mags, band_keys):
+        d = digitizers[k]
+        # indices = d.backward(m)
+        cmags.append(d.edges[int(m * 256)])
 
     for b, a, m, p in zip(band_indices, atom_indices, cmags, sample_pos):
         yield (keys[b], a, p, m)
@@ -222,87 +222,80 @@ def real():
     return decoded
 
 
-def break_apart(x):
-    indices = network.get_atom_keys(x[:, :8])
-    buckets = indices // 512
 
-    d = {}
-    for i, ss in enumerate(signal_sizes):
-        idx = buckets == i
-        d[ss] = x[idx]
-    return d
-
-
-def multiband_loss(a, b):
-    ad = break_apart(a)
-    bd = break_apart(b)
-
-    l = 0
-    for x, y in zip(ad.values(), bd.values()):
-        l = l + loss_func(x, y)
-
-    return l
-
-
-def alignment_loss(a, b):
-
-    # TODO: try aligning by atom only
-    dist = torch.cdist(a, b)
-
-    indices = torch.argmin(dist, dim=0)
-
-    # indices = []
-    # rows = set()
-    # cols = set()
-    # srt = np.argsort(dist.data.cpu().numpy(), axis=None)
-    # row = srt // a.shape[0]
-    # col = srt % a.shape[0]
-
-    # for r, c in zip(row, col):
-    #     if c not in cols and r not in rows:
-    #         indices.append(r)
-    #         rows.add(r)
-    #         cols.add(c)
-
-    return F.mse_loss(a, b[indices]) + -F.cosine_similarity(a, b[indices]).mean()
-
-
-def loss_func(a, b):
-    """
-    Align points/atoms with their best matches from the
-    decoded signal and compute overall distance
-    """
-
-    l = max(a.shape[0], b.shape[0])
-    a_diff = l - a.shape[0]
-    b_diff = l - b.shape[0]
-
-    a = F.pad(a, (0, 0, 0, a_diff))
-    b = F.pad(b, (0, 0, 0, b_diff))
-
-    return -F.cosine_similarity(a, b).mean()
-
-    loss = None
-
-    aw = a.unfold(0, 16, 12).permute(0, 2, 1)
-    bw = b.unfold(0, 16, 12).permute(0, 2, 1)
-
-    for x, y in zip(aw, bw):
-        l = alignment_loss(x, y)
-        if loss is None:
-            loss = l
-        else:
-            loss += l
-
-    return loss
-
+real_target = 1
+fake_target = 0
 
 def least_squares_generator_loss(j):
-    return 0.5 * ((j - 1) ** 2).mean()
+    return 0.5 * ((j - real_target) ** 2).mean()
 
 
 def least_squares_disc_loss(r_j, f_j):
-    return 0.5 * (((r_j - 1) ** 2).mean() + (f_j ** 2).mean())
+    return 0.5 * (((r_j - real_target) ** 2).mean() + ((f_j - fake_target) ** 2).mean())
+
+
+def train_disc(example1, example2):
+    disc_optim.zero_grad()
+
+    # train disc
+    encoded = decode(example1, sparse_dict)
+    a, p, m = nn_encode(encoded, digitizers)
+    rl = torch.FloatTensor([a.shape[0] / 768]).to(device)
+
+    with torch.no_grad():
+        z = latent()
+        recon, l = gen.forward(z)
+
+    rj1 = disc.forward([a, p, m], rl).view(-1)
+    fj1 = disc.forward(recon, l).view(-1)
+
+    # do it again
+    encoded = decode(example2, sparse_dict)
+    a, p, m = nn_encode(encoded, digitizers)
+    rl = torch.FloatTensor([a.shape[0] / 768]).to(device)
+
+    with torch.no_grad():
+        z = latent()
+        recon, l = gen.forward(z)
+
+    rj2 = disc.forward([a, p, m], rl).view(-1)
+    fj2 = disc.forward(recon, l).view(-1)
+
+    loss = least_squares_disc_loss(torch.cat([rj1, rj2]), torch.cat([fj1, fj2]))
+
+    loss.backward()
+    clip_grad_value_(disc.parameters(), 0.5)
+    disc_optim.step()
+    print('Disc: ', loss.item(), a.shape[0], recon.shape[0])
+
+    orig = disc.get_embeddings([a, p, m])
+
+    return recon, orig
+
+
+def train_gen(example):
+    gen_optim.zero_grad()
+
+    # train gen
+    encoded = decode(example, sparse_dict)
+    a, p, m = nn_encode(encoded, digitizers)
+
+    # do two
+    z = latent()
+    recon, l = gen.forward(z)
+    fj1 = disc.forward(recon, l)
+
+    z = latent()
+    recon2, l2 = gen.forward(z)
+    fj2 = disc.forward(recon2, l2)
+
+
+    loss = least_squares_generator_loss(torch.cat([fj1, fj2])) #+ diff
+
+    loss.backward()
+    clip_grad_value_(gen.parameters(), 0.5)
+    gen_optim.step()
+    print('Gen: ', loss.item(), a.shape[0], recon.shape[0])
 
 
 if __name__ == '__main__':
@@ -311,88 +304,15 @@ if __name__ == '__main__':
     app = zounds.ZoundsApp(locals=locals(), globals=globals())
     app.start_in_thread(9999)
 
-    for i, example in enumerate(iter_training_examples()):
-        disc_optim.zero_grad()
-        gen_optim.zero_grad()
+    stream = enumerate(iter_training_examples())
+    # stream = cycle([next(stream)])
 
-        if i % 2 == 0:
-            # train disc
-            encoded = decode(example, sparse_dict)
-            a, p, m = nn_encode(encoded, digitizers)
-            rl = torch.FloatTensor([a.shape[0] / 768]).to(device)
+    while True:
+        _, example1 = next(stream)
+        _, example2 = next(stream)
+        recon, orig = train_disc(example1, example2)
 
-            with torch.no_grad():
-                z = latent()
-                recon, l = gen.forward(z)
-
-            rj = disc.forward([a, p, m], rl)
-            fj = disc.forward(recon, l)
-            # loss = (torch.abs(rj - 1) + torch.abs(fj - 0)).mean()
-            loss = least_squares_disc_loss(rj, fj)
-            loss.backward()
-            clip_grad_value_(disc.parameters(), 0.5)
-            disc_optim.step()
-            print('Disc: ', loss.item(), a.shape[0], recon.shape[0])
-        else:
-            # train gen
-            encoded = decode(example, sparse_dict)
-            a, p, m = nn_encode(encoded, digitizers)
-
-            # do two
-            z = latent()
-            recon, l = gen.forward(z)
-            fj1 = disc.forward(recon, l)
-
-            z = latent()
-            recon2, l2 = gen.forward(z)
-            fj2 = disc.forward(recon2, l2)
-
-            loss = least_squares_generator_loss(torch.cat([fj1, fj2]))
-
-            loss.backward()
-            clip_grad_value_(gen.parameters(), 0.5)
-            gen_optim.step()
-            print('Gen: ', loss.item(), a.shape[0], recon.shape[0])
-
-        orig = disc.get_embeddings([a, p, m])
+        _, example3 = next(stream)
+        train_gen(example3)
         o = orig.data.cpu().numpy()[:128]
         r = recon.data.cpu().numpy()[:128]
-
-    # overfit = cycle([next(iter_training_examples())])
-
-    # starting = network.encoder.atom_embedding.weight.data.cpu().numpy().squeeze()
-
-    # # TODO: Pre-embed atoms
-    # for i, example in enumerate(iter_training_examples()):
-    #     optim.zero_grad()
-
-    #     encoded = decode(example, sparse_dict)
-
-    #     a, p, m = nn_encode(encoded, digitizers)
-
-    #     # print('N ATOMS', a.shape, len(set(a.data.cpu().numpy())))
-
-    #     if a.shape[0] == 0:
-    #         print('WARNING 0 length')
-    #         continue
-
-    #     recon, latent = network([a, p, m])
-    #     orig = network.get_embeddings([a, p, m])
-
-    #     o = orig.data.cpu().numpy()[:128]
-    #     r = recon.data.cpu().numpy()[:128]
-
-    #     z = latent.data.cpu().numpy()
-
-    #     loss = loss_func(recon, orig)
-    #     # loss = multiband_loss(recon, orig)
-
-    #     w = network.encoder.atom_embedding.weight.data.cpu().numpy().squeeze()
-
-    #     loss.backward()
-
-    #     # clip_grad_value_(network.parameters(), 0.5)
-
-    #     optim.step()
-
-    #     print(loss.item())
