@@ -22,7 +22,7 @@ def init_weights(p):
             pass
 
         try:
-            p.bias.fill_(0)
+            p.bias.uniform_(-0.0001, 0.0001)
         except AttributeError:
             pass
 
@@ -331,9 +331,9 @@ class Decoder(nn.Module):
 
         encodings = torch.cat(output, dim=0).view(-1, self.channels)
 
-        atoms = self.to_atom(encodings)
-        pos = self.to_pos(encodings)
-        mags = self.to_magnitude(encodings)
+        atoms = torch.sin(self.to_atom(encodings))
+        pos = (torch.sin(self.to_pos(encodings)) + 1) * 0.5
+        mags = (torch.sin(self.to_magnitude(encodings)) + 1) * 0.5
 
         recon = torch.cat([atoms, pos, mags], dim=-1)
         return recon

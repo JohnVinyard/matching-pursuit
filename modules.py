@@ -140,29 +140,30 @@ class PositionalEncoding(Module):
 
 
 class ResidualBlock(Module):
-    def __init__(self, channels, bias=True):
+    def __init__(self, channels, bias=True, activation=lambda x: F.leaky_relu(x, 0.2)):
         super().__init__()
         self.channels = channels
         self.l1 = Linear(channels, channels, bias)
         self.l2 = Linear(channels, channels, bias)
+        self.activation = activation
         self.apply(init_weights)
 
     def forward(self, x):
         shortcut = x
         x = self.l1(x)
-        x = activation(x)
+        x = self.activation(x)
         x = self.l2(x)
-        x = activation(shortcut + x)
+        x = self.activation(shortcut + x)
         return x
 
 
 class ResidualStack(Module):
-    def __init__(self, channels, layers, bias=True):
+    def __init__(self, channels, layers, bias=True, activation=lambda x: F.leaky_relu(x, 0.2)):
         super().__init__()
         self.channels = channels
         self.layers = layers
         self.net = Sequential(
-            *[ResidualBlock(channels, bias) for _ in range(layers)]
+            *[ResidualBlock(channels, bias, activation) for _ in range(layers)]
         )
 
     def forward(self, x):

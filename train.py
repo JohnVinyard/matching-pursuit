@@ -33,10 +33,12 @@ signal_sizes = [1024, 2048, 4096, 8192, 16384, 32768]
 
 # optim = Adam(network.parameters(), lr=1e-4, betas=(0, 0.9))
 
-gen = Generator(128).to(device)
+embedding_weights = get_trained_weights()
+
+gen = Generator(128, embedding_weights).to(device)
 gen_optim = Adam(gen.parameters(), lr=1e-4, betas=(0, 0.9))
 
-disc = Discriminator(128, get_trained_weights()).to(device)
+disc = Discriminator(128, embedding_weights).to(device)
 disc_optim = Adam(disc.parameters(), lr=1e-4, betas=(0, 0.9))
 
 
@@ -152,8 +154,8 @@ def nn_encode(encoded, digitizers):
                 atoms.append(512 * band_index + atom)
                 positions.append(pos / float(signal_size))
                 # mags.extend(digitizers[signal_size].forward([mag]))
-                mags.append(mag / digitizers[signal_size].max)
-                # mags.append(mag / 20)
+                # mags.append(mag / digitizers[signal_size].max)
+                mags.append(mag / 20)
 
     atoms = np.array(atoms)
     positions = np.array(positions)
@@ -191,7 +193,7 @@ def nn_decode(encoded):
     pos = np.clip(p.data.cpu().numpy().squeeze(), 0, 1)
     # mags = network.get_magnitude_keys(m).data.cpu().numpy()
     mags = np.clip(m.data.cpu().numpy().squeeze(), 0, 1)
-    # cmags = mags * 20
+    cmags = mags * 20
 
     band_indices = atom_indices // 512
     atom_indices = atom_indices % 512
@@ -200,11 +202,11 @@ def nn_decode(encoded):
 
     sample_pos = (pos * band_keys).astype(np.int32)
 
-    cmags = []
-    for m, k in zip(mags, band_keys):
-        d = digitizers[k]
-        # indices = d.backward(m)
-        cmags.append(d.edges[int(m * 256)])
+    # cmags = []
+    # for m, k in zip(mags, band_keys):
+    #     d = digitizers[k]
+    #     # indices = d.backward(m)
+    #     cmags.append(d.edges[int(m * 256)])
 
     for b, a, m, p in zip(band_indices, atom_indices, cmags, sample_pos):
         yield (keys[b], a, p, m)
@@ -222,9 +224,9 @@ def real():
     return decoded
 
 
-
 real_target = 1
 fake_target = 0
+
 
 def least_squares_generator_loss(j):
     return 0.5 * ((j - real_target) ** 2).mean()
@@ -261,7 +263,8 @@ def train_disc(example1, example2):
     rj2 = disc.forward([a, p, m], rl).view(-1)
     fj2 = disc.forward(recon, l).view(-1)
 
-    loss = least_squares_disc_loss(torch.cat([rj1, rj2]), torch.cat([fj1, fj2]))
+    loss = least_squares_disc_loss(
+        torch.cat([rj1, rj2]), torch.cat([fj1, fj2]))
 
     loss.backward()
     clip_grad_value_(disc.parameters(), 0.5)
@@ -289,10 +292,16 @@ def train_gen(example):
     recon2, l2 = gen.forward(z)
     fj2 = disc.forward(recon2, l2)
 
-
-    loss = least_squares_generator_loss(torch.cat([fj1, fj2])) #+ diff
+    loss = least_squares_generator_loss(torch.cat([fj1, fj2]))  # + diff
 
     loss.backward()
+
+    print('============================================')
+    for n, p in gen.named_parameters():
+        if p.grad is None:
+            continue
+        print(n, p.grad.std().item())
+
     clip_grad_value_(gen.parameters(), 0.5)
     gen_optim.step()
     print('Gen: ', loss.item(), a.shape[0], recon.shape[0])
