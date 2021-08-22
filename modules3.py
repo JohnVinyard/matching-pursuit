@@ -8,6 +8,10 @@ from torch.nn.modules.linear import Linear
 from modules import PositionalEncoding, ResidualStack, get_best_matches, init_weights
 from torch.nn import functional as F
 
+def unit_norm(x):
+    n = torch.norm(x, dim=1, keepdim=True)
+    x = x / (n + 1e-12)
+    return x
 
 class Attention(nn.Module):
     def __init__(self, channels, layer_norm=True):
@@ -22,12 +26,14 @@ class Attention(nn.Module):
     def forward(self, x):
         x = x.view(-1, self.channels)
         l = x.shape[0]
-        q = self.query(x)
-        k = self.key(x)
-        v = self.value(x)
+        q = unit_norm(self.query(x))
+        k = unit_norm(self.key(x))
+        v = unit_norm(self.value(x))
         attn = torch.matmul(q, k.T)
-        attn = attn / np.sqrt(attn.numel())
-        attn = torch.softmax(attn.view(-1), dim=0).view(l, l)
+
+        # attn = attn / np.sqrt(attn.numel())
+        # attn = torch.softmax(attn.view(-1), dim=0).view(l, l)
+        
         x = torch.matmul(attn, v)
         if self.layer_norm:
             x = self.norm(x)

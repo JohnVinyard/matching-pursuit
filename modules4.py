@@ -68,13 +68,13 @@ class Discriminator(nn.Module):
             LinearOutputStack(channels, 2, in_channels=10,
                               activation=activation),
 
-            MultiHeadAttention(channels, 4),
+            MultiHeadAttention(channels, 8, layer_norm=False),
             LinearOutputStack(channels, 3, activation=activation),
 
-            MultiHeadAttention(channels, 4),
+            MultiHeadAttention(channels, 8, layer_norm=False),
             LinearOutputStack(channels, 3, activation=activation),
 
-            MultiHeadAttention(channels, 4),
+            MultiHeadAttention(channels, 8, layer_norm=False),
             LinearOutputStack(channels, 3, activation=activation),
         )
 

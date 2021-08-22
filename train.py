@@ -296,11 +296,11 @@ def train_gen(example):
 
     loss.backward()
 
-    print('============================================')
-    for n, p in gen.named_parameters():
-        if p.grad is None:
-            continue
-        print(n, p.grad.std().item())
+    # print('============================================')
+    # for n, p in gen.named_parameters():
+    #     if p.grad is None:
+    #         continue
+    #     print(n, p.grad.std().item())
 
     clip_grad_value_(gen.parameters(), 0.5)
     gen_optim.step()
