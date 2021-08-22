@@ -62,7 +62,7 @@ class Discriminator(nn.Module):
         self.atom_embedding.requires_grad = False
 
         self.atom_judge = LinearOutputStack(
-            channels, 3, out_channels=1, in_channels=10)
+            channels, 3, in_channels=10)
 
         self.dense = nn.Sequential(
             LinearOutputStack(channels, 2, in_channels=10,
@@ -80,7 +80,10 @@ class Discriminator(nn.Module):
 
         self.length = LinearOutputStack(
             channels, 2, in_channels=1, activation=activation)
-        self.final = nn.Linear(channels * 2, 1)
+        self.final = nn.Linear(channels * 2, channels)
+
+        self.weighting = LinearOutputStack(channels, 3, out_channels=1, in_channels=channels * 2)
+        self.final_final = LinearOutputStack(channels, 3, out_channels=1)
 
         self.apply(init_weights)
 
@@ -103,7 +106,7 @@ class Discriminator(nn.Module):
         if isinstance(x, list):
             x = self.get_embeddings(x)
 
-        aj = self.atom_judge(x).view(-1, 1)
+        aj = self.atom_judge(x)
 
         l = self.length(l).repeat(x.shape[0], 1)
         x = self.dense(x)
@@ -111,8 +114,16 @@ class Discriminator(nn.Module):
         x = torch.cat([
             x.view(-1, self.channels),
             l.view(-1, self.channels)], dim=1)
-        x = self.final(x).view(-1, 1)
+        x = self.final(x)
+
         x = torch.cat([x, aj], dim=1)
+
+        w = self.weighting(x)
+        x = w * x
+
+        # x = torch.max(x, dim=1)[0]
+        # x = self.final_final(x)
+
         return x
 
 

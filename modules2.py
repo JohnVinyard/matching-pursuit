@@ -17,7 +17,7 @@ def init_weights(p):
 
     with torch.no_grad():
         try:
-            p.weight.uniform_(-0.1, 0.1)
+            p.weight.uniform_(-0.05, 0.05)
         except AttributeError:
             pass
 
