@@ -82,8 +82,26 @@ class Discriminator(nn.Module):
             channels, 2, in_channels=1, activation=activation)
         self.final = nn.Linear(channels * 2, channels)
 
-        self.weighting = LinearOutputStack(channels, 3, out_channels=1, in_channels=channels * 2)
-        self.final_final = LinearOutputStack(channels, 3, out_channels=1)
+        self.reducer = nn.Sequential(
+            nn.Conv1d(channels * 2, channels, 7, 1, 3),
+            nn.MaxPool1d(2, 2),
+            nn.Conv1d(channels, channels, 7, 1, 3),
+            nn.MaxPool1d(2, 2),
+            nn.Conv1d(channels, channels, 7, 1, 3),
+            nn.MaxPool1d(2, 2),
+            nn.Conv1d(channels, channels, 7, 1, 3),
+            nn.MaxPool1d(2, 2),
+            nn.Conv1d(channels, channels, 7, 1, 3),
+            nn.MaxPool1d(2, 2),
+            nn.Conv1d(channels, channels, 7, 1, 3),
+            nn.MaxPool1d(2, 2),
+            nn.Conv1d(channels, channels, 7, 1, 3),
+            nn.MaxPool1d(2, 2),
+            nn.Conv1d(channels, channels, 7, 1, 3),
+            nn.MaxPool1d(2, 2),
+            nn.Conv1d(channels, channels, 4, 4, 0),
+            nn.Conv1d(channels, 1, 1, 1, 0)
+        )
 
         self.apply(init_weights)
 
@@ -106,7 +124,7 @@ class Discriminator(nn.Module):
         if isinstance(x, list):
             x = self.get_embeddings(x)
 
-        aj = self.atom_judge(x)
+        aj = self.atom_judge(x).view(-1, 1)
 
         l = self.length(l).repeat(x.shape[0], 1)
         x = self.dense(x)
@@ -114,16 +132,14 @@ class Discriminator(nn.Module):
         x = torch.cat([
             x.view(-1, self.channels),
             l.view(-1, self.channels)], dim=1)
-        x = self.final(x)
-
+        x = self.final(x).view(-1, 1)
         x = torch.cat([x, aj], dim=1)
 
-        w = self.weighting(x)
-        x = w * x
-
-        # x = torch.max(x, dim=1)[0]
-        # x = self.final_final(x)
-
+        x = x.permute(1, 0).reshape(1, self.channels * 2, -1)
+        diff = 1024 - x.shape[-1]
+        x = F.pad(x, (0, diff))
+        x = self.reducer(x)
+        x = x.permute(0, 2, 1).reshape(1, 1)
         return x
 
 
