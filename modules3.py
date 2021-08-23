@@ -17,6 +17,10 @@ class Attention(nn.Module):
     def __init__(self, channels, layer_norm=True):
         super().__init__()
         self.channels = channels
+
+        self.query_vector = nn.Parameter(torch.FloatTensor(1, channels).normal_(0, 1))
+        self.key_vector = nn.Parameter(torch.FloatTensor(1, channels).normal_(0, 1))
+
         self.query = nn.Linear(channels, channels)
         self.key = nn.Linear(channels, channels)
         self.value = nn.Linear(channels, channels)
@@ -25,18 +29,25 @@ class Attention(nn.Module):
 
     def forward(self, x):
         x = x.view(-1, self.channels)
-        l = x.shape[0]
-        q = unit_norm(self.query(x))
-        k = unit_norm(self.key(x))
-        v = unit_norm(self.value(x))
-        attn = torch.matmul(q, k.T)
+        # l = x.shape[0]
+
+        q = self.query(x)
+        k = self.key(x)
+        v = self.value(x)
+
+        global_query = (q * self.query_vector).sum(dim=0, keepdim=True)
+        k = (k * global_query * self.key_vector).sum(dim=0, keepdim=True)
+        v = (k * v) + q
+
+
+        # attn = torch.matmul(q, k.T)
 
         # attn = attn / np.sqrt(attn.numel())
         # attn = torch.softmax(attn.view(-1), dim=0).view(l, l)
         
-        x = torch.matmul(attn, v)
-        if self.layer_norm:
-            x = self.norm(x)
+        # x = torch.matmul(attn, v)
+        # if self.layer_norm:
+        #     x = self.norm(x)
         return x
 
 
