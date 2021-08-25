@@ -154,8 +154,8 @@ def nn_encode(encoded, digitizers):
                 atoms.append(512 * band_index + atom)
                 positions.append(pos / float(signal_size))
                 # mags.extend(digitizers[signal_size].forward([mag]))
-                # mags.append(mag / digitizers[signal_size].max)
-                mags.append(mag / 20)
+                mags.append(mag / digitizers[signal_size].max)
+                # mags.append(mag / 20)
 
     atoms = np.array(atoms)
     positions = np.array(positions)
@@ -193,7 +193,7 @@ def nn_decode(encoded):
     pos = np.clip(p.data.cpu().numpy().squeeze(), 0, 1)
     # mags = network.get_magnitude_keys(m).data.cpu().numpy()
     mags = np.clip(m.data.cpu().numpy().squeeze(), 0, 1)
-    cmags = mags * 20
+    # cmags = mags * 20
 
     band_indices = atom_indices // 512
     atom_indices = atom_indices % 512
@@ -202,11 +202,11 @@ def nn_decode(encoded):
 
     sample_pos = (pos * band_keys).astype(np.int32)
 
-    # cmags = []
-    # for m, k in zip(mags, band_keys):
-    #     d = digitizers[k]
-    #     # indices = d.backward(m)
-    #     cmags.append(d.edges[int(m * 256)])
+    cmags = []
+    for m, k in zip(mags, band_keys):
+        d = digitizers[k]
+        # indices = d.backward(m)
+        cmags.append(d.edges[int(m * 256)])
 
     for b, a, m, p in zip(band_indices, atom_indices, cmags, sample_pos):
         yield (keys[b], a, p, m)

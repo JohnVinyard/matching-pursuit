@@ -16,6 +16,11 @@ def sine_one(x):
     return (torch.sin(x) + 1) * 0.5
 
 
+def unit_norm(x):
+    n = torch.norm(x, dim=1, keepdim=True)
+    return x / (n + 1e-12)
+
+
 class MultiHeadAttention(nn.Module):
     def __init__(self, channels, heads, layer_norm=True):
         super().__init__()
@@ -23,28 +28,41 @@ class MultiHeadAttention(nn.Module):
         self.heads = heads
         self.attn = nn.Sequential(*[Attention(channels, layer_norm)
                                   for _ in range(self.heads)])
-        self.fc = nn.Linear(channels, channels)
-        self.ln = nn.LayerNorm(self.channels)
-        self.layer_norm = layer_norm
+        self.fc = nn.Linear(channels * heads, channels)
+        # self.ln = nn.LayerNorm(self.channels)
+        # self.layer_norm = layer_norm
 
     def forward(self, x):
         orig = x
 
-        results = None
+        results = []
         for attn in self.attn:
             z = attn(x)
-            if results is None:
-                results = z
-            else:
-                results = results + z
+            results.append(z)
 
-        # residual
-        results = results + orig
-        x = self.fc(results)
+        x = torch.cat(results, dim=1)
+        x = self.fc(x)
+        x = x + orig
 
-        if self.layer_norm:
-            x = self.ln(x)
+        return x
 
+
+class AttentionClusters(nn.Module):
+    def __init__(self, channels, heads):
+        super().__init__()
+        self.channels = channels
+        self.heads = heads
+        self.clusters = nn.Sequential(
+            *[Attention(channels, reduce=True) for _ in range(self.heads)])
+
+    def forward(self, x):
+        x = x.view(-1, self.channels)
+        clusters = []
+        for cluster in self.clusters:
+            z = cluster(x).view(1, self.channels)
+            clusters.append(z)
+
+        x = torch.cat(clusters, dim=0)
         return x
 
 
@@ -82,7 +100,16 @@ class Discriminator(nn.Module):
             channels, 2, in_channels=1, activation=activation)
         self.final = nn.Linear(channels * 2, channels)
         self.final_final = LinearOutputStack(
-            channels, 3, out_channels=1, in_channels=channels * 2)
+            channels, 3, in_channels=channels * 2)
+
+        self.reduce = nn.Sequential(
+            AttentionClusters(channels, 8),
+            LinearOutputStack(channels, 2),
+            AttentionClusters(channels, 2),
+            LinearOutputStack(channels, 2),
+            AttentionClusters(channels, 1),
+            LinearOutputStack(channels, 2, out_channels=1)
+        )
 
         self.apply(init_weights)
 
@@ -116,25 +143,52 @@ class Discriminator(nn.Module):
         x = self.final(x)
         x = torch.cat([x, aj], dim=1)
         x = self.final_final(x)
+
+        x = self.reduce(x)
         return x
 
 
-# class VariableExpander(nn.Module):
-#     def __init__(self, channels):
-#         super().__init__()
-#         self.max_atoms = 12
-#         self.channels = channels
-#         self.to_length = LinearOutputStack(channels, 2, out_channels=1)
-#         self.var = LinearOutputStack(
-#             channels, 3, out_channels=self.max_atoms * self.channels)
+class VariableExpander(nn.Module):
+    def __init__(self, channels, max_atoms):
+        super().__init__()
+        self.channels = channels
+        self.is_member = nn.Linear(channels, 1)
+        self.max_atoms = max_atoms
 
-#     def forward(self, x):
-#         x = x.view(1, self.channels)
-#         l = torch.clamp(torch.abs(self.to_length(x)), 0, 1)
-#         c = int(self.max_atoms * l.item()) + 1
+        self.length = LinearOutputStack(
+            channels, 3, out_channels=1, activation=activation)
 
-#         z = self.var(x).reshape(-1, self.channels)[:c]
-#         return z, l
+        self.rnn_layers = 3
+        self.rnn = nn.RNN(
+            channels,
+            channels,
+            self.rnn_layers,
+            batch_first=False,
+            nonlinearity='relu')
+
+    def forward(self, x):
+        x = x.view(1, self.channels)
+
+        # continuous/differentiable length ratio
+        length = l = torch.clamp(torch.abs(self.length(x)), 0, 0.9999)
+
+        # discrete length for indexing
+        c = int(l * self.max_atoms) + 1
+
+        # input in shape (sequence_length, batch_size, input_dim)
+        # hidden in shape (num_rnn_layers, batch, hidden_dim)
+        inp = torch.zeros(1, 1, self.channels).to(x.device)
+        hid = torch.zeros(self.rnn_layers, 1, self.channels).to(x.device)
+        hid[0, :, :] = x
+
+        seq = []
+        for i in range(c):
+            inp, hid = self.rnn.forward(inp, hid)
+            x = inp.view(1, self.channels)
+            seq.append(x)
+
+        seq = torch.cat(seq, dim=0)
+        return seq, length
 
 
 class SetExpansion(nn.Module):
@@ -143,13 +197,9 @@ class SetExpansion(nn.Module):
         self.channels = channels
         self.max_atoms = max_atoms
 
-        self.members = nn.Parameter(torch.FloatTensor(
-            max_atoms, channels).normal_(0, 1))
+        self.register_buffer('members', torch.FloatTensor(
+            self.max_atoms, channels).normal_(0, 1))
 
-        self.to_query = LinearOutputStack(channels, 3, activation=activation)
-        self.pos_encoding = PositionalEncoding(1, self.max_atoms, 8, channels)
-        self.reduce = LinearOutputStack(
-            channels, 3, in_channels=channels * 2 + self.pos_encoding.freq_channels, activation=activation)
         self.length = LinearOutputStack(
             channels, 3, out_channels=1, activation=activation)
 
@@ -162,19 +212,7 @@ class SetExpansion(nn.Module):
         # discrete length for indexing
         c = int(l * self.max_atoms) + 1
 
-        p1, p2 = self.pos_encoding(torch.linspace(0, 0.9999, self.max_atoms))
-        p1 = p1[:c]
-
-        q = self.to_query(x)
-
-        scores = torch.matmul(self.members, q.T).view(-1)
-        indices = torch.argsort(scores)[-c:]
-
-        members = self.members[indices]
-        x = x.repeat(c, 1)
-
-        x = torch.cat([members, x, p1], dim=1)
-        x = self.reduce(x)
+        x = (self.members * x)[:c]
 
         return x, length
 
@@ -183,8 +221,6 @@ class Generator(nn.Module):
     def __init__(self, channels, embedding_weights):
         super().__init__()
         self.channels = channels
-
-        self.register_buffer('embedding', torch.from_numpy(embedding_weights))
 
         self.max_atoms = 768
 
@@ -207,20 +243,7 @@ class Generator(nn.Module):
             LinearOutputStack(channels, 3, activation=activation),
         )
 
-        # self.to_atom = nn.Sequential(
-        #     ResidualStack(channels, layers=1, activation=activation),
-        #     nn.Linear(128, 8)
-        # )
-
-        # self.to_pos = nn.Sequential(
-        #     ResidualStack(channels, layers=1, activation=activation),
-        #     nn.Linear(128, 1)
-        # )
-
-        # self.to_magnitude = nn.Sequential(
-        #     ResidualStack(channels, layers=1, activation=activation),
-        #     nn.Linear(128, 1)
-        # )
+        self._initial = None
 
         self.to_atom = LinearOutputStack(
             channels, 3, activation=activation, out_channels=8)
@@ -233,6 +256,9 @@ class Generator(nn.Module):
 
     def forward(self, x):
         encodings, length = self.set_expansion(x)
+
+        self._initial = encodings.data.cpu().numpy()
+
         encodings = self.net(encodings)
 
         atoms = self.to_atom(encodings)

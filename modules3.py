@@ -53,6 +53,9 @@ class Attention(nn.Module):
         # x = torch.matmul(attn, v)
         # if self.layer_norm:
         #     x = self.norm(x)
+
+        if self.reduce:
+            v = v.sum(dim=0, keepdim=True)
         return v
 
 
