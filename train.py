@@ -36,10 +36,10 @@ signal_sizes = [1024, 2048, 4096, 8192, 16384, 32768]
 embedding_weights = get_trained_weights()
 
 gen = Generator(128, embedding_weights).to(device)
-gen_optim = Adam(gen.parameters(), lr=1e-4, betas=(0, 0.9))
+gen_optim = Adam(gen.parameters(), lr=1e-4, betas=(0.5, 0.9))
 
 disc = Discriminator(128, embedding_weights).to(device)
-disc_optim = Adam(disc.parameters(), lr=1e-4, betas=(0, 0.9))
+disc_optim = Adam(disc.parameters(), lr=1e-4, betas=(0.5, 0.9))
 
 
 def latent():
@@ -267,7 +267,7 @@ def train_disc(example1, example2):
         torch.cat([rj1, rj2]), torch.cat([fj1, fj2]))
 
     loss.backward()
-    clip_grad_value_(disc.parameters(), 0.5)
+    # clip_grad_value_(disc.parameters(), 0.5)
     disc_optim.step()
     print('Disc: ', loss.item(), a.shape[0], recon.shape[0])
 
@@ -302,7 +302,7 @@ def train_gen(example):
     #         continue
     #     print(n, p.grad.std().item())
 
-    clip_grad_value_(gen.parameters(), 0.5)
+    # clip_grad_value_(gen.parameters(), 0.5)
     gen_optim.step()
     print('Gen: ', loss.item(), a.shape[0], recon.shape[0])
 

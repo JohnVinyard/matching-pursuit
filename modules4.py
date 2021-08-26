@@ -94,6 +94,9 @@ class Discriminator(nn.Module):
 
             MultiHeadAttention(channels, 8, layer_norm=False),
             LinearOutputStack(channels, 3, activation=activation),
+
+            MultiHeadAttention(channels, 8, layer_norm=False),
+            LinearOutputStack(channels, 3, activation=activation),
         )
 
         self.length = LinearOutputStack(
@@ -217,6 +220,25 @@ class SetExpansion(nn.Module):
         return x, length
 
 
+class MultiSetExpansion(nn.Module):
+    def __init__(self, channels, max_atoms):
+        super().__init__()
+        self.set_expansion = SetExpansion(channels, max_atoms)
+        self.max_atoms = max_atoms
+
+    def forward(self, x):
+        chunks = []
+        length = 0
+
+        for chunk in x:
+            z, l = self.set_expansion(chunk)
+            chunks.append(z)
+            length = length + l
+
+        x = torch.cat(chunks, dim=0)
+        return x, length
+
+
 class Generator(nn.Module):
     def __init__(self, channels, embedding_weights):
         super().__init__()
@@ -243,8 +265,6 @@ class Generator(nn.Module):
             LinearOutputStack(channels, 3, activation=activation),
         )
 
-        self._initial = None
-
         self.to_atom = LinearOutputStack(
             channels, 3, activation=activation, out_channels=8)
         self.to_pos = LinearOutputStack(
@@ -256,14 +276,11 @@ class Generator(nn.Module):
 
     def forward(self, x):
         encodings, length = self.set_expansion(x)
-
-        self._initial = encodings.data.cpu().numpy()
-
         encodings = self.net(encodings)
 
-        atoms = self.to_atom(encodings)
-        pos = self.to_pos(encodings)
-        mags = self.to_magnitude(encodings)
+        atoms = torch.sin(self.to_atom(encodings))
+        pos = sine_one(self.to_pos(encodings))
+        mags = sine_one(self.to_magnitude(encodings))
 
         recon = torch.cat([atoms, pos, mags], dim=-1)
         return recon, length
