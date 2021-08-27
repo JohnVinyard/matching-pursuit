@@ -4,6 +4,7 @@ from multilevel_sparse import encode, learn_multilevel_dict
 from conjure import cache, LmdbCollection, clear_cache, dump_pickle, hash_args, hash_function, load_pickle
 import numpy as np
 from multiprocessing.pool import ThreadPool
+from random import choice
 
 n_bands = 6
 
@@ -66,13 +67,23 @@ def encode_chunk(path, start, stop, d):
     print(f'{fn} {start} {stop} [{encoded[0]} ... {encoded[-1]}]')
     return encoded
 
+def iter_keys():
+    for txn, key in collection.iter_prefix(encode_chunk.func_hash):
+        yield key
 
 def iter_training_examples():
+    keys = list(iter_keys())
+
     while True:
-        for txn, key in collection.iter_prefix(encode_chunk.func_hash):
-            raw = txn.get(key)
-            encoded = load_pickle(raw, txn)
-            yield encoded
+        key = choice(keys)
+        value, txn = collection[key]
+        encoded = load_pickle(value, txn)
+        yield encoded
+        
+        # for txn, key in collection.iter_prefix(encode_chunk.func_hash):
+        #     raw = txn.get(key)
+        #     encoded = load_pickle(raw, txn)
+        #     yield encoded
 
 if __name__ == '__main__':
     sparse_dict = learn_dict()

@@ -1,5 +1,6 @@
+from torch.nn.modules.container import Sequential
 from modules2 import Cluster, Expander, init_weights, PositionalEncoding
-from modules3 import Attention, LinearOutputStack
+from modules3 import Attention, LinearOutputStack, ToThreeD, ToTwoD
 from torch import nn
 import torch
 import numpy as np
@@ -10,6 +11,14 @@ from torch.nn import functional as F
 
 def activation(x):
     return F.leaky_relu(x, 0.2)
+
+
+class Activation(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        return torch.sin(x)
 
 
 def sine_one(x):
@@ -66,6 +75,32 @@ class AttentionClusters(nn.Module):
         return x
 
 
+class AttentionStack(nn.Module):
+    def __init__(
+            self,
+            channels,
+            attention_heads,
+            attention_layers,
+            intermediate_layers=3):
+
+        super().__init__()
+        self.channels = channels
+        self.attention_heads = attention_heads
+        self.attention_layers = attention_layers
+        self.intermediate_layers = intermediate_layers
+
+        self.net = nn.Sequential(*[
+            nn.Sequential(
+                MultiHeadAttention(
+                    channels, attention_heads, layer_norm=False),
+                LinearOutputStack(channels, intermediate_layers, activation=activation))
+            for _ in range(attention_layers)
+        ])
+
+    def forward(self, x):
+        return self.net(x)
+
+
 class Discriminator(nn.Module):
     def __init__(self, channels, embedding_weights):
         super().__init__()
@@ -86,17 +121,12 @@ class Discriminator(nn.Module):
             LinearOutputStack(channels, 2, in_channels=10,
                               activation=activation),
 
-            MultiHeadAttention(channels, 8, layer_norm=False),
-            LinearOutputStack(channels, 3, activation=activation),
 
-            MultiHeadAttention(channels, 8, layer_norm=False),
-            LinearOutputStack(channels, 3, activation=activation),
-
-            MultiHeadAttention(channels, 8, layer_norm=False),
-            LinearOutputStack(channels, 3, activation=activation),
-
-            MultiHeadAttention(channels, 8, layer_norm=False),
-            LinearOutputStack(channels, 3, activation=activation),
+            AttentionStack(
+                channels,
+                attention_heads=8,
+                attention_layers=6,
+                intermediate_layers=2)
         )
 
         self.length = LinearOutputStack(
@@ -106,10 +136,12 @@ class Discriminator(nn.Module):
             channels, 3, in_channels=channels * 2)
 
         self.reduce = nn.Sequential(
-            AttentionClusters(channels, 8),
+            AttentionClusters(channels, 16),
             LinearOutputStack(channels, 2),
-            AttentionClusters(channels, 2),
+
+            AttentionClusters(channels, 4),
             LinearOutputStack(channels, 2),
+
             AttentionClusters(channels, 1),
             LinearOutputStack(channels, 2, out_channels=1)
         )
@@ -239,6 +271,47 @@ class MultiSetExpansion(nn.Module):
         return x, length
 
 
+class ResidualUpscale(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.conv = nn.ConvTranspose1d(channels, channels, 4, 2, 1)
+
+    def forward(self, x):
+        up = F.upsample(x, scale_factor=2, mode='linear')
+        conv = self.conv(x)
+        return torch.sin(up + conv)
+
+
+class ConvExpander(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.channels = channels
+        self.max_atoms = 768
+        self.ln = nn.Linear(channels, channels * 8)
+        n_layers = int(np.log2(1024) - np.log2(8))
+        self.net = nn.Sequential(
+            ToThreeD(),
+            nn.Sequential(*[
+                ResidualUpscale(channels)
+                for _ in range(n_layers)]),
+            ToTwoD()
+        )
+
+        self.length = LinearOutputStack(
+            channels, 3, out_channels=1, activation=activation)
+
+    def forward(self, x):
+        # continuous/differentiable length ratio
+        length = l = torch.clamp(torch.abs(self.length(x)), 0, 0.9999)
+
+        # discrete length for indexing
+        c = int(l * self.max_atoms) + 1
+
+        x = self.ln(x).reshape(8, self.channels)
+        x = self.net(x)
+        return x[:c], length
+
+
 class Generator(nn.Module):
     def __init__(self, channels, embedding_weights):
         super().__init__()
@@ -246,24 +319,31 @@ class Generator(nn.Module):
 
         self.max_atoms = 768
 
-        self.set_expansion = SetExpansion(channels, self.max_atoms)
+        # self.set_expansion = SetExpansion(channels, self.max_atoms)
+        self.conv_expander = ConvExpander(channels)
 
-        self.net = nn.Sequential(
-            MultiHeadAttention(channels, 8, layer_norm=False),
-            LinearOutputStack(channels, 3, activation=activation),
+        self.net = AttentionStack(
+            channels,
+            attention_heads=8,
+            attention_layers=6,
+            intermediate_layers=2)
 
-            MultiHeadAttention(channels, 8, layer_norm=False),
-            LinearOutputStack(channels, 3, activation=activation),
+        # self.net = nn.Sequential(
+        #     MultiHeadAttention(channels, 8, layer_norm=False),
+        #     LinearOutputStack(channels, 3, activation=activation),
 
-            MultiHeadAttention(channels, 8, layer_norm=False),
-            LinearOutputStack(channels, 3, activation=activation),
+        #     MultiHeadAttention(channels, 8, layer_norm=False),
+        #     LinearOutputStack(channels, 3, activation=activation),
 
-            MultiHeadAttention(channels, 8, layer_norm=False),
-            LinearOutputStack(channels, 3, activation=activation),
+        #     MultiHeadAttention(channels, 8, layer_norm=False),
+        #     LinearOutputStack(channels, 3, activation=activation),
 
-            MultiHeadAttention(channels, 8, layer_norm=False),
-            LinearOutputStack(channels, 3, activation=activation),
-        )
+        #     MultiHeadAttention(channels, 8, layer_norm=False),
+        #     LinearOutputStack(channels, 3, activation=activation),
+
+        #     MultiHeadAttention(channels, 8, layer_norm=False),
+        #     LinearOutputStack(channels, 3, activation=activation),
+        # )
 
         self.to_atom = LinearOutputStack(
             channels, 3, activation=activation, out_channels=8)
@@ -275,7 +355,8 @@ class Generator(nn.Module):
         self.apply(init_weights)
 
     def forward(self, x):
-        encodings, length = self.set_expansion(x)
+        # encodings, length = self.set_expansion(x)
+        encodings, length = self.conv_expander(x)
         encodings = self.net(encodings)
 
         atoms = torch.sin(self.to_atom(encodings))
