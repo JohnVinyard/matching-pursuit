@@ -26,7 +26,10 @@ def sine_one(x):
 
 
 def unit_norm(x):
-    n = torch.norm(x, dim=1, keepdim=True)
+    if isinstance(x, np.ndarray):
+        n = np.linalg.norm(x, axis=1, keepdims=True)
+    else:
+        n = torch.norm(x, dim=1, keepdim=True)
     return x / (n + 1e-12)
 
 
@@ -237,9 +240,12 @@ class SetExpansion(nn.Module):
 
         self.length = LinearOutputStack(
             channels, 3, out_channels=1, activation=activation)
+        
+        self.reduce = nn.Linear(channels * 2, channels)
 
     def forward(self, x):
         x = x.view(1, self.channels)
+        z = x
 
         # continuous/differentiable length ratio
         length = l = torch.clamp(torch.abs(self.length(x)), 0, 0.9999)
@@ -248,6 +254,10 @@ class SetExpansion(nn.Module):
         c = int(l * self.max_atoms) + 1
 
         x = (self.members * x)[:c]
+        z = z.repeat(c, 1)
+
+        x = torch.cat([x, z], dim=1)
+        x = self.reduce(x)
 
         return x, length
 
@@ -277,7 +287,7 @@ class ResidualUpscale(nn.Module):
         self.conv = nn.ConvTranspose1d(channels, channels, 4, 2, 1)
 
     def forward(self, x):
-        up = F.upsample(x, scale_factor=2, mode='linear')
+        up = F.upsample(x, scale_factor=2)
         conv = self.conv(x)
         return torch.sin(up + conv)
 
@@ -286,9 +296,9 @@ class ConvExpander(nn.Module):
     def __init__(self, channels):
         super().__init__()
         self.channels = channels
-        self.max_atoms = 768
+        self.max_atoms = 200
         self.ln = nn.Linear(channels, channels * 8)
-        n_layers = int(np.log2(1024) - np.log2(8))
+        n_layers = int(np.log2(128) - np.log2(8))
         self.net = nn.Sequential(
             ToThreeD(),
             nn.Sequential(*[
@@ -317,10 +327,10 @@ class Generator(nn.Module):
         super().__init__()
         self.channels = channels
 
-        self.max_atoms = 768
+        self.max_atoms = 200
 
-        # self.set_expansion = SetExpansion(channels, self.max_atoms)
-        self.conv_expander = ConvExpander(channels)
+        self.set_expansion = SetExpansion(channels, self.max_atoms)
+        # self.conv_expander = ConvExpander(channels)
 
         self.net = AttentionStack(
             channels,
@@ -355,13 +365,13 @@ class Generator(nn.Module):
         self.apply(init_weights)
 
     def forward(self, x):
-        # encodings, length = self.set_expansion(x)
-        encodings, length = self.conv_expander(x)
+        encodings, length = self.set_expansion(x)
+        # encodings, length = self.conv_expander(x)
         encodings = self.net(encodings)
 
-        atoms = torch.sin(self.to_atom(encodings))
-        pos = sine_one(self.to_pos(encodings))
-        mags = sine_one(self.to_magnitude(encodings))
+        atoms = unit_norm(self.to_atom(encodings))
+        pos = self.to_pos(encodings)
+        mags = self.to_magnitude(encodings)
 
         recon = torch.cat([atoms, pos, mags], dim=-1)
         return recon, length

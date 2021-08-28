@@ -1,5 +1,5 @@
 from collections import defaultdict
-from modules4 import Discriminator, Generator
+from modules4 import Discriminator, Generator, unit_norm
 from sparse2 import freq_recompose
 from multilevel_sparse import multilevel_sparse_decode
 from get_encoded import iter_training_examples, learn_dict
@@ -33,7 +33,7 @@ signal_sizes = [1024, 2048, 4096, 8192, 16384, 32768]
 
 # optim = Adam(network.parameters(), lr=1e-4, betas=(0, 0.9))
 
-embedding_weights = get_trained_weights()
+embedding_weights = unit_norm(get_trained_weights())
 
 gen = Generator(128, embedding_weights).to(device)
 gen_optim = Adam(gen.parameters(), lr=2e-4, betas=(0.5, 0.9))
@@ -162,8 +162,8 @@ def nn_encode(encoded, digitizers):
     mags = np.array(mags)
 
     # sort by time
-    # indices = np.argsort(positions)
-    indices = np.random.permutation(atoms.shape[0])
+    indices = np.argsort(mags)[::-1][:100]
+    # indices = np.random.permutation(atoms.shape[0])
     atoms = atoms[indices]
     positions = positions[indices]
     mags = mags[indices]
