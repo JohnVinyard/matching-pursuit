@@ -16,7 +16,7 @@ def unit_norm(x):
 
 
 class Attention(nn.Module):
-    def __init__(self, channels, layer_norm=True, reduce=False):
+    def __init__(self, channels, layer_norm=True, reduce=False, linear_attn=False):
         super().__init__()
         self.channels = channels
 
@@ -29,30 +29,29 @@ class Attention(nn.Module):
         self.key = nn.Linear(channels, channels)
         self.value = nn.Linear(channels, channels)
         self.layer_norm = layer_norm
-        self.norm = nn.LayerNorm(channels)
+        self.linear_attn = linear_attn
 
         self.reduce = reduce
 
     def forward(self, x):
         x = x.view(-1, self.channels)
-        # l = x.shape[0]
+        l = x.shape[0]
 
         q = self.query(x)
         k = self.key(x)
         v = self.value(x)
 
-        global_query = torch.softmax((q * self.query_vector).sum(dim=0, keepdim=True), dim=1)
-        k = torch.softmax((k * global_query * self.key_vector).sum(dim=0, keepdim=True), dim=1)
-        v = (k * v) + q
-
-        # attn = torch.matmul(q, k.T)
-
-        # attn = attn / np.sqrt(attn.numel())
-        # attn = torch.softmax(attn.view(-1), dim=0).view(l, l)
-
-        # x = torch.matmul(attn, v)
-        # if self.layer_norm:
-        #     x = self.norm(x)
+        if self.linear_attn:
+            global_query = torch.softmax(
+                (q * self.query_vector).sum(dim=0, keepdim=True), dim=1)
+            k = torch.softmax(
+                (k * global_query * self.key_vector).sum(dim=0, keepdim=True), dim=1)
+            v = (k * v) + q
+        else:
+            attn = torch.matmul(q, k.T)
+            attn = attn / np.sqrt(attn.numel())
+            attn = torch.softmax(attn.view(-1), dim=0).view(l, l)
+            x = torch.matmul(attn, v)
 
         if self.reduce:
             v = v.sum(dim=0, keepdim=True)
@@ -65,7 +64,8 @@ class LinearOutputStack(nn.Module):
             layers,
             out_channels=None,
             in_channels=None,
-            activation=lambda x: F.leaky_relu(x, 0.2)):
+            activation=lambda x: F.leaky_relu(x, 0.2),
+            bias=True):
 
         super().__init__()
         self.channels = channels
@@ -73,11 +73,12 @@ class LinearOutputStack(nn.Module):
         self.out_channels = out_channels or channels
 
         core = [
-            ResidualStack(channels, layers, activation),
+            ResidualStack(channels, layers, activation=activation, bias=bias),
             nn.Linear(channels, self.out_channels, bias=self.out_channels > 1)
         ]
 
-        inp = [] if in_channels is None else [nn.Linear(in_channels, channels)]
+        inp = [] if in_channels is None else [
+            nn.Linear(in_channels, channels, bias=bias)]
 
         self.net = nn.Sequential(*[
             *inp,

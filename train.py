@@ -16,6 +16,8 @@ from torch.nn.utils.clip_grad import clip_grad_value_
 
 sr = zounds.SR22050()
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+one_hot = False
+max_atoms = 100
 
 
 def get_trained_weights():
@@ -33,13 +35,13 @@ signal_sizes = [1024, 2048, 4096, 8192, 16384, 32768]
 
 # optim = Adam(network.parameters(), lr=1e-4, betas=(0, 0.9))
 
-embedding_weights = unit_norm(get_trained_weights())
+embedding_weights = get_trained_weights()
 
-gen = Generator(128, embedding_weights).to(device)
-gen_optim = Adam(gen.parameters(), lr=2e-4, betas=(0.5, 0.9))
+gen = Generator(128, embedding_weights, one_hot).to(device)
+gen_optim = Adam(gen.parameters(), lr=1e-4, betas=(0, 0.9))
 
-disc = Discriminator(128, embedding_weights).to(device)
-disc_optim = Adam(disc.parameters(), lr=2e-4, betas=(0.5, 0.9))
+disc = Discriminator(128, embedding_weights, one_hot).to(device)
+disc_optim = Adam(disc.parameters(), lr=1e-4, betas=(0, 0.9))
 
 
 def latent():
@@ -162,7 +164,7 @@ def nn_encode(encoded, digitizers):
     mags = np.array(mags)
 
     # sort by time
-    indices = np.argsort(mags)[::-1][:100]
+    indices = np.argsort(mags)[::-1][:max_atoms]
     # indices = np.random.permutation(atoms.shape[0])
     atoms = atoms[indices]
     positions = positions[indices]
@@ -185,7 +187,8 @@ def nn_decode(encoded):
     if isinstance(encoded, list):
         a, p, m = encoded
     else:
-        a, p, m = encoded[:, :8], encoded[:, 8:9], encoded[:, 9:]
+        a, p, m = encoded[:, :8 if not one_hot else 3072], encoded[:, -
+                                                                   2:-1], encoded[:, -1:]
 
     keys = sorted(digitizers.keys())
 
@@ -213,6 +216,7 @@ def nn_decode(encoded):
 
 
 def listen():
+    print(recon.shape)
     encoded = list(nn_decode(recon))
     decoded = decode(encoded, sparse_dict, return_audio=True)
     return decoded
@@ -242,7 +246,7 @@ def train_disc(example1, example2):
     # train disc
     encoded = decode(example1, sparse_dict)
     a, p, m = nn_encode(encoded, digitizers)
-    rl = torch.FloatTensor([a.shape[0] / 768]).to(device)
+    rl = torch.FloatTensor([a.shape[0] / max_atoms]).to(device)
 
     with torch.no_grad():
         z = latent()
@@ -254,7 +258,7 @@ def train_disc(example1, example2):
     # do it again
     encoded = decode(example2, sparse_dict)
     a, p, m = nn_encode(encoded, digitizers)
-    rl = torch.FloatTensor([a.shape[0] / 768]).to(device)
+    rl = torch.FloatTensor([a.shape[0] / max_atoms]).to(device)
 
     with torch.no_grad():
         z = latent()

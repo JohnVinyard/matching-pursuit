@@ -8,6 +8,11 @@ from torch import nn
 from torch.optim import Adam
 import zounds
 
+# TODO: What about training this using the method with no negative examples?
+# Instead, we ensure that:
+# - each feature in the batch has zero mean and unit variance (std=1)
+# - Upper diagonal of the batch's covariance matrix is zero (features are independent)
+
 segment_duration = 0.1
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 embedding = nn.Embedding(3072, 8).to(device)

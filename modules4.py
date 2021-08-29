@@ -105,9 +105,10 @@ class AttentionStack(nn.Module):
 
 
 class Discriminator(nn.Module):
-    def __init__(self, channels, embedding_weights):
+    def __init__(self, channels, embedding_weights, one_hot=False):
         super().__init__()
         self.channels = channels
+        self.one_hot = one_hot
 
         self.atom_embedding = nn.Embedding(512 * 6, 8)
 
@@ -118,10 +119,10 @@ class Discriminator(nn.Module):
         self.atom_embedding.requires_grad = False
 
         self.atom_judge = LinearOutputStack(
-            channels, 3, in_channels=10)
+            channels, 3, in_channels=10 if not one_hot else 3072 + 2)
 
         self.dense = nn.Sequential(
-            LinearOutputStack(channels, 2, in_channels=10,
+            LinearOutputStack(channels, 2, in_channels=10 if not one_hot else 3072 + 2,
                               activation=activation),
 
 
@@ -156,11 +157,21 @@ class Discriminator(nn.Module):
         Return atom indices
         """
         nw = self.atom_embedding.weight
-        return get_best_matches(nw, embeddings)
+        if self.one_hot:
+            return torch.argmax(embeddings, dim=1)
+        else:
+            return get_best_matches(nw, embeddings)
 
     def get_embeddings(self, x):
         atom, time, mag = x
-        ae = self.atom_embedding(atom).view(-1, 8)
+
+        if self.one_hot:
+            a = torch.zeros(time.shape[0], 3072).to(time.device)
+            a[torch.arange(time.shape[0]), atom] = 1
+            ae = a
+        else:
+            ae = self.atom_embedding(atom).view(-1, 8)
+        
         pe = time.view(-1, 1)
         me = mag.view(-1, 1)
         return torch.cat([ae, pe, me], dim=-1)
@@ -296,7 +307,7 @@ class ConvExpander(nn.Module):
     def __init__(self, channels):
         super().__init__()
         self.channels = channels
-        self.max_atoms = 200
+        self.max_atoms = 100
         self.ln = nn.Linear(channels, channels * 8)
         n_layers = int(np.log2(128) - np.log2(8))
         self.net = nn.Sequential(
@@ -323,14 +334,17 @@ class ConvExpander(nn.Module):
 
 
 class Generator(nn.Module):
-    def __init__(self, channels, embedding_weights):
+    def __init__(self, channels, embedding_weights, one_hot=False):
         super().__init__()
         self.channels = channels
+        self.one_hot = one_hot
 
-        self.max_atoms = 200
+        self.max_atoms = 100
+
+        self.register_buffer('embedding', torch.from_numpy(embedding_weights))
 
         self.set_expansion = SetExpansion(channels, self.max_atoms)
-        # self.conv_expander = ConvExpander(channels)
+        self.conv_expander = ConvExpander(channels)
 
         self.net = AttentionStack(
             channels,
@@ -338,42 +352,39 @@ class Generator(nn.Module):
             attention_layers=6,
             intermediate_layers=2)
 
-        # self.net = nn.Sequential(
-        #     MultiHeadAttention(channels, 8, layer_norm=False),
-        #     LinearOutputStack(channels, 3, activation=activation),
 
-        #     MultiHeadAttention(channels, 8, layer_norm=False),
-        #     LinearOutputStack(channels, 3, activation=activation),
-
-        #     MultiHeadAttention(channels, 8, layer_norm=False),
-        #     LinearOutputStack(channels, 3, activation=activation),
-
-        #     MultiHeadAttention(channels, 8, layer_norm=False),
-        #     LinearOutputStack(channels, 3, activation=activation),
-
-        #     MultiHeadAttention(channels, 8, layer_norm=False),
-        #     LinearOutputStack(channels, 3, activation=activation),
-        # )
-
-        self.to_atom = LinearOutputStack(
-            channels, 3, activation=activation, out_channels=8)
-        self.to_pos = LinearOutputStack(
-            channels, 3, activation=activation, out_channels=1)
-        self.to_magnitude = LinearOutputStack(
-            channels, 3, activation=activation, out_channels=1)
+        # self.to_atom = LinearOutputStack(
+        #     channels, 3, activation=activation, out_channels=3072)
+        # self.to_pos = LinearOutputStack(
+        #     channels, 3, activation=activation, out_channels=1)
+        # self.to_magnitude = LinearOutputStack(
+        #     channels, 3, activation=activation, out_channels=1)
+        
+        self.all_in_one = LinearOutputStack(channels, 3, activation=activation, out_channels=10)
 
         self.apply(init_weights)
 
     def forward(self, x):
-        encodings, length = self.set_expansion(x)
-        # encodings, length = self.conv_expander(x)
+        # encodings, length = self.set_expansion(x)
+        encodings, length = self.conv_expander(x)
         encodings = self.net(encodings)
 
-        atoms = unit_norm(self.to_atom(encodings))
-        pos = self.to_pos(encodings)
-        mags = self.to_magnitude(encodings)
+        if self.one_hot:
+            atoms = torch.softmax(self.to_atom(encodings), dim=1)
+        else:
+            # atoms = torch.softmax(self.to_atom(encodings), dim=1)
+            # atoms = torch.matmul(atoms, self.embedding)
+            pass
 
-        recon = torch.cat([atoms, pos, mags], dim=-1)
+        # pos = sine_one(self.to_pos(encodings))
+        # mag = sine_one(self.to_magnitude(encodings))
+
+
+        recon = self.all_in_one(encodings)
+        atoms = torch.sin(recon[:, :8]) * 3
+        pos = sine_one(recon[:, -2:-1])
+        mag = sine_one(recon[:, -1:])
+        recon = torch.cat([atoms, pos, mag], dim=-1)
         return recon, length
 
 
