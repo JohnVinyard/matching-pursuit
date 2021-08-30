@@ -171,7 +171,6 @@ class Discriminator(nn.Module):
             ae = torch.softmax(a, dim=1)
         else:
             ae = self.atom_embedding(atom).view(-1, 8)
-            ae = ae + torch.FloatTensor(*ae.shape).normal_(0, 0.03).to(ae.device)
         
         pe = time.view(-1, 1)
         me = mag.view(-1, 1)
@@ -382,10 +381,16 @@ class Generator(nn.Module):
 
 
         recon = self.all_in_one(encodings)
-        atoms = torch.sin(recon[:, :8]) * 3
-        pos = sine_one(recon[:, -2:-1])
-        mag = sine_one(recon[:, -1:])
-        # recon = torch.cat([atoms, pos, mag], dim=-1)
+        # atoms = torch.sin(recon[:, :8]) * 3
+        # pos = sine_one(recon[:, -2:-1])
+        # mag = sine_one(recon[:, -1:])
+
+        atoms = torch.tanh(recon[:, :8])
+        pos = torch.sigmoid(recon[:, -2:-1])
+        mag = torch.sigmoid(recon[:, -1:])
+        
+        recon = torch.cat([atoms, pos, mag], dim=-1)
+
         return recon, length
 
 
