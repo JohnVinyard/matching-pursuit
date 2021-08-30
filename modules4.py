@@ -166,11 +166,12 @@ class Discriminator(nn.Module):
         atom, time, mag = x
 
         if self.one_hot:
-            a = torch.zeros(time.shape[0], 3072).to(time.device)
+            a = torch.zeros(time.shape[0], 3072).to(time.device).uniform_(0, 0.1)
             a[torch.arange(time.shape[0]), atom] = 1
-            ae = a
+            ae = torch.softmax(a, dim=1)
         else:
             ae = self.atom_embedding(atom).view(-1, 8)
+            ae = ae + torch.FloatTensor(*ae.shape).normal_(0, 0.03).to(ae.device)
         
         pe = time.view(-1, 1)
         me = mag.view(-1, 1)
@@ -300,7 +301,7 @@ class ResidualUpscale(nn.Module):
     def forward(self, x):
         up = F.upsample(x, scale_factor=2)
         conv = self.conv(x)
-        return torch.sin(up + conv)
+        return F.leaky_relu(up + conv, 0.2)
 
 
 class ConvExpander(nn.Module):
@@ -353,12 +354,12 @@ class Generator(nn.Module):
             intermediate_layers=2)
 
 
-        # self.to_atom = LinearOutputStack(
-        #     channels, 3, activation=activation, out_channels=3072)
-        # self.to_pos = LinearOutputStack(
-        #     channels, 3, activation=activation, out_channels=1)
-        # self.to_magnitude = LinearOutputStack(
-        #     channels, 3, activation=activation, out_channels=1)
+        self.to_atom = LinearOutputStack(
+            channels, 3, activation=activation, out_channels=3072)
+        self.to_pos = LinearOutputStack(
+            channels, 3, activation=activation, out_channels=1)
+        self.to_magnitude = LinearOutputStack(
+            channels, 3, activation=activation, out_channels=1)
         
         self.all_in_one = LinearOutputStack(channels, 3, activation=activation, out_channels=10)
 
@@ -384,7 +385,7 @@ class Generator(nn.Module):
         atoms = torch.sin(recon[:, :8]) * 3
         pos = sine_one(recon[:, -2:-1])
         mag = sine_one(recon[:, -1:])
-        recon = torch.cat([atoms, pos, mag], dim=-1)
+        # recon = torch.cat([atoms, pos, mag], dim=-1)
         return recon, length
 
 

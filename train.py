@@ -187,8 +187,7 @@ def nn_decode(encoded):
     if isinstance(encoded, list):
         a, p, m = encoded
     else:
-        a, p, m = encoded[:, :8 if not one_hot else 3072], encoded[:, -
-                                                                   2:-1], encoded[:, -1:]
+        a, p, m = encoded[:, :8 if not one_hot else 3072], encoded[:, -2:-1], encoded[:, -1:]
 
     keys = sorted(digitizers.keys())
 

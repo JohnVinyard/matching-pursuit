@@ -7,6 +7,9 @@ import numpy as np
 from torch import nn
 from torch.optim import Adam
 import zounds
+from sklearn.manifold import TSNE
+import argparse
+from matplotlib import pyplot as plt
 
 # TODO: What about training this using the method with no negative examples?
 # Instead, we ensure that:
@@ -25,7 +28,7 @@ loss = nn.TripletMarginLoss(margin=0.01).to(device)
 
 
 def get_trained_weights():
-    with open('embedding.dat') as f:
+    with open('embedding.dat', 'rb') as f:
         embedding.load_state_dict(torch.load(f))
         return embedding.weight.data
 
@@ -96,18 +99,38 @@ def iter_batches(batch_size=128):
             negative = []
 
 
+def visualize():
+    w = get_trained_weights().cpu().numpy()
+    tsne = TSNE()
+    points = tsne.fit_transform(w)
+    plt.scatter(points[:, 0], points[:, 1], s=1)
+    plt.savefig('embeddings.png')
+
+
 if __name__ == '__main__':
-    app = zounds.ZoundsApp(locals=locals(), globals=globals())
-    app.start_in_thread(9999)
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--train', action='store_true')
+    parser.add_argument('--visualize', action='store_true')
+    args = parser.parse_args()
 
-    for anchor, positive, negative in iter_batches(batch_size=128):
-        optim.zero_grad()
+    if args.train:
+        app = zounds.ZoundsApp(locals=locals(), globals=globals())
+        app.start_in_thread(9999)
 
-        a = embedding.forward(anchor)
-        p = embedding.forward(positive)
-        n = embedding.forward(negative)
+        for anchor, positive, negative in iter_batches(batch_size=128):
+            optim.zero_grad()
 
-        l = loss.forward(a, p, n)
-        l.backward()
-        optim.step()
-        print(l.item())
+            a = embedding.forward(anchor)
+            p = embedding.forward(positive)
+            n = embedding.forward(negative)
+
+            l = loss.forward(a, p, n)
+            l.backward()
+            optim.step()
+            print(l.item())
+
+    elif args.visualize:
+        visualize()
+
+    else:
+        pass
