@@ -333,6 +333,55 @@ class ConvExpander(nn.Module):
         return x[:c], length
 
 
+class LengthProducer(nn.Module):
+    def __init__(self, channels, max_atoms):
+        super().__init__()
+        self.channels = channels
+        self.max_atoms = max_atoms
+        self.length = LinearOutputStack(channels, 3, out_channels=1)
+    
+    def forward(self, x):
+        # continuous/differentiable length ratio
+        length = l = torch.clamp(torch.abs(self.length(x)), 0, 0.9999)
+
+        # discrete length for indexing
+        c = int(l * self.max_atoms) + 1
+        return length, c
+
+class RnnGenerator(nn.Module):
+    def __init__(self, channels, max_atoms):
+        super().__init__()
+        self.channels = channels
+        self.length = LengthProducer(channels, max_atoms)
+        self.rnn_layers = 4
+        self.rnn = nn.RNN(channels, channels, self.rnn_layers, nonlinearity='relu')
+    
+    def forward(self, x):
+        x = x.view(1, self.channels)
+        l, c = self.length(x)
+
+        # input in shape (sequence_length, batch_size, input_dim)
+        # hidden in shape (num_rnn_layers, batch, hidden_dim)
+        inp = torch.zeros(1, 1, self.channels).to(x.device)
+        hid = torch.zeros(self.rnn_layers, 1, self.channels).to(x.device)
+        hid[0, :, :] = x
+
+        seq = []
+        for i in range(c):
+            inp, hid = self.rnn.forward(inp, hid)
+            inp = unit_norm(inp)
+            hid = unit_norm(hid)
+            x = inp.view(1, self.channels)
+            seq.append(x)
+
+            # member = self.is_member(x).view(1).item()
+            # if member < 0.5:
+            #     break
+
+        seq = torch.cat(seq, dim=0)
+        return seq, l
+
+
 class Generator(nn.Module):
     def __init__(self, channels, embedding_weights, one_hot=False):
         super().__init__()
@@ -341,16 +390,18 @@ class Generator(nn.Module):
 
         self.max_atoms = 100
 
-        self.register_buffer('embedding', torch.from_numpy(embedding_weights))
+        # self.register_buffer('embedding', torch.from_numpy(embedding_weights))
 
-        self.set_expansion = SetExpansion(channels, self.max_atoms)
-        self.conv_expander = ConvExpander(channels)
+        # self.set_expansion = SetExpansion(channels, self.max_atoms)
+        # self.conv_expander = ConvExpander(channels)
 
-        self.net = AttentionStack(
-            channels,
-            attention_heads=8,
-            attention_layers=6,
-            intermediate_layers=2)
+        # self.net = AttentionStack(
+        #     channels,
+        #     attention_heads=8,
+        #     attention_layers=6,
+        #     intermediate_layers=2)
+
+        self.seq = RnnGenerator(channels, self.max_atoms)
 
 
         self.to_atom = LinearOutputStack(
@@ -366,18 +417,20 @@ class Generator(nn.Module):
 
     def forward(self, x):
         # encodings, length = self.set_expansion(x)
-        encodings, length = self.conv_expander(x)
-        encodings = self.net(encodings)
+        # encodings, length = self.conv_expander(x)
+        # encodings = self.net(encodings)
 
-        if self.one_hot:
-            atoms = torch.softmax(self.to_atom(encodings), dim=1)
-        else:
-            # atoms = torch.softmax(self.to_atom(encodings), dim=1)
-            # atoms = torch.matmul(atoms, self.embedding)
-            pass
+        # if self.one_hot:
+        #     atoms = torch.softmax(self.to_atom(encodings), dim=1)
+        # else:
+        #     # atoms = torch.softmax(self.to_atom(encodings), dim=1)
+        #     # atoms = torch.matmul(atoms, self.embedding)
+        #     pass
 
-        # pos = sine_one(self.to_pos(encodings))
-        # mag = sine_one(self.to_magnitude(encodings))
+        # # pos = sine_one(self.to_pos(encodings))
+        # # mag = sine_one(self.to_magnitude(encodings))
+
+        encodings, length = self.seq(x)
 
 
         recon = self.all_in_one(encodings)
@@ -385,10 +438,10 @@ class Generator(nn.Module):
         # pos = sine_one(recon[:, -2:-1])
         # mag = sine_one(recon[:, -1:])
 
-        atoms = torch.tanh(recon[:, :8])
-        pos = torch.sigmoid(recon[:, -2:-1])
-        mag = torch.sigmoid(recon[:, -1:])
-        
+        atoms = torch.sin(recon[:, :8])
+        pos = sine_one(recon[:, -2:-1])
+        mag = sine_one(recon[:, -1:])
+
         recon = torch.cat([atoms, pos, mag], dim=-1)
 
         return recon, length
