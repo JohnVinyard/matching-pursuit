@@ -390,18 +390,17 @@ class Generator(nn.Module):
 
         self.max_atoms = 100
 
-        # self.register_buffer('embedding', torch.from_numpy(embedding_weights))
 
         # self.set_expansion = SetExpansion(channels, self.max_atoms)
-        # self.conv_expander = ConvExpander(channels)
+        self.conv_expander = ConvExpander(channels)
 
-        # self.net = AttentionStack(
-        #     channels,
-        #     attention_heads=8,
-        #     attention_layers=6,
-        #     intermediate_layers=2)
+        self.net = AttentionStack(
+            channels,
+            attention_heads=8,
+            attention_layers=6,
+            intermediate_layers=2)
 
-        self.seq = RnnGenerator(channels, self.max_atoms)
+        # self.seq = RnnGenerator(channels, self.max_atoms)
 
 
         self.to_atom = LinearOutputStack(
@@ -417,8 +416,8 @@ class Generator(nn.Module):
 
     def forward(self, x):
         # encodings, length = self.set_expansion(x)
-        # encodings, length = self.conv_expander(x)
-        # encodings = self.net(encodings)
+        encodings, length = self.conv_expander(x)
+        encodings = self.net(encodings)
 
         # if self.one_hot:
         #     atoms = torch.softmax(self.to_atom(encodings), dim=1)
@@ -430,7 +429,7 @@ class Generator(nn.Module):
         # # pos = sine_one(self.to_pos(encodings))
         # # mag = sine_one(self.to_magnitude(encodings))
 
-        encodings, length = self.seq(x)
+        # encodings, length = self.seq(x)
 
 
         recon = self.all_in_one(encodings)
@@ -438,9 +437,9 @@ class Generator(nn.Module):
         # pos = sine_one(recon[:, -2:-1])
         # mag = sine_one(recon[:, -1:])
 
-        atoms = torch.sin(recon[:, :8])
-        pos = sine_one(recon[:, -2:-1])
-        mag = sine_one(recon[:, -1:])
+        atoms = torch.tanh(recon[:, :8])
+        pos = torch.sigmoid(recon[:, -2:-1])
+        mag = torch.sigmoid(recon[:, -1:])
 
         recon = torch.cat([atoms, pos, mag], dim=-1)
 

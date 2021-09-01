@@ -38,10 +38,10 @@ signal_sizes = [1024, 2048, 4096, 8192, 16384, 32768]
 embedding_weights = get_trained_weights()
 
 gen = Generator(128, embedding_weights, one_hot).to(device)
-gen_optim = Adam(gen.parameters(), lr=1e-4, betas=(0.5, 0.9))
+gen_optim = Adam(gen.parameters(), lr=1e-4, betas=(0, 0.9))
 
 disc = Discriminator(128, embedding_weights, one_hot).to(device)
-disc_optim = Adam(disc.parameters(), lr=1e-4, betas=(0.5, 0.9))
+disc_optim = Adam(disc.parameters(), lr=1e-4, betas=(0, 0.9))
 
 
 def latent():
