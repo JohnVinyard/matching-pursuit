@@ -34,11 +34,11 @@ def unit_norm(x):
 
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, channels, heads, layer_norm=True):
+    def __init__(self, channels, heads, layer_norm=True, linear_attention=False):
         super().__init__()
         self.channels = channels
         self.heads = heads
-        self.attn = nn.Sequential(*[Attention(channels, layer_norm)
+        self.attn = nn.Sequential(*[Attention(channels, layer_norm, linear_attn=linear_attention)
                                   for _ in range(self.heads)])
         self.fc = nn.Linear(channels * heads, channels)
         # self.ln = nn.LayerNorm(self.channels)
@@ -84,7 +84,8 @@ class AttentionStack(nn.Module):
             channels,
             attention_heads,
             attention_layers,
-            intermediate_layers=3):
+            intermediate_layers=3,
+            linear_attention=False):
 
         super().__init__()
         self.channels = channels
@@ -95,7 +96,7 @@ class AttentionStack(nn.Module):
         self.net = nn.Sequential(*[
             nn.Sequential(
                 MultiHeadAttention(
-                    channels, attention_heads, layer_norm=False),
+                    channels, attention_heads, layer_norm=False, linear_attention=linear_attention),
                 LinearOutputStack(channels, intermediate_layers, activation=activation))
             for _ in range(attention_layers)
         ])
@@ -130,7 +131,8 @@ class Discriminator(nn.Module):
                 channels,
                 attention_heads=8,
                 attention_layers=6,
-                intermediate_layers=2)
+                intermediate_layers=2,
+                linear_attention=False)
         )
 
         self.length = LinearOutputStack(
@@ -138,6 +140,8 @@ class Discriminator(nn.Module):
         self.final = nn.Linear(channels * 2, channels)
         self.final_final = LinearOutputStack(
             channels, 3, in_channels=channels * 2)
+
+        self.dense_judge = LinearOutputStack(channels, 3, out_channels=1)
 
         self.reduce = nn.Sequential(
             AttentionClusters(channels, 16),
@@ -166,12 +170,13 @@ class Discriminator(nn.Module):
         atom, time, mag = x
 
         if self.one_hot:
-            a = torch.zeros(time.shape[0], 3072).to(time.device).uniform_(0, 0.1)
+            a = torch.zeros(time.shape[0], 3072).to(
+                time.device).uniform_(0, 0.2)
             a[torch.arange(time.shape[0]), atom] = 1
             ae = torch.softmax(a, dim=1)
         else:
             ae = self.atom_embedding(atom).view(-1, 8)
-        
+
         pe = time.view(-1, 1)
         me = mag.view(-1, 1)
         return torch.cat([ae, pe, me], dim=-1)
@@ -192,8 +197,11 @@ class Discriminator(nn.Module):
         x = self.final(x)
         x = torch.cat([x, aj], dim=1)
         x = self.final_final(x)
+        j = self.dense_judge(x).mean().view(-1)
 
-        x = self.reduce(x)
+        x = self.reduce(x).view(-1)
+        # x = torch.sigmoid(x)
+        x = torch.cat([x, j])
         return x
 
 
@@ -251,7 +259,7 @@ class SetExpansion(nn.Module):
 
         self.length = LinearOutputStack(
             channels, 3, out_channels=1, activation=activation)
-        
+
         self.reduce = nn.Linear(channels * 2, channels)
 
     def forward(self, x):
@@ -296,11 +304,17 @@ class ResidualUpscale(nn.Module):
     def __init__(self, channels):
         super().__init__()
         self.conv = nn.ConvTranspose1d(channels, channels, 4, 2, 1)
+        self.expander = Expander(channels, factor=2)
+        self.stack = LinearOutputStack(channels, 2)
 
     def forward(self, x):
-        up = F.upsample(x, scale_factor=2)
-        conv = self.conv(x)
-        return F.leaky_relu(up + conv, 0.2)
+        # up = F.upsample(x, scale_factor=2)
+        # x = self.conv(x)
+        # return F.leaky_relu(x + up, 0.2)
+
+        exp = self.expander(x)
+        x = self.stack(exp)
+        return x + exp
 
 
 class ConvExpander(nn.Module):
@@ -308,14 +322,15 @@ class ConvExpander(nn.Module):
         super().__init__()
         self.channels = channels
         self.max_atoms = 100
-        self.ln = nn.Linear(channels, channels * 8)
+        # self.ln = nn.Linear(channels, channels * 8)
+        self.ln = Expander(channels, factor=8)
         n_layers = int(np.log2(128) - np.log2(8))
         self.net = nn.Sequential(
-            ToThreeD(),
+            # ToThreeD(),
             nn.Sequential(*[
                 ResidualUpscale(channels)
                 for _ in range(n_layers)]),
-            ToTwoD()
+            # ToTwoD()
         )
 
         self.length = LinearOutputStack(
@@ -328,7 +343,7 @@ class ConvExpander(nn.Module):
         # discrete length for indexing
         c = int(l * self.max_atoms) + 1
 
-        x = self.ln(x).reshape(8, self.channels)
+        x = self.ln(x)
         x = self.net(x)
         return x[:c], length
 
@@ -339,7 +354,7 @@ class LengthProducer(nn.Module):
         self.channels = channels
         self.max_atoms = max_atoms
         self.length = LinearOutputStack(channels, 3, out_channels=1)
-    
+
     def forward(self, x):
         # continuous/differentiable length ratio
         length = l = torch.clamp(torch.abs(self.length(x)), 0, 0.9999)
@@ -348,14 +363,16 @@ class LengthProducer(nn.Module):
         c = int(l * self.max_atoms) + 1
         return length, c
 
+
 class RnnGenerator(nn.Module):
     def __init__(self, channels, max_atoms):
         super().__init__()
         self.channels = channels
         self.length = LengthProducer(channels, max_atoms)
         self.rnn_layers = 4
-        self.rnn = nn.RNN(channels, channels, self.rnn_layers, nonlinearity='relu')
-    
+        self.rnn = nn.RNN(channels, channels,
+                          self.rnn_layers, nonlinearity='relu')
+
     def forward(self, x):
         x = x.view(1, self.channels)
         l, c = self.length(x)
@@ -390,18 +407,17 @@ class Generator(nn.Module):
 
         self.max_atoms = 100
 
-
-        # self.set_expansion = SetExpansion(channels, self.max_atoms)
+        self.set_expansion = SetExpansion(channels, self.max_atoms)
         self.conv_expander = ConvExpander(channels)
 
         self.net = AttentionStack(
             channels,
             attention_heads=8,
             attention_layers=6,
-            intermediate_layers=2)
+            intermediate_layers=2,
+            linear_attention=False)
 
         # self.seq = RnnGenerator(channels, self.max_atoms)
-
 
         self.to_atom = LinearOutputStack(
             channels, 3, activation=activation, out_channels=3072)
@@ -409,37 +425,28 @@ class Generator(nn.Module):
             channels, 3, activation=activation, out_channels=1)
         self.to_magnitude = LinearOutputStack(
             channels, 3, activation=activation, out_channels=1)
-        
-        self.all_in_one = LinearOutputStack(channels, 3, activation=activation, out_channels=10)
+
+        self.all_in_one = LinearOutputStack(
+            channels, 3, activation=activation, out_channels=10)
 
         self.apply(init_weights)
 
     def forward(self, x):
         # encodings, length = self.set_expansion(x)
         encodings, length = self.conv_expander(x)
-        encodings = self.net(encodings)
+        # encodings = self.net(encodings)
 
-        # if self.one_hot:
-        #     atoms = torch.softmax(self.to_atom(encodings), dim=1)
-        # else:
-        #     # atoms = torch.softmax(self.to_atom(encodings), dim=1)
-        #     # atoms = torch.matmul(atoms, self.embedding)
-        #     pass
-
-        # # pos = sine_one(self.to_pos(encodings))
-        # # mag = sine_one(self.to_magnitude(encodings))
+        if self.one_hot:
+            atoms = torch.softmax(self.to_atom(encodings), dim=1)
+            pos = torch.sigmoid(self.to_pos(encodings))
+            mag = torch.sigmoid(self.to_magnitude(encodings))
+        else:
+            recon = self.all_in_one(encodings)
+            atoms = torch.tanh(recon[:, :8])
+            pos = torch.sigmoid(recon[:, -2:-1])
+            mag = torch.sigmoid(recon[:, -1:])
 
         # encodings, length = self.seq(x)
-
-
-        recon = self.all_in_one(encodings)
-        # atoms = torch.sin(recon[:, :8]) * 3
-        # pos = sine_one(recon[:, -2:-1])
-        # mag = sine_one(recon[:, -1:])
-
-        atoms = torch.tanh(recon[:, :8])
-        pos = torch.sigmoid(recon[:, -2:-1])
-        mag = torch.sigmoid(recon[:, -1:])
 
         recon = torch.cat([atoms, pos, mag], dim=-1)
 

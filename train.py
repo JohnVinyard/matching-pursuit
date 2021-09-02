@@ -16,7 +16,7 @@ from torch.nn.utils.clip_grad import clip_grad_value_
 
 sr = zounds.SR22050()
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-one_hot = False
+one_hot = True
 max_atoms = 100
 
 
@@ -317,7 +317,7 @@ if __name__ == '__main__':
     app.start_in_thread(9999)
 
     stream = enumerate(iter_training_examples())
-    # stream = cycle([next(stream)])
+    stream = cycle([next(stream)])
 
     while True:
         _, example1 = next(stream)
