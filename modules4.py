@@ -34,11 +34,11 @@ def unit_norm(x):
 
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, channels, heads, layer_norm=True, linear_attention=False):
+    def __init__(self, channels, heads, layer_norm=True):
         super().__init__()
         self.channels = channels
         self.heads = heads
-        self.attn = nn.Sequential(*[Attention(channels, layer_norm, linear_attn=linear_attention)
+        self.attn = nn.Sequential(*[Attention(channels, layer_norm)
                                   for _ in range(self.heads)])
         self.fc = nn.Linear(channels * heads, channels)
         # self.ln = nn.LayerNorm(self.channels)
@@ -52,7 +52,7 @@ class MultiHeadAttention(nn.Module):
             z = attn(x)
             results.append(z)
 
-        x = torch.cat(results, dim=1)
+        x = torch.cat(results, dim=-1)
         x = self.fc(x)
         x = x + orig
 
@@ -68,13 +68,14 @@ class AttentionClusters(nn.Module):
             *[Attention(channels, reduce=True) for _ in range(self.heads)])
 
     def forward(self, x):
-        x = x.view(-1, self.channels)
+        batch, time, channels = x.shape
+        # x = x.view(-1, self.channels)
         clusters = []
         for cluster in self.clusters:
-            z = cluster(x).view(1, self.channels)
+            z = cluster(x)
             clusters.append(z)
 
-        x = torch.cat(clusters, dim=0)
+        x = torch.cat(clusters, dim=1)
         return x
 
 
@@ -84,8 +85,7 @@ class AttentionStack(nn.Module):
             channels,
             attention_heads,
             attention_layers,
-            intermediate_layers=3,
-            linear_attention=False):
+            intermediate_layers=3):
 
         super().__init__()
         self.channels = channels
@@ -96,7 +96,7 @@ class AttentionStack(nn.Module):
         self.net = nn.Sequential(*[
             nn.Sequential(
                 MultiHeadAttention(
-                    channels, attention_heads, layer_norm=False, linear_attention=linear_attention),
+                    channels, attention_heads, layer_norm=False),
                 LinearOutputStack(channels, intermediate_layers, activation=activation))
             for _ in range(attention_layers)
         ])
@@ -106,10 +106,9 @@ class AttentionStack(nn.Module):
 
 
 class Discriminator(nn.Module):
-    def __init__(self, channels, embedding_weights, one_hot=False):
+    def __init__(self, channels, embedding_weights):
         super().__init__()
         self.channels = channels
-        self.one_hot = one_hot
 
         self.atom_embedding = nn.Embedding(512 * 6, 8)
 
@@ -135,13 +134,12 @@ class Discriminator(nn.Module):
                 channels,
                 attention_heads=8,
                 attention_layers=6,
-                intermediate_layers=2,
-                linear_attention=False)
+                intermediate_layers=2)
         )
 
         self.length = LinearOutputStack(
             channels, 2, in_channels=1, activation=activation)
-        self.final = nn.Linear(channels * 2, channels)
+        self.final = nn.Linear(channels, channels)
         self.final_final = LinearOutputStack(
             channels, 3, in_channels=channels * 2)
 
@@ -165,52 +163,34 @@ class Discriminator(nn.Module):
         Return atom indices
         """
         nw = self.atom_embedding.weight
-        if self.one_hot:
-            return torch.argmax(embeddings, dim=1)
-        else:
-            return get_best_matches(nw, embeddings)
+        return get_best_matches(nw, embeddings)
 
     def get_embeddings(self, x):
         atom, time, mag = x
 
-        if self.one_hot:
-            a = torch.zeros(time.shape[0], 3072).to(
-                time.device).uniform_(0, 0.2)
-            a[torch.arange(time.shape[0]), atom] = 1
-            ae = torch.softmax(a, dim=1)
-        else:
-            ae = self.atom_embedding(atom).view(-1, 8)
+        ae = self.atom_embedding(atom).view(-1, 8)
 
         pe = time.view(-1, 1)
         me = mag.view(-1, 1)
         return torch.cat([ae, pe, me], dim=-1)
 
-    def forward(self, x, l):
+    def forward(self, x):
+        batch, time, channels = x.shape
 
-        if isinstance(x, list):
-            x = self.get_embeddings(x)
-
-        if self.one_hot:
-            ta = self.time_amp(x[:, 3072:])
-            e = self.atom(x[:, :3072])
-            comb = torch.cat([ta, e], dim=1)
-            x = self.combine(comb)
+        # if isinstance(x, list):
+        #     x = self.get_embeddings(x)
 
         aj = self.atom_judge(x)
 
-        l = self.length(l).repeat(x.shape[0], 1)
         x = self.dense(x)
 
-        x = torch.cat([
-            x.view(-1, self.channels),
-            l.view(-1, self.channels)], dim=1)
         x = self.final(x)
-        x = torch.cat([x, aj], dim=1)
+        x = torch.cat([x, aj], dim=-1)
         x = self.final_final(x)
-        j = self.dense_judge(x).mean().view(-1)
+        j = self.dense_judge(x).mean(dim=1, keepdim=True)
 
-        x = self.reduce(x).view(-1)
-        x = torch.cat([x, j])
+        x = self.reduce(x)
+        x = torch.cat([x, j], dim=-1)
 
         # x = torch.sigmoid(x)
 
@@ -272,29 +252,15 @@ class SetExpansion(nn.Module):
         self.bias = LinearOutputStack(channels, 3, activation=activation)
         self.weight = LinearOutputStack(channels, 3, activation=activation)
 
-        self.length = LinearOutputStack(
-            channels, 3, out_channels=1, activation=activation)
-
-        # self.reduce = nn.Linear(channels * 2, channels)
-
     def forward(self, x):
-        x = x.view(1, self.channels)
-
-        # continuous/differentiable length ratio
-        length = l = torch.clamp(torch.abs(self.length(x)), 0, 0.9999)
-
-        # discrete length for indexing
-        c = int(l * self.max_atoms) + 1
+        x = x.view(-1, self.channels)
 
         b = self.bias(x)
         w = self.weight(x)
 
-        x = ((self.members * w) + b)[:c]
+        x = ((self.members[None, ...] * w[:, None, :]) + b[:, None, :])
 
-        # x = torch.cat([x], dim=1)
-        # x = self.reduce(x)
-
-        return x, length
+        return x
 
 
 class MultiSetExpansion(nn.Module):
@@ -419,10 +385,9 @@ class RnnGenerator(nn.Module):
 
 
 class Generator(nn.Module):
-    def __init__(self, channels, embedding_weights, one_hot=False):
+    def __init__(self, channels):
         super().__init__()
         self.channels = channels
-        self.one_hot = one_hot
 
         self.max_atoms = 100
 
@@ -433,17 +398,7 @@ class Generator(nn.Module):
             channels,
             attention_heads=8,
             attention_layers=6,
-            intermediate_layers=2,
-            linear_attention=False)
-
-        # self.seq = RnnGenerator(channels, self.max_atoms)
-
-        self.to_atom = LinearOutputStack(
-            channels, 3, activation=activation, out_channels=3072)
-        self.to_pos = LinearOutputStack(
-            channels, 3, activation=activation, out_channels=1)
-        self.to_magnitude = LinearOutputStack(
-            channels, 3, activation=activation, out_channels=1)
+            intermediate_layers=2)
 
         self.all_in_one = LinearOutputStack(
             channels, 3, activation=activation, out_channels=10)
@@ -453,40 +408,29 @@ class Generator(nn.Module):
     def forward(self, x):
         # encodings, length = self.conv_expander(x)
 
-        encodings, length = self.set_expansion(x)
+        encodings = self.set_expansion(x)
         encodings = self.net(encodings)
 
-        if self.one_hot:
-            atoms = torch.softmax(self.to_atom(encodings), dim=1)
-            pos = torch.sigmoid(self.to_pos(encodings))
-            mag = torch.sigmoid(self.to_magnitude(encodings))
-        else:
-            recon = self.all_in_one(encodings)
-            atoms = torch.sin(recon[:, :8])
-            pos = sine_one(recon[:, -2:-1])
-            mag = sine_one(recon[:, -1:])
+        recon = self.all_in_one(encodings)
+        atoms = torch.sin(recon[..., :8])
+        pos = sine_one(recon[..., -2:-1])
+        mag = sine_one(recon[..., -1:])
 
         # encodings, length = self.seq(x)
 
         recon = torch.cat([atoms, pos, mag], dim=-1)
 
-        return recon, length
+        return recon
 
 
 if __name__ == '__main__':
-    # l = torch.FloatTensor([0.5])
-    # x = torch.FloatTensor(700, 128).normal_(0, 1)
+    ew = np.random.normal(0, 1, (3072, 8))
 
-    latent = torch.FloatTensor(1, 128).normal_(0, 1)
-    se = SetExpansion(128, 768)
+    gen = Generator(128)
+    latent = torch.FloatTensor(8, 128).normal_(0, 1)
+    generated = gen.forward(latent)
+    print(generated.shape)
 
-    x, l = se.forward(latent)
-    print(x.shape)
-
-    # g = Generator(128)
-    # x, l = g(latent)
-    # print(x.shape, l.shape)
-
-    # d = Discriminator(128, np.random.normal(0, 1, (3072, 8)))
-    # x = d(x, l)
-    # print(x.shape)
+    disc = Discriminator(128, ew)
+    j = disc.forward(generated)
+    print(j.shape)
