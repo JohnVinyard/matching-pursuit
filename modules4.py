@@ -119,12 +119,16 @@ class Discriminator(nn.Module):
 
         self.atom_embedding.requires_grad = False
 
+        self.time_amp = LinearOutputStack(channels, 3, in_channels=2)
+        self.atom = LinearOutputStack(channels, 3, in_channels=3072)
+        self.combine = LinearOutputStack(channels, 3, in_channels=channels * 2)
+
         self.atom_judge = LinearOutputStack(
-            channels, 3, in_channels=10 if not one_hot else 3072 + 2)
+            channels, 3, in_channels=10)
 
         self.dense = nn.Sequential(
-            LinearOutputStack(channels, 2, in_channels=10 if not one_hot else 3072 + 2,
-                              activation=activation),
+            LinearOutputStack(channels, 2,
+                              activation=activation, in_channels=10),
 
 
             AttentionStack(
@@ -186,6 +190,12 @@ class Discriminator(nn.Module):
         if isinstance(x, list):
             x = self.get_embeddings(x)
 
+        if self.one_hot:
+            ta = self.time_amp(x[:, 3072:])
+            e = self.atom(x[:, :3072])
+            comb = torch.cat([ta, e], dim=1)
+            x = self.combine(comb)
+
         aj = self.atom_judge(x)
 
         l = self.length(l).repeat(x.shape[0], 1)
@@ -200,8 +210,10 @@ class Discriminator(nn.Module):
         j = self.dense_judge(x).mean().view(-1)
 
         x = self.reduce(x).view(-1)
-        # x = torch.sigmoid(x)
         x = torch.cat([x, j])
+
+        # x = torch.sigmoid(x)
+
         return x
 
 
@@ -257,14 +269,16 @@ class SetExpansion(nn.Module):
         self.register_buffer('members', torch.FloatTensor(
             self.max_atoms, channels).normal_(0, 1))
 
+        self.bias = LinearOutputStack(channels, 3, activation=activation)
+        self.weight = LinearOutputStack(channels, 3, activation=activation)
+
         self.length = LinearOutputStack(
             channels, 3, out_channels=1, activation=activation)
 
-        self.reduce = nn.Linear(channels * 2, channels)
+        # self.reduce = nn.Linear(channels * 2, channels)
 
     def forward(self, x):
         x = x.view(1, self.channels)
-        z = x
 
         # continuous/differentiable length ratio
         length = l = torch.clamp(torch.abs(self.length(x)), 0, 0.9999)
@@ -272,11 +286,13 @@ class SetExpansion(nn.Module):
         # discrete length for indexing
         c = int(l * self.max_atoms) + 1
 
-        x = (self.members * x)[:c]
-        z = z.repeat(c, 1)
+        b = self.bias(x)
+        w = self.weight(x)
 
-        x = torch.cat([x, z], dim=1)
-        x = self.reduce(x)
+        x = ((self.members * w) + b)[:c]
+
+        # x = torch.cat([x], dim=1)
+        # x = self.reduce(x)
 
         return x, length
 
@@ -306,6 +322,7 @@ class ResidualUpscale(nn.Module):
         self.conv = nn.ConvTranspose1d(channels, channels, 4, 2, 1)
         self.expander = Expander(channels, factor=2)
         self.stack = LinearOutputStack(channels, 2)
+        self.attn = MultiHeadAttention(channels, 4)
 
     def forward(self, x):
         # up = F.upsample(x, scale_factor=2)
@@ -314,7 +331,9 @@ class ResidualUpscale(nn.Module):
 
         exp = self.expander(x)
         x = self.stack(exp)
-        return x + exp
+        x = x + exp
+        x = self.attn(x)
+        return x
 
 
 class ConvExpander(nn.Module):
@@ -432,9 +451,10 @@ class Generator(nn.Module):
         self.apply(init_weights)
 
     def forward(self, x):
-        # encodings, length = self.set_expansion(x)
-        encodings, length = self.conv_expander(x)
-        # encodings = self.net(encodings)
+        # encodings, length = self.conv_expander(x)
+
+        encodings, length = self.set_expansion(x)
+        encodings = self.net(encodings)
 
         if self.one_hot:
             atoms = torch.softmax(self.to_atom(encodings), dim=1)
@@ -442,9 +462,9 @@ class Generator(nn.Module):
             mag = torch.sigmoid(self.to_magnitude(encodings))
         else:
             recon = self.all_in_one(encodings)
-            atoms = torch.tanh(recon[:, :8])
-            pos = torch.sigmoid(recon[:, -2:-1])
-            mag = torch.sigmoid(recon[:, -1:])
+            atoms = torch.sin(recon[:, :8])
+            pos = sine_one(recon[:, -2:-1])
+            mag = sine_one(recon[:, -1:])
 
         # encodings, length = self.seq(x)
 

@@ -16,8 +16,9 @@ from torch.nn.utils.clip_grad import clip_grad_value_
 
 sr = zounds.SR22050()
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-one_hot = True
+one_hot = False
 max_atoms = 100
+overfit = False
 
 
 def get_trained_weights():
@@ -43,9 +44,15 @@ gen_optim = Adam(gen.parameters(), lr=1e-4, betas=(0, 0.9))
 disc = Discriminator(128, embedding_weights, one_hot).to(device)
 disc_optim = Adam(disc.parameters(), lr=1e-4, betas=(0, 0.9))
 
+if overfit:
+    z_latent = torch.FloatTensor(1, 128).normal_(0, 1).to(device)
 
 def latent():
+    if overfit:
+        return z_latent
+    
     return torch.FloatTensor(1, 128).normal_(0, 1).to(device)
+
 
 
 class Digitizer(object):
@@ -239,6 +246,7 @@ def least_squares_disc_loss(r_j, f_j):
     return 0.5 * (((r_j - real_target) ** 2).mean() + ((f_j - fake_target) ** 2).mean())
 
 
+
 def train_disc(example1, example2):
     disc_optim.zero_grad()
 
@@ -317,7 +325,8 @@ if __name__ == '__main__':
     app.start_in_thread(9999)
 
     stream = enumerate(iter_training_examples())
-    stream = cycle([next(stream)])
+    if overfit:
+        stream = cycle([next(stream)])
 
     while True:
         _, example1 = next(stream)
