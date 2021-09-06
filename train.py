@@ -14,6 +14,7 @@ from torch.nn import Embedding
 from torch.nn.utils.clip_grad import clip_grad_value_
 from itertools import repeat, cycle
 from enum import Enum
+from matplotlib import pyplot as plt
 
 
 sr = zounds.SR22050()
@@ -26,23 +27,29 @@ pos_embedding_dim = 1
 total_vector_dim = embedding_dim + mag_embedding_dim + pos_embedding_dim
 batch_size = 16
 
-
-def get_trained_weights():
-    with open('embedding.dat', 'rb') as f:
-        embedding = Embedding(n_atoms, embedding_dim).to(device)
-        embedding.load_state_dict(torch.load(f))
-        return embedding.weight.data.cpu().numpy()
+# my sense is that using the embedding, trained in this way, will lead to 
+# bad outcomes.  I've essentially learned an embedding that places the 
+# high-frequency, noisy (and probably quiet; my positive selection 
+# scheme ignores volume) atoms near almost everything, since they're always
+# occuring, and very frequent.
+# def get_trained_weights():
+#     with open('embedding.dat', 'rb') as f:
+#         embedding = Embedding(n_atoms, embedding_dim).to(device)
+#         embedding.load_state_dict(torch.load(f))
+#         return embedding.weight.data.cpu().numpy()
 
 
 signal_sizes = [1024, 2048, 4096, 8192, 16384, 32768]
 
-embedding_weights = get_trained_weights()
+# embedding_weights = get_trained_weights()
 
-gen = Generator(128).to(device)
+disc = Discriminator(128).to(device)
+disc_optim = Adam(disc.parameters(), lr=1e-4, betas=(0, 0.9))
+
+gen = Generator(128, disc.atom_embedding).to(device)
 gen_optim = Adam(gen.parameters(), lr=1e-4, betas=(0, 0.9))
 
-disc = Discriminator(128, embedding_weights).to(device)
-disc_optim = Adam(disc.parameters(), lr=1e-4, betas=(0, 0.9))
+
 
 
 def latent():
@@ -114,6 +121,27 @@ def nn_encode(encoded, max_atoms=100, pack=False):
         return atoms, positions, mags
 
 
+def _nn_decode(encoded, visualize=False):
+    if isinstance(encoded, list):
+        a, p, m = encoded
+    else:
+        a, p, m = encoded[:, :8], encoded[:, -2:-1], encoded[:, -1:]
+
+    atom_indices = disc.get_atom_keys(a).data.cpu().numpy()
+    pos = np.clip(p.data.cpu().numpy().squeeze(), 0, 1)
+    mags = np.clip(m.data.cpu().numpy().squeeze(), 0, 1) * 20
+
+    if visualize:
+        t = ((pos * signal_sizes[-1])).astype(np.int32)
+        sizes = list(mags * 5)
+        plt.xlim([0, signal_sizes[-1]])
+        plt.ylim([0, 3072])
+        plt.scatter(t, atom_indices, sizes, alpha=0.5)
+        plt.savefig('vis.png')
+        plt.clf()
+    else:
+        return atom_indices, pos, mags
+
 def nn_decode(encoded):
     """
     Transform the neural network encoding into one 
@@ -121,19 +149,22 @@ def nn_decode(encoded):
 
     # encoded = network.flatten(encoded)
 
-    if isinstance(encoded, list):
-        a, p, m = encoded
-    else:
-        a, p, m = encoded[:, :8], encoded[:, -2:-1], encoded[:, -1:]
+    # if isinstance(encoded, list):
+    #     a, p, m = encoded
+    # else:
+    #     a, p, m = encoded[:, :8], encoded[:, -2:-1], encoded[:, -1:]
 
     keys = signal_sizes
 
-    atom_indices = disc.get_atom_keys(a).data.cpu().numpy()
-    pos = np.clip(p.data.cpu().numpy().squeeze(), 0, 1)
-    mags = np.clip(m.data.cpu().numpy().squeeze(), 0, 1) * 20
+    # atom_indices = disc.get_atom_keys(a).data.cpu().numpy()
+    # pos = np.clip(p.data.cpu().numpy().squeeze(), 0, 1)
+    # mags = np.clip(m.data.cpu().numpy().squeeze(), 0, 1) * 20
+
+    atom_indices, pos, mags = _nn_decode(encoded)
 
     band_indices = atom_indices // 512
     atom_indices = atom_indices % 512
+
 
     band_keys = np.array([keys[i] for i in band_indices])
 
@@ -142,12 +173,18 @@ def nn_decode(encoded):
     for b, a, m, p in zip(band_indices, atom_indices, mags, sample_pos):
         yield (keys[b], a, p, m)
 
+def vis_fake():
+    vis = _nn_decode(recon[0], visualize=True)
+    return vis
+
+def vis_real():
+    vis = _nn_decode(orig[0], visualize=True)
+    return vis
 
 def listen():
     encoded = list(nn_decode(recon[0]))
     decoded = decode(encoded, sparse_dict, return_audio=True)
     return decoded
-
 
 def real():
     encoded = list(nn_decode(orig[0]))

@@ -13,12 +13,12 @@ def activation(x):
     return F.leaky_relu(x, 0.2)
 
 
-class Activation(nn.Module):
-    def __init__(self):
-        super().__init__()
+# class Activation(nn.Module):
+#     def __init__(self):
+#         super().__init__()
 
-    def forward(self, x):
-        return torch.sin(x)
+#     def forward(self, x):
+#         return torch.sin(x)
 
 
 def sine_one(x):
@@ -106,17 +106,17 @@ class AttentionStack(nn.Module):
 
 
 class Discriminator(nn.Module):
-    def __init__(self, channels, embedding_weights):
+    def __init__(self, channels):
         super().__init__()
         self.channels = channels
 
-        self.atom_embedding = nn.Embedding(512 * 6, 8)
+        self.atom_embedding = nn.Embedding(512 * 6, 8, max_norm=1, scale_grad_by_freq=True)
 
-        with torch.no_grad():
-            self.atom_embedding.weight.data = torch.from_numpy(
-                embedding_weights)
+        # with torch.no_grad():
+        #     self.atom_embedding.weight.data = torch.from_numpy(
+        #         embedding_weights)
 
-        self.atom_embedding.requires_grad = False
+        # self.atom_embedding.requires_grad = False
 
         self.time_amp = LinearOutputStack(channels, 3, in_channels=2)
         self.atom = LinearOutputStack(channels, 3, in_channels=3072)
@@ -158,6 +158,7 @@ class Discriminator(nn.Module):
 
         self.apply(init_weights)
 
+
     def get_atom_keys(self, embeddings):
         """
         Return atom indices
@@ -197,49 +198,6 @@ class Discriminator(nn.Module):
         return x
 
 
-class VariableExpander(nn.Module):
-    def __init__(self, channels, max_atoms):
-        super().__init__()
-        self.channels = channels
-        self.is_member = nn.Linear(channels, 1)
-        self.max_atoms = max_atoms
-
-        self.length = LinearOutputStack(
-            channels, 3, out_channels=1, activation=activation)
-
-        self.rnn_layers = 3
-        self.rnn = nn.RNN(
-            channels,
-            channels,
-            self.rnn_layers,
-            batch_first=False,
-            nonlinearity='relu')
-
-    def forward(self, x):
-        x = x.view(1, self.channels)
-
-        # continuous/differentiable length ratio
-        length = l = torch.clamp(torch.abs(self.length(x)), 0, 0.9999)
-
-        # discrete length for indexing
-        c = int(l * self.max_atoms) + 1
-
-        # input in shape (sequence_length, batch_size, input_dim)
-        # hidden in shape (num_rnn_layers, batch, hidden_dim)
-        inp = torch.zeros(1, 1, self.channels).to(x.device)
-        hid = torch.zeros(self.rnn_layers, 1, self.channels).to(x.device)
-        hid[0, :, :] = x
-
-        seq = []
-        for i in range(c):
-            inp, hid = self.rnn.forward(inp, hid)
-            x = inp.view(1, self.channels)
-            seq.append(x)
-
-        seq = torch.cat(seq, dim=0)
-        return seq, length
-
-
 class SetExpansion(nn.Module):
     def __init__(self, channels, max_atoms):
         super().__init__()
@@ -263,38 +221,14 @@ class SetExpansion(nn.Module):
         return x
 
 
-class MultiSetExpansion(nn.Module):
-    def __init__(self, channels, max_atoms):
-        super().__init__()
-        self.set_expansion = SetExpansion(channels, max_atoms)
-        self.max_atoms = max_atoms
-
-    def forward(self, x):
-        chunks = []
-        length = 0
-
-        for chunk in x:
-            z, l = self.set_expansion(chunk)
-            chunks.append(z)
-            length = length + l
-
-        x = torch.cat(chunks, dim=0)
-        return x, length
-
-
 class ResidualUpscale(nn.Module):
     def __init__(self, channels):
         super().__init__()
-        self.conv = nn.ConvTranspose1d(channels, channels, 4, 2, 1)
         self.expander = Expander(channels, factor=2)
         self.stack = LinearOutputStack(channels, 2)
         self.attn = MultiHeadAttention(channels, 4)
 
     def forward(self, x):
-        # up = F.upsample(x, scale_factor=2)
-        # x = self.conv(x)
-        # return F.leaky_relu(x + up, 0.2)
-
         exp = self.expander(x)
         x = self.stack(exp)
         x = x + exp
@@ -318,78 +252,57 @@ class ConvExpander(nn.Module):
             # ToTwoD()
         )
 
-        self.length = LinearOutputStack(
-            channels, 3, out_channels=1, activation=activation)
-
     def forward(self, x):
-        # continuous/differentiable length ratio
-        length = l = torch.clamp(torch.abs(self.length(x)), 0, 0.9999)
-
-        # discrete length for indexing
-        c = int(l * self.max_atoms) + 1
-
+        x = x.view(-1, 1, self.channels)
         x = self.ln(x)
         x = self.net(x)
-        return x[:c], length
-
-
-class LengthProducer(nn.Module):
-    def __init__(self, channels, max_atoms):
-        super().__init__()
-        self.channels = channels
-        self.max_atoms = max_atoms
-        self.length = LinearOutputStack(channels, 3, out_channels=1)
-
-    def forward(self, x):
-        # continuous/differentiable length ratio
-        length = l = torch.clamp(torch.abs(self.length(x)), 0, 0.9999)
-
-        # discrete length for indexing
-        c = int(l * self.max_atoms) + 1
-        return length, c
+        return x[:, :self.max_atoms, :]
 
 
 class RnnGenerator(nn.Module):
     def __init__(self, channels, max_atoms):
         super().__init__()
+        self.max_atoms = max_atoms
         self.channels = channels
-        self.length = LengthProducer(channels, max_atoms)
         self.rnn_layers = 4
         self.rnn = nn.RNN(channels, channels,
                           self.rnn_layers, nonlinearity='relu')
 
     def forward(self, x):
-        x = x.view(1, self.channels)
-        l, c = self.length(x)
+        x = x.view(-1, 1, self.channels)
+        batch = x.shape[0]
 
         # input in shape (sequence_length, batch_size, input_dim)
         # hidden in shape (num_rnn_layers, batch, hidden_dim)
-        inp = torch.zeros(1, 1, self.channels).to(x.device)
-        hid = torch.zeros(self.rnn_layers, 1, self.channels).to(x.device)
-        hid[0, :, :] = x
+        inp = torch.zeros(1, batch, self.channels).to(x.device)
+        hid = torch.zeros(self.rnn_layers, batch, self.channels).to(x.device)
+        
+        hid[0, :, :] = x.squeeze()
 
         seq = []
-        for i in range(c):
+        for i in range(self.max_atoms):
             inp, hid = self.rnn.forward(inp, hid)
             inp = unit_norm(inp)
             hid = unit_norm(hid)
-            x = inp.view(1, self.channels)
+            # print(inp.shape, hid.shape)
+            x = inp
             seq.append(x)
 
-            # member = self.is_member(x).view(1).item()
-            # if member < 0.5:
-            #     break
 
-        seq = torch.cat(seq, dim=0)
-        return seq, l
+        seq = torch.cat(seq, dim=0) # time, batch, channels
+        seq = seq.permute(1, 0, 2).contiguous()
+        return seq
 
 
 class Generator(nn.Module):
-    def __init__(self, channels):
+    def __init__(self, channels, embeddings):
         super().__init__()
         self.channels = channels
+        self.embeddings = [embeddings]
 
         self.max_atoms = 100
+
+        self.rnn = RnnGenerator(channels, 100)
 
         self.set_expansion = SetExpansion(channels, self.max_atoms)
         self.conv_expander = ConvExpander(channels)
@@ -400,25 +313,33 @@ class Generator(nn.Module):
             attention_layers=6,
             intermediate_layers=2)
 
-        self.all_in_one = LinearOutputStack(
-            channels, 3, activation=activation, out_channels=10)
+
+        self.atoms = LinearOutputStack(channels, 3, out_channels=3072)
+        self.pos_loc = LinearOutputStack(channels, 3, out_channels=2)
 
         self.apply(init_weights)
 
     def forward(self, x):
-        # encodings, length = self.conv_expander(x)
-
+        # Set Expansion
         encodings = self.set_expansion(x)
         encodings = self.net(encodings)
 
-        recon = self.all_in_one(encodings)
-        atoms = torch.sin(recon[..., :8])
-        pos = sine_one(recon[..., -2:-1])
-        mag = sine_one(recon[..., -1:])
+        # Expansion
+        # encodings = self.conv_expander(x)
 
-        # encodings, length = self.seq(x)
+        # RNN
+        # encodings = self.rnn(x)
 
-        recon = torch.cat([atoms, pos, mag], dim=-1)
+        e = self.embeddings[0].weight.clone()
+
+        atoms = torch.softmax(self.atoms(encodings), dim=1)
+        atoms = atoms @ e
+
+        # atoms = torch.sin(self.atoms(encodings))
+
+        pt = sine_one(self.pos_loc(encodings))
+
+        recon = torch.cat([atoms, pt], dim=-1)
 
         return recon
 
