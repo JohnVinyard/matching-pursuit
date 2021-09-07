@@ -10,13 +10,13 @@ from torch.nn import functional as F
 
 
 def unit_norm(x):
-    n = torch.norm(x, dim=1, keepdim=True)
+    n = torch.norm(x, dim=-1, keepdim=True)
     x = x / (n + 1e-12)
     return x
 
 
 class Attention(nn.Module):
-    def __init__(self, channels, layer_norm=True, reduce=False, linear_attn=False):
+    def __init__(self, channels, reduce=False):
         super().__init__()
         self.channels = channels
 
@@ -28,8 +28,6 @@ class Attention(nn.Module):
         self.query = nn.Linear(channels, channels)
         self.key = nn.Linear(channels, channels)
         self.value = nn.Linear(channels, channels)
-        self.layer_norm = layer_norm
-        self.linear_attn = linear_attn
 
         self.reduce = reduce
 
@@ -45,17 +43,6 @@ class Attention(nn.Module):
         attn = torch.softmax(attn.view(batch, -1), dim=1).view(batch, time, time)
         x = torch.bmm(attn, v)
 
-        # if self.linear_attn:
-        #     global_query = torch.softmax(
-        #         (q * self.query_vector).sum(dim=0, keepdim=True), dim=1)
-        #     k = torch.softmax(
-        #         (k * global_query * self.key_vector).sum(dim=0, keepdim=True), dim=1)
-        #     v = (k * v) + q
-        # else:
-        #     attn = torch.matmul(q, k.T)
-        #     attn = attn / np.sqrt(attn.numel())
-        #     attn = torch.softmax(attn.view(-1), dim=0).view(l, l)
-        #     x = torch.matmul(attn, v)
 
         if self.reduce:
             v = v.sum(dim=1, keepdim=True)

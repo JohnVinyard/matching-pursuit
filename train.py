@@ -29,7 +29,7 @@ batch_size = 16
 overfit = False
 
 # OPTIONS
-dense_judgements = True
+dense_judgements = False
 
 # generation methods 
 #   - conv, 
@@ -44,8 +44,11 @@ dense_judgements = True
 #   - larger embedding dim
 
 # currently trying
-# - dense judgements, conv w/ internal and end attention
+# - dense judgments, noise w/ attention *
 
+
+# tried
+# - dense judgements, conv w/ internal and end attention - FAIL
 
 # my sense is that using the embedding, trained in this way, will lead to
 # bad outcomes.  I've essentially learned an embedding that places the

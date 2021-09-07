@@ -34,15 +34,12 @@ def unit_norm(x):
 
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, channels, heads, layer_norm=True):
+    def __init__(self, channels, heads):
         super().__init__()
         self.channels = channels
         self.heads = heads
-        self.attn = nn.Sequential(*[Attention(channels, layer_norm)
-                                  for _ in range(self.heads)])
+        self.attn = nn.Sequential(*[Attention(channels) for _ in range(self.heads)])
         self.fc = nn.Linear(channels * heads, channels)
-        # self.ln = nn.LayerNorm(self.channels)
-        # self.layer_norm = layer_norm
 
     def forward(self, x):
         orig = x
@@ -55,6 +52,7 @@ class MultiHeadAttention(nn.Module):
         x = torch.cat(results, dim=-1)
         x = self.fc(x)
         x = x + orig
+
 
         return x
 
@@ -95,8 +93,7 @@ class AttentionStack(nn.Module):
 
         self.net = nn.Sequential(*[
             nn.Sequential(
-                MultiHeadAttention(
-                    channels, attention_heads, layer_norm=False),
+                MultiHeadAttention(channels, attention_heads),
                 LinearOutputStack(channels, intermediate_layers, activation=activation))
             for _ in range(attention_layers)
         ])
@@ -312,7 +309,7 @@ class Generator(nn.Module):
         self.net = AttentionStack(
             channels,
             attention_heads=8,
-            attention_layers=6,
+            attention_layers=8,
             intermediate_layers=2)
 
         self.atoms = LinearOutputStack(channels, 3, out_channels=3072)
@@ -323,10 +320,10 @@ class Generator(nn.Module):
     def forward(self, x):
 
         # Expansion
-        encodings = self.conv_expander(x)
+        # encodings = self.conv_expander(x)
 
         # Set Expansion
-        # encodings = self.set_expansion(x)
+        encodings = self.set_expansion(x)
 
         # RNN
         # encodings = self.rnn(x)
@@ -334,14 +331,14 @@ class Generator(nn.Module):
         # End attention stack
         encodings = self.net(encodings)
 
+        # softmax with disc embeddings
         e = self.embeddings[0].weight.clone()
-
         atoms = torch.softmax(self.atoms(encodings), dim=1)
         atoms = atoms @ e
 
         # atoms = torch.sin(self.atoms(encodings))
 
-        pt = torch.clamp(self.pos_loc(encodings), 0, 1)
+        pt = sine_one(self.pos_loc(encodings))
 
         recon = torch.cat([atoms, pt], dim=-1)
 
