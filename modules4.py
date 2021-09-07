@@ -27,9 +27,9 @@ def sine_one(x):
 
 def unit_norm(x):
     if isinstance(x, np.ndarray):
-        n = np.linalg.norm(x, axis=1, keepdims=True)
+        n = np.linalg.norm(x, axis=-1, keepdims=True)
     else:
-        n = torch.norm(x, dim=1, keepdim=True)
+        n = torch.norm(x, dim=-1, keepdim=True)
     return x / (n + 1e-12)
 
 
@@ -38,7 +38,8 @@ class MultiHeadAttention(nn.Module):
         super().__init__()
         self.channels = channels
         self.heads = heads
-        self.attn = nn.Sequential(*[Attention(channels) for _ in range(self.heads)])
+        self.attn = nn.Sequential(*[Attention(channels)
+                                  for _ in range(self.heads)])
         self.fc = nn.Linear(channels * heads, channels)
 
     def forward(self, x):
@@ -52,7 +53,6 @@ class MultiHeadAttention(nn.Module):
         x = torch.cat(results, dim=-1)
         x = self.fc(x)
         x = x + orig
-
 
         return x
 
@@ -232,7 +232,7 @@ class ResidualUpscale(nn.Module):
         exp = self.expander(x)
         x = self.stack(exp)
         x = x + exp
-        x = self.attn(x)
+        # x = self.attn(x)
         return x
 
 
@@ -259,49 +259,14 @@ class ConvExpander(nn.Module):
         return x[:, :self.max_atoms, :]
 
 
-class RnnGenerator(nn.Module):
-    def __init__(self, channels, max_atoms):
-        super().__init__()
-        self.max_atoms = max_atoms
-        self.channels = channels
-        self.rnn_layers = 4
-        self.rnn = nn.RNN(channels, channels,
-                          self.rnn_layers, nonlinearity='relu')
-
-    def forward(self, x):
-        x = x.view(-1, 1, self.channels)
-        batch = x.shape[0]
-
-        # input in shape (sequence_length, batch_size, input_dim)
-        # hidden in shape (num_rnn_layers, batch, hidden_dim)
-        inp = torch.zeros(1, batch, self.channels).to(x.device)
-        hid = torch.zeros(self.rnn_layers, batch, self.channels).to(x.device)
-
-        hid[0, :, :] = x.squeeze()
-
-        seq = []
-        for i in range(self.max_atoms):
-            inp, hid = self.rnn.forward(inp, hid)
-            inp = unit_norm(inp)
-            hid = unit_norm(hid)
-            # print(inp.shape, hid.shape)
-            x = inp
-            seq.append(x)
-
-        seq = torch.cat(seq, dim=0)  # time, batch, channels
-        seq = seq.permute(1, 0, 2).contiguous()
-        return seq
-
-
 class Generator(nn.Module):
-    def __init__(self, channels, embeddings):
+    def __init__(self, channels, embeddings, use_disc_embeddings=True):
         super().__init__()
         self.channels = channels
         self.embeddings = [embeddings]
 
         self.max_atoms = 100
-
-        self.rnn = RnnGenerator(channels, 100)
+        self.use_disc_embeddings = use_disc_embeddings
 
         self.set_expansion = SetExpansion(channels, self.max_atoms)
         self.conv_expander = ConvExpander(channels)
@@ -312,7 +277,8 @@ class Generator(nn.Module):
             attention_layers=8,
             intermediate_layers=2)
 
-        self.atoms = LinearOutputStack(channels, 3, out_channels=3072)
+        self.atoms = LinearOutputStack(
+            channels, 3, out_channels=3072 if use_disc_embeddings else 8)
         self.pos_loc = LinearOutputStack(channels, 3, out_channels=2)
 
         self.apply(init_weights)
@@ -320,10 +286,10 @@ class Generator(nn.Module):
     def forward(self, x):
 
         # Expansion
-        # encodings = self.conv_expander(x)
+        encodings = self.conv_expander(x)
 
         # Set Expansion
-        encodings = self.set_expansion(x)
+        # encodings = self.set_expansion(x)
 
         # RNN
         # encodings = self.rnn(x)
@@ -331,12 +297,13 @@ class Generator(nn.Module):
         # End attention stack
         encodings = self.net(encodings)
 
-        # softmax with disc embeddings
-        e = self.embeddings[0].weight.clone()
-        atoms = torch.softmax(self.atoms(encodings), dim=1)
-        atoms = atoms @ e
-
-        # atoms = torch.sin(self.atoms(encodings))
+        if self.use_disc_embeddings:
+            # softmax with disc embeddings
+            e = self.embeddings[0].weight.clone()
+            atoms = torch.softmax(self.atoms(encodings), dim=1)
+            atoms = atoms @ e
+        else:
+            atoms = torch.sin(self.atoms(encodings))
 
         pt = sine_one(self.pos_loc(encodings))
 

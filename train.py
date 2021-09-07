@@ -30,6 +30,7 @@ overfit = False
 
 # OPTIONS
 dense_judgements = False
+gen_uses_disc_embeddings = False
 
 # generation methods 
 #   - conv, 
@@ -66,10 +67,15 @@ signal_sizes = [1024, 2048, 4096, 8192, 16384, 32768]
 
 # embedding_weights = get_trained_weights()
 
-disc = Discriminator(128, dense_judgements).to(device)
+disc = Discriminator(
+    128, 
+    dense_judgements).to(device)
 disc_optim = Adam(disc.parameters(), lr=1e-4, betas=(0, 0.9))
 
-gen = Generator(128, disc.atom_embedding).to(device)
+gen = Generator(
+    128, 
+    disc.atom_embedding, 
+    use_disc_embeddings=gen_uses_disc_embeddings).to(device)
 gen_optim = Adam(gen.parameters(), lr=1e-4, betas=(0, 0.9))
 
 
