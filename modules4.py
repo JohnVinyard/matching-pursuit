@@ -106,11 +106,13 @@ class AttentionStack(nn.Module):
 
 
 class Discriminator(nn.Module):
-    def __init__(self, channels):
+    def __init__(self, channels, dense_judgments):
         super().__init__()
         self.channels = channels
+        self.dense_judgements = dense_judgments
 
-        self.atom_embedding = nn.Embedding(512 * 6, 8, max_norm=1, scale_grad_by_freq=True)
+        self.atom_embedding = nn.Embedding(
+            512 * 6, 8, max_norm=1, scale_grad_by_freq=True)
 
         # with torch.no_grad():
         #     self.atom_embedding.weight.data = torch.from_numpy(
@@ -158,7 +160,6 @@ class Discriminator(nn.Module):
 
         self.apply(init_weights)
 
-
     def get_atom_keys(self, embeddings):
         """
         Return atom indices
@@ -188,13 +189,15 @@ class Discriminator(nn.Module):
         x = self.final(x)
         x = torch.cat([x, aj], dim=-1)
         x = self.final_final(x)
-        j = self.dense_judge(x).mean(dim=1, keepdim=True)
 
+        j = self.dense_judge(x)
+
+        if self.dense_judgements:
+            return j
+
+        j = j.mean(dim=1, keepdim=True)
         x = self.reduce(x)
         x = torch.cat([x, j], dim=-1)
-
-        # x = torch.sigmoid(x)
-
         return x
 
 
@@ -276,7 +279,7 @@ class RnnGenerator(nn.Module):
         # hidden in shape (num_rnn_layers, batch, hidden_dim)
         inp = torch.zeros(1, batch, self.channels).to(x.device)
         hid = torch.zeros(self.rnn_layers, batch, self.channels).to(x.device)
-        
+
         hid[0, :, :] = x.squeeze()
 
         seq = []
@@ -288,8 +291,7 @@ class RnnGenerator(nn.Module):
             x = inp
             seq.append(x)
 
-
-        seq = torch.cat(seq, dim=0) # time, batch, channels
+        seq = torch.cat(seq, dim=0)  # time, batch, channels
         seq = seq.permute(1, 0, 2).contiguous()
         return seq
 
@@ -313,22 +315,24 @@ class Generator(nn.Module):
             attention_layers=6,
             intermediate_layers=2)
 
-
         self.atoms = LinearOutputStack(channels, 3, out_channels=3072)
         self.pos_loc = LinearOutputStack(channels, 3, out_channels=2)
 
         self.apply(init_weights)
 
     def forward(self, x):
-        # Set Expansion
-        encodings = self.set_expansion(x)
-        encodings = self.net(encodings)
 
         # Expansion
-        # encodings = self.conv_expander(x)
+        encodings = self.conv_expander(x)
+
+        # Set Expansion
+        # encodings = self.set_expansion(x)
 
         # RNN
         # encodings = self.rnn(x)
+
+        # End attention stack
+        encodings = self.net(encodings)
 
         e = self.embeddings[0].weight.clone()
 
@@ -337,7 +341,7 @@ class Generator(nn.Module):
 
         # atoms = torch.sin(self.atoms(encodings))
 
-        pt = sine_one(self.pos_loc(encodings))
+        pt = torch.clamp(self.pos_loc(encodings), 0, 1)
 
         recon = torch.cat([atoms, pt], dim=-1)
 

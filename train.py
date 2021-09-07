@@ -26,10 +26,30 @@ mag_embedding_dim = 1
 pos_embedding_dim = 1
 total_vector_dim = embedding_dim + mag_embedding_dim + pos_embedding_dim
 batch_size = 16
+overfit = False
 
-# my sense is that using the embedding, trained in this way, will lead to 
-# bad outcomes.  I've essentially learned an embedding that places the 
-# high-frequency, noisy (and probably quiet; my positive selection 
+# OPTIONS
+dense_judgements = True
+
+# generation methods 
+#   - conv, 
+#   - conv with attention, 
+#   - noise w/ attention, 
+#   - RNN
+#   - conv with internal attn and end attention
+#   - conv with no internal attn and end attention
+
+# discriminator options:
+#   - return judgements after each attention layer
+#   - larger embedding dim
+
+# currently trying
+# - dense judgements, conv w/ internal and end attention
+
+
+# my sense is that using the embedding, trained in this way, will lead to
+# bad outcomes.  I've essentially learned an embedding that places the
+# high-frequency, noisy (and probably quiet; my positive selection
 # scheme ignores volume) atoms near almost everything, since they're always
 # occuring, and very frequent.
 # def get_trained_weights():
@@ -43,17 +63,32 @@ signal_sizes = [1024, 2048, 4096, 8192, 16384, 32768]
 
 # embedding_weights = get_trained_weights()
 
-disc = Discriminator(128).to(device)
+disc = Discriminator(128, dense_judgements).to(device)
 disc_optim = Adam(disc.parameters(), lr=1e-4, betas=(0, 0.9))
 
 gen = Generator(128, disc.atom_embedding).to(device)
 gen_optim = Adam(gen.parameters(), lr=1e-4, betas=(0, 0.9))
 
 
+class LatentGenerator(object):
+    def __init__(self, overfit=False):
+        self.overfit = overfit
+        self._fixed = self._generate()
+
+    def _generate(self):
+        return torch.FloatTensor(
+            batch_size, 128).normal_(0, 1).to(device)
+
+    def __call__(self):
+        if self.overfit:
+            return self._fixed.clone()
+        return self._generate()
 
 
-def latent():
-    return torch.FloatTensor(batch_size, 128).normal_(0, 1).to(device)
+latent = LatentGenerator(overfit=overfit)
+
+# def latent():
+#     return torch.FloatTensor(batch_size, 128).normal_(0, 1).to(device)
 
 
 def decode(encoded, sparse_dict, return_audio=False):
@@ -142,6 +177,7 @@ def _nn_decode(encoded, visualize=False):
     else:
         return atom_indices, pos, mags
 
+
 def nn_decode(encoded):
     """
     Transform the neural network encoding into one 
@@ -165,7 +201,6 @@ def nn_decode(encoded):
     band_indices = atom_indices // 512
     atom_indices = atom_indices % 512
 
-
     band_keys = np.array([keys[i] for i in band_indices])
 
     sample_pos = (pos * band_keys).astype(np.int32)
@@ -173,18 +208,22 @@ def nn_decode(encoded):
     for b, a, m, p in zip(band_indices, atom_indices, mags, sample_pos):
         yield (keys[b], a, p, m)
 
+
 def vis_fake():
     vis = _nn_decode(recon[0], visualize=True)
     return vis
+
 
 def vis_real():
     vis = _nn_decode(orig[0], visualize=True)
     return vis
 
+
 def listen():
     encoded = list(nn_decode(recon[0]))
     decoded = decode(encoded, sparse_dict, return_audio=True)
     return decoded
+
 
 def real():
     encoded = list(nn_decode(orig[0]))
@@ -229,17 +268,46 @@ def train_gen(batch):
     print('Gen: ', loss.item())
 
 
-def get_batch(batch_size, max_atoms):
-    examples = []
-    for example in iter_training_examples():
-        encoded = decode(example, sparse_dict)
-        x = nn_encode(encoded, max_atoms=max_atoms, pack=True)
-        if x.shape[0] != max_atoms:
-            continue
-        examples.append(x)
-        if len(examples) == batch_size:
-            break
-    return torch.stack(examples)
+# def get_batch(batch_size, max_atoms):
+#     examples = []
+#     for example in iter_training_examples():
+#         encoded = decode(example, sparse_dict)
+#         x = nn_encode(encoded, max_atoms=max_atoms, pack=True)
+#         if x.shape[0] != max_atoms:
+#             continue
+#         examples.append(x)
+#         if len(examples) == batch_size:
+#             break
+#     return torch.stack(examples)
+
+
+class BatchGenerator(object):
+    def __init__(self, overfit=False):
+        self.overfit = overfit
+        self._iter = \
+            cycle([next(iter_training_examples())]) \
+            if overfit else iter_training_examples()
+
+    def __call__(self, batch_size, max_atoms):
+
+        if self.overfit:
+            batch_size = 1
+
+        examples = []
+        for example in self._iter:
+            encoded = decode(example, sparse_dict)
+            x = nn_encode(encoded, max_atoms=max_atoms, pack=True)
+            if x.shape[0] != max_atoms:
+                continue
+            examples.append(x)
+            if len(examples) == batch_size:
+                break
+
+        output = torch.stack(examples)
+        return output
+
+
+get_batch = BatchGenerator(overfit=overfit)
 
 
 class Turn(Enum):
