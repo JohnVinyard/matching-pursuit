@@ -303,9 +303,9 @@ class Generator(nn.Module):
             atoms = torch.softmax(self.atoms(encodings), dim=1)
             atoms = atoms @ e
         else:
-            atoms = torch.sin(self.atoms(encodings))
+            atoms = torch.clamp(self.atoms(encodings), -1, 1)
 
-        pt = sine_one(self.pos_loc(encodings))
+        pt = torch.clamp(self.pos_loc(encodings), 0, 1)
 
         recon = torch.cat([atoms, pt], dim=-1)
 
