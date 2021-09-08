@@ -1,7 +1,7 @@
 from torch.nn.modules.container import Sequential
 from modules2 import Cluster, Expander, init_weights, PositionalEncoding
 from modules3 import Attention, LinearOutputStack, ToThreeD, ToTwoD
-from torch import nn
+from torch import device, nn
 import torch
 import numpy as np
 from torch.nn.modules.linear import Linear
@@ -169,6 +169,10 @@ class Discriminator(nn.Module):
 
         ae = self.atom_embedding(atom).view(-1, 8)
 
+        # add noise so the discriminator can't use *exact* embeddings
+        # to judge real vs fake.
+        ae = ae + torch.zeros_like(ae).normal_(0, 0.01).to(ae.device)
+
         pe = time.view(-1, 1)
         me = mag.view(-1, 1)
         return torch.cat([ae, pe, me], dim=-1)
@@ -232,7 +236,7 @@ class ResidualUpscale(nn.Module):
         exp = self.expander(x)
         x = self.stack(exp)
         x = x + exp
-        # x = self.attn(x)
+        x = self.attn(x)
         return x
 
 
@@ -303,7 +307,7 @@ class Generator(nn.Module):
             atoms = torch.softmax(self.atoms(encodings), dim=1)
             atoms = atoms @ e
         else:
-            atoms = torch.clamp(self.atoms(encodings), -1, 1)
+            atoms = self.atoms(encodings)
 
         pt = torch.clamp(self.pos_loc(encodings), 0, 1)
 
