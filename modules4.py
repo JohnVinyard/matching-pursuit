@@ -33,6 +33,47 @@ def unit_norm(x):
     return x / (n + 1e-12)
 
 
+class SelfSimilarity(nn.Module):
+    def __init__(self, max_atoms):
+        super().__init__()
+        self.max_atoms = max_atoms
+
+        self.size = (max_atoms ** 2) // 2
+
+        self.net = nn.Sequential(
+            nn.Conv1d(1, 8, 2, 2, 0),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(8, 8, 2, 2, 0),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(8, 8, 2, 2, 0),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(8, 8, 2, 2, 0),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(8, 8, 2, 2, 0),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(8, 8, 2, 2, 0),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(8, 8, 2, 2, 0),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(8, 1, 2, 2, 0),
+        )
+    
+    def forward(self, x):
+        batch, time, channels = x.shape
+        dist = torch.cdist(x, x)
+
+        upper = []
+        indices = torch.triu_indices(time, time, offset=1)
+        for i in range(batch):
+            upper.append(dist[i, indices[0], indices[1]])
+        
+        upper = torch.stack(upper) # batch * (time ** 2 / 2)
+        upper = upper[:, None, :]
+
+
+        x = self.net(upper)
+        return x
+
 class MultiHeadAttention(nn.Module):
     def __init__(self, channels, heads):
         super().__init__()
@@ -111,12 +152,18 @@ class Discriminator(nn.Module):
         self.one_hot = one_hot
         self.noise_level = noise_level
 
-        self.atom_embedding = nn.Embedding(
-            512 * 6, embedding_size, max_norm=1, scale_grad_by_freq=True)
+        self.time_encode = PositionalEncoding(1, 16384, 8)
+        self.mag_encode = PositionalEncoding(1, 512, 8)
 
-        self.time_mag = nn.Linear(2, channels)
+        # self.self_similarity = SelfSimilarity(100)
+
+        self.atom_embedding = nn.Embedding(
+            512 * 6, embedding_size, scale_grad_by_freq=True)
+
+        self.time = nn.Linear(17, channels)
+        self.mag = nn.Linear(17, channels)
         self.atom = nn.Linear(3072 if one_hot else embedding_size, channels)
-        self.combine = LinearOutputStack(channels, 3, in_channels=channels * 2)
+        self.combine = LinearOutputStack(channels, 3, in_channels=channels * 3)
 
         self.dense = nn.Sequential(
             LinearOutputStack(
@@ -145,6 +192,15 @@ class Discriminator(nn.Module):
         )
 
         self.apply(init_weights)
+
+        with torch.no_grad():
+            self.atom_embedding.weight.uniform_(0, 1)
+    
+    def get_times(self, embeddings):
+        return self.time_encode.get_positions(embeddings)
+    
+    def get_mags(self, embeddings):
+        return self.mag_encode.get_positions(embeddings)
 
     def get_atom_keys(self, embeddings):
         """
@@ -175,8 +231,10 @@ class Discriminator(nn.Module):
             # to judge real vs fake.
             ae = ae + torch.zeros_like(ae).normal_(0, 0.01).to(ae.device)
 
-        pe = time.view(-1, 1)
-        me = mag.view(-1, 1)
+        # pe = time.view(-1, 1)
+        # me = mag.view(-1, 1)
+        pe = self.time_encode(time)
+        me = self.mag_encode(mag)
         return torch.cat([ae, pe, me], dim=-1)
 
     def forward(self, x):
@@ -185,10 +243,13 @@ class Discriminator(nn.Module):
         # if isinstance(x, list):
         #     x = self.get_embeddings(x)
 
-        tm = self.time_mag(x[..., -2:])
+        # ss = self.self_similarity(x)
+
         cutoff = 3072 if self.one_hot else self.embedding_size
         a = self.atom(x[..., :cutoff])
-        x = torch.cat([tm, a], dim=-1)
+        p = self.time(x[..., cutoff: cutoff + 17])
+        m = self.mag(x[..., cutoff + 17:])
+        x = torch.cat([a, p, m], dim=-1)
         x = self.combine(x)
 
         x = self.dense(x)
@@ -200,6 +261,8 @@ class Discriminator(nn.Module):
         j = j.mean(dim=1, keepdim=True)
         x = self.reduce(x)
         x = torch.cat([x, j], dim=-1)
+
+        x = torch.cat([x.view(-1)])
         return x
 
 
@@ -297,9 +360,9 @@ class Generator(nn.Module):
             use_disc_embeddings or one_hot) else self.embedding_size
         
         self.atoms = LinearOutputStack(
-            channels, 3, out_channels=out_channels, bias=False)
-        self.pos = LinearOutputStack(channels, 3, out_channels=1, bias=False)
-        self.mag = LinearOutputStack(channels, 3, out_channels=1, bias=False)
+            channels, 3, out_channels=out_channels)
+        self.pos = LinearOutputStack(channels, 3, out_channels=17)
+        self.mag = LinearOutputStack(channels, 3, out_channels=17)
 
         self.apply(init_weights)
 
@@ -343,8 +406,8 @@ class Generator(nn.Module):
         else:
             atoms = self.atoms(encodings)
 
-        p = torch.clamp(self.pos(encodings), 0, 1)
-        m = torch.clamp(self.mag(encodings), 0, 1)
+        p = torch.sin(self.pos(encodings))
+        m = torch.sin(self.mag(encodings))
 
         recon = torch.cat([atoms, p, m], dim=-1)
 

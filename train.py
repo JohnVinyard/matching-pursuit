@@ -32,7 +32,7 @@ overfit = False
 dense_judgements = True
 gen_uses_disc_embeddings = False
 one_hot = False
-embedding_size = 64
+embedding_size = 32
 noise_level = 0.05
 
 signal_sizes = [1024, 2048, 4096, 8192, 16384, 32768]
@@ -149,12 +149,16 @@ def _nn_decode(encoded, visualize=False):
     else:
         a, p, m = \
             encoded[:, :size], \
-            encoded[:, -2:-1], \
-            encoded[:, -1:]
+            encoded[:, size:size + 17], \
+            encoded[:, size + 17:]
 
     atom_indices = disc.get_atom_keys(a).data.cpu().numpy()
-    pos = np.clip(p.data.cpu().numpy().squeeze(), 0, 1)
-    mags = np.clip(m.data.cpu().numpy().squeeze(), 0, 1) * 20
+    # pos = np.clip(p.data.cpu().numpy().squeeze(), 0, 1)
+    # mags = np.clip(m.data.cpu().numpy().squeeze(), 0, 1) * 20
+
+    # translate from embeddings to time and magnitude
+    pos = disc.get_times(p).data.cpu().numpy()
+    mags = disc.get_mags(m).data.cpu().numpy() * 20
 
     if visualize:
         t = ((pos * signal_sizes[-1])).astype(np.int32)

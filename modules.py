@@ -108,20 +108,17 @@ class PositionalEncoding(Module):
     Take the appropriate slices from a positional encoding
     """
 
-    def __init__(self, domain, n_samples, n_freqs, out_channels):
+    def __init__(self, domain, n_samples, n_freqs):
         super().__init__()
         self.domain = domain
         self.n_samples = n_samples
         self.n_freqs = n_freqs
-        self.out_channels = out_channels
 
         self.freq_channels = 1 + n_freqs * 2
 
         pe = torch.from_numpy(pos_encode(
             self.domain, self.n_samples, self.n_freqs)).float().permute(1, 0)
         self.register_buffer('pos_encode', pe)
-
-        self.l1 = Linear(self.freq_channels, self.out_channels, bias=False)
 
     def get_positions(self, embeddings):
         """
@@ -133,10 +130,11 @@ class PositionalEncoding(Module):
         """
         x should be time encodings in the domain [0 - 1]
         """
+        x = torch.clamp(x, 0, 0.9999)
+        
         indices = (x * self.n_samples).long()
-        orig = x = self.pos_encode[indices]
-        x = self.l1(x)
-        return orig, x
+        x = self.pos_encode[indices]
+        return x
 
 
 class ResidualBlock(Module):
@@ -351,9 +349,6 @@ class Decoder(Module):
 
         recon = torch.cat([atoms, pos, mags], dim=-1)
         return recon
-
-
-
 
 
 class AutoEncoder(Module):
