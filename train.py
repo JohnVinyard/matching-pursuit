@@ -29,53 +29,29 @@ batch_size = 16
 overfit = False
 
 # OPTIONS
-dense_judgements = False
+dense_judgements = True
 gen_uses_disc_embeddings = False
-
-# generation methods 
-#   - conv, 
-#   - conv with attention, 
-#   - noise w/ attention, 
-#   - RNN
-#   - conv with internal attn and end attention
-#   - conv with no internal attn and end attention
-
-# discriminator options:
-#   - return judgements after each attention layer
-#   - larger embedding dim
-
-# currently trying
-# - dense judgments, noise w/ attention *
-
-
-# tried
-# - dense judgements, conv w/ internal and end attention - FAIL
-
-# my sense is that using the embedding, trained in this way, will lead to
-# bad outcomes.  I've essentially learned an embedding that places the
-# high-frequency, noisy (and probably quiet; my positive selection
-# scheme ignores volume) atoms near almost everything, since they're always
-# occuring, and very frequent.
-# def get_trained_weights():
-#     with open('embedding.dat', 'rb') as f:
-#         embedding = Embedding(n_atoms, embedding_dim).to(device)
-#         embedding.load_state_dict(torch.load(f))
-#         return embedding.weight.data.cpu().numpy()
-
+one_hot = False
+embedding_size = 64
+noise_level = 0.05
 
 signal_sizes = [1024, 2048, 4096, 8192, 16384, 32768]
 
-# embedding_weights = get_trained_weights()
-
 disc = Discriminator(
-    128, 
-    dense_judgements).to(device)
+    128,
+    dense_judgements,
+    embedding_size,
+    one_hot,
+    noise_level).to(device)
 disc_optim = Adam(disc.parameters(), lr=1e-4, betas=(0, 0.9))
 
 gen = Generator(
-    128, 
-    disc.atom_embedding, 
-    use_disc_embeddings=gen_uses_disc_embeddings).to(device)
+    128,
+    disc.atom_embedding,
+    use_disc_embeddings=gen_uses_disc_embeddings,
+    embedding_size=embedding_size,
+    one_hot=one_hot,
+    noise_level=noise_level).to(device)
 gen_optim = Adam(gen.parameters(), lr=1e-4, betas=(0, 0.9))
 
 
@@ -166,10 +142,15 @@ def nn_encode(encoded, max_atoms=100, pack=False):
 
 
 def _nn_decode(encoded, visualize=False):
+
+    size = embedding_size if not one_hot else 3072
     if isinstance(encoded, list):
         a, p, m = encoded
     else:
-        a, p, m = encoded[:, :8], encoded[:, -2:-1], encoded[:, -1:]
+        a, p, m = \
+            encoded[:, :size], \
+            encoded[:, -2:-1], \
+            encoded[:, -1:]
 
     atom_indices = disc.get_atom_keys(a).data.cpu().numpy()
     pos = np.clip(p.data.cpu().numpy().squeeze(), 0, 1)

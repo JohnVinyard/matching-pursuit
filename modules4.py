@@ -103,46 +103,35 @@ class AttentionStack(nn.Module):
 
 
 class Discriminator(nn.Module):
-    def __init__(self, channels, dense_judgments):
+    def __init__(self, channels, dense_judgments, embedding_size, one_hot, noise_level):
         super().__init__()
         self.channels = channels
         self.dense_judgements = dense_judgments
+        self.embedding_size = embedding_size
+        self.one_hot = one_hot
+        self.noise_level = noise_level
 
         self.atom_embedding = nn.Embedding(
-            512 * 6, 8, max_norm=1, scale_grad_by_freq=True)
+            512 * 6, embedding_size, max_norm=1, scale_grad_by_freq=True)
 
-        # with torch.no_grad():
-        #     self.atom_embedding.weight.data = torch.from_numpy(
-        #         embedding_weights)
-
-        # self.atom_embedding.requires_grad = False
-
-        self.time_amp = LinearOutputStack(channels, 3, in_channels=2)
-        self.atom = LinearOutputStack(channels, 3, in_channels=3072)
+        self.time_mag = nn.Linear(2, channels)
+        self.atom = nn.Linear(3072 if one_hot else embedding_size, channels)
         self.combine = LinearOutputStack(channels, 3, in_channels=channels * 2)
 
-        self.atom_judge = LinearOutputStack(
-            channels, 3, in_channels=10)
-
         self.dense = nn.Sequential(
-            LinearOutputStack(channels, 2,
-                              activation=activation, in_channels=10),
-
+            LinearOutputStack(
+                channels,
+                2,
+                activation=activation),
 
             AttentionStack(
                 channels,
                 attention_heads=8,
-                attention_layers=6,
+                attention_layers=8,
                 intermediate_layers=2)
         )
 
-        self.length = LinearOutputStack(
-            channels, 2, in_channels=1, activation=activation)
-        self.final = nn.Linear(channels, channels)
-        self.final_final = LinearOutputStack(
-            channels, 3, in_channels=channels * 2)
-
-        self.dense_judge = LinearOutputStack(channels, 3, out_channels=1)
+        self.dense_judge = LinearOutputStack(channels, 4, out_channels=1)
 
         self.reduce = nn.Sequential(
             AttentionClusters(channels, 16),
@@ -161,17 +150,30 @@ class Discriminator(nn.Module):
         """
         Return atom indices
         """
-        nw = self.atom_embedding.weight
-        return get_best_matches(nw, embeddings)
+        if self.one_hot:
+            return torch.argmax(embeddings, dim=1)
+        else:
+            nw = self.atom_embedding.weight
+            return get_best_matches(nw, embeddings)
 
     def get_embeddings(self, x):
         atom, time, mag = x
 
-        ae = self.atom_embedding(atom).view(-1, 8)
+        if self.one_hot:
+            n_atoms = atom.shape[0]
+            oh = torch.zeros(n_atoms, 3072).to(
+                atom.device).uniform_(0, self.noise_level)
+            # ones = torch.ones_like(oh)
+            # ones = ones * torch.zeros_like(ones).normal_(1, 0.01)
+            indices = torch.arange(n_atoms)
+            oh[indices, atom] = 1
+            ae = oh
+        else:
+            ae = self.atom_embedding(atom).view(-1, self.embedding_size)
 
-        # add noise so the discriminator can't use *exact* embeddings
-        # to judge real vs fake.
-        ae = ae + torch.zeros_like(ae).normal_(0, 0.01).to(ae.device)
+            # add noise so the discriminator can't use *exact* embeddings
+            # to judge real vs fake.
+            ae = ae + torch.zeros_like(ae).normal_(0, 0.01).to(ae.device)
 
         pe = time.view(-1, 1)
         me = mag.view(-1, 1)
@@ -183,14 +185,13 @@ class Discriminator(nn.Module):
         # if isinstance(x, list):
         #     x = self.get_embeddings(x)
 
-        aj = self.atom_judge(x)
+        tm = self.time_mag(x[..., -2:])
+        cutoff = 3072 if self.one_hot else self.embedding_size
+        a = self.atom(x[..., :cutoff])
+        x = torch.cat([tm, a], dim=-1)
+        x = self.combine(x)
 
         x = self.dense(x)
-
-        x = self.final(x)
-        x = torch.cat([x, aj], dim=-1)
-        x = self.final_final(x)
-
         j = self.dense_judge(x)
 
         if self.dense_judgements:
@@ -264,10 +265,21 @@ class ConvExpander(nn.Module):
 
 
 class Generator(nn.Module):
-    def __init__(self, channels, embeddings, use_disc_embeddings=True):
+    def __init__(
+            self,
+            channels,
+            embeddings,
+            use_disc_embeddings=True,
+            embedding_size=8,
+            one_hot=False,
+            noise_level=0.1):
+
         super().__init__()
         self.channels = channels
         self.embeddings = [embeddings]
+        self.embedding_size = embedding_size
+        self.one_hot = one_hot
+        self.noise_level = noise_level
 
         self.max_atoms = 100
         self.use_disc_embeddings = use_disc_embeddings
@@ -281,19 +293,26 @@ class Generator(nn.Module):
             attention_layers=8,
             intermediate_layers=2)
 
+        out_channels = 3072 if (
+            use_disc_embeddings or one_hot) else self.embedding_size
+        
         self.atoms = LinearOutputStack(
-            channels, 3, out_channels=3072 if use_disc_embeddings else 8)
-        self.pos_loc = LinearOutputStack(channels, 3, out_channels=2)
+            channels, 3, out_channels=out_channels, bias=False)
+        self.pos = LinearOutputStack(channels, 3, out_channels=1, bias=False)
+        self.mag = LinearOutputStack(channels, 3, out_channels=1, bias=False)
 
         self.apply(init_weights)
 
     def forward(self, x):
 
+        batch = x.shape[0]
+        time = self.max_atoms
+
         # Expansion
-        encodings = self.conv_expander(x)
+        # encodings = self.conv_expander(x)
 
         # Set Expansion
-        # encodings = self.set_expansion(x)
+        encodings = self.set_expansion(x)
 
         # RNN
         # encodings = self.rnn(x)
@@ -306,12 +325,28 @@ class Generator(nn.Module):
             e = self.embeddings[0].weight.clone()
             atoms = torch.softmax(self.atoms(encodings), dim=1)
             atoms = atoms @ e
+        elif self.one_hot:
+            atoms = self.atoms(encodings)
+            noise = torch.zeros_like(atoms).uniform_(0, self.noise_level)
+            atoms = atoms + noise
+            atoms = F.relu(atoms)
+
+            # atoms = torch.softmax(atoms, dim=-1)
+
+            # atoms = torch.clamp(atoms.reshape(batch * time, -1), 0, 1)
+            # indices = torch.argmax(atoms, dim=-1)
+            # oh = torch.zeros_like(atoms)
+            # first_dim = torch.arange(batch * time)
+            # oh[first_dim, indices] = atoms[first_dim, indices]
+            # oh = oh.reshape(batch, time, -1)
+            # atoms = oh
         else:
             atoms = self.atoms(encodings)
 
-        pt = torch.clamp(self.pos_loc(encodings), 0, 1)
+        p = torch.clamp(self.pos(encodings), 0, 1)
+        m = torch.clamp(self.mag(encodings), 0, 1)
 
-        recon = torch.cat([atoms, pt], dim=-1)
+        recon = torch.cat([atoms, p, m], dim=-1)
 
         return recon
 
