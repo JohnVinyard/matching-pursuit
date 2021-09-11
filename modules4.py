@@ -57,7 +57,7 @@ class SelfSimilarity(nn.Module):
             nn.LeakyReLU(0.2),
             nn.Conv1d(8, 1, 2, 2, 0),
         )
-    
+
     def forward(self, x):
         batch, time, channels = x.shape
         dist = torch.cdist(x, x)
@@ -66,13 +66,13 @@ class SelfSimilarity(nn.Module):
         indices = torch.triu_indices(time, time, offset=1)
         for i in range(batch):
             upper.append(dist[i, indices[0], indices[1]])
-        
-        upper = torch.stack(upper) # batch * (time ** 2 / 2)
-        upper = upper[:, None, :]
 
+        upper = torch.stack(upper)  # batch * (time ** 2 / 2)
+        upper = upper[:, None, :]
 
         x = self.net(upper)
         return x
+
 
 class MultiHeadAttention(nn.Module):
     def __init__(self, channels, heads):
@@ -195,10 +195,10 @@ class Discriminator(nn.Module):
 
         with torch.no_grad():
             self.atom_embedding.weight.uniform_(0, 1)
-    
+
     def get_times(self, embeddings):
         return self.time_encode.get_positions(embeddings)
-    
+
     def get_mags(self, embeddings):
         return self.mag_encode.get_positions(embeddings)
 
@@ -358,7 +358,7 @@ class Generator(nn.Module):
 
         out_channels = 3072 if (
             use_disc_embeddings or one_hot) else self.embedding_size
-        
+
         self.atoms = LinearOutputStack(
             channels, 3, out_channels=out_channels)
         self.pos = LinearOutputStack(channels, 3, out_channels=17)
@@ -372,10 +372,10 @@ class Generator(nn.Module):
         time = self.max_atoms
 
         # Expansion
-        # encodings = self.conv_expander(x)
+        encodings = self.conv_expander(x)
 
         # Set Expansion
-        encodings = self.set_expansion(x)
+        # encodings = self.set_expansion(x)
 
         # RNN
         # encodings = self.rnn(x)
