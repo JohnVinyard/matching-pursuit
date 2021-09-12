@@ -44,7 +44,8 @@ class Attention(nn.Module):
             attn.view(batch, -1), dim=1).view(batch, time, time)
         x = torch.bmm(attn, v)
 
-
+        x = unit_norm(x)
+                
         if self.reduce:
             v = v.sum(dim=1, keepdim=True)
         return v

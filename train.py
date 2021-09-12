@@ -32,7 +32,7 @@ overfit = False
 dense_judgements = True
 gen_uses_disc_embeddings = False
 one_hot = False
-embedding_size = 32
+embedding_size = 17
 noise_level = 0.05
 
 signal_sizes = [1024, 2048, 4096, 8192, 16384, 32768]
@@ -47,7 +47,8 @@ disc_optim = Adam(disc.parameters(), lr=1e-4, betas=(0, 0.9))
 
 gen = Generator(
     128,
-    disc.atom_embedding,
+    # disc.atom_embedding,
+    None,
     use_disc_embeddings=gen_uses_disc_embeddings,
     embedding_size=embedding_size,
     one_hot=one_hot,
@@ -119,7 +120,7 @@ def nn_encode(encoded, max_atoms=100, pack=False):
             for atom, pos, mag, _ in atom_list:
                 atoms.append(512 * band_index + atom)
                 positions.append(pos / float(signal_size))
-                mags.append(mag / 20)
+                mags.append(np.clip(mag / 20, 0, 0.9999))
 
     atoms = np.array(atoms)
     positions = np.array(positions)
@@ -132,8 +133,8 @@ def nn_encode(encoded, max_atoms=100, pack=False):
     mags = mags[indices]
 
     atoms = torch.from_numpy(atoms).long().to(device)
-    positions = torch.from_numpy(positions).float().to(device)
-    mags = torch.from_numpy(mags).float().to(device)
+    positions = torch.from_numpy(positions * signal_sizes[-1]).long().to(device)
+    mags = torch.from_numpy(mags * 512).long().to(device)
 
     if pack:
         return disc.get_embeddings([atoms, positions, mags])
@@ -153,12 +154,9 @@ def _nn_decode(encoded, visualize=False):
             encoded[:, size + 17:]
 
     atom_indices = disc.get_atom_keys(a).data.cpu().numpy()
-    # pos = np.clip(p.data.cpu().numpy().squeeze(), 0, 1)
-    # mags = np.clip(m.data.cpu().numpy().squeeze(), 0, 1) * 20
-
     # translate from embeddings to time and magnitude
-    pos = disc.get_times(p).data.cpu().numpy()
-    mags = disc.get_mags(m).data.cpu().numpy() * 20
+    pos = (disc.get_times(p).data.cpu().numpy() / signal_sizes[-1])
+    mags = (disc.get_mags(m).data.cpu().numpy() / 512) * 20
 
     if visualize:
         t = ((pos * signal_sizes[-1])).astype(np.int32)
@@ -177,28 +175,14 @@ def nn_decode(encoded):
     Transform the neural network encoding into one 
     """
 
-    # encoded = network.flatten(encoded)
-
-    # if isinstance(encoded, list):
-    #     a, p, m = encoded
-    # else:
-    #     a, p, m = encoded[:, :8], encoded[:, -2:-1], encoded[:, -1:]
-
     keys = signal_sizes
-
-    # atom_indices = disc.get_atom_keys(a).data.cpu().numpy()
-    # pos = np.clip(p.data.cpu().numpy().squeeze(), 0, 1)
-    # mags = np.clip(m.data.cpu().numpy().squeeze(), 0, 1) * 20
 
     atom_indices, pos, mags = _nn_decode(encoded)
 
     band_indices = atom_indices // 512
     atom_indices = atom_indices % 512
-
     band_keys = np.array([keys[i] for i in band_indices])
-
     sample_pos = (pos * band_keys).astype(np.int32)
-
     for b, a, m, p in zip(band_indices, atom_indices, mags, sample_pos):
         yield (keys[b], a, p, m)
 
@@ -327,3 +311,5 @@ if __name__ == '__main__':
             orig, recon = train_disc(batch)
             o = orig[0].data.cpu().numpy()
             r = recon[0].data.cpu().numpy()
+
+        
