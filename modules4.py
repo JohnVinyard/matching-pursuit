@@ -323,8 +323,8 @@ class Generator(nn.Module):
 
         self.atoms = LinearOutputStack(
             channels, 3, out_channels=out_channels)
-        self.pos = LinearOutputStack(channels, 3, out_channels=1)
-        self.mag = LinearOutputStack(channels, 3, out_channels=1)
+        self.pos_mag = LinearOutputStack(channels, 3, out_channels=2)
+        
 
         self.apply(init_weights)
 
@@ -346,10 +346,10 @@ class Generator(nn.Module):
         encodings = self.net(encodings)
 
         atoms = unit_norm(self.atoms(encodings))
-        p = torch.clamp(self.pos(encodings), 0, 1)
-        m = torch.clamp(self.mag(encodings), 0, 1)
 
-        recon = torch.cat([atoms, p, m], dim=-1)
+        pm = torch.sin(self.pos_mag(encodings))
+
+        recon = torch.cat([atoms, pm], dim=-1)
 
         return recon
 
