@@ -33,6 +33,31 @@ def unit_norm(x):
     return x / (n + 1e-12)
 
 
+class SelfSimilarity2(nn.Module):
+    def __init__(self, max_atoms):
+        super().__init__()
+        self.max_atoms = max_atoms
+        
+        layers = int(np.log2(max_atoms))
+
+        self.net = nn.Sequential(
+            nn.Conv2d(1, 16, (3, 3), (1, 1), (1, 1)),
+            *[
+                nn.Sequential(
+                    nn.Conv2d(16, 16, (3, 3), (1, 1), (1, 1)),
+                    nn.MaxPool2d((3, 3), (2, 2), (1, 1))
+                ) for _ in range(layers)
+            ],
+            nn.Conv2d(16, 1, (1, 1), (1, 1), (0, 0)))
+        
+    
+    def forward(self, x):
+        batch, time, channels = x.shape
+        dist = torch.cdist(x, x) # (batch, time, time)
+        dist = dist.reshape(batch, 1, time, time)
+        j = self.net(dist)
+        return j
+
 class SelfSimilarity(nn.Module):
     def __init__(self, max_atoms):
         super().__init__()
@@ -60,7 +85,7 @@ class SelfSimilarity(nn.Module):
 
     def forward(self, x):
         batch, time, channels = x.shape
-        dist = torch.cdist(x, x)
+        dist = torch.cdist(x, x) # (batch, max_atoms, max_atoms)
 
         upper = []
         indices = torch.triu_indices(time, time, offset=1)
@@ -152,7 +177,7 @@ class Discriminator(nn.Module):
         self.one_hot = one_hot
         self.noise_level = noise_level
 
-        self.self_similarity = SelfSimilarity(100)
+        self.self_similarity = SelfSimilarity2(128)
 
         self.atom_embedding = nn.Embedding(
             512 * 6, embedding_size, scale_grad_by_freq=True)
@@ -262,7 +287,12 @@ class ResidualUpscale(nn.Module):
         exp = self.expander(x)
         x = self.stack(exp)
         x = x + exp
+
+        x = unit_norm(x) * 3.2
+
         x = self.attn(x)
+        
+        
         return x
 
 
@@ -333,6 +363,8 @@ class Generator(nn.Module):
         batch = x.shape[0]
         time = self.max_atoms
 
+        # print('============================')
+
         # Expansion
         encodings = self.conv_expander(x)
 
@@ -347,7 +379,7 @@ class Generator(nn.Module):
 
         atoms = unit_norm(self.atoms(encodings))
 
-        pm = torch.sin(self.pos_mag(encodings))
+        pm = torch.clamp(self.pos_mag(encodings), 0, 1)
 
         recon = torch.cat([atoms, pm], dim=-1)
 
