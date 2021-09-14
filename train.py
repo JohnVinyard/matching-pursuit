@@ -19,7 +19,7 @@ from matplotlib import pyplot as plt
 
 sr = zounds.SR22050()
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-max_atoms = 100
+max_atoms = 128
 embedding_dim = 8
 n_atoms = 512 * 6  # 512 atoms * 6 bands
 mag_embedding_dim = 1

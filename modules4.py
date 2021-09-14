@@ -1,3 +1,4 @@
+from torch.nn.modules.activation import LeakyReLU
 from torch.nn.modules.container import Sequential
 from modules2 import Cluster, Expander, init_weights, PositionalEncoding
 from modules3 import Attention, LinearOutputStack, ToThreeD, ToTwoD
@@ -33,30 +34,92 @@ def unit_norm(x):
     return x / (n + 1e-12)
 
 
-class SelfSimilarity2(nn.Module):
+class SelfSimilaritySummarizer(nn.Module):
     def __init__(self, max_atoms):
         super().__init__()
         self.max_atoms = max_atoms
-        
-        layers = int(np.log2(max_atoms))
-
+        layers = int(np.log2(max_atoms)) - 2
         self.net = nn.Sequential(
             nn.Conv2d(1, 16, (3, 3), (1, 1), (1, 1)),
             *[
                 nn.Sequential(
                     nn.Conv2d(16, 16, (3, 3), (1, 1), (1, 1)),
-                    nn.MaxPool2d((3, 3), (2, 2), (1, 1))
+                    nn.MaxPool2d((3, 3), (2, 2), (1, 1)),
+                    nn.LeakyReLU(0.2),
                 ) for _ in range(layers)
             ],
             nn.Conv2d(16, 1, (1, 1), (1, 1), (0, 0)))
-        
-    
+
+    def forward(self, x, y):
+        batch, time, channels = x.shape
+        dist = torch.cdist(x, y)
+        dist = dist.reshape(batch, 1, time, time)
+        return self.net(dist)
+
+
+class SelfSimilarity2(nn.Module):
+    def __init__(self, max_atoms):
+        super().__init__()
+
+        self.all = SelfSimilaritySummarizer(max_atoms)
+        self.time = SelfSimilaritySummarizer(max_atoms)
+        self.atom = SelfSimilaritySummarizer(max_atoms)
+        self.batch = SelfSimilaritySummarizer(max_atoms)
+
+        # self.max_atoms = max_atoms
+
+        # layers = int(np.log2(max_atoms)) - 2
+
+        # self.net = nn.Sequential(
+        #     nn.Conv2d(1, 16, (3, 3), (1, 1), (1, 1)),
+        #     *[
+        #         nn.Sequential(
+        #             nn.Conv2d(16, 16, (3, 3), (1, 1), (1, 1)),
+        #             nn.MaxPool2d((3, 3), (2, 2), (1, 1))
+        #         ) for _ in range(layers)
+        #     ],
+        #     nn.Conv2d(16, 1, (1, 1), (1, 1), (0, 0)))
+
+        # self.diversity = nn.Sequential(
+        #     nn.Conv2d(1, 16, (3, 3), (1, 1), (1, 1)),
+        #     *[
+        #         nn.Sequential(
+        #             nn.Conv2d(16, 16, (3, 3), (1, 1), (1, 1)),
+        #             nn.MaxPool2d((3, 3), (2, 2), (1, 1))
+        #         ) for _ in range(layers)
+        #     ],
+        #     nn.Conv2d(16, 1, (1, 1), (1, 1), (0, 0)))
+
     def forward(self, x):
         batch, time, channels = x.shape
-        dist = torch.cdist(x, x) # (batch, time, time)
-        dist = dist.reshape(batch, 1, time, time)
-        j = self.net(dist)
-        return j
+
+        t = x[..., -2:-1].contiguous()
+        a = x[..., :-2].contiguous()
+
+        # similarity with other samples in the batch
+        # hopefully to promote sample diversity.
+
+        # If the batch size is odd, the following strategy
+        # for producing within-batch pairs would result in
+        # a sample compared to itself
+        assert batch % 2 == 0
+
+        indices1 = np.random.permutation(batch)
+        indices2 = np.roll(indices1, 1)
+
+        total = self.all(x, x)
+        time = self.time(t, t)
+        atom = self.atom(a, a)
+        b = self.batch(x[indices1], x[indices2])
+
+        # TODO: Consider attention layers that create 
+        # query and value based on a subset of features
+        return torch.cat([
+            total.view(-1), 
+            time.view(-1), 
+            atom.view(-1), 
+            b.view(-1)])
+
 
 class SelfSimilarity(nn.Module):
     def __init__(self, max_atoms):
@@ -85,7 +148,7 @@ class SelfSimilarity(nn.Module):
 
     def forward(self, x):
         batch, time, channels = x.shape
-        dist = torch.cdist(x, x) # (batch, max_atoms, max_atoms)
+        dist = torch.cdist(x, x)  # (batch, max_atoms, max_atoms)
 
         upper = []
         indices = torch.triu_indices(time, time, offset=1)
@@ -98,14 +161,15 @@ class SelfSimilarity(nn.Module):
         x = self.net(upper)
         return x
 
-
+# TODO: Add in channels and slices
 class MultiHeadAttention(nn.Module):
     def __init__(self, channels, heads):
         super().__init__()
         self.channels = channels
         self.heads = heads
-        self.attn = nn.Sequential(*[Attention(channels)
-                                  for _ in range(self.heads)])
+        self.attn = nn.Sequential(*[
+            Attention(channels) for _ in range(self.heads)
+        ])
         self.fc = nn.Linear(channels * heads, channels)
 
     def forward(self, x):
@@ -229,7 +293,8 @@ class Discriminator(nn.Module):
 
     def get_embeddings(self, x):
         atom, time, mag = x
-        ae = unit_norm(self.atom_embedding.weight[atom.view(-1)].view(-1, self.embedding_size))
+        ae = unit_norm(
+            self.atom_embedding.weight[atom.view(-1)].view(-1, self.embedding_size))
         pe = time.view(-1, 1)
         me = mag.view(-1, 1)
         return torch.cat([ae, pe, me], dim=-1)
@@ -243,7 +308,7 @@ class Discriminator(nn.Module):
         j = self.dense_judge(x)
 
         if self.dense_judgements:
-            return j
+            return torch.cat([j.view(-1), ss.view(-1)])
 
         j = j.mean(dim=1, keepdim=True)
         x = self.reduce(x)
@@ -262,16 +327,19 @@ class SetExpansion(nn.Module):
         self.register_buffer('members', torch.FloatTensor(
             self.max_atoms, channels).normal_(0, 1))
 
-        self.bias = LinearOutputStack(channels, 3, activation=activation)
-        self.weight = LinearOutputStack(channels, 3, activation=activation)
+        self.bias = LinearOutputStack(channels, 3, activation=activation, in_channels=channels * 2)
+        self.weight = LinearOutputStack(channels, 3, activation=activation, in_channels=channels * 2)
 
     def forward(self, x):
-        x = x.view(-1, self.channels)
+        x = x.view(-1, 1, self.channels).repeat(1, self.max_atoms, 1)
+        x = torch.cat([x, self.members[None, ...].repeat(16, 1, 1)], dim=-1)
 
         b = self.bias(x)
         w = self.weight(x)
 
-        x = ((self.members[None, ...] * w[:, None, :]) + b[:, None, :])
+        x = (self.members[None, ...] * w) + b
+
+        # x = ((self.members[None, ...] * w[:, None, :]) + b[:, None, :])
 
         return x
 
@@ -291,8 +359,7 @@ class ResidualUpscale(nn.Module):
         x = unit_norm(x) * 3.2
 
         x = self.attn(x)
-        
-        
+
         return x
 
 
@@ -336,7 +403,7 @@ class Generator(nn.Module):
         self.one_hot = one_hot
         self.noise_level = noise_level
 
-        self.max_atoms = 100
+        self.max_atoms = 128
         self.use_disc_embeddings = use_disc_embeddings
 
         self.set_expansion = SetExpansion(channels, self.max_atoms)
@@ -354,7 +421,6 @@ class Generator(nn.Module):
         self.atoms = LinearOutputStack(
             channels, 3, out_channels=out_channels)
         self.pos_mag = LinearOutputStack(channels, 3, out_channels=2)
-        
 
         self.apply(init_weights)
 
@@ -366,10 +432,10 @@ class Generator(nn.Module):
         # print('============================')
 
         # Expansion
-        encodings = self.conv_expander(x)
+        # encodings = self.conv_expander(x)
 
         # Set Expansion
-        # encodings = self.set_expansion(x)
+        encodings = self.set_expansion(x)
 
         # RNN
         # encodings = self.rnn(x)
