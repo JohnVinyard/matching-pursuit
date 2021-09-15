@@ -112,12 +112,12 @@ class SelfSimilarity2(nn.Module):
         atom = self.atom(a, a)
         b = self.batch(x[indices1], x[indices2])
 
-        # TODO: Consider attention layers that create 
+        # TODO: Consider attention layers that create
         # query and value based on a subset of features
         return torch.cat([
-            total.view(-1), 
-            time.view(-1), 
-            atom.view(-1), 
+            total.view(-1),
+            time.view(-1),
+            atom.view(-1),
             b.view(-1)])
 
 
@@ -161,12 +161,12 @@ class SelfSimilarity(nn.Module):
         x = self.net(upper)
         return x
 
-# TODO: Add in channels and slices
 class MultiHeadAttention(nn.Module):
     def __init__(self, channels, heads):
         super().__init__()
         self.channels = channels
         self.heads = heads
+
         self.attn = nn.Sequential(*[
             Attention(channels) for _ in range(self.heads)
         ])
@@ -223,9 +223,11 @@ class AttentionStack(nn.Module):
 
         self.net = nn.Sequential(*[
             nn.Sequential(
-                MultiHeadAttention(channels, attention_heads),
+                MultiHeadAttention(
+                    channels,
+                    attention_heads),
                 LinearOutputStack(channels, intermediate_layers, activation=activation))
-            for _ in range(attention_layers)
+            for i in range(attention_layers)
         ])
 
     def forward(self, x):
@@ -327,8 +329,10 @@ class SetExpansion(nn.Module):
         self.register_buffer('members', torch.FloatTensor(
             self.max_atoms, channels).normal_(0, 1))
 
-        self.bias = LinearOutputStack(channels, 3, activation=activation, in_channels=channels * 2)
-        self.weight = LinearOutputStack(channels, 3, activation=activation, in_channels=channels * 2)
+        self.bias = LinearOutputStack(
+            channels, 3, activation=activation, in_channels=channels * 2)
+        self.weight = LinearOutputStack(
+            channels, 3, activation=activation, in_channels=channels * 2)
 
     def forward(self, x):
         x = x.view(-1, 1, self.channels).repeat(1, self.max_atoms, 1)
@@ -419,8 +423,8 @@ class Generator(nn.Module):
             use_disc_embeddings or one_hot) else self.embedding_size
 
         self.atoms = LinearOutputStack(
-            channels, 3, out_channels=out_channels)
-        self.pos_mag = LinearOutputStack(channels, 3, out_channels=2)
+            channels, 5, out_channels=out_channels)
+        self.pos_mag = LinearOutputStack(channels, 5, out_channels=2)
 
         self.apply(init_weights)
 
@@ -429,19 +433,15 @@ class Generator(nn.Module):
         batch = x.shape[0]
         time = self.max_atoms
 
-        # print('============================')
-
         # Expansion
-        # encodings = self.conv_expander(x)
+        encodings = self.conv_expander(x)
 
         # Set Expansion
-        encodings = self.set_expansion(x)
-
-        # RNN
-        # encodings = self.rnn(x)
+        # encodings = self.set_expansion(x)
 
         # End attention stack
         encodings = self.net(encodings)
+
 
         atoms = unit_norm(self.atoms(encodings))
 

@@ -16,35 +16,20 @@ def unit_norm(x):
 
 
 class Attention(nn.Module):
-    def __init__(self, channels, reduce=False, in_channels=None, slce=None):
+    def __init__(self, channels, reduce=False):
         super().__init__()
         self.channels = channels
-        self.slce = slce or slice(None)
-        inp = in_channels or channels
-        if slce is None:
-            self.in_channels = inp
-        else:
-            start, stop, step = slce.indices(inp)
-            self.in_channels = stop - start
-
-        # self.query_vector = nn.Parameter(
-        #     torch.FloatTensor(1, channels).normal_(0, 1))
-        # self.key_vector = nn.Parameter(
-        #     torch.FloatTensor(1, channels).normal_(0, 1))
-
-        self.query = nn.Linear(self.in_channels, channels)
-        self.key = nn.Linear(self.in_channels, channels)
-        self.value = nn.Linear(self.in_channels, channels)
+        self.query = nn.Linear(channels, channels)
+        self.key = nn.Linear(channels, channels)
+        self.value = nn.Linear(channels, channels)
 
         self.reduce = reduce
 
     def forward(self, x):
         batch, time, channels = x.shape
 
-        q = self.query(x[..., self.slce])
-        k = self.key(x[..., self.slce])
-
-
+        q = self.query(x)
+        k = self.key(x)
         v = self.value(x)
         
         attn = torch.bmm(q, k.permute(0, 2, 1))
@@ -56,8 +41,6 @@ class Attention(nn.Module):
         # print('ATTN', x.std().item())
 
         x = unit_norm(x) * 3.2
-
-        
                 
         if self.reduce:
             v = v.sum(dim=1, keepdim=True)
