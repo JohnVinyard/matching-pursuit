@@ -52,7 +52,8 @@ gen = Generator(
     use_disc_embeddings=gen_uses_disc_embeddings,
     embedding_size=embedding_size,
     one_hot=one_hot,
-    noise_level=noise_level).to(device)
+    noise_level=noise_level,
+    max_atoms=max_atoms).to(device)
 gen_optim = Adam(gen.parameters(), lr=1e-4, betas=(0, 0.9))
 
 

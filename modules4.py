@@ -398,7 +398,8 @@ class Generator(nn.Module):
             use_disc_embeddings=True,
             embedding_size=8,
             one_hot=False,
-            noise_level=0.1):
+            noise_level=0.1,
+            max_atoms=128):
 
         super().__init__()
         self.channels = channels
@@ -407,7 +408,7 @@ class Generator(nn.Module):
         self.one_hot = one_hot
         self.noise_level = noise_level
 
-        self.max_atoms = 128
+        self.max_atoms = max_atoms
         self.use_disc_embeddings = use_disc_embeddings
 
         self.set_expansion = SetExpansion(channels, self.max_atoms)
