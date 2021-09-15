@@ -1,5 +1,6 @@
+from modules4 import unit_norm
 from re import M
-from train import decode, nn_encode, digitizers
+from train import decode, nn_encode
 from get_encoded import iter_training_examples, learn_dict
 import torch
 import bisect
@@ -37,7 +38,7 @@ def iter_sorted_by_time():
     sparse_dict = learn_dict()
     for example in iter_training_examples():
         encoded = decode(example, sparse_dict)
-        a, p, m = nn_encode(encoded, digitizers)
+        a, p, m = nn_encode(encoded)
 
         # indices sorted by time
         indices = torch.argsort(p)
@@ -100,10 +101,10 @@ def iter_batches(batch_size=128):
 
 
 def visualize():
-    w = get_trained_weights().cpu().numpy()
+    w = unit_norm(get_trained_weights().cpu().numpy())
     tsne = TSNE()
     points = tsne.fit_transform(w)
-    plt.scatter(points[:, 0], points[:, 1], s=1)
+    plt.scatter(points[:, 0], points[:, 1], s=5, alpha=0.1)
     plt.savefig('embeddings.png')
 
 
