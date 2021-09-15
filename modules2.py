@@ -187,12 +187,15 @@ class Expander(nn.Module):
         self.channels = channels
         self.factor = factor
         self.expand = nn.Linear(
-            self.channels, self.channels * factor)
+            self.channels, self.channels * factor, bias=False)
 
     def forward(self, x):
-        x = x.view(-1, self.channels)
+        batch, time, channels = x.shape
+        # x = x.view(-1, self.channels)
         x = self.expand(x)
-        x = x.view(-1, self.channels)
+        # x = x.view(batch, time, channels, self.factor)
+        # x = x.permute(0, 3, 1, 2)
+        x = x.reshape(batch, -1, self.channels)
         return x
 
 

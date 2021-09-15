@@ -1,5 +1,5 @@
 from collections import defaultdict
-from modules4 import Discriminator, Generator
+from modules4 import Discriminator, Generator, unit_norm
 from sparse2 import freq_recompose
 from multilevel_sparse import multilevel_sparse_decode
 from get_encoded import iter_training_examples, learn_dict
@@ -12,75 +12,69 @@ from random import shuffle
 from torch.nn import functional as F
 from torch.nn import Embedding
 from torch.nn.utils.clip_grad import clip_grad_value_
+from itertools import repeat, cycle
+from enum import Enum
+from matplotlib import pyplot as plt
 
 
 sr = zounds.SR22050()
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+max_atoms = 128
+embedding_dim = 8
+n_atoms = 512 * 6  # 512 atoms * 6 bands
+mag_embedding_dim = 1
+pos_embedding_dim = 1
+total_vector_dim = embedding_dim + mag_embedding_dim + pos_embedding_dim
+batch_size = 16
+overfit = False
 
-
-def get_trained_weights():
-    with open('embedding.dat', 'rb') as f:
-        embedding = Embedding(3072, 8).to(device)
-        embedding.load_state_dict(torch.load(f))
-        return embedding.weight.data.cpu().numpy()
-
-
-# network = AutoEncoder(128, get_trained_weights()).to(device)
-
+# OPTIONS
+dense_judgements = True
+gen_uses_disc_embeddings = False
+one_hot = False
+embedding_size = 17
+noise_level = 0.05
 
 signal_sizes = [1024, 2048, 4096, 8192, 16384, 32768]
 
-
-# optim = Adam(network.parameters(), lr=1e-4, betas=(0, 0.9))
-
-embedding_weights = get_trained_weights()
-
-gen = Generator(128, embedding_weights).to(device)
-gen_optim = Adam(gen.parameters(), lr=1e-4, betas=(0, 0.9))
-
-disc = Discriminator(128, embedding_weights).to(device)
+disc = Discriminator(
+    128,
+    dense_judgements,
+    embedding_size,
+    one_hot,
+    noise_level).to(device)
 disc_optim = Adam(disc.parameters(), lr=1e-4, betas=(0, 0.9))
 
+gen = Generator(
+    128,
+    # disc.atom_embedding,
+    None,
+    use_disc_embeddings=gen_uses_disc_embeddings,
+    embedding_size=embedding_size,
+    one_hot=one_hot,
+    noise_level=noise_level).to(device)
+gen_optim = Adam(gen.parameters(), lr=1e-4, betas=(0, 0.9))
 
-def latent():
-    return torch.FloatTensor(1, 128).normal_(0, 1).to(device)
+
+class LatentGenerator(object):
+    def __init__(self, overfit=False):
+        self.overfit = overfit
+        self._fixed = self._generate()
+
+    def _generate(self):
+        return torch.FloatTensor(
+            batch_size, 128).normal_(0, 1).to(device)
+
+    def __call__(self):
+        if self.overfit:
+            return self._fixed.clone()
+        return self._generate()
 
 
-class Digitizer(object):
-    def __init__(self, data, n_bins):
-        super().__init__()
-        self.data = np.sort(data)
-        self.n_bins = n_bins
-        self.edges = np.histogram_bin_edges(data, bins=n_bins)
+latent = LatentGenerator(overfit=overfit)
 
-    @property
-    def std(self):
-        return self.data.std()
-
-    @property
-    def mean(self):
-        return self.data.mean()
-
-    @property
-    def max(self):
-        return self.data.max()
-
-    def __repr__(self):
-        return f'''
-Digitizer(
-    n_bins={self.n_bins}, 
-    range=[{self.data.min()}...{self.data.max()}, 
-    std={self.std}, 
-    mean={self.mean}])'''
-
-    def __str__(self):
-        return self.__repr__()
-
-    def forward(self, x):
-        return np.clip(np.digitize(x, self.edges), 0, self.n_bins - 1)
-
-    def backward(self, x):
-        return self.data[np.clip(np.searchsorted(self.data, x), 0, self.n_bins - 1)]
+# def latent():
+#     return torch.FloatTensor(batch_size, 128).normal_(0, 1).to(device)
 
 
 def decode(encoded, sparse_dict, return_audio=False):
@@ -107,34 +101,7 @@ def decode(encoded, sparse_dict, return_audio=False):
     return zounds.AudioSamples(recomposed, sr).pad_with_silence()
 
 
-def build_digitizers(bins=256, n_examples=20):
-    magintudes = defaultdict(list)
-
-    for i, example in enumerate(iter_training_examples()):
-        for instance in example:
-            sig_size, _, _, mag = instance
-            magintudes[sig_size].append(mag)
-        if i >= n_examples:
-            break
-
-    # sig_sizes = sorted(magintudes.keys())
-    sig_sizes = signal_sizes
-    sig_size_indices = {ss: i for i, ss in enumerate(sig_sizes)}
-
-    digitizers = {}
-
-    for size, index in zip(sig_sizes, sig_size_indices):
-        digitizers[index] = Digitizer(magintudes[size], bins)
-
-    return digitizers
-
-
-digitizers = build_digitizers()
-for k, v in digitizers.items():
-    print(k, v.mean, v.std)
-
-
-def nn_encode(encoded, digitizers):
+def nn_encode(encoded, max_atoms=100, pack=False):
     """
     Transform the encoding into a format 
     suitable for the neural network to manipulate
@@ -143,7 +110,7 @@ def nn_encode(encoded, digitizers):
     positions = []
     mags = []
 
-    sig_sizes = sorted(digitizers.keys())
+    sig_sizes = signal_sizes
     sig_size_indices = {i: ss for i, ss in enumerate(sig_sizes)}
 
     for band_index, atom_dict in encoded.items():
@@ -153,17 +120,14 @@ def nn_encode(encoded, digitizers):
             for atom, pos, mag, _ in atom_list:
                 atoms.append(512 * band_index + atom)
                 positions.append(pos / float(signal_size))
-                # mags.extend(digitizers[signal_size].forward([mag]))
-                # mags.append(mag / digitizers[signal_size].max)
                 mags.append(mag / 20)
 
     atoms = np.array(atoms)
     positions = np.array(positions)
     mags = np.array(mags)
 
-    # sort by time
-    # indices = np.argsort(positions)
-    indices = np.random.permutation(atoms.shape[0])
+    # sort by magnitude
+    indices = np.argsort(mags)[::-1][:max_atoms]
     atoms = atoms[indices]
     positions = positions[indices]
     mags = mags[indices]
@@ -172,7 +136,39 @@ def nn_encode(encoded, digitizers):
     positions = torch.from_numpy(positions).float().to(device)
     mags = torch.from_numpy(mags).float().to(device)
 
-    return atoms, positions, mags
+    if pack:
+        return disc.get_embeddings([atoms, positions, mags])
+    else:
+        return atoms, positions, mags
+
+
+def _nn_decode(encoded, visualize=False):
+
+    size = embedding_size if not one_hot else 3072
+    if isinstance(encoded, list):
+        a, p, m = encoded
+    else:
+        a, p, m = \
+            encoded[:, :size], \
+            encoded[:, -2:-1], \
+            encoded[:, -1:]
+
+    atom_indices = disc.get_atom_keys(a).data.cpu().numpy()
+    # translate from embeddings to time and magnitude
+    pos = np.clip(disc.get_times(p).data.cpu().numpy(), 0, 1)
+    mags = np.clip(disc.get_mags(m).data.cpu().numpy(), 0, 1) * 20
+
+
+    if visualize:
+        t = ((pos * signal_sizes[-1])).astype(np.int32)
+        sizes = list(mags * 5)
+        plt.xlim([0, signal_sizes[-1]])
+        plt.ylim([0, 3072])
+        plt.scatter(t, atom_indices, sizes, alpha=0.5)
+        plt.savefig('vis.png')
+        plt.clf()
+    else:
+        return atom_indices, pos, mags
 
 
 def nn_decode(encoded):
@@ -180,46 +176,38 @@ def nn_decode(encoded):
     Transform the neural network encoding into one 
     """
 
-    # encoded = network.flatten(encoded)
+    keys = signal_sizes
 
-    if isinstance(encoded, list):
-        a, p, m = encoded
-    else:
-        a, p, m = encoded[:, :8], encoded[:, 8:9], encoded[:, 9:]
-
-    keys = sorted(digitizers.keys())
-
-    atom_indices = disc.get_atom_keys(a).data.cpu().numpy()
-    pos = np.clip(p.data.cpu().numpy().squeeze(), 0, 1)
-    # mags = network.get_magnitude_keys(m).data.cpu().numpy()
-    mags = np.clip(m.data.cpu().numpy().squeeze(), 0, 1)
-    cmags = mags * 20
+    atom_indices, pos, mags = _nn_decode(encoded)
 
     band_indices = atom_indices // 512
     atom_indices = atom_indices % 512
 
+
     band_keys = np.array([keys[i] for i in band_indices])
-
     sample_pos = (pos * band_keys).astype(np.int32)
-
-    # cmags = []
-    # for m, k in zip(mags, band_keys):
-    #     d = digitizers[k]
-    #     # indices = d.backward(m)
-    #     cmags.append(d.edges[int(m * 256)])
-
-    for b, a, m, p in zip(band_indices, atom_indices, cmags, sample_pos):
+    for b, a, m, p in zip(band_indices, atom_indices, mags, sample_pos):
         yield (keys[b], a, p, m)
 
 
+def vis_fake():
+    vis = _nn_decode(recon[0], visualize=True)
+    return vis
+
+
+def vis_real():
+    vis = _nn_decode(orig[0], visualize=True)
+    return vis
+
+
 def listen():
-    encoded = list(nn_decode(recon))
+    encoded = list(nn_decode(recon[0]))
     decoded = decode(encoded, sparse_dict, return_audio=True)
     return decoded
 
 
 def real():
-    encoded = list(nn_decode(orig))
+    encoded = list(nn_decode(orig[0]))
     decoded = decode(encoded, sparse_dict, return_audio=True)
     return decoded
 
@@ -236,92 +224,83 @@ def least_squares_disc_loss(r_j, f_j):
     return 0.5 * (((r_j - real_target) ** 2).mean() + ((f_j - fake_target) ** 2).mean())
 
 
-def train_disc(example1, example2):
+def train_disc(batch):
     disc_optim.zero_grad()
-
-    # train disc
-    encoded = decode(example1, sparse_dict)
-    a, p, m = nn_encode(encoded, digitizers)
-    rl = torch.FloatTensor([a.shape[0] / 768]).to(device)
-
     with torch.no_grad():
         z = latent()
-        recon, l = gen.forward(z)
-
-    rj1 = disc.forward([a, p, m], rl).view(-1)
-    fj1 = disc.forward(recon, l).view(-1)
-
-    # do it again
-    encoded = decode(example2, sparse_dict)
-    a, p, m = nn_encode(encoded, digitizers)
-    rl = torch.FloatTensor([a.shape[0] / 768]).to(device)
-
-    with torch.no_grad():
-        z = latent()
-        recon, l = gen.forward(z)
-
-    rj2 = disc.forward([a, p, m], rl).view(-1)
-    fj2 = disc.forward(recon, l).view(-1)
-
-    loss = least_squares_disc_loss(
-        torch.cat([rj1, rj2]), torch.cat([fj1, fj2]))
-
+        recon = gen.forward(z)
+    rj = disc.forward(batch)
+    fj = disc.forward(recon)
+    loss = least_squares_disc_loss(rj, fj)
     loss.backward()
-    clip_grad_value_(disc.parameters(), 0.5)
     disc_optim.step()
-    print('Disc: ', loss.item(), a.shape[0], recon.shape[0])
-
-    orig = disc.get_embeddings([a, p, m])
-
-    return recon, orig
+    print('Disc: ', loss.item())
+    return batch, recon
 
 
-def train_gen(example):
+def train_gen(batch):
     gen_optim.zero_grad()
-
-    # train gen
-    encoded = decode(example, sparse_dict)
-    a, p, m = nn_encode(encoded, digitizers)
-
-    # do two
     z = latent()
-    recon, l = gen.forward(z)
-    fj1 = disc.forward(recon, l)
-
-    z = latent()
-    recon2, l2 = gen.forward(z)
-    fj2 = disc.forward(recon2, l2)
-
-    loss = least_squares_generator_loss(torch.cat([fj1, fj2]))  # + diff
-
+    recon = gen.forward(z)
+    fj = disc.forward(recon)
+    loss = least_squares_generator_loss(fj)
     loss.backward()
-
-    # print('============================================')
-    # for n, p in gen.named_parameters():
-    #     if p.grad is None:
-    #         continue
-    #     print(n, p.grad.std().item())
-
-    clip_grad_value_(gen.parameters(), 0.5)
     gen_optim.step()
-    print('Gen: ', loss.item(), a.shape[0], recon.shape[0])
+    print('Gen: ', loss.item())
+
+
+class BatchGenerator(object):
+    def __init__(self, overfit=False):
+        self.overfit = overfit
+        self._iter = \
+            cycle([next(iter_training_examples())]) \
+            if overfit else iter_training_examples()
+
+    def __call__(self, batch_size, max_atoms):
+
+        if self.overfit:
+            batch_size = 1
+
+        examples = []
+        for example in self._iter:
+            encoded = decode(example, sparse_dict)
+            x = nn_encode(encoded, max_atoms=max_atoms, pack=True)
+            if x.shape[0] != max_atoms:
+                continue
+            examples.append(x)
+            if len(examples) == batch_size:
+                break
+
+        output = torch.stack(examples)
+        return output
+
+
+get_batch = BatchGenerator(overfit=overfit)
+
+
+class Turn(Enum):
+    GEN = 'gen'
+    DISC = 'disc'
 
 
 if __name__ == '__main__':
     sparse_dict = learn_dict()
 
+    torch.backends.cudnn.benchmark = True
+
     app = zounds.ZoundsApp(locals=locals(), globals=globals())
     app.start_in_thread(9999)
 
-    stream = enumerate(iter_training_examples())
-    # stream = cycle([next(stream)])
+    turn = cycle([Turn.GEN, Turn.DISC])
 
-    while True:
-        _, example1 = next(stream)
-        _, example2 = next(stream)
-        recon, orig = train_disc(example1, example2)
+    for t in turn:
+        batch = get_batch(batch_size=batch_size, max_atoms=max_atoms)
+        if t == Turn.GEN:
+            train_gen(batch)
+        elif t == Turn.DISC:
+            orig, recon = train_disc(batch)
+            o = orig[0].data.cpu().numpy()
+            r = recon[0].data.cpu().numpy()
 
-        _, example3 = next(stream)
-        train_gen(example3)
-        o = orig.data.cpu().numpy()[:128]
-        r = recon.data.cpu().numpy()[:128]
+
+        

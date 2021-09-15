@@ -1,4 +1,5 @@
 *.wav
+*.png
 __pycache__
 audio
 sparse_coded
