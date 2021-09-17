@@ -21,7 +21,7 @@ mag_embedding_dim = 1
 pos_embedding_dim = 1
 total_vector_dim = embedding_dim + mag_embedding_dim + pos_embedding_dim
 batch_size = 16
-overfit = False
+overfit = True
 
 # OPTIONS
 dense_judgements = False

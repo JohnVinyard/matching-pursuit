@@ -455,7 +455,7 @@ class ResidualUpscale(nn.Module):
 
         x = unit_norm(x) * 3.2
 
-        x = self.attn(x)
+        # x = self.attn(x)
 
         return x
 
@@ -505,6 +505,7 @@ class Generator(nn.Module):
         self.use_disc_embeddings = use_disc_embeddings
 
         self.conv_expander = ConvExpander(channels, self.max_atoms)
+        self.set_expansion = SetExpansion(channels, self.max_atoms)
 
         self.net = AttentionStack(
             channels,
@@ -528,6 +529,7 @@ class Generator(nn.Module):
 
         # Expansion
         encodings = self.conv_expander(x)
+        # encodings = self.set_expansion(x)
 
         # End attention stack
         # encodings = self.net(encodings)
