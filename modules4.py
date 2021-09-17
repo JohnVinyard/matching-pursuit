@@ -65,52 +65,25 @@ class SelfSimilarity2(nn.Module):
         self.time = SelfSimilaritySummarizer(max_atoms)
         self.atom = SelfSimilaritySummarizer(max_atoms)
         self.batch = SelfSimilaritySummarizer(max_atoms)
-
-        # self.max_atoms = max_atoms
-
-        # layers = int(np.log2(max_atoms)) - 2
-
-        # self.net = nn.Sequential(
-        #     nn.Conv2d(1, 16, (3, 3), (1, 1), (1, 1)),
-        #     *[
-        #         nn.Sequential(
-        #             nn.Conv2d(16, 16, (3, 3), (1, 1), (1, 1)),
-        #             nn.MaxPool2d((3, 3), (2, 2), (1, 1))
-        #         ) for _ in range(layers)
-        #     ],
-        #     nn.Conv2d(16, 1, (1, 1), (1, 1), (0, 0)))
-
-        # self.diversity = nn.Sequential(
-        #     nn.Conv2d(1, 16, (3, 3), (1, 1), (1, 1)),
-        #     *[
-        #         nn.Sequential(
-        #             nn.Conv2d(16, 16, (3, 3), (1, 1), (1, 1)),
-        #             nn.MaxPool2d((3, 3), (2, 2), (1, 1))
-        #         ) for _ in range(layers)
-        #     ],
-        #     nn.Conv2d(16, 1, (1, 1), (1, 1), (0, 0)))
-
+        
     def forward(self, x):
         batch, time, channels = x.shape
 
         t = x[..., -2:-1].contiguous()
         a = x[..., :-2].contiguous()
 
-        # similarity with other samples in the batch
-        # hopefully to promote sample diversity.
-
-        # If the batch size is odd, the following strategy
-        # for producing within-batch pairs would result in
-        # a sample compared to itself
-        assert batch % 2 == 0
-
-        indices1 = np.random.permutation(batch)
-        indices2 = np.roll(indices1, 1)
 
         total = self.all(x, x)
         time = self.time(t, t)
         atom = self.atom(a, a)
+
+
+        # similarity with other samples in the batch
+        # to promote sample diversity.
+        indices1 = np.random.permutation(batch)
+        indices2 = np.roll(indices1, 1)
         b = self.batch(x[indices1], x[indices2])
+        
 
         # TODO: Consider attention layers that create
         # query and value based on a subset of features
@@ -160,6 +133,7 @@ class SelfSimilarity(nn.Module):
 
         x = self.net(upper)
         return x
+
 
 class MultiHeadAttention(nn.Module):
     def __init__(self, channels, heads):
@@ -233,7 +207,67 @@ class AttentionStack(nn.Module):
     def forward(self, x):
         return self.net(x)
 
+class DiscReducer(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.channels = channels
 
+        self.net = nn.Sequential(
+            nn.Sequential(
+                nn.Conv1d(channels, channels, 7, 1, 3),
+                nn.MaxPool1d(7, 2, 3),
+                nn.LeakyReLU(0.2),
+            ),
+
+            nn.Sequential(
+                nn.Conv1d(channels, channels, 7, 1, 3),
+                nn.MaxPool1d(7, 2, 3),
+                nn.LeakyReLU(0.2),
+            ),
+
+            nn.Sequential(
+                nn.Conv1d(channels, channels, 7, 1, 3),
+                nn.MaxPool1d(7, 2, 3),
+                nn.LeakyReLU(0.2),
+            ),
+
+            nn.Sequential(
+                nn.Conv1d(channels, channels, 7, 1, 3),
+                nn.MaxPool1d(7, 2, 3),
+                nn.LeakyReLU(0.2),
+            ),
+
+            nn.Sequential(
+                nn.Conv1d(channels, channels, 3, 1, 1),
+                nn.MaxPool1d(3, 2, 1),
+                nn.LeakyReLU(0.2),
+            ),
+
+            nn.Sequential(
+                nn.Conv1d(channels, channels, 3, 1, 1),
+                nn.MaxPool1d(3, 2, 1),
+                nn.LeakyReLU(0.2),
+            ),
+
+            nn.Sequential(
+                nn.Conv1d(channels, channels, 3, 1, 1),
+                nn.MaxPool1d(3, 2, 1),
+                nn.LeakyReLU(0.2),
+            ),
+
+            
+
+            nn.Conv1d(channels, 1, 7, 1, 3)
+            
+        )
+    
+    def forward(self, x):
+        batch, time, channels = x.shape
+        x = x.permute(0, 2, 1) # (batch, channels, time) for conv
+        x = self.net(x)
+        x = x.permute(0, 2, 1)
+        return x
+    
 class Discriminator(nn.Module):
     def __init__(self, channels, dense_judgments, embedding_size, one_hot, noise_level):
         super().__init__()
@@ -262,6 +296,13 @@ class Discriminator(nn.Module):
                 intermediate_layers=2)
         )
 
+        self.atoms = LinearOutputStack(
+            channels, 3, in_channels=embedding_size + 2)
+        self.contextual = LinearOutputStack(
+            channels, 3, in_channels=channels * 2, out_channels=1)
+
+        self.dist_judge = LinearOutputStack(channels, 3, in_channels=self.embedding_size, out_channels=1)
+
         self.dense_judge = LinearOutputStack(channels, 4, out_channels=1)
 
         self.reduce = nn.Sequential(
@@ -274,6 +315,10 @@ class Discriminator(nn.Module):
             AttentionClusters(channels, 1),
             LinearOutputStack(channels, 2, out_channels=1)
         )
+
+        self.reducer = DiscReducer(channels)
+
+        self.init_atoms = set()
 
         self.apply(init_weights)
 
@@ -291,12 +336,24 @@ class Discriminator(nn.Module):
         Return atom indices
         """
         nw = self.atom_embedding.weight
-        return get_best_matches(unit_norm(nw), unit_norm(embeddings))
+        return get_best_matches(nw, embeddings)
+    
+    def _init_atoms(self, atom):
+        indices = set([int(a) for a in atom.view(-1)])
+        to_init = indices - self.init_atoms
+        self.init_atoms.update(to_init)
+        for ti in to_init:
+            with torch.no_grad():
+                self.atom_embedding.weight[ti] = torch.FloatTensor(17).uniform_(-0.1, 0.1).to(atom.device)
 
     def get_embeddings(self, x):
         atom, time, mag = x
-        ae = unit_norm(
-            self.atom_embedding.weight[atom.view(-1)].view(-1, self.embedding_size))
+        self._init_atoms(atom)
+        ae = self.atom_embedding.weight[atom.view(-1)].view(-1, self.embedding_size)
+        # add noise to make it a bit harder for the discriminator, i.e., 
+        # don't allow the cheap/easy approach of identifying real samples
+        # based on exact matches with the embeddings
+        ae = ae + torch.zeros_like(ae).normal_(0, 0.03)
         pe = time.view(-1, 1)
         me = mag.view(-1, 1)
         return torch.cat([ae, pe, me], dim=-1)
@@ -306,17 +363,41 @@ class Discriminator(nn.Module):
 
         ss = self.self_similarity(x)
 
+        atoms = x[..., :-2]
+
+        keys = self.get_atom_keys(atoms.view(-1, self.embedding_size))
+        embeddings = self.atom_embedding.weight[keys]\
+            .reshape(batch, time, self.embedding_size)
+        diff = embeddings - atoms
+        dj = self.dist_judge(diff)
+
+        a = self.atoms(x)
+
         x = self.dense(x)
+        c = self.contextual(torch.cat([a, x], dim=-1))
+
         j = self.dense_judge(x)
 
         if self.dense_judgements:
-            return torch.cat([j.view(-1), ss.view(-1)])
+            return torch.cat([
+                j.view(-1), 
+                dj.view(-1), 
+                c.view(-1), 
+                ss.view(-1)
+            ])
 
-        j = j.mean(dim=1, keepdim=True)
-        x = self.reduce(x)
-        x = torch.cat([x, j], dim=-1)
+        # j = j.mean(dim=1, keepdim=True)
+        # x = self.reduce(x)
+        # x = torch.cat([x, j], dim=-1)
 
-        x = torch.cat([x.view(-1), ss.view(-1)])
+        x = self.reducer(x)
+
+        x = torch.cat([
+            x.view(-1), 
+            ss.mean().view(-1), 
+            c.mean().view(-1), 
+            dj.mean().view(-1)
+        ])
         return x
 
 
@@ -349,13 +430,25 @@ class SetExpansion(nn.Module):
 
 
 class ResidualUpscale(nn.Module):
-    def __init__(self, channels):
+    def __init__(self, channels, heads=4):
         super().__init__()
+
+        # self.summarize = nn.Linear(channels * 2, channels)
+
         self.expander = Expander(channels, factor=2)
         self.stack = LinearOutputStack(channels, 2)
-        self.attn = MultiHeadAttention(channels, 4)
+        self.attn = MultiHeadAttention(channels, heads)
 
     def forward(self, x):
+
+        batch, time, channels = x.shape
+
+        # noise = torch.zeros(batch, 1, channels)\
+        #     .normal_(0, 1).repeat(1, time, 1).to(x.device)
+
+        # x = torch.cat([x, noise], dim=-1)
+        # x = self.summarize(x)
+
         exp = self.expander(x)
         x = self.stack(exp)
         x = x + exp
@@ -368,18 +461,18 @@ class ResidualUpscale(nn.Module):
 
 
 class ConvExpander(nn.Module):
-    def __init__(self, channels):
+    def __init__(self, channels, max_atoms):
         super().__init__()
         self.channels = channels
-        self.max_atoms = 100
+        self.max_atoms = max_atoms
         # self.ln = nn.Linear(channels, channels * 8)
         self.ln = Expander(channels, factor=8)
         n_layers = int(np.log2(128) - np.log2(8))
         self.net = nn.Sequential(
             # ToThreeD(),
             nn.Sequential(*[
-                ResidualUpscale(channels)
-                for _ in range(n_layers)]),
+                ResidualUpscale(channels, heads=i + 1)
+                for i in range(n_layers)]),
             # ToTwoD()
         )
 
@@ -411,8 +504,7 @@ class Generator(nn.Module):
         self.max_atoms = max_atoms
         self.use_disc_embeddings = use_disc_embeddings
 
-        self.set_expansion = SetExpansion(channels, self.max_atoms)
-        self.conv_expander = ConvExpander(channels)
+        self.conv_expander = ConvExpander(channels, self.max_atoms)
 
         self.net = AttentionStack(
             channels,
@@ -437,15 +529,13 @@ class Generator(nn.Module):
         # Expansion
         encodings = self.conv_expander(x)
 
-        # Set Expansion
-        # encodings = self.set_expansion(x)
-
         # End attention stack
-        encodings = self.net(encodings)
+        # encodings = self.net(encodings)
 
-
-        atoms = unit_norm(self.atoms(encodings))
-
+        # Interestingly, this doesn't work when trying to use the
+        # discriminator embeddings.  I wonder if it's too hard to produce
+        # embeddings in the two different domains from the same feature
+        atoms = self.atoms(encodings)
         pm = torch.clamp(self.pos_mag(encodings), 0, 1)
 
         recon = torch.cat([atoms, pm], dim=-1)

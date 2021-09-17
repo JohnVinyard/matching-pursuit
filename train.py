@@ -1,5 +1,5 @@
 from collections import defaultdict
-from modules4 import Discriminator, Generator, unit_norm
+from modules4 import Discriminator, Generator
 from sparse2 import freq_recompose
 from multilevel_sparse import multilevel_sparse_decode
 from get_encoded import iter_training_examples, learn_dict
@@ -8,14 +8,9 @@ import numpy as np
 import torch
 from torch.optim import Adam
 from itertools import cycle
-from random import shuffle
-from torch.nn import functional as F
-from torch.nn import Embedding
-from torch.nn.utils.clip_grad import clip_grad_value_
-from itertools import repeat, cycle
 from enum import Enum
 from matplotlib import pyplot as plt
-
+from torch.nn.utils.clip_grad import clip_grad_value_
 
 sr = zounds.SR22050()
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -29,7 +24,7 @@ batch_size = 16
 overfit = False
 
 # OPTIONS
-dense_judgements = True
+dense_judgements = False
 gen_uses_disc_embeddings = False
 one_hot = False
 embedding_size = 17
@@ -127,8 +122,14 @@ def nn_encode(encoded, max_atoms=100, pack=False):
     positions = np.array(positions)
     mags = np.array(mags)
 
-    # sort by magnitude
+    # get the N loudest
     indices = np.argsort(mags)[::-1][:max_atoms]
+    atoms = atoms[indices]
+    positions = positions[indices]
+    mags = mags[indices]
+
+    # shuffle the loudest
+    indices = np.random.permutation(atoms.shape[0])
     atoms = atoms[indices]
     positions = positions[indices]
     mags = mags[indices]
@@ -234,6 +235,7 @@ def train_disc(batch):
     fj = disc.forward(recon)
     loss = least_squares_disc_loss(rj, fj)
     loss.backward()
+    clip_grad_value_(disc.parameters(), 0.5)
     disc_optim.step()
     print('Disc: ', loss.item())
     return batch, recon
@@ -246,6 +248,7 @@ def train_gen(batch):
     fj = disc.forward(recon)
     loss = least_squares_generator_loss(fj)
     loss.backward()
+    clip_grad_value_(gen.parameters(), 0.5)
     gen_optim.step()
     print('Gen: ', loss.item())
 
@@ -294,7 +297,7 @@ if __name__ == '__main__':
 
     turn = cycle([Turn.GEN, Turn.DISC])
 
-    for t in turn:
+    for i, t in enumerate(turn):
         batch = get_batch(batch_size=batch_size, max_atoms=max_atoms)
         if t == Turn.GEN:
             train_gen(batch)
