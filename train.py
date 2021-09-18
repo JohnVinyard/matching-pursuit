@@ -116,7 +116,7 @@ def nn_encode(encoded, max_atoms=100, pack=False):
             for atom, pos, mag, _ in atom_list:
                 atoms.append(512 * band_index + atom)
                 positions.append(pos / float(signal_size))
-                mags.append(mag / 20)
+                mags.append(np.clip(mag / 20, 0, 1))
 
     atoms = np.array(atoms)
     positions = np.array(positions)
