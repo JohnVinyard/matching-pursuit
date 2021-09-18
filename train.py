@@ -144,7 +144,7 @@ def nn_encode(encoded, max_atoms=100, pack=False):
         return atoms, positions, mags
 
 
-def _nn_decode(encoded, visualize=False):
+def _nn_decode(encoded, visualize=False, save=True, plot_mags=False):
 
     size = embedding_size if not one_hot else 3072
     if isinstance(encoded, list):
@@ -165,10 +165,17 @@ def _nn_decode(encoded, visualize=False):
         t = ((pos * signal_sizes[-1])).astype(np.int32)
         sizes = list(mags * 5)
         plt.xlim([0, signal_sizes[-1]])
-        plt.ylim([0, 3072])
-        plt.scatter(t, atom_indices, sizes, alpha=0.5)
-        plt.savefig('vis.png')
-        plt.clf()
+
+        if plot_mags:
+            plt.ylim([0, 20])
+            plt.scatter(t, mags, alpha=0.5)
+        else:
+            plt.ylim([0, 3072])
+            plt.scatter(t, atom_indices, sizes, alpha=0.5)
+        
+        if save:
+            plt.savefig('vis.png')
+            plt.clf()
     else:
         return atom_indices, pos, mags
 
@@ -201,6 +208,13 @@ def vis_real():
     vis = _nn_decode(orig[0], visualize=True)
     return vis
 
+def vis():
+    _nn_decode(recon[0], visualize=True, save=False)
+    _nn_decode(orig[0], visualize=True, save=True)
+
+def vis_mags():
+    _nn_decode(recon[0], visualize=True, save=False, plot_mags=True)
+    _nn_decode(orig[0], visualize=True, save=True, plot_mags=True)
 
 def listen():
     encoded = list(nn_decode(recon[0]))
