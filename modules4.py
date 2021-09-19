@@ -6,7 +6,7 @@ from torch import device, nn
 import torch
 import numpy as np
 from torch.nn.modules.linear import Linear
-from modules import ResidualStack, get_best_matches
+from modules import ResidualStack, get_best_matches, pos_encode_feature
 from torch.nn import functional as F
 
 
@@ -69,8 +69,8 @@ class SelfSimilarity2(nn.Module):
     def forward(self, x):
         batch, time, channels = x.shape
 
-        t = x[..., -2:-1].contiguous()
-        a = x[..., :-2].contiguous()
+        t = x[..., 17:17*2].contiguous()
+        a = x[..., :17].contiguous()
 
 
         total = self.all(x, x)
@@ -279,6 +279,11 @@ class Discriminator(nn.Module):
 
         self.self_similarity = SelfSimilarity2(128)
 
+        self.time_embedding = PositionalEncoding(1, 30768, 8)
+        self.mag_embedding = PositionalEncoding(1, 512, 8)
+
+        input_size = self.embedding_size * 3
+
         self.atom_embedding = nn.Embedding(
             512 * 6, embedding_size, scale_grad_by_freq=True)
 
@@ -287,7 +292,7 @@ class Discriminator(nn.Module):
                 channels,
                 2,
                 activation=activation,
-                in_channels=embedding_size + 2),
+                in_channels=input_size),
 
             AttentionStack(
                 channels,
@@ -297,7 +302,7 @@ class Discriminator(nn.Module):
         )
 
         self.atoms = LinearOutputStack(
-            channels, 3, in_channels=embedding_size + 2)
+            channels, 3, in_channels=input_size)
         self.contextual = LinearOutputStack(
             channels, 3, in_channels=channels * 2, out_channels=1)
 
@@ -326,10 +331,12 @@ class Discriminator(nn.Module):
             self.atom_embedding.weight.fill_(0)
 
     def get_times(self, embeddings):
-        return embeddings.view(-1)
+        # return embeddings.view(-1)
+        return self.time_embedding.get_positions(embeddings)
 
     def get_mags(self, embeddings):
-        return embeddings.view(-1)
+        # return embeddings.view(-1)
+        return self.mag_embedding.get_positions(embeddings)
 
     def get_atom_keys(self, embeddings):
         """
@@ -354,8 +361,10 @@ class Discriminator(nn.Module):
         # don't allow the cheap/easy approach of identifying real samples
         # based on exact matches with the embeddings
         ae = ae + torch.zeros_like(ae).normal_(0, 0.03)
-        pe = time.view(-1, 1)
-        me = mag.view(-1, 1)
+        # pe = time.view(-1, 1)
+        pe = self.time_embedding.forward(time)
+        # me = mag.view(-1, 1)
+        me = self.mag_embedding.forward(mag)
         return torch.cat([ae, pe, me], dim=-1)
 
     def forward(self, x):
@@ -363,7 +372,7 @@ class Discriminator(nn.Module):
 
         ss = self.self_similarity(x)
 
-        atoms = x[..., :-2]
+        atoms = x[..., :self.embedding_size]
 
         keys = self.get_atom_keys(atoms.view(-1, self.embedding_size))
         embeddings = self.atom_embedding.weight[keys]\
@@ -505,6 +514,11 @@ class Generator(nn.Module):
         self.use_disc_embeddings = use_disc_embeddings
 
         self.conv_expander = ConvExpander(channels, self.max_atoms)
+
+        self.atom_expander = ConvExpander(channels, self.max_atoms)
+        self.pos_expander = ConvExpander(channels, self.max_atoms)
+        self.mag_expander = ConvExpander(channels, self.max_atoms)
+
         self.set_expansion = SetExpansion(channels, self.max_atoms)
 
         self.net = AttentionStack(
@@ -517,30 +531,27 @@ class Generator(nn.Module):
             use_disc_embeddings or one_hot) else self.embedding_size
 
         self.atoms = LinearOutputStack(
-            channels, 5, out_channels=out_channels)
-        self.pos_mag = LinearOutputStack(channels, 5, out_channels=2)
+            channels, 3, out_channels=out_channels)
+        self.pos = LinearOutputStack(channels, 3, out_channels=1)
+        self.mag = LinearOutputStack(channels, 3, out_channels=1)
 
         self.apply(init_weights)
 
     def forward(self, x):
+        # encodings = self.conv_expander(x)
 
-        batch = x.shape[0]
-        time = self.max_atoms
-
-        # Expansion
-        encodings = self.conv_expander(x)
-        # encodings = self.set_expansion(x)
-
-        # End attention stack
-        # encodings = self.net(encodings)
+        atom_encodings = self.atom_expander(x)
+        pos_encodings = self.pos_expander(x)
+        mag_encodings = self.mag_expander(x)
 
         # Interestingly, this doesn't work when trying to use the
         # discriminator embeddings.  I wonder if it's too hard to produce
         # embeddings in the two different domains from the same feature
-        atoms = self.atoms(encodings)
-        pm = torch.clamp(self.pos_mag(encodings), 0, 1)
+        atoms = self.atoms(atom_encodings)
+        p = pos_encode_feature(self.pos(pos_encodings), 1, 8)
+        m = pos_encode_feature(self.mag(mag_encodings), 1, 8)
 
-        recon = torch.cat([atoms, pm], dim=-1)
+        recon = torch.cat([atoms, p, m], dim=-1)
 
         return recon
 

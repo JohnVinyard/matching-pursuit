@@ -54,7 +54,8 @@ class LinearOutputStack(nn.Module):
             out_channels=None,
             in_channels=None,
             activation=lambda x: F.leaky_relu(x, 0.2),
-            bias=True):
+            bias=True,
+            shortcut=True):
 
         super().__init__()
         self.channels = channels
@@ -62,7 +63,7 @@ class LinearOutputStack(nn.Module):
         self.out_channels = out_channels or channels
 
         core = [
-            ResidualStack(channels, layers, activation=activation, bias=bias),
+            ResidualStack(channels, layers, activation=activation, bias=bias, shortcut=shortcut),
             nn.Linear(channels, self.out_channels, bias=self.out_channels > 1)
         ]
 

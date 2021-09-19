@@ -19,6 +19,20 @@ class Activation(Module):
         return activation(x)
 
 
+def pos_encode_feature(x, domain, n_freqs):
+    batch, time, _ = x.shape
+    x = torch.clamp(x, -domain, domain)
+    output = [x]
+    for i in range(n_freqs):
+        output.extend([
+            torch.sin((2 ** i) * x),
+            torch.cos((2 ** i) * x)
+        ])
+
+    x = torch.cat(output, dim=-1)
+    return x
+
+
 def pos_encode(domain, n_samples, n_freqs):
     d = np.linspace(-domain, domain, n_samples)
     x = [d[None, :]]
@@ -131,19 +145,26 @@ class PositionalEncoding(Module):
         x should be time encodings in the domain [0 - 1]
         """
         x = torch.clamp(x, 0, 0.9999)
-        
+
         indices = (x * self.n_samples).long()
         x = self.pos_encode[indices]
         return x
 
 
 class ResidualBlock(Module):
-    def __init__(self, channels, bias=True, activation=lambda x: F.leaky_relu(x, 0.2)):
+    def __init__(
+            self,
+            channels,
+            bias=True,
+            activation=lambda x: F.leaky_relu(x, 0.2),
+            shortcut=True):
+
         super().__init__()
         self.channels = channels
         self.l1 = Linear(channels, channels, bias)
         self.l2 = Linear(channels, channels, bias)
         self.activation = activation
+        self.shortcut = shortcut
         self.apply(init_weights)
 
     def forward(self, x):
@@ -151,17 +172,27 @@ class ResidualBlock(Module):
         x = self.l1(x)
         x = self.activation(x)
         x = self.l2(x)
-        x = self.activation(shortcut + x)
+        if self.shortcut:
+            x = self.activation(shortcut + x)
+        else:
+            x = self.activation(x)
         return x
 
 
 class ResidualStack(Module):
-    def __init__(self, channels, layers, bias=True, activation=lambda x: F.leaky_relu(x, 0.2)):
+    def __init__(
+            self,
+            channels, 
+            layers, 
+            bias=True, 
+            activation=lambda x: F.leaky_relu(x, 0.2), 
+            shortcut=True):
+
         super().__init__()
         self.channels = channels
         self.layers = layers
         self.net = Sequential(
-            *[ResidualBlock(channels, bias, activation) for _ in range(layers)]
+            *[ResidualBlock(channels, bias, activation, shortcut) for _ in range(layers)]
         )
 
     def forward(self, x):

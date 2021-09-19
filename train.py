@@ -152,13 +152,13 @@ def _nn_decode(encoded, visualize=False, save=True, plot_mags=False):
     else:
         a, p, m = \
             encoded[:, :size], \
-            encoded[:, -2:-1], \
-            encoded[:, -1:]
+            encoded[:, size:size * 2], \
+            encoded[:, -size:]
 
     atom_indices = disc.get_atom_keys(a).data.cpu().numpy()
     # translate from embeddings to time and magnitude
-    pos = np.clip(disc.get_times(p).data.cpu().numpy(), 0, 1)
-    mags = np.clip(disc.get_mags(m).data.cpu().numpy(), 0, 1) * 20
+    pos = disc.get_times(p).data.cpu().numpy()
+    mags = disc.get_mags(m).data.cpu().numpy() * 20
 
 
     if visualize:
