@@ -507,6 +507,10 @@ class Generator(nn.Module):
         self.conv_expander = ConvExpander(channels, self.max_atoms)
         self.set_expansion = SetExpansion(channels, self.max_atoms)
 
+        self.atom_expander = ConvExpander(channels, self.max_atoms)
+        self.pos_expander = ConvExpander(channels, self.max_atoms)
+        self.mag_expander = ConvExpander(channels, self.max_atoms)
+
         self.net = AttentionStack(
             channels,
             attention_heads=8,
@@ -517,8 +521,9 @@ class Generator(nn.Module):
             use_disc_embeddings or one_hot) else self.embedding_size
 
         self.atoms = LinearOutputStack(
-            channels, 5, out_channels=out_channels)
-        self.pos_mag = LinearOutputStack(channels, 5, out_channels=2)
+            channels, 3, out_channels=out_channels)
+        self.pos = LinearOutputStack(channels, 3, out_channels=1)
+        self.mag = LinearOutputStack(channels, 3, out_channels=1)
 
         self.apply(init_weights)
 
@@ -528,8 +533,12 @@ class Generator(nn.Module):
         time = self.max_atoms
 
         # Expansion
-        encodings = self.conv_expander(x)
+        # encodings = self.conv_expander(x)
         # encodings = self.set_expansion(x)
+
+        atom_encodings = self.atom_expander(x)
+        pos_encodings = self.pos_expander(x)
+        mag_encodings = self.mag_expander(x)
 
         # End attention stack
         # encodings = self.net(encodings)
@@ -537,10 +546,14 @@ class Generator(nn.Module):
         # Interestingly, this doesn't work when trying to use the
         # discriminator embeddings.  I wonder if it's too hard to produce
         # embeddings in the two different domains from the same feature
-        atoms = self.atoms(encodings)
-        pm = torch.clamp(self.pos_mag(encodings), 0, 1)
+        
+        atoms = self.atoms(atom_encodings)
+        p = torch.clamp(self.pos(pos_encodings), 0, 1)
+        m = torch.clamp(self.mag(mag_encodings), 0, 1)
 
-        recon = torch.cat([atoms, pm], dim=-1)
+        # pm = torch.clamp(self.pos_mag(encodings), 0, 1)
+
+        recon = torch.cat([atoms, p, m], dim=-1)
 
         return recon
 
