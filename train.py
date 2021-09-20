@@ -1,5 +1,7 @@
 from collections import defaultdict
+from dict_learning_step import unit_norm
 from modules4 import Discriminator, Generator
+from rasterized_modules import RasterizedDiscriminator, RasterizedGenerator
 from sparse2 import freq_recompose
 from multilevel_sparse import multilevel_sparse_decode
 from get_encoded import iter_training_examples, learn_dict
@@ -14,7 +16,7 @@ from torch.nn.utils.clip_grad import clip_grad_value_
 
 sr = zounds.SR22050()
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-max_atoms = 128
+max_atoms = 512
 embedding_dim = 8
 n_atoms = 512 * 6  # 512 atoms * 6 bands
 mag_embedding_dim = 1
@@ -38,7 +40,7 @@ disc = Discriminator(
     embedding_size,
     one_hot,
     noise_level).to(device)
-disc_optim = Adam(disc.parameters(), lr=1e-4, betas=(0, 0.9))
+disc_optim = Adam(disc.parameters(), lr=1e-4, betas=(0.5, 0.9))
 
 gen = Generator(
     128,
@@ -49,7 +51,13 @@ gen = Generator(
     one_hot=one_hot,
     noise_level=noise_level,
     max_atoms=max_atoms).to(device)
-gen_optim = Adam(gen.parameters(), lr=1e-4, betas=(0, 0.9))
+gen_optim = Adam(gen.parameters(), lr=1e-4, betas=(0.5, 0.9))
+
+
+rasterized_gen = RasterizedGenerator().to(device)
+rgo = Adam(rasterized_gen.parameters(), lr=1e-4, betas=(0, 0.9))
+disc = rasterized_disc = RasterizedDiscriminator().to(device)
+rdo = Adam(rasterized_disc.parameters(), lr=1e-4, betas=(0, 0.9))
 
 
 class LatentGenerator(object):
@@ -129,10 +137,10 @@ def nn_encode(encoded, max_atoms=100, pack=False):
     mags = mags[indices]
 
     # shuffle the loudest
-    indices = np.random.permutation(atoms.shape[0])
-    atoms = atoms[indices]
-    positions = positions[indices]
-    mags = mags[indices]
+    # indices = np.random.permutation(atoms.shape[0])
+    # atoms = atoms[indices]
+    # positions = positions[indices]
+    # mags = mags[indices]
 
     atoms = torch.from_numpy(atoms).long().to(device)
     positions = torch.from_numpy(positions).float().to(device)
@@ -154,6 +162,8 @@ def _nn_decode(encoded, visualize=False, save=True, plot_mags=False):
             encoded[:, :size], \
             encoded[:, -2:-1], \
             encoded[:, -1:]
+    
+    print(size, a.shape, p.shape, m.shape)
 
     atom_indices = disc.get_atom_keys(a).data.cpu().numpy()
     # translate from embeddings to time and magnitude
@@ -292,14 +302,94 @@ class BatchGenerator(object):
         output = torch.stack(examples)
         return output
 
+class RasterizedBatchGenerator(object):
+    def __init__(self, slots, depth, embedding_size, overfit=False):
+        self.overfit = overfit
+        self.gen = BatchGenerator(overfit)
+        self.slots = slots
+        self.depth = depth
+        self.embedding_size = embedding_size
+    
+    def __call__(self, batch_size, max_atoms):
+        batch = self.gen(batch_size, max_atoms).data.cpu().numpy()
+        # batch is (batch_size, max_atoms, embedding_size)
+        # concretely, (16, 128, 19)
+
+        output = np.zeros(
+            (batch_size, self.embedding_size, self.slots, self.depth), 
+            dtype=np.float32)
+        
+        for b in range(batch_size):
+            times = disc.extract_time(batch[b])
+            atoms = disc.extract_atom(batch[b])
+            mags = disc.extract_mag(batch[b])
+            atoms = unit_norm(atoms) * mags
+
+            timing = times * self.slots
+
+            slots = timing.astype(np.int32).squeeze()
+            fine_timing = (timing % 1).squeeze()
+            counts = np.zeros((self.slots,), dtype=np.int32).squeeze()
+
+            for a, s, ft in zip(atoms, slots, fine_timing):
+
+                if counts[s] >= self.depth:
+                    continue
+
+                atom = np.concatenate([a.reshape(-1), ft.reshape(-1)])
+                output[b, :, s, counts[s]] = atom
+                counts[s] += 1
+        
+        return torch.from_numpy(output).to(device)
+
+def decode_rasterized(x):
+    embed_dim, slots, depth = x.shape
+    atoms = []
+    for s in range(slots):
+        for d in range(depth):
+            atom = x[:, s, d]
+            embed = atom[:17]
+            if embed.sum() == 0:
+                continue
+            norm = torch.norm(embed)
+            embed /= norm
+            pos = (s / slots) + (atom[-1:] / slots)
+            atoms.append(torch.cat([embed.view(-1), pos.view(-1), norm.view(-1)])[None, :])
+    
+    return torch.cat(atoms)[None, ...]
+    
+
 
 get_batch = BatchGenerator(overfit=overfit)
 
+rasterized_batches = RasterizedBatchGenerator(256, 8, 18, overfit=overfit)
+
+
+
+
+def fake():
+    x = decode_rasterized(recon[0].clone())
+    encoded = list(nn_decode(x[0]))
+    decoded = decode(encoded, sparse_dict, return_audio=True)
+    return decoded
+
+
+def real():
+    x = decode_rasterized(batch[0].clone())
+    encoded = list(nn_decode(x[0]))
+    decoded = decode(encoded, sparse_dict, return_audio=True)
+    return decoded
 
 class Turn(Enum):
     GEN = 'gen'
     DISC = 'disc'
 
+
+def view_real():
+    return batch.data.cpu().numpy()[0, :, :, :].sum(axis=0)
+
+def view_fake():
+    return recon.data.cpu().numpy()[0, :, :, :].sum(axis=0)
 
 if __name__ == '__main__':
     sparse_dict = learn_dict()
@@ -312,13 +402,37 @@ if __name__ == '__main__':
     turn = cycle([Turn.GEN, Turn.DISC])
 
     for i, t in enumerate(turn):
-        batch = get_batch(batch_size=batch_size, max_atoms=max_atoms)
+        batch = rasterized_batches(batch_size, max_atoms)
         if t == Turn.GEN:
-            train_gen(batch)
+            rgo.zero_grad()
+            z = latent()
+            recon = rasterized_gen(z)
+            j = rasterized_disc(recon)
+            loss = least_squares_generator_loss(j)
+            clip_grad_value_(rasterized_gen.parameters(), 0.5)
+            loss.backward()
+            rgo.step()
+            print('G', loss.item())
         elif t == Turn.DISC:
-            orig, recon = train_disc(batch)
-            o = orig[0].data.cpu().numpy()
-            r = recon[0].data.cpu().numpy()
+            rdo.zero_grad()
+            rj = rasterized_disc(batch)
+            fj = rasterized_disc(rasterized_gen(latent()))
+            loss = least_squares_disc_loss(rj, fj)
+            clip_grad_value_(rasterized_disc.parameters(), 0.5)
+            loss.backward()
+            rdo.step()
+            print('D', loss.item())
+
+        # recon = decode_rasterized(batch[0])
+        # print(batch.shape)
+
+        # batch = get_batch(batch_size=batch_size, max_atoms=max_atoms)
+        # if t == Turn.GEN:
+        #     train_gen(batch)
+        # elif t == Turn.DISC:
+        #     orig, recon = train_disc(batch)
+        #     o = orig[0].data.cpu().numpy()
+        #     r = recon[0].data.cpu().numpy()
 
 
         
