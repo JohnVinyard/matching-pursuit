@@ -124,7 +124,7 @@ def nn_encode(encoded, max_atoms=100, pack=False):
             for atom, pos, mag, _ in atom_list:
                 atoms.append(512 * band_index + atom)
                 positions.append(pos / float(signal_size))
-                mags.append(np.clip(mag / 20, 0, 1))
+                mags.append(mag)
 
     atoms = np.array(atoms)
     positions = np.array(positions)
@@ -168,7 +168,7 @@ def _nn_decode(encoded, visualize=False, save=True, plot_mags=False):
     atom_indices = disc.get_atom_keys(a).data.cpu().numpy()
     # translate from embeddings to time and magnitude
     pos = np.clip(disc.get_times(p).data.cpu().numpy(), 0, 1)
-    mags = np.clip(disc.get_mags(m).data.cpu().numpy(), 0, 1) * 20
+    mags = disc.get_mags(m).data.cpu().numpy()
 
 
     if visualize:

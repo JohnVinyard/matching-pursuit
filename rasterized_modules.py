@@ -78,10 +78,7 @@ class RasterizedDiscriminator(nn.Module):
         atom, time, mag = x
         self._init_atoms(atom)
         ae = self.atom_embedding.weight[atom.view(-1)].view(-1, self.embedding_size)
-        # add noise to make it a bit harder for the discriminator, i.e.,
-        # don't allow the cheap/easy approach of identifying real samples
-        # based on exact matches with the embeddings
-        ae = ae + torch.zeros_like(ae).normal_(0, 0.03)
+        
         pe = time.view(-1, 1)
         me = mag.view(-1, 1)
         return torch.cat([ae, pe, me], dim=-1)
@@ -115,7 +112,7 @@ class RasterizedGenerator(nn.Module):
         x = self.expand(x).view(-1, 128, 4, 4)
         x = self.net(x)
 
-        atom = x[:, :17, :, :]
+        atom = torch.clamp(x[:, :17, :, :], -10, 10)
         pos = torch.clamp(x[:, -1:, :, :], 0, 1)
 
         x = torch.cat([atom, pos], dim=1)
