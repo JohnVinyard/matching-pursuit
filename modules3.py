@@ -40,7 +40,7 @@ class Attention(nn.Module):
 
         # print('ATTN', x.std().item())
 
-        x = unit_norm(x) * 3.2
+        # x = unit_norm(x) * 3.2
                 
         if self.reduce:
             v = v.sum(dim=1, keepdim=True)

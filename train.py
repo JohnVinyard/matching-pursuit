@@ -21,7 +21,7 @@ mag_embedding_dim = 1
 pos_embedding_dim = 1
 total_vector_dim = embedding_dim + mag_embedding_dim + pos_embedding_dim
 batch_size = 16
-overfit = True
+overfit = False
 
 # OPTIONS
 dense_judgements = False
@@ -116,7 +116,7 @@ def nn_encode(encoded, max_atoms=100, pack=False):
             for atom, pos, mag, _ in atom_list:
                 atoms.append(512 * band_index + atom)
                 positions.append(pos / float(signal_size))
-                mags.append(np.clip(mag / 20, 0, 1))
+                mags.append(mag)
 
     atoms = np.array(atoms)
     positions = np.array(positions)
@@ -148,17 +148,17 @@ def _nn_decode(encoded, visualize=False, save=True, plot_mags=False):
 
     size = embedding_size if not one_hot else 3072
     if isinstance(encoded, list):
-        a, p, m = encoded
+        a, p = encoded
     else:
-        a, p, m = \
+        a, p = \
             encoded[:, :size], \
-            encoded[:, size:size * 2], \
-            encoded[:, -size:]
+            encoded[:, size:size * 2]
 
+    
     atom_indices = disc.get_atom_keys(a).data.cpu().numpy()
     # translate from embeddings to time and magnitude
     pos = disc.get_times(p).data.cpu().numpy()
-    mags = disc.get_mags(m).data.cpu().numpy() * 20
+    mags = disc.get_mags(a).data.cpu().numpy()
 
 
     if visualize:
