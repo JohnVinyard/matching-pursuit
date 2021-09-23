@@ -19,7 +19,7 @@ class Activation(Module):
         return activation(x)
 
 
-def pos_encode_feature(x, domain, n_freqs):
+def pos_encode_feature(x, domain, n_samples, n_freqs):
     batch, time, _ = x.shape
     x = torch.clamp(x, -domain, domain)
     output = [x]

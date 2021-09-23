@@ -24,7 +24,7 @@ batch_size = 16
 overfit = False
 
 # OPTIONS
-dense_judgements = False
+dense_judgements = True
 gen_uses_disc_embeddings = False
 one_hot = False
 embedding_size = 17
@@ -115,8 +115,8 @@ def nn_encode(encoded, max_atoms=100, pack=False):
         for atom_index, atom_list in atom_dict.items():
             for atom, pos, mag, _ in atom_list:
                 atoms.append(512 * band_index + atom)
-                positions.append(pos / float(signal_size))
-                mags.append(mag)
+                positions.append((pos / float(signal_size)) * 2 - 1)
+                mags.append(np.clip(mag, 0, 20))
 
     atoms = np.array(atoms)
     positions = np.array(positions)
@@ -135,7 +135,7 @@ def nn_encode(encoded, max_atoms=100, pack=False):
     mags = mags[indices]
 
     atoms = torch.from_numpy(atoms).long().to(device)
-    positions = torch.from_numpy(positions).float().to(device)
+    positions = (torch.from_numpy(positions).float().to(device))
     mags = torch.from_numpy(mags).float().to(device)
 
     if pack:
@@ -157,7 +157,7 @@ def _nn_decode(encoded, visualize=False, save=True, plot_mags=False):
     
     atom_indices = disc.get_atom_keys(a).data.cpu().numpy()
     # translate from embeddings to time and magnitude
-    pos = disc.get_times(p).data.cpu().numpy()
+    pos = (disc.get_times(p).data.cpu().numpy() + 1) / 2
     mags = disc.get_mags(a).data.cpu().numpy()
 
 

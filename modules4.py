@@ -69,7 +69,7 @@ class SelfSimilarity2(nn.Module):
     def forward(self, x):
         batch, time, channels = x.shape
 
-        t = x[..., 17:17*2].contiguous()
+        t = x[..., 17:].contiguous()
         a = unit_norm(x[..., :17].contiguous())
 
         total = self.all(x, x)
@@ -79,9 +79,9 @@ class SelfSimilarity2(nn.Module):
 
         # similarity with other samples in the batch
         # to promote sample diversity.
-        # indices1 = np.random.permutation(batch)
-        # indices2 = np.roll(indices1, 1)
-        # b = self.batch(x[indices1], x[indices2])
+        indices1 = np.random.permutation(batch)
+        indices2 = np.roll(indices1, 1)
+        b = self.batch(x[indices1], x[indices2])
 
         # TODO: Consider attention layers that create
         # query and value based on a subset of features
@@ -89,7 +89,7 @@ class SelfSimilarity2(nn.Module):
             total.view(-1),
             time.view(-1),
             atom.view(-1),
-            # b.view(-1)
+            b.view(-1)
         ])
 
 
@@ -282,7 +282,7 @@ class Discriminator(nn.Module):
 
         self.time_embedding = PositionalEncoding(1, 2 ** 15, 8)
 
-        input_size = self.embedding_size * 2
+        input_size = self.embedding_size + 1
 
         self.atom_embedding = nn.Embedding(
             512 * 6, embedding_size, scale_grad_by_freq=True)
@@ -332,11 +332,9 @@ class Discriminator(nn.Module):
             self.atom_embedding.weight.fill_(0)
 
     def get_times(self, embeddings):
-        return self.time_embedding.get_positions(embeddings)
+        return embeddings.view(-1)
 
     def get_mags(self, embeddings):
-        # return embeddings.view(-1)
-        # return self.mag_embedding.get_positions(embeddings)
         return torch.norm(embeddings, dim=-1)
 
     def get_atom_keys(self, embeddings):
@@ -352,22 +350,19 @@ class Discriminator(nn.Module):
         self.init_atoms.update(to_init)
         for ti in to_init:
             with torch.no_grad():
-                self.atom_embedding.weight[ti] = torch.FloatTensor(
-                    17).uniform_(-0.1, 0.1).to(atom.device)
+                self.atom_embedding.weight[ti] = torch.FloatTensor(17).uniform_(-1, 1).to(atom.device)
 
     def get_embeddings(self, x):
         atom, time, mag = x
         self._init_atoms(atom)
-
-        ae = self.atom_embedding.weight[atom.view(-1)
-                                        ].view(-1, self.embedding_size)
-        # add noise to make it a bit harder for the discriminator, i.e.,
-        # don't allow the cheap/easy approach of identifying real samples
-        # based on exact matches with the embeddings
-        # ae = ae + torch.zeros_like(ae).normal_(0, 0.03)
+        ae = self \
+            .atom_embedding.weight[atom.view(-1)] \
+            .view(-1, self.embedding_size)
         ae = unit_norm(ae)
 
-        pe = self.time_embedding.forward(time)
+        pe = time.view(-1, 1)
+
+
         return torch.cat([ae * mag[:, None], pe], dim=-1)
 
     def forward(self, x):
@@ -376,11 +371,9 @@ class Discriminator(nn.Module):
         # ss = self.self_similarity(x)
 
         # atoms = x[..., :self.embedding_size]
-
         # keys = self.get_atom_keys(atoms.view(-1, self.embedding_size))
-
-        # embeddings = unit_norm(self.atom_embedding.weight[keys].reshape(batch, time, self.embedding_size))
-
+        # embeddings = unit_norm(self.atom_embedding.weight[keys] \
+        #     .reshape(batch, time, self.embedding_size))
         # diff = embeddings - unit_norm(atoms)
         # dj = self.dist_judge(diff)
 
@@ -468,7 +461,7 @@ class ResidualUpscale(nn.Module):
 
         # x = unit_norm(x) * 3.2
 
-        # x = self.attn(x)
+        x = self.attn(x)
 
         return x
 
@@ -532,7 +525,7 @@ class Generator(nn.Module):
 
         self.atoms = LinearOutputStack(
             channels, 5, out_channels=out_channels)
-        self.pos = LinearOutputStack(channels, 5, out_channels=17)
+        self.pos = LinearOutputStack(channels, 5, out_channels=1)
 
         self.apply(init_weights)
 
@@ -543,8 +536,11 @@ class Generator(nn.Module):
         # discriminator embeddings.  I wonder if it's too hard to produce
         # embeddings in the two different domains from the same feature
 
-        atoms = torch.clamp(self.atoms(encodings), -10, 10)
-        p = torch.sin(self.pos(encodings))
+        encodings = self.net(encodings)
+
+
+        atoms = self.atoms(encodings)
+        p = torch.clamp(self.pos(encodings), -1, 1)
 
         # m = sine_one(self.mag(encodings))
         # p = pos_encode_feature(torch.clamp(self.pos(encodings), -1, 1), 1, 8)
