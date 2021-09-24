@@ -42,8 +42,7 @@ disc_optim = Adam(disc.parameters(), lr=1e-4, betas=(0, 0.9))
 
 gen = Generator(
     128,
-    # disc.atom_embedding,
-    None,
+    disc.atom_embedding,
     use_disc_embeddings=gen_uses_disc_embeddings,
     embedding_size=embedding_size,
     one_hot=one_hot,

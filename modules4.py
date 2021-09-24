@@ -69,13 +69,13 @@ class SelfSimilarity2(nn.Module):
     def forward(self, x):
         batch, time, channels = x.shape
 
-        t = x[..., 17:].contiguous()
-        a = unit_norm(x[..., :17].contiguous())
+        # t = x[..., 17:].contiguous()
+        # a = unit_norm(x[..., :17].contiguous())
 
-        total = self.all(x, x)
-        time = self.time(t, t)
+        # total = self.all(x, x)
+        # time = self.time(t, t)
 
-        atom = self.atom(a, a)
+        # atom = self.atom(a, a)
 
         # similarity with other samples in the batch
         # to promote sample diversity.
@@ -86,9 +86,9 @@ class SelfSimilarity2(nn.Module):
         # TODO: Consider attention layers that create
         # query and value based on a subset of features
         return torch.cat([
-            total.view(-1),
-            time.view(-1),
-            atom.view(-1),
+            # total.view(-1),
+            # time.view(-1),
+            # atom.view(-1),
             b.view(-1)
         ])
 
@@ -350,7 +350,8 @@ class Discriminator(nn.Module):
         self.init_atoms.update(to_init)
         for ti in to_init:
             with torch.no_grad():
-                self.atom_embedding.weight[ti] = torch.FloatTensor(17).uniform_(-1, 1).to(atom.device)
+                self.atom_embedding.weight[ti] = torch.FloatTensor(
+                    17).uniform_(-1, 1).to(atom.device)
 
     def get_embeddings(self, x):
         atom, time, mag = x
@@ -362,13 +363,12 @@ class Discriminator(nn.Module):
 
         pe = time.view(-1, 1)
 
-
         return torch.cat([ae * mag[:, None], pe], dim=-1)
 
     def forward(self, x):
         batch, time, channels = x.shape
 
-        # ss = self.self_similarity(x)
+        ss = self.self_similarity(x)
 
         # atoms = x[..., :self.embedding_size]
         # keys = self.get_atom_keys(atoms.view(-1, self.embedding_size))
@@ -461,7 +461,7 @@ class ResidualUpscale(nn.Module):
 
         # x = unit_norm(x) * 3.2
 
-        x = self.attn(x)
+        # x = self.attn(x)
 
         return x
 
@@ -524,8 +524,9 @@ class Generator(nn.Module):
             use_disc_embeddings or one_hot) else self.embedding_size
 
         self.atoms = LinearOutputStack(
-            channels, 5, out_channels=out_channels)
-        self.pos = LinearOutputStack(channels, 5, out_channels=1)
+            channels, 3, out_channels=3072, shortcut=False)
+        self.pos = LinearOutputStack(
+            channels, 3, out_channels=1, shortcut=False)
 
         self.apply(init_weights)
 
@@ -536,10 +537,10 @@ class Generator(nn.Module):
         # discriminator embeddings.  I wonder if it's too hard to produce
         # embeddings in the two different domains from the same feature
 
-        encodings = self.net(encodings)
+        # encodings = self.net(encodings)
 
-
-        atoms = self.atoms(encodings)
+        atoms = F.relu(self.atoms(encodings)
+                       ) @ self.embeddings[0].weight.clone()
         p = torch.clamp(self.pos(encodings), -1, 1)
 
         # m = sine_one(self.mag(encodings))
