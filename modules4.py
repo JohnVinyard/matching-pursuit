@@ -135,10 +135,14 @@ class SelfSimilarity(nn.Module):
 
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, channels, heads):
+    def __init__(self, channels, heads, in_channels=None):
         super().__init__()
         self.channels = channels
         self.heads = heads
+        self.in_channels = in_channels
+
+        if in_channels:
+            self.alter = nn.Linear(in_channels, channels)
 
         self.attn = nn.Sequential(*[
             Attention(channels) for _ in range(self.heads)
@@ -147,6 +151,9 @@ class MultiHeadAttention(nn.Module):
 
     def forward(self, x):
         orig = x
+
+        if self.in_channels:
+            x = self.ater(x)
 
         results = []
         for attn in self.attn:
@@ -359,7 +366,7 @@ class Discriminator(nn.Module):
         ae = self \
             .atom_embedding.weight[atom.view(-1)] \
             .view(-1, self.embedding_size)
-        ae = unit_norm(ae)
+        ae = unit_norm(ae) + torch.zeros_like(ae).uniform_(-0.1, 0.1)
 
         pe = time.view(-1, 1)
 
@@ -368,7 +375,7 @@ class Discriminator(nn.Module):
     def forward(self, x):
         batch, time, channels = x.shape
 
-        ss = self.self_similarity(x)
+        # ss = self.self_similarity(x)
 
         # atoms = x[..., :self.embedding_size]
         # keys = self.get_atom_keys(atoms.view(-1, self.embedding_size))
@@ -461,7 +468,7 @@ class ResidualUpscale(nn.Module):
 
         # x = unit_norm(x) * 3.2
 
-        # x = self.attn(x)
+        x = self.attn(x)
 
         return x
 
@@ -489,6 +496,80 @@ class ConvExpander(nn.Module):
         return x[:, :self.max_atoms, :]
 
 
+class ToAtom(nn.Module):
+    def __init__(self, channels, embeddings):
+        super().__init__()
+        self.channels = channels
+        self.embeddings = [embeddings]
+
+        self.atoms = LinearOutputStack(
+            channels, 3, out_channels=17)
+        self.pos = LinearOutputStack(
+            channels, 3, out_channels=1)
+        
+    
+    def _decompose(self, x):
+        a = x[..., :17]
+        p = x[..., -1:]
+        return a, p
+
+    def _recompose(self, a, p):
+        a = a
+        p = torch.clamp(p, -1, 1)
+        return torch.cat([a, p], dim=-1)
+    
+    def forward(self, encodings, mother_atoms):
+        # atoms = \
+        #     F.relu(self.atoms(encodings)) @ self.embeddings[0].weight.clone()
+
+        a = self.atoms(encodings)
+        p = self.pos(encodings)
+
+        ma, mp = self._decompose(mother_atoms.repeat_interleave(2, 1))
+
+        a = self._recompose(a + ma, p + mp)
+
+        return a
+
+
+class Transform(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.net = LinearOutputStack(
+            channels, 3, in_channels=128 + 18 + channels)
+    
+    def forward(self, latent, atom, local_latent):
+        batch, time, channels = atom.shape
+        factor = time // latent.shape[1]
+        latent = latent.repeat(1, factor, 1)
+        x = torch.cat([atom, latent, local_latent], dim=-1)
+        x = self.net(x)
+        return x
+
+
+class PleaseDearGod(nn.Module):
+    def __init__(self, channels, max_atoms, embeddings, heads):
+        super().__init__()
+        self.channels = channels
+        self.transformer = Transform(channels)
+        self.max_atoms = max_atoms
+        self.to_atom = ToAtom(channels, embeddings)
+        self.expander = Expander(channels, 2)
+        self.attn = MultiHeadAttention(channels, heads)
+        self.heads = heads
+    
+    def forward(self, z, a, local_latent):
+        z = z.view(-1, 1, self.channels)
+        batch = z.shape[0]
+        x = self.transformer(z, a, local_latent)
+        x = self.attn(x)
+        x = self.expander(x)
+        # TODO: Try positional encoding
+        a = self.to_atom(x, a)
+
+        return a, x
+
+
 class Generator(nn.Module):
     def __init__(
             self,
@@ -510,6 +591,10 @@ class Generator(nn.Module):
         self.max_atoms = max_atoms
         self.use_disc_embeddings = use_disc_embeddings
 
+        self.please_dear_god = nn.Sequential(*[
+            PleaseDearGod(channels, max_atoms, embeddings, i + 1) for i in range(6)
+        ])
+
         self.conv_expander = ConvExpander(channels, self.max_atoms)
 
         self.set_expansion = SetExpansion(channels, self.max_atoms)
@@ -528,9 +613,26 @@ class Generator(nn.Module):
         self.pos = LinearOutputStack(
             channels, 3, out_channels=1, shortcut=False)
 
+        
+        # self.model = PleaseDearGod(channels, max_atoms, embeddings)
+
         self.apply(init_weights)
 
     def forward(self, x):
+        batch = x.shape[0]
+
+        z = x
+        a = torch.zeros(batch, 1, 18).to(z.device)
+        local_latent = torch.zeros(batch, 1, self.channels).to(z.device)
+        atoms = []
+
+        for layer in self.please_dear_god:
+            a, local_latent = layer(z, a, local_latent)
+            atoms.append(a)
+        
+        x = torch.cat(atoms, dim=1)
+        return x
+
         encodings = self.conv_expander(x)
 
         # Interestingly, this doesn't work when trying to use the
@@ -539,8 +641,8 @@ class Generator(nn.Module):
 
         # encodings = self.net(encodings)
 
-        atoms = F.relu(self.atoms(encodings)
-                       ) @ self.embeddings[0].weight.clone()
+        atoms = \
+            F.relu(self.atoms(encodings)) @ self.embeddings[0].weight.clone()
         p = torch.clamp(self.pos(encodings), -1, 1)
 
         # m = sine_one(self.mag(encodings))

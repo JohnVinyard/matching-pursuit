@@ -165,7 +165,7 @@ class ResidualBlock(Module):
         self.l2 = Linear(channels, channels, bias)
         self.activation = activation
         self.shortcut = shortcut
-        self.apply(init_weights)
+        # self.apply(init_weights)
 
     def forward(self, x):
         shortcut = x
