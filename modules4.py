@@ -365,7 +365,12 @@ class Discriminator(nn.Module):
         self._init_atoms(atom)
         ae = self \
             .atom_embedding.weight[atom.view(-1)] \
-            .view(-1, self.embedding_size)
+            .view(-1, 
+            self.embedding_size)
+
+        # STOP: Do not remove!! Adding noise is crucial to
+        # keep the discriminator from simply distinguising
+        # based on exact atom matches
         ae = unit_norm(ae) + torch.zeros_like(ae).uniform_(-0.1, 0.1)
 
         pe = time.view(-1, 1)
@@ -503,7 +508,7 @@ class ToAtom(nn.Module):
         self.embeddings = [embeddings]
 
         self.atoms = LinearOutputStack(
-            channels, 3, out_channels=17)
+            channels, 3, out_channels=3072)
         self.pos = LinearOutputStack(
             channels, 3, out_channels=1)
         
@@ -519,15 +524,15 @@ class ToAtom(nn.Module):
         return torch.cat([a, p], dim=-1)
     
     def forward(self, encodings, mother_atoms):
-        # atoms = \
-        #     F.relu(self.atoms(encodings)) @ self.embeddings[0].weight.clone()
+        a = \
+            F.relu(self.atoms(encodings)) @ self.embeddings[0].weight.clone()
 
-        a = self.atoms(encodings)
+        # a = self.atoms(encodings)
         p = self.pos(encodings)
 
         ma, mp = self._decompose(mother_atoms.repeat_interleave(2, 1))
 
-        a = self._recompose(a + ma, p + mp)
+        a = self._recompose(a, p + mp)
 
         return a
 
