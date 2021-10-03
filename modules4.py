@@ -69,69 +69,28 @@ class SelfSimilarity2(nn.Module):
     def forward(self, x):
         batch, time, channels = x.shape
 
-        # t = x[..., 17:].contiguous()
-        # a = unit_norm(x[..., :17].contiguous())
+        t = x[..., 17:].contiguous()
+        a = unit_norm(x[..., :17].contiguous())
 
-        # total = self.all(x, x)
-        # time = self.time(t, t)
+        total = self.all(x, x)
+        time = self.time(t, t)
 
-        # atom = self.atom(a, a)
+        atom = self.atom(a, a)
 
         # similarity with other samples in the batch
         # to promote sample diversity.
-        indices1 = np.random.permutation(batch)
-        indices2 = np.roll(indices1, 1)
-        b = self.batch(x[indices1], x[indices2])
+        # indices1 = np.random.permutation(batch)
+        # indices2 = np.roll(indices1, 1)
+        # b = self.batch(x[indices1], x[indices2])
 
         # TODO: Consider attention layers that create
         # query and value based on a subset of features
         return torch.cat([
-            # total.view(-1),
-            # time.view(-1),
-            # atom.view(-1),
-            b.view(-1)
+            total.view(-1),
+            time.view(-1),
+            atom.view(-1),
+            # b.view(-1)
         ])
-
-
-class SelfSimilarity(nn.Module):
-    def __init__(self, max_atoms):
-        super().__init__()
-        self.max_atoms = max_atoms
-
-        self.size = (max_atoms ** 2) // 2
-
-        self.net = nn.Sequential(
-            nn.Conv1d(1, 8, 2, 2, 0),
-            nn.LeakyReLU(0.2),
-            nn.Conv1d(8, 8, 2, 2, 0),
-            nn.LeakyReLU(0.2),
-            nn.Conv1d(8, 8, 2, 2, 0),
-            nn.LeakyReLU(0.2),
-            nn.Conv1d(8, 8, 2, 2, 0),
-            nn.LeakyReLU(0.2),
-            nn.Conv1d(8, 8, 2, 2, 0),
-            nn.LeakyReLU(0.2),
-            nn.Conv1d(8, 8, 2, 2, 0),
-            nn.LeakyReLU(0.2),
-            nn.Conv1d(8, 8, 2, 2, 0),
-            nn.LeakyReLU(0.2),
-            nn.Conv1d(8, 1, 2, 2, 0),
-        )
-
-    def forward(self, x):
-        batch, time, channels = x.shape
-        dist = torch.cdist(x, x)  # (batch, max_atoms, max_atoms)
-
-        upper = []
-        indices = torch.triu_indices(time, time, offset=1)
-        for i in range(batch):
-            upper.append(dist[i, indices[0], indices[1]])
-
-        upper = torch.stack(upper)  # batch * (time ** 2 / 2)
-        upper = upper[:, None, :]
-
-        x = self.net(upper)
-        return x
 
 
 class MultiHeadAttention(nn.Module):
@@ -276,6 +235,20 @@ class DiscReducer(nn.Module):
         return x
 
 
+class BatchDisc(nn.Module):
+    def __init__(self, input_channels, channels):
+        super().__init__()
+        self.net = LinearOutputStack(
+            channels, 3, in_channels=input_channels, out_channels=1)
+        self.input_channels = input_channels
+
+    def forward(self, x):
+        batch, atoms, channels = x.shape
+        x = x.permute(1, 0, 2).reshape(-1, self.input_channels)
+        x = self.net(x)
+        return x.mean()
+
+
 class Discriminator(nn.Module):
     def __init__(self, channels, dense_judgments, embedding_size, one_hot, noise_level):
         super().__init__()
@@ -331,6 +304,9 @@ class Discriminator(nn.Module):
 
         self.reducer = DiscReducer(channels)
 
+        # TODO: hard-coded batch size
+        self.batch_disc = BatchDisc(16 * input_size, channels)
+
         self.init_atoms = set()
 
         self.apply(init_weights)
@@ -365,8 +341,8 @@ class Discriminator(nn.Module):
         self._init_atoms(atom)
         ae = self \
             .atom_embedding.weight[atom.view(-1)] \
-            .view(-1, 
-            self.embedding_size)
+            .view(-1,
+                  self.embedding_size)
 
         # STOP: Do not remove!! Adding noise is crucial to
         # keep the discriminator from simply distinguising
@@ -380,41 +356,34 @@ class Discriminator(nn.Module):
     def forward(self, x):
         batch, time, channels = x.shape
 
-        # ss = self.self_similarity(x)
+        ss = self.self_similarity(x)
 
-        # atoms = x[..., :self.embedding_size]
-        # keys = self.get_atom_keys(atoms.view(-1, self.embedding_size))
-        # embeddings = unit_norm(self.atom_embedding.weight[keys] \
-        #     .reshape(batch, time, self.embedding_size))
-        # diff = embeddings - unit_norm(atoms)
-        # dj = self.dist_judge(diff)
+        bd = self.batch_disc(x)
 
         a = self.atoms(x)
 
         x = self.dense(x)
-        c = self.contextual(torch.cat([a, x], dim=-1))
+        # c = self.contextual(torch.cat([a, x], dim=-1))
 
         j = self.dense_judge(x)
 
         if self.dense_judgements:
             return torch.cat([
                 j.view(-1),
-                # dj.view(-1),
-                c.view(-1),
-                # ss.view(-1)
+                bd.view(-1),
+                # c.view(-1),
+                ss.view(-1)
             ])
 
-        # j = j.mean(dim=1, keepdim=True)
-        # x = self.reduce(x)
-        # x = torch.cat([x, j], dim=-1)
 
-        x = self.reducer(x)
+        # x = self.reducer(x)
+        x = self.reduce(x)
 
         x = torch.cat([
             x.view(-1),
-            # ss.mean().view(-1),
-            c.mean().view(-1),
-            # dj.mean().view(-1)
+            bd.mean().view(-1),
+            ss.mean().view(-1),
+            # c.mean().view(-1),
         ])
         return x
 
@@ -507,32 +476,43 @@ class ToAtom(nn.Module):
         self.channels = channels
         self.embeddings = [embeddings]
 
+        self.combine = LinearOutputStack(
+            channels, 3, in_channels=channels + 18)
+
         self.atoms = LinearOutputStack(
             channels, 3, out_channels=3072)
         self.pos = LinearOutputStack(
             channels, 3, out_channels=1)
-        
-    
+
     def _decompose(self, x):
         a = x[..., :17]
         p = x[..., -1:]
         return a, p
 
     def _recompose(self, a, p):
-        a = a
-        p = torch.clamp(p, -1, 1)
         return torch.cat([a, p], dim=-1)
-    
+
     def forward(self, encodings, mother_atoms):
-        a = \
-            F.relu(self.atoms(encodings)) @ self.embeddings[0].weight.clone()
+
+        encodings = torch.cat(
+            [encodings, mother_atoms.repeat_interleave(2, 1)], dim=-1)
+        encodings = self.combine(encodings)
+
+        a = self.atoms(encodings)
+
+        # a = \
+        #     F.relu(self.atoms(encodings)) @ self.embeddings[0].weight.clone().detach()
+
+        a = F.relu(a) @ unit_norm(self.embeddings[0].weight.clone().detach())
 
         # a = self.atoms(encodings)
         p = self.pos(encodings)
 
-        ma, mp = self._decompose(mother_atoms.repeat_interleave(2, 1))
+        # TODO: Consider concatenating and transforming the encodings and mother atoms
+        # before producing output
+        # ma, mp = self._decompose(mother_atoms.repeat_interleave(2, 1))
 
-        a = self._recompose(a, p + mp)
+        a = self._recompose(a, p)
 
         return a
 
@@ -542,7 +522,7 @@ class Transform(nn.Module):
         super().__init__()
         self.net = LinearOutputStack(
             channels, 3, in_channels=128 + 18 + channels)
-    
+
     def forward(self, latent, atom, local_latent):
         batch, time, channels = atom.shape
         factor = time // latent.shape[1]
@@ -562,7 +542,7 @@ class PleaseDearGod(nn.Module):
         self.expander = Expander(channels, 2)
         self.attn = MultiHeadAttention(channels, heads)
         self.heads = heads
-    
+
     def forward(self, z, a, local_latent):
         z = z.view(-1, 1, self.channels)
         batch = z.shape[0]
@@ -614,49 +594,43 @@ class Generator(nn.Module):
             use_disc_embeddings or one_hot) else self.embedding_size
 
         self.atoms = LinearOutputStack(
-            channels, 3, out_channels=3072, shortcut=False)
+            channels, 3, out_channels=3072)
         self.pos = LinearOutputStack(
-            channels, 3, out_channels=1, shortcut=False)
+            channels, 3, out_channels=1)
 
-        
         # self.model = PleaseDearGod(channels, max_atoms, embeddings)
+
+        self.to_atom = ToAtom(channels, embeddings)
 
         self.apply(init_weights)
 
     def forward(self, x):
         batch = x.shape[0]
 
-        z = x
-        a = torch.zeros(batch, 1, 18).to(z.device)
-        local_latent = torch.zeros(batch, 1, self.channels).to(z.device)
-        atoms = []
+        # z = x
+        # a = torch.zeros(batch, 1, 18).to(z.device)
+        # local_latent = torch.zeros(batch, 1, self.channels).to(z.device)
+        # atoms = []
 
-        for layer in self.please_dear_god:
-            a, local_latent = layer(z, a, local_latent)
-            atoms.append(a)
-        
-        x = torch.cat(atoms, dim=1)
-        return x
+        # for layer in self.please_dear_god:
+        #     a, local_latent = layer(z, a, local_latent)
+        #     atoms.append(a)
+
+        # recon = x = torch.cat(atoms, dim=1)
 
         encodings = self.conv_expander(x)
-
-        # Interestingly, this doesn't work when trying to use the
-        # discriminator embeddings.  I wonder if it's too hard to produce
-        # embeddings in the two different domains from the same feature
-
-        # encodings = self.net(encodings)
-
-        atoms = \
-            F.relu(self.atoms(encodings)) @ self.embeddings[0].weight.clone()
-        p = torch.clamp(self.pos(encodings), -1, 1)
-
-        # m = sine_one(self.mag(encodings))
-        # p = pos_encode_feature(torch.clamp(self.pos(encodings), -1, 1), 1, 8)
-        # atoms = atoms * m
+        a = self.atoms(encodings)
+        atoms = F.relu(
+            a) @ unit_norm(self.embeddings[0].weight.clone().detach())
+        p = self.pos(encodings)
 
         recon = torch.cat([atoms, p], dim=-1)
 
-        return recon
+        # shuffle so order can't be used by the discriminator
+        output = torch.zeros_like(recon)
+        for i in range(batch):
+            output[i] = recon[i, torch.randperm(x.shape[1]), :]
+        return output
 
 
 if __name__ == '__main__':

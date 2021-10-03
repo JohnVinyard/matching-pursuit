@@ -35,7 +35,8 @@ class Attention(nn.Module):
         
         attn = torch.bmm(q, k.permute(0, 2, 1))
         attn = attn / np.sqrt(attn.numel())
-        attn = torch.sigmoid(attn.view(batch, -1)).view(batch, time, time)
+        attn = torch.sigmoid(attn)
+        # attn = torch.softmax(attn.view(batch, -1), dim=-1).view(batch, time, time)
         x = torch.bmm(attn, v)
 
 

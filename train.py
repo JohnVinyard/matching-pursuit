@@ -24,7 +24,7 @@ batch_size = 16
 overfit = False
 
 # OPTIONS
-dense_judgements = True
+dense_judgements = False
 gen_uses_disc_embeddings = False
 one_hot = False
 embedding_size = 17
@@ -156,8 +156,14 @@ def _nn_decode(encoded, visualize=False, save=True, plot_mags=False):
     
     atom_indices = disc.get_atom_keys(a).data.cpu().numpy()
     # translate from embeddings to time and magnitude
-    pos = (disc.get_times(p).data.cpu().numpy() + 1) / 2
+    pos = np.clip((disc.get_times(p).data.cpu().numpy() + 1) / 2, -1, 1)
     mags = disc.get_mags(a).data.cpu().numpy()
+
+    # filter positions outside (-1, 1)
+    indices = np.where((pos >= 0) & (pos <= 1))
+    atom_indices = atom_indices[indices]
+    pos = pos[indices]
+    mags = mags[indices]
 
 
     if visualize:
