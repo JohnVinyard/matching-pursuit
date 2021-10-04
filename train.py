@@ -29,6 +29,7 @@ gen_uses_disc_embeddings = False
 one_hot = False
 embedding_size = 17
 noise_level = 0.05
+evaluate_disc = False
 
 signal_sizes = [1024, 2048, 4096, 8192, 16384, 32768]
 
@@ -222,7 +223,8 @@ def vis_mags():
     _nn_decode(orig[0], visualize=True, save=True, plot_mags=True)
 
 def listen():
-    encoded = list(nn_decode(recon[0]))
+    index = np.random.randint(0, len(recon))
+    encoded = list(nn_decode(recon[index]))
     decoded = decode(encoded, sparse_dict, return_audio=True)
     return decoded
 
@@ -233,7 +235,8 @@ def real():
     return decoded
 
 
-real_target = 1
+# one-sided label smoothing
+real_target = 0.9
 fake_target = 0
 
 
@@ -314,16 +317,28 @@ if __name__ == '__main__':
     app = zounds.ZoundsApp(locals=locals(), globals=globals())
     app.start_in_thread(9999)
 
-    turn = cycle([Turn.GEN, Turn.DISC])
+    if evaluate_disc:
+        disc.load_state_dict(torch.load('disc.dat'))
 
-    for i, t in enumerate(turn):
-        batch = get_batch(batch_size=batch_size, max_atoms=max_atoms)
-        if t == Turn.GEN:
-            train_gen(batch)
-        elif t == Turn.DISC:
-            orig, recon = train_disc(batch)
-            o = orig[0].data.cpu().numpy()
-            r = recon[0].data.cpu().numpy()
+        result = torch.nn.Parameter(torch.FloatTensor(batch_size, max_atoms, 18).uniform_(-1, 1).to(device))
+        optim = Adam([result], lr=1e-3, betas=(0, 0.9))        
+        while True:
+            j = disc(result).mean()
+            j.backward()
+            optim.step()
+            recon = result
+            print(j.item())
+    else:
+        turn = cycle([Turn.GEN, Turn.DISC])
+
+        for i, t in enumerate(turn):
+            batch = get_batch(batch_size=batch_size, max_atoms=max_atoms)
+            if t == Turn.GEN:
+                train_gen(batch)
+            elif t == Turn.DISC:
+                orig, recon = train_disc(batch)
+                o = orig[0].data.cpu().numpy()
+                r = recon[0].data.cpu().numpy()
 
 
         

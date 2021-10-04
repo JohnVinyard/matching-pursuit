@@ -79,9 +79,9 @@ class SelfSimilarity2(nn.Module):
 
         # similarity with other samples in the batch
         # to promote sample diversity.
-        # indices1 = np.random.permutation(batch)
-        # indices2 = np.roll(indices1, 1)
-        # b = self.batch(x[indices1], x[indices2])
+        indices1 = np.random.permutation(batch)
+        indices2 = np.roll(indices1, 1)
+        b = self.batch(x[indices1], x[indices2])
 
         # TODO: Consider attention layers that create
         # query and value based on a subset of features
@@ -89,7 +89,7 @@ class SelfSimilarity2(nn.Module):
             total.view(-1),
             time.view(-1),
             atom.view(-1),
-            # b.view(-1)
+            b.view(-1)
         ])
 
 
@@ -341,8 +341,7 @@ class Discriminator(nn.Module):
         self._init_atoms(atom)
         ae = self \
             .atom_embedding.weight[atom.view(-1)] \
-            .view(-1,
-                  self.embedding_size)
+            .view(-1, self.embedding_size)
 
         # STOP: Do not remove!! Adding noise is crucial to
         # keep the discriminator from simply distinguising
@@ -356,11 +355,11 @@ class Discriminator(nn.Module):
     def forward(self, x):
         batch, time, channels = x.shape
 
-        ss = self.self_similarity(x)
+        # ss = self.self_similarity(x)
 
-        bd = self.batch_disc(x)
+        # bd = self.batch_disc(x)
 
-        a = self.atoms(x)
+        # a = self.atoms(x)
 
         x = self.dense(x)
         # c = self.contextual(torch.cat([a, x], dim=-1))
@@ -370,22 +369,22 @@ class Discriminator(nn.Module):
         if self.dense_judgements:
             return torch.cat([
                 j.view(-1),
-                bd.view(-1),
+                # bd.view(-1),
                 # c.view(-1),
-                ss.view(-1)
+                # ss.view(-1)
             ])
 
 
-        # x = self.reducer(x)
-        x = self.reduce(x)
+        x = self.reducer(x)
+        # x = self.reduce(x)
 
         x = torch.cat([
             x.view(-1),
-            bd.mean().view(-1),
-            ss.mean().view(-1),
+            # bd.mean().view(-1),
+            # ss.mean().view(-1),
             # c.mean().view(-1),
         ])
-        return x
+        return torch.sigmoid(x)
 
 
 class SetExpansion(nn.Module):

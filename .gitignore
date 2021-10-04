@@ -1,5 +1,6 @@
 *.wav
 *.png
+disc.dat
 __pycache__
 audio
 sparse_coded
