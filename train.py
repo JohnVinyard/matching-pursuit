@@ -339,6 +339,3 @@ if __name__ == '__main__':
                 orig, recon = train_disc(batch)
                 o = orig[0].data.cpu().numpy()
                 r = recon[0].data.cpu().numpy()
-
-
-        
