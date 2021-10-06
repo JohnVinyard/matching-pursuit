@@ -11,6 +11,7 @@ from itertools import cycle
 from enum import Enum
 from matplotlib import pyplot as plt
 from torch.nn.utils.clip_grad import clip_grad_value_
+from scipy.spatial.distance import cdist
 
 sr = zounds.SR22050()
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -234,6 +235,34 @@ def real():
     decoded = decode(encoded, sparse_dict, return_audio=True)
     return decoded
 
+def real_time_graph():
+    g = 2 - np.abs((o[None, :, -1:] - o[:, None, -1:]).reshape((max_atoms, max_atoms)))
+    indices = np.where(g > 1.8)
+    sparse = np.zeros_like(g)
+    sparse[indices] = g[indices]
+    return sparse
+
+def real_atom_graph():
+    atoms = o[..., :-1]
+    norms = np.linalg.norm(atoms, axis=-1, keepdims=True)
+    normed = atoms / (norms + 1e-12)
+    g = cdist(normed, normed)
+    return g.max() - g
+
+def fake_time_graph():
+    g = 2 - np.abs((r[None, :, -1:] - r[:, None, -1:]).reshape((max_atoms, max_atoms)))
+    indices = np.where(g > 1.8)
+    sparse = np.zeros_like(g)
+    sparse[indices] = g[indices]
+    return sparse
+
+def fake_atom_graph():
+    atoms = r[..., :-1]
+    norms = np.linalg.norm(atoms, axis=-1, keepdims=True)
+    normed = atoms / (norms + 1e-12)
+    g = cdist(normed, normed)
+    return g.max() - g
+    
 
 # one-sided label smoothing
 real_target = 0.9
@@ -324,10 +353,11 @@ if __name__ == '__main__':
         optim = Adam([result], lr=1e-3, betas=(0, 0.9))        
         while True:
             j = disc(result).mean()
-            j.backward()
+            loss = least_squares_generator_loss(j)
+            loss.backward()
             optim.step()
             recon = result
-            print(j.item())
+            print(loss.item())
     else:
         turn = cycle([Turn.GEN, Turn.DISC])
 

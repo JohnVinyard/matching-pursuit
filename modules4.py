@@ -265,7 +265,8 @@ class Discriminator(nn.Module):
         input_size = self.embedding_size + 1
 
         self.atom_embedding = nn.Embedding(
-            512 * 6, embedding_size, scale_grad_by_freq=True)
+            512 * 6, 
+            embedding_size)
 
         self.dense = nn.Sequential(
             LinearOutputStack(
@@ -355,9 +356,9 @@ class Discriminator(nn.Module):
     def forward(self, x):
         batch, time, channels = x.shape
 
-        # ss = self.self_similarity(x)
+        ss = self.self_similarity(x)
 
-        # bd = self.batch_disc(x)
+        bd = self.batch_disc(x)
 
         # a = self.atoms(x)
 
@@ -369,19 +370,18 @@ class Discriminator(nn.Module):
         if self.dense_judgements:
             return torch.cat([
                 j.view(-1),
-                # bd.view(-1),
+                bd.view(-1),
                 # c.view(-1),
-                # ss.view(-1)
+                ss.view(-1)
             ])
-
 
         x = self.reducer(x)
         # x = self.reduce(x)
 
         x = torch.cat([
             x.view(-1),
-            # bd.mean().view(-1),
-            # ss.mean().view(-1),
+            bd.mean().view(-1),
+            ss.mean().view(-1),
             # c.mean().view(-1),
         ])
         return torch.sigmoid(x)
@@ -424,6 +424,7 @@ class ResidualUpscale(nn.Module):
         self.expander = Expander(channels, factor=2)
         self.stack = LinearOutputStack(channels, 2)
         self.attn = MultiHeadAttention(channels, heads)
+        self.norm = nn.BatchNorm1d(channels)
 
     def forward(self, x):
 
@@ -439,9 +440,13 @@ class ResidualUpscale(nn.Module):
         x = self.stack(exp)
         x = x + exp
 
+        x = x.permute(0, 2, 1)
+        x = self.norm(x)
+        x = x.permute(0, 2, 1)
+        
         # x = unit_norm(x) * 3.2
 
-        x = self.attn(x)
+        # x = self.attn(x)
 
         return x
 
@@ -618,9 +623,12 @@ class Generator(nn.Module):
         # recon = x = torch.cat(atoms, dim=1)
 
         encodings = self.conv_expander(x)
+        # encodings = self.net(encodings) + encodings
+
         a = self.atoms(encodings)
-        atoms = F.relu(
-            a) @ unit_norm(self.embeddings[0].weight.clone().detach())
+        atoms = \
+            F.relu(a) \
+            @ unit_norm(self.embeddings[0].weight.clone().detach())
         p = self.pos(encodings)
 
         recon = torch.cat([atoms, p], dim=-1)
