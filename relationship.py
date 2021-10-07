@@ -30,6 +30,7 @@ class Relationship(nn.Module):
         x = self.transform(rel)
 
         x = attn * x
+        # x = x.mean(dim=1)
         x, _ = x.max(dim=1)
         # x = unit_norm(x) * 3.2
         return x
