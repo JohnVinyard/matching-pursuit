@@ -112,7 +112,7 @@ class MultiHeadAttention(nn.Module):
         orig = x
 
         if self.in_channels:
-            x = self.ater(x)
+            x = self.alter(x)
 
         results = []
         for attn in self.attn:
@@ -122,6 +122,8 @@ class MultiHeadAttention(nn.Module):
         x = torch.cat(results, dim=-1)
         x = self.fc(x)
         x = x + orig
+
+        
 
         return x
 
@@ -356,9 +358,9 @@ class Discriminator(nn.Module):
     def forward(self, x):
         batch, time, channels = x.shape
 
-        ss = self.self_similarity(x)
+        # ss = self.self_similarity(x)
 
-        bd = self.batch_disc(x)
+        # bd = self.batch_disc(x)
 
         # a = self.atoms(x)
 
@@ -370,9 +372,9 @@ class Discriminator(nn.Module):
         if self.dense_judgements:
             return torch.cat([
                 j.view(-1),
-                bd.view(-1),
+                # bd.view(-1),
                 # c.view(-1),
-                ss.view(-1)
+                # ss.view(-1)
             ])
 
         x = self.reducer(x)
@@ -380,8 +382,8 @@ class Discriminator(nn.Module):
 
         x = torch.cat([
             x.view(-1),
-            bd.mean().view(-1),
-            ss.mean().view(-1),
+            # bd.mean().view(-1),
+            # ss.mean().view(-1),
             # c.mean().view(-1),
         ])
         return torch.sigmoid(x)
@@ -443,7 +445,7 @@ class ResidualUpscale(nn.Module):
         x = x.permute(0, 2, 1)
         x = self.norm(x)
         x = x.permute(0, 2, 1)
-        
+
         # x = unit_norm(x) * 3.2
 
         # x = self.attn(x)
@@ -626,10 +628,9 @@ class Generator(nn.Module):
         # encodings = self.net(encodings) + encodings
 
         a = self.atoms(encodings)
-        atoms = \
-            F.relu(a) \
-            @ unit_norm(self.embeddings[0].weight.clone().detach())
+        atoms = F.relu(a) @ unit_norm(self.embeddings[0].weight)
         p = self.pos(encodings)
+
 
         recon = torch.cat([atoms, p], dim=-1)
 

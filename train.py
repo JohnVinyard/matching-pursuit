@@ -25,7 +25,7 @@ batch_size = 16
 overfit = False
 
 # OPTIONS
-dense_judgements = False
+dense_judgements = True
 gen_uses_disc_embeddings = False
 one_hot = False
 embedding_size = 17

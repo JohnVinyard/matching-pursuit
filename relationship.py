@@ -31,7 +31,7 @@ class Relationship(nn.Module):
 
         x = attn * x
         x, _ = x.max(dim=1)
-        x = unit_norm(x) * 3.2
+        # x = unit_norm(x) * 3.2
         return x
 
 
