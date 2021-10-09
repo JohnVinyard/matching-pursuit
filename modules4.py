@@ -385,16 +385,13 @@ class Discriminator(nn.Module):
         x = self.comb(x)
         # multiple attention layers
         x = self.dense(x)
-        
+
         # c = self.contextual(torch.cat([a, x], dim=-1))
 
-        j = self.dense_judge(x)
-        return torch.sigmoid(j)
-
-        # x = x.mean(dim=1)
-        # x = self.final(x)
-        # x = torch.sigmoid(x)
-        # return x
+        x = x.mean(dim=1)
+        x = self.final(x)
+        x = torch.sigmoid(x)
+        return x
 
         # if self.dense_judgements:
         #     return torch.sigmoid(torch.cat([
@@ -453,7 +450,6 @@ class ResidualUpscale(nn.Module):
         self.expander = Expander(channels, factor=2)
         self.stack = LinearOutputStack(channels, 2)
         self.attn = MultiHeadAttention(channels, heads)
-        self.norm = nn.BatchNorm1d(channels)
 
     def forward(self, x):
 
@@ -469,11 +465,7 @@ class ResidualUpscale(nn.Module):
         x = self.stack(exp)
         x = x + exp
 
-        x = x.permute(0, 2, 1)
-        x = self.norm(x)
-        x = x.permute(0, 2, 1)
-
-        # x = unit_norm(x) * 3.2
+        x = unit_norm(x) * 8
 
         # x = self.attn(x)
 
@@ -516,13 +508,17 @@ class ToAtom(nn.Module):
             channels, 3, out_channels=3072)
         self.pos = LinearOutputStack(
             channels, 3, out_channels=1)
+        self.mag = LinearOutputStack(
+            channels, 3, out_channels=1)
 
     def _decompose(self, x):
         a = x[..., :17]
         p = x[..., -1:]
-        return a, p
+        m = torch.norm(a, dim=-1, keepdim=True)
+        return a, p, m
 
-    def _recompose(self, a, p):
+    def _recompose(self, a, p, m):
+        a = unit_norm(a) * m
         return torch.cat([a, p], dim=-1)
 
     def forward(self, encodings, mother_atoms):
@@ -536,16 +532,17 @@ class ToAtom(nn.Module):
         # a = \
         #     F.relu(self.atoms(encodings)) @ self.embeddings[0].weight.clone().detach()
 
-        a = F.relu(a) @ unit_norm(self.embeddings[0].weight)
+        m = self.mag(encodings)
+        a = torch.softmax(a, dim=-1) @ unit_norm(self.embeddings[0].weight)
 
         # a = self.atoms(encodings)
         p = self.pos(encodings)
 
         # TODO: Consider concatenating and transforming the encodings and mother atoms
         # before producing output
-        ma, mp = self._decompose(mother_atoms.repeat_interleave(2, 1))
+        ma, mp, mm = self._decompose(mother_atoms.repeat_interleave(2, 1))
         # positions are relative
-        a = self._recompose(a, p + mp)
+        a = self._recompose(a, p + mp, m + mm)
 
         return a
 
@@ -579,8 +576,12 @@ class PleaseDearGod(nn.Module):
     def forward(self, z, a, local_latent):
         z = z.view(-1, 1, self.channels)
         batch = z.shape[0]
+
         x = self.transformer(z, a, local_latent)
-        x = self.attn(x)
+
+        if a.shape[1] > 1:
+            x = self.attn(x)
+
         x = self.expander(x)
         # TODO: Try positional encoding
         a = self.to_atom(x, a)
@@ -644,15 +645,15 @@ class Generator(nn.Module):
         a = torch.zeros(batch, 1, 18).to(z.device)
         local_latent = torch.zeros(batch, 1, self.channels).to(z.device)
         atoms = []
-
         for layer in self.please_dear_god:
             a, local_latent = layer(z, a, local_latent)
             atoms.append(a)
-
         recon = x = torch.cat(atoms, dim=1)
 
         # encodings = self.conv_expander(x)
         # a = self.atoms(encodings)
+        # # TODO: Try producing embeddings directly with a commitment cost
+        # # and/or vector-quantized loss
         # atoms = F.relu(a) @ unit_norm(self.embeddings[0].weight)
         # p = self.pos(encodings)
         # recon = torch.cat([atoms, p], dim=-1)
