@@ -52,6 +52,13 @@ gen = Generator(
     max_atoms=max_atoms).to(device)
 gen_optim = Adam(gen.parameters(), lr=1e-4, betas=(0, 0.9))
 
+def unit_norm(x):
+    if isinstance(x, np.ndarray):
+        n = np.linalg.norm(x, axis=-1, keepdims=True)
+    else:
+        n = torch.norm(x, dim=-1, keepdim=True)
+    return x / (n + 1e-12)
+
 
 class LatentGenerator(object):
     def __init__(self, overfit=False):
@@ -296,8 +303,20 @@ def train_gen(batch):
     gen_optim.zero_grad()
     z = latent()
     recon = gen.forward(z)
+
+    # commitment cost
+    fake_atoms = unit_norm(recon[:, :, :17])
+    real_atoms = unit_norm(disc.atom_embedding.weight)[None, ...]
+
+    dist = torch.cdist(fake_atoms, real_atoms).reshape(-1, 3072)
+    indices = torch.argmin(dist, dim=1)
+
+    commitment_cost = ((fake_atoms.reshape(-1, 17) - real_atoms.reshape(3072, 17)[indices]) ** 2).mean()
+    print('C', commitment_cost.item())
+
+
     fj = disc.forward(recon)
-    loss = least_squares_generator_loss(fj)
+    loss = least_squares_generator_loss(fj) + commitment_cost
     loss.backward()
     clip_grad_value_(gen.parameters(), 0.5)
     gen_optim.step()

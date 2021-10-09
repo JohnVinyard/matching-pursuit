@@ -19,9 +19,9 @@ class Attention(nn.Module):
     def __init__(self, channels, reduce=False):
         super().__init__()
         self.channels = channels
-        self.query = nn.Linear(channels, channels)
-        self.key = nn.Linear(channels, channels)
-        self.value = nn.Linear(channels, channels)
+        self.query = nn.Linear(channels, channels, bias=False)
+        self.key = nn.Linear(channels, channels, bias=False)
+        self.value = nn.Linear(channels, channels, bias=False)
 
         self.reduce = reduce
         # self.norm = nn.BatchNorm1d(self.channels)

@@ -386,7 +386,9 @@ class Discriminator(nn.Module):
         # multiple attention layers
         x = self.dense(x)
 
-        # c = self.contextual(torch.cat([a, x], dim=-1))
+        j = self.dense_judge(x)
+        return torch.sigmoid(j)
+
 
         x = x.mean(dim=1)
         x = self.final(x)
@@ -502,23 +504,20 @@ class ToAtom(nn.Module):
         self.embeddings = [embeddings]
 
         self.combine = LinearOutputStack(
-            channels, 3, in_channels=channels + 18)
+            channels, 3, in_channels=channels + 18, bias=False)
 
         self.atoms = LinearOutputStack(
-            channels, 3, out_channels=3072)
+            channels, 3, out_channels=3072, bias=False)
         self.pos = LinearOutputStack(
-            channels, 3, out_channels=1)
-        self.mag = LinearOutputStack(
-            channels, 3, out_channels=1)
+            channels, 3, out_channels=1, bias=False)
+        
 
     def _decompose(self, x):
         a = x[..., :17]
         p = x[..., -1:]
-        m = torch.norm(a, dim=-1, keepdim=True)
-        return a, p, m
+        return a, p
 
-    def _recompose(self, a, p, m):
-        a = unit_norm(a) * m
+    def _recompose(self, a, p):
         return torch.cat([a, p], dim=-1)
 
     def forward(self, encodings, mother_atoms):
@@ -528,21 +527,12 @@ class ToAtom(nn.Module):
         encodings = self.combine(encodings)
 
         a = self.atoms(encodings)
-
-        # a = \
-        #     F.relu(self.atoms(encodings)) @ self.embeddings[0].weight.clone().detach()
-
-        m = self.mag(encodings)
-        a = torch.softmax(a, dim=-1) @ unit_norm(self.embeddings[0].weight)
-
-        # a = self.atoms(encodings)
+        a = F.relu(a) @ self.embeddings[0].weight
         p = self.pos(encodings)
 
-        # TODO: Consider concatenating and transforming the encodings and mother atoms
-        # before producing output
-        ma, mp, mm = self._decompose(mother_atoms.repeat_interleave(2, 1))
+        ma, mp = self._decompose(mother_atoms.repeat_interleave(2, 1))
         # positions are relative
-        a = self._recompose(a, p + mp, m + mm)
+        a = self._recompose(a, p + mp)
 
         return a
 
@@ -551,7 +541,7 @@ class Transform(nn.Module):
     def __init__(self, channels):
         super().__init__()
         self.net = LinearOutputStack(
-            channels, 3, in_channels=128 + 18 + channels)
+            channels, 3, in_channels=128 + 18 + channels, bias=False)
 
     def forward(self, latent, atom, local_latent):
         batch, time, channels = atom.shape
@@ -579,8 +569,7 @@ class PleaseDearGod(nn.Module):
 
         x = self.transformer(z, a, local_latent)
 
-        if a.shape[1] > 1:
-            x = self.attn(x)
+        x = self.attn(x)
 
         x = self.expander(x)
         # TODO: Try positional encoding

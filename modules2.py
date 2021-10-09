@@ -17,7 +17,7 @@ def init_weights(p):
 
     with torch.no_grad():
         try:
-            p.weight.uniform_(-0.1, 0.1)
+            p.weight.uniform_(-0.11, 0.11)
         except AttributeError:
             pass
 
@@ -193,8 +193,10 @@ class Expander(nn.Module):
         batch, time, channels = x.shape
         # x = x.view(-1, self.channels)
         x = self.expand(x)
+
         # x = x.view(batch, time, channels, self.factor)
         # x = x.permute(0, 3, 1, 2)
+
         x = x.reshape(batch, -1, self.channels)
         return x
 
