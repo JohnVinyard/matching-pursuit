@@ -1,3 +1,4 @@
+import math
 from torch.nn.modules.activation import LeakyReLU
 from torch.nn.modules.container import Sequential
 from modules2 import Cluster, Expander, init_weights, PositionalEncoding
@@ -297,7 +298,7 @@ class Discriminator(nn.Module):
             embedding_size)
         self.atom_embedding.weight.requires_grad = False
 
-        in_channels = embedding_size + 2
+        in_channels = embedding_size + 2 + 17
         self.bd = BatchDisc(in_channels, channels)
         self.rel = Relationship(in_channels, channels)
         self.abs = LinearOutputStack(channels, 3, in_channels=in_channels)
@@ -378,21 +379,22 @@ class Discriminator(nn.Module):
     def forward(self, x):
         batch, time, channels = x.shape
 
-        # x = x[..., :-1]
-        # t = pos_encode_feature(x[..., -1:], 1, 2**15, 8)
-        # x = torch.cat([x, t], dim=-1)
+        t = pos_encode_feature(x[..., -2:-1], 1, 2**15, 8)
+        x = torch.cat([x, t], dim=-1)
 
-        b = self.bd(x)
+        
 
         # look at atom relationships
         r = self.rel(x)
         # look at absolute atom positions
         a = self.abs(x)
+
         # combine and reduce
         x = torch.cat([r, a], dim=-1)
         x = self.comb(x)
         # multiple attention layers
         x, d = self.dense(x)
+
 
         return d
 
@@ -641,43 +643,63 @@ class Generator(nn.Module):
 
         self.apply(init_weights)
 
-    def forward(self, x):
-        batch = x.shape[0]
+    def forward(self, x, batch):
 
-        # x = x[:, None, :] + self.pos_encoder.pos_encode[None, :, :-1]
-        # encodings = self.net(x)
+        just_shuffle = False
 
-        z = x
-        a = torch.zeros(batch, 1, 265).to(z.device)
-        local_latent = torch.zeros(batch, 1, self.channels).to(z.device)
-        atoms = []
-        for layer in self.please_dear_god:
-            a, local_latent = layer(z, a, local_latent)
-            atoms.append(a)
-        recon = x = torch.cat(atoms, dim=1)
+        if just_shuffle:
+            b, time, channels = batch.shape
 
-        # encodings = self.conv_expander(x)
+            batch = batch.clone().detach()
+            mags = batch[:, :, -1].reshape((b * time))
+            indices = np.random.permutation(mags.shape[0])
+            mags = mags[indices].reshape((b, time))
 
-        # a = F.relu(self.atoms(encodings))
-        # b = torch.softmax(self.band(encodings), dim=-1)
-        # a = torch.cat([a, b], dim=-1)
 
-        # # a = torch.softmax(self.atoms(encodings), dim=-1) @ self.embeddings[0].weight
+            # shuffle atoms in the batch
+            atoms = batch[..., :-2].reshape((b * time, -1))
+            indices = np.random.permutation(atoms.shape[0])
+            atoms = atoms[indices].reshape((b, time, -1))
 
-        # # TODO: Try producing embeddings directly with a commitment cost
-        # # and/or vector-quantized loss
-        # # atoms = F.relu(a) @ unit_norm(self.embeddings[0].weight)
+            # mess with atoms
+            # batch[..., :-2] = atoms
 
-        # p = self.pos(encodings)
-        # m = F.relu(self.mag(encodings))
+            # mess with positions
+            batch[:, :, -2] = torch.from_numpy(np.random.uniform(-1, 1, (batch.shape[0], batch.shape[1]))).to(x.device).float()
 
-        # recon = torch.cat([a, p, m], dim=-1)
+            # mess with magnitudes
+            # batch[:, :, -1] = mags
+            return batch
+        
+        else:
+            batch = x.shape[0]
 
-        # shuffle so order can't be used by the discriminator
-        output = torch.zeros_like(recon)
-        for i in range(batch):
-            output[i] = recon[i, torch.randperm(x.shape[1]), :]
-        return output
+            # x = x[:, None, :] + self.pos_encoder.pos_encode[None, :, :-1]
+            # encodings = self.net(x)
+
+            # z = x
+            # a = torch.zeros(batch, 1, 265).to(z.device)
+            # local_latent = torch.zeros(batch, 1, self.channels).to(z.device)
+            # atoms = []
+            # for layer in self.please_dear_god:
+            #     a, local_latent = layer(z, a, local_latent)
+            #     atoms.append(a)
+            # recon = x = torch.cat(atoms, dim=1)
+
+            encodings = self.conv_expander(x)
+
+            a = F.relu(self.atoms(encodings))
+            b = torch.softmax(self.band(encodings), dim=-1)
+            a = torch.cat([a, b], dim=-1)
+            p = self.pos(encodings)
+            m = F.relu(self.mag(encodings))
+            recon = torch.cat([a, p, m], dim=-1)
+
+            # shuffle so order can't be used by the discriminator
+            output = torch.zeros_like(recon)
+            for i in range(batch):
+                output[i] = recon[i, torch.randperm(x.shape[1]), :]
+            return output
 
 
 if __name__ == '__main__':

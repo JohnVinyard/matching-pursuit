@@ -30,7 +30,7 @@ def unit_norm(x):
 
 embeddings = []
 for band, d in sparse_dict.items():
-    spec = unit_norm(np.abs(np.fft.rfft(d, norm='ortho')))
+    spec = np.abs(np.fft.rfft(d, norm='ortho'))
     b = torch.zeros((spec.shape[0], len(sparse_dict)))
     b[:, band] = 1
     full = np.concatenate([spec, b], axis=-1)
@@ -263,6 +263,33 @@ def real():
     decoded = decode(encoded, sparse_dict, return_audio=True)
     return decoded
 
+
+def fake_spec():
+    return r[..., :-8]
+
+def real_spec():
+    return o[..., :-8]
+
+
+def fake_bands():
+    return r[..., -8:-2]
+
+def real_bands():
+    return o[..., -8:-2]
+
+def real_time_dist():
+    return np.sort(o[..., -2])
+
+def fake_time_dist():
+    return np.sort(r[..., -2])
+
+def real_mag_dist():
+    return np.sort(o[..., -1])
+
+def fake_mag_dist():
+    return np.sort(r[..., -1])
+
+
 def real_time_graph():
     g = 2 - np.abs((o[None, :, -1:] - o[:, None, -1:]).reshape((max_atoms, max_atoms)))
     indices = np.where(g > 1.8)
@@ -309,12 +336,12 @@ def train_disc(batch):
     disc_optim.zero_grad()
     with torch.no_grad():
         z = latent()
-        recon = gen.forward(z)
+        recon = gen.forward(z, batch)
     rj = disc.forward(batch)
     fj = disc.forward(recon)
     loss = least_squares_disc_loss(rj, fj)
     loss.backward()
-    clip_grad_value_(disc.parameters(), 0.5)
+    # clip_grad_value_(disc.parameters(), 0.5)
     disc_optim.step()
     print('Disc: ', loss.item())
     return batch, recon
@@ -323,7 +350,7 @@ def train_disc(batch):
 def train_gen(batch):
     gen_optim.zero_grad()
     z = latent()
-    recon = gen.forward(z)
+    recon = gen.forward(z, batch)
 
     # commitment cost
     real = disc.atom_embedding.weight
@@ -339,7 +366,7 @@ def train_gen(batch):
     fj = disc.forward(recon)
     loss = least_squares_generator_loss(fj) + commitment_cost
     loss.backward()
-    clip_grad_value_(gen.parameters(), 0.5)
+    # clip_grad_value_(gen.parameters(), 0.5)
     gen_optim.step()
     print('Gen: ', loss.item())
 
@@ -397,7 +424,10 @@ if __name__ == '__main__':
             recon = result
             print(loss.item())
     else:
-        turn = cycle([Turn.GEN, Turn.DISC])
+        turn = cycle([
+            Turn.GEN, 
+            Turn.DISC
+        ])
 
         for i, t in enumerate(turn):
             batch = get_batch(batch_size=batch_size, max_atoms=max_atoms)
