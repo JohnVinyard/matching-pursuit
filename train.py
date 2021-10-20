@@ -15,20 +15,44 @@ from scipy.spatial.distance import cdist
 
 sr = zounds.SR22050()
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+
+sparse_dict = learn_dict()
+
+torch.backends.cudnn.benchmark = True
+
+def unit_norm(x):
+    if isinstance(x, np.ndarray):
+        n = np.linalg.norm(x, axis=-1, keepdims=True)
+    else:
+        n = torch.norm(x, dim=-1, keepdim=True)
+    return x / (n + 1e-12)
+
+embeddings = []
+for band, d in sparse_dict.items():
+    spec = unit_norm(np.abs(np.fft.rfft(d, norm='ortho')))
+    b = torch.zeros((spec.shape[0], len(sparse_dict)))
+    b[:, band] = 1
+    full = np.concatenate([spec, b], axis=-1)
+    embeddings.append(full)
+
+embeddings = np.concatenate(embeddings, axis=0)
+
+
 max_atoms = 128
 embedding_dim = 8
 n_atoms = 512 * 6  # 512 atoms * 6 bands
 mag_embedding_dim = 1
 pos_embedding_dim = 1
 total_vector_dim = embedding_dim + mag_embedding_dim + pos_embedding_dim
-batch_size = 16
+batch_size = 8
 overfit = False
 
 # OPTIONS
 dense_judgements = True
 gen_uses_disc_embeddings = False
 one_hot = False
-embedding_size = 17
+embedding_size = 263
 noise_level = 0.05
 evaluate_disc = False
 
@@ -39,7 +63,8 @@ disc = Discriminator(
     dense_judgements,
     embedding_size,
     one_hot,
-    noise_level).to(device)
+    noise_level,
+    embeddings).to(device)
 disc_optim = Adam(disc.parameters(), lr=1e-4, betas=(0, 0.9))
 
 gen = Generator(
@@ -52,12 +77,7 @@ gen = Generator(
     max_atoms=max_atoms).to(device)
 gen_optim = Adam(gen.parameters(), lr=1e-4, betas=(0, 0.9))
 
-def unit_norm(x):
-    if isinstance(x, np.ndarray):
-        n = np.linalg.norm(x, axis=-1, keepdims=True)
-    else:
-        n = torch.norm(x, dim=-1, keepdim=True)
-    return x / (n + 1e-12)
+
 
 
 class LatentGenerator(object):
@@ -156,17 +176,18 @@ def _nn_decode(encoded, visualize=False, save=True, plot_mags=False):
 
     size = embedding_size if not one_hot else 3072
     if isinstance(encoded, list):
-        a, p = encoded
+        a, p, m = encoded
     else:
-        a, p = \
+        a, p, m = \
             encoded[:, :size], \
-            encoded[:, size:size * 2]
+            encoded[:, -2:-1], \
+            encoded[:, -1:]
 
     
     atom_indices = disc.get_atom_keys(a).data.cpu().numpy()
     # translate from embeddings to time and magnitude
-    pos = np.clip((disc.get_times(p).data.cpu().numpy() + 1) / 2, -1, 1)
-    mags = disc.get_mags(a).data.cpu().numpy()
+    pos = (disc.get_times(p).data.cpu().numpy() + 1) / 2
+    mags = disc.get_mags(m).data.cpu().numpy()
 
     # filter positions outside (-1, 1)
     indices = np.where((pos >= 0) & (pos <= 1))
@@ -305,15 +326,15 @@ def train_gen(batch):
     recon = gen.forward(z)
 
     # commitment cost
-    fake_atoms = unit_norm(recon[:, :, :17])
-    real_atoms = unit_norm(disc.atom_embedding.weight)[None, ...]
+    real = disc.atom_embedding.weight
+    fake_atoms = recon[:, :, :-2]
+    real_atoms = real[None, ...]
 
-    dist = torch.cdist(fake_atoms, real_atoms).reshape(-1, 3072)
+    dist = torch.cdist(fake_atoms, real_atoms).reshape(-1, real.shape[0])
     indices = torch.argmin(dist, dim=1)
 
-    commitment_cost = ((fake_atoms.reshape(-1, 17) - real_atoms.reshape(3072, 17)[indices]) ** 2).mean()
-    print('C', commitment_cost.item())
-
+    commitment_cost = ((fake_atoms.reshape(-1, embedding_size) - real_atoms.reshape(-1, embedding_size)[indices]) ** 2).mean()
+    commitment_cost = commitment_cost * 10
 
     fj = disc.forward(recon)
     loss = least_squares_generator_loss(fj) + commitment_cost
@@ -358,9 +379,7 @@ class Turn(Enum):
 
 
 if __name__ == '__main__':
-    sparse_dict = learn_dict()
-
-    torch.backends.cudnn.benchmark = True
+    
 
     app = zounds.ZoundsApp(locals=locals(), globals=globals())
     app.start_in_thread(9999)
