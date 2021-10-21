@@ -30,7 +30,7 @@ def unit_norm(x):
 
 embeddings = []
 for band, d in sparse_dict.items():
-    spec = np.abs(np.fft.rfft(d, norm='ortho'))
+    spec = unit_norm(np.abs(np.fft.rfft(d, norm='ortho')))
     b = torch.zeros((spec.shape[0], len(sparse_dict)))
     b[:, band] = 1
     full = np.concatenate([spec, b], axis=-1)
@@ -353,18 +353,18 @@ def train_gen(batch):
     recon = gen.forward(z, batch)
 
     # commitment cost
-    real = disc.atom_embedding.weight
-    fake_atoms = recon[:, :, :-2]
-    real_atoms = real[None, ...]
+    # real = disc.atom_embedding.weight
+    # fake_atoms = recon[:, :, :-2]
+    # real_atoms = real[None, ...]
 
-    dist = torch.cdist(fake_atoms, real_atoms).reshape(-1, real.shape[0])
-    indices = torch.argmin(dist, dim=1)
+    # dist = torch.cdist(fake_atoms, real_atoms).reshape(-1, real.shape[0])
+    # indices = torch.argmin(dist, dim=1)
 
-    commitment_cost = ((fake_atoms.reshape(-1, embedding_size) - real_atoms.reshape(-1, embedding_size)[indices]) ** 2).mean()
-    commitment_cost = commitment_cost * 10
+    # commitment_cost = ((fake_atoms.reshape(-1, embedding_size) - real_atoms.reshape(-1, embedding_size)[indices]) ** 2).mean()
+    # commitment_cost = commitment_cost * 5
 
     fj = disc.forward(recon)
-    loss = least_squares_generator_loss(fj) + commitment_cost
+    loss = least_squares_generator_loss(fj) #+ commitment_cost
     loss.backward()
     # clip_grad_value_(gen.parameters(), 0.5)
     gen_optim.step()

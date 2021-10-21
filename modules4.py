@@ -395,16 +395,14 @@ class Discriminator(nn.Module):
         # multiple attention layers
         x, d = self.dense(x)
 
-
-        return d
-
-        # x = self.dense_judge(x)
-        # return torch.sigmoid(x)
+        x = self.dense_judge(x)
+        return torch.sigmoid(x)
 
         # global pooling
         x = x.mean(dim=1)
         x = self.final(x)
         x = torch.sigmoid(x)
+        return x
         
 
         return torch.cat([x.view(-1), b.view(-1)])
@@ -688,11 +686,14 @@ class Generator(nn.Module):
 
             encodings = self.conv_expander(x)
 
-            a = F.relu(self.atoms(encodings))
+            a = unit_norm(F.relu(self.atoms(encodings)))
             b = torch.softmax(self.band(encodings), dim=-1)
             a = torch.cat([a, b], dim=-1)
-            p = self.pos(encodings)
-            m = F.relu(self.mag(encodings))
+
+            # a = torch.softmax(self.atoms(encodings), dim=-1) @ self.embeddings[0].weight
+
+            p = torch.tanh(self.pos(encodings))
+            m = torch.sigmoid(self.mag(encodings)) * 20
             recon = torch.cat([a, p, m], dim=-1)
 
             # shuffle so order can't be used by the discriminator
