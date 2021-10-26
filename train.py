@@ -37,6 +37,8 @@ for band, d in sparse_dict.items():
     embeddings.append(full)
 
 embeddings = np.concatenate(embeddings, axis=0)
+proj = np.random.normal(0, 1, (263, 17))
+embeddings = np.dot(embeddings, proj)
 
 
 max_atoms = 128
@@ -45,14 +47,14 @@ n_atoms = 512 * 6  # 512 atoms * 6 bands
 mag_embedding_dim = 1
 pos_embedding_dim = 1
 total_vector_dim = embedding_dim + mag_embedding_dim + pos_embedding_dim
-batch_size = 8
+batch_size = 16
 overfit = False
 
 # OPTIONS
 dense_judgements = True
 gen_uses_disc_embeddings = False
 one_hot = False
-embedding_size = 263
+embedding_size = 17
 noise_level = 0.05
 evaluate_disc = False
 
@@ -264,18 +266,18 @@ def real():
     return decoded
 
 
-def fake_spec():
-    return r[..., :-8]
+# def fake_spec():
+#     return r[..., :-8]
 
-def real_spec():
-    return o[..., :-8]
+# def real_spec():
+#     return o[..., :-8]
 
 
-def fake_bands():
-    return r[..., -8:-2]
+# def fake_bands():
+#     return r[..., -8:-2]
 
-def real_bands():
-    return o[..., -8:-2]
+# def real_bands():
+#     return o[..., -8:-2]
 
 def real_time_dist():
     return np.sort(o[..., -2])
@@ -353,18 +355,18 @@ def train_gen(batch):
     recon = gen.forward(z, batch)
 
     # commitment cost
-    # real = disc.atom_embedding.weight
-    # fake_atoms = recon[:, :, :-2]
-    # real_atoms = real[None, ...]
+    real = disc.atom_embedding.weight
+    fake_atoms = recon[:, :, :-2]
+    real_atoms = real[None, ...]
 
-    # dist = torch.cdist(fake_atoms, real_atoms).reshape(-1, real.shape[0])
-    # indices = torch.argmin(dist, dim=1)
+    dist = torch.cdist(unit_norm(fake_atoms), unit_norm(real_atoms)).reshape(-1, real.shape[0])
+    indices = torch.argmin(dist, dim=1)
 
-    # commitment_cost = ((fake_atoms.reshape(-1, embedding_size) - real_atoms.reshape(-1, embedding_size)[indices]) ** 2).mean()
-    # commitment_cost = commitment_cost * 5
+    commitment_cost = ((fake_atoms.reshape(-1, embedding_size) - real_atoms.reshape(-1, embedding_size)[indices]) ** 2).mean()
+    commitment_cost = commitment_cost * 0.1
 
     fj = disc.forward(recon)
-    loss = least_squares_generator_loss(fj) #+ commitment_cost
+    loss = least_squares_generator_loss(fj) + commitment_cost
     loss.backward()
     # clip_grad_value_(gen.parameters(), 0.5)
     gen_optim.step()
@@ -437,3 +439,5 @@ if __name__ == '__main__':
                 orig, recon = train_disc(batch)
                 o = orig[0].data.cpu().numpy()
                 r = recon[0].data.cpu().numpy()
+                
+            

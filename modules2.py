@@ -40,10 +40,30 @@ class Dilated(nn.Module):
             dilation=dilation)
 
     def forward(self, x):
-        orig = x
         x = F.pad(x, (self.dilation, 0))
         x = self.net(x)
+        x = F.leaky_relu(x, 0.2)
+        return x
+
+
+class DilatedBlock(nn.Module):
+    def __init__(self, channels, dilation):
+        super().__init__()
+        self.dilated = Dilated(channels, dilation)
+        self.conv = nn.Conv1d(channels, channels, 1, 1, 0)
+        # self.norm = nn.BatchNorm1d(channels)
+    
+    def forward(self, x):
+        orig = x
+        x = self.dilated(x)
+        x = self.conv(x)
         x = F.leaky_relu(x + orig, 0.2)
+
+        # Pixel Norm
+        x = x / torch.sqrt(torch.mean(x ** 2, dim=1, keepdim=True) + 1e-8)
+
+        # x = self.norm(x)
+
         return x
 
 

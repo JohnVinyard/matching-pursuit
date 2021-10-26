@@ -1,13 +1,14 @@
 import math
 from torch.nn.modules.activation import LeakyReLU
 from torch.nn.modules.container import Sequential
-from modules2 import Cluster, Expander, init_weights, PositionalEncoding
+from torch.nn.modules.normalization import LayerNorm
+from modules2 import Cluster, DilatedBlock, Expander, init_weights, PositionalEncoding
 from modules3 import Attention, LinearOutputStack, ToThreeD, ToTwoD
 from torch import device, nn
 import torch
 import numpy as np
 from torch.nn.modules.linear import Linear
-from modules import ResidualStack, get_best_matches, pos_encode, pos_encode_feature
+from modules import ResidualBlock, ResidualStack, get_best_matches, pos_encode, pos_encode_feature
 from torch.nn import functional as F
 
 from relationship import Relationship
@@ -35,6 +36,43 @@ def unit_norm(x):
     else:
         n = torch.norm(x, dim=-1, keepdim=True)
     return x / (n + 1e-12)
+
+
+class Conv(nn.Module):
+    def __init__(self, channels, kernel=7):
+        super().__init__()
+        self.conv = nn.Conv1d(channels, channels, kernel, 1, kernel // 2)
+        self.kernel = kernel
+    
+    def forward(self, x):
+        x = x.permute(0, 2, 1)
+        x = self.conv(x)
+        x = x.permute(0,2, 1)
+        # Pixel Norm
+        x = x / torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + 1e-8)
+        return x
+
+
+class Mixer(nn.Module):
+    def __init__(self, channels, layers):
+        super().__init__()
+        self.net = nn.Sequential(
+            Conv(channels), 
+            *[
+                nn.Sequential(
+                    
+                    ResidualBlock(channels),
+                )
+                for _ in range(layers)
+        ])
+    
+    def forward(self, x):
+        for layer in self.net:
+            x = layer(x)
+            # Pixel Norm
+            x = x / torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + 1e-8)
+            x = x.permute(0, 2, 1)
+        return x
 
 
 class SelfSimilaritySummarizer(nn.Module):
@@ -288,15 +326,13 @@ class Discriminator(nn.Module):
 
         self.self_similarity = SelfSimilarity2(128)
 
-        
-
 
         # input_size = self.embedding_size + 1
 
         self.atom_embedding = nn.Embedding(
             512 * 6,
             embedding_size)
-        self.atom_embedding.weight.requires_grad = False
+        # self.atom_embedding.weight.requires_grad = False
 
         in_channels = embedding_size + 2 + 17
         self.bd = BatchDisc(in_channels, channels)
@@ -304,6 +340,22 @@ class Discriminator(nn.Module):
         self.abs = LinearOutputStack(channels, 3, in_channels=in_channels)
 
         self.comb = LinearOutputStack(channels, 3, in_channels=channels * 2)
+
+        self.stack = nn.Sequential(
+            DilatedBlock(channels, 1),
+            DilatedBlock(channels, 2),
+            DilatedBlock(channels, 4),
+            DilatedBlock(channels, 8),
+            DilatedBlock(channels, 16),
+            DilatedBlock(channels, 1),
+            DilatedBlock(channels, 2),
+            DilatedBlock(channels, 4),
+            DilatedBlock(channels, 8),
+            DilatedBlock(channels, 16),
+            DilatedBlock(channels, 1),
+        )
+
+        self.mixer = Mixer(channels, 12)
 
         self.dense = nn.Sequential(
             LinearOutputStack(
@@ -316,8 +368,7 @@ class Discriminator(nn.Module):
                 channels,
                 attention_heads=8,
                 attention_layers=12,
-                intermediate_layers=2,
-                discriminator=True)
+                intermediate_layers=2)
         )
 
         # self.atoms = LinearOutputStack(
@@ -326,6 +377,9 @@ class Discriminator(nn.Module):
             channels, 3, in_channels=channels * 2, out_channels=1)
 
         self.dense_judge = LinearOutputStack(channels, 4, out_channels=1)
+
+
+        self.atom_judge = LinearOutputStack(in_channels, 4, out_channels=1)
 
         self.init_atoms = set()
         self.final = LinearOutputStack(channels, 3, out_channels=1)
@@ -348,16 +402,16 @@ class Discriminator(nn.Module):
         Return atom indices
         """
         nw = self.atom_embedding.weight
-        return get_best_matches(nw, embeddings)
+        return get_best_matches(unit_norm(nw), unit_norm(embeddings))
 
-    # def _init_atoms(self, atom):
-    #     indices = set([int(a) for a in atom.view(-1)])
-    #     to_init = indices - self.init_atoms
-    #     self.init_atoms.update(to_init)
-    #     for ti in to_init:
-    #         with torch.no_grad():
-    #             self.atom_embedding.weight[ti] = torch.FloatTensor(
-    #                 self.embedding_size).uniform_(-1, 1).to(atom.device)
+    def _init_atoms(self, atom):
+        indices = set([int(a) for a in atom.view(-1)])
+        to_init = indices - self.init_atoms
+        self.init_atoms.update(to_init)
+        for ti in to_init:
+            with torch.no_grad():
+                self.atom_embedding.weight[ti] = torch.FloatTensor(
+                    self.embedding_size).uniform_(-1, 1).to(atom.device)
 
     def get_embeddings(self, x):
         atom, time, mag = x
@@ -369,7 +423,7 @@ class Discriminator(nn.Module):
         # STOP: Do not remove!! Adding noise is crucial to
         # keep the discriminator from simply distinguising
         # based on exact atom matches
-        # ae = unit_norm(ae) + torch.zeros_like(ae).uniform_(-0.1, 0.1)
+        ae = unit_norm(ae) + torch.zeros_like(ae).uniform_(-0.1, 0.1)
 
         pe = time.view(-1, 1)
         m = mag.view(-1, 1)
@@ -381,6 +435,9 @@ class Discriminator(nn.Module):
 
         t = pos_encode_feature(x[..., -2:-1], 1, 2**15, 8)
         x = torch.cat([x, t], dim=-1)
+        # j = torch.sigmoid(self.atom_judge(x))
+
+        # b = self.bd(x)
 
         
 
@@ -392,17 +449,29 @@ class Discriminator(nn.Module):
         # combine and reduce
         x = torch.cat([r, a], dim=-1)
         x = self.comb(x)
-        # multiple attention layers
-        x, d = self.dense(x)
 
-        x = self.dense_judge(x)
-        return torch.sigmoid(x)
+        
+        x = x.permute(0, 2, 1)
+        x = self.stack(x)
+        x = x.permute(0, 2, 1)
+
+        # multiple attention layers
+        # x = self.dense(x)
+
+        # x = self.mixer(x)
+        # x = self.dense_judge(x)
+        # x = torch.sigmoid(x)
 
         # global pooling
         x = x.mean(dim=1)
         x = self.final(x)
         x = torch.sigmoid(x)
-        return x
+
+        return torch.cat([
+            x.view(-1), 
+            # j.view(-1), 
+            # b.view(-1)
+        ])
         
 
         return torch.cat([x.view(-1), b.view(-1)])
@@ -504,9 +573,9 @@ class ToAtom(nn.Module):
             channels, 3, in_channels=channels + embeddings.weight.shape[1] + 2, bias=False)
 
         self.atoms = LinearOutputStack(
-            channels, 3, out_channels=257, bias=False)
-        self.band = LinearOutputStack(
-            channels, 3, out_channels=6, bias=False)
+            channels, 3, out_channels=17, bias=False)
+        # self.band = LinearOutputStack(
+        #     channels, 3, out_channels=6, bias=False)
         self.pos = LinearOutputStack(
             channels, 3, out_channels=1, bias=False)
         self.mag = LinearOutputStack(
@@ -514,14 +583,13 @@ class ToAtom(nn.Module):
         
 
     def _decompose(self, x):
-        a = x[..., :257]
-        b = x[..., 257: 257 + 6]
+        a = x[..., :17]
         p = x[..., -2:-1]
         m = x[..., -1:]
-        return a, b, p, m
+        return a, p, m
 
-    def _recompose(self, a, b, p, m):
-        return torch.cat([a, b, p, m], dim=-1)
+    def _recompose(self, a, p, m):
+        return torch.cat([a, p, m], dim=-1)
 
     def forward(self, encodings, mother_atoms):
 
@@ -532,15 +600,15 @@ class ToAtom(nn.Module):
         # a = F.relu(a) @ self.embeddings[0].weight
         p = self.pos(encodings)
 
-        ma, mb, mp, mm = self._decompose(mother_atoms.repeat_interleave(2, 1))
+        ma, mp, mm = self._decompose(mother_atoms.repeat_interleave(2, 1))
 
         a = self.atoms(encodings)
-        b = torch.softmax(self.band(encodings), dim=-1)
+        # b = torch.softmax(self.band(encodings), dim=-1)
 
-        mag = F.relu(self.mag(encodings))
+        mag = self.mag(encodings)
 
         # positions are relative
-        a = self._recompose(F.relu(a + ma), b, p + mp, mag + mm)
+        a = self._recompose(unit_norm(a + ma), p + mp, mag + mm)
 
         return a
 
@@ -549,7 +617,7 @@ class Transform(nn.Module):
     def __init__(self, channels):
         super().__init__()
         self.net = LinearOutputStack(
-            channels, 3, in_channels=128 + 265 + channels, bias=False)
+            channels, 3, in_channels=128 + 19 + channels, bias=False)
 
     def forward(self, latent, atom, local_latent):
         batch, time, channels = atom.shape
@@ -611,7 +679,7 @@ class Generator(nn.Module):
             PleaseDearGod(channels, max_atoms, embeddings, i + 1) for i in range(6)
         ])
 
-        self.pos_encoder = PositionalEncoding(1, 128, 64)
+        self.pos_encoder = PositionalEncoding(1, 128, 32)
 
         self.conv_expander = ConvExpander(channels, self.max_atoms)
 
@@ -622,14 +690,32 @@ class Generator(nn.Module):
             attention_heads=8,
             attention_layers=12,
             intermediate_layers=2)
+        
+
+        self.transform_pos = nn.Conv1d(channels + 65, channels, 1, 1, 0)
+        self.stack = nn.Sequential(
+            DilatedBlock(channels, 1),
+            DilatedBlock(channels, 2),
+            DilatedBlock(channels, 4),
+            DilatedBlock(channels, 8),
+            DilatedBlock(channels, 16),
+            DilatedBlock(channels, 1),
+            DilatedBlock(channels, 2),
+            DilatedBlock(channels, 4),
+            DilatedBlock(channels, 8),
+            DilatedBlock(channels, 16),
+            DilatedBlock(channels, 1),
+        )
+
+        self.mixer = Mixer(channels, 12)
 
         # out_channels = 3072 if (
         #     use_disc_embeddings or one_hot) else self.embedding_size
 
         self.atoms = LinearOutputStack(
-            channels, 3, out_channels=257)
-        self.band = LinearOutputStack(
-            channels, 3, out_channels=6)
+            channels, 3, out_channels=17)
+        # self.band = LinearOutputStack(
+        #     channels, 3, out_channels=6)
         self.pos = LinearOutputStack(
             channels, 3, out_channels=1)
         self.mag = LinearOutputStack(
@@ -672,11 +758,20 @@ class Generator(nn.Module):
         else:
             batch = x.shape[0]
 
-            # x = x[:, None, :] + self.pos_encoder.pos_encode[None, :, :-1]
-            # encodings = self.net(x)
 
+            x = x.view(-1, 128, 1).repeat(1, 1, 128)
+            p = self.pos_encoder.pos_encode.view(1, 128, 65).permute(0, 2, 1).repeat(batch, 1, 1)
+
+            x = torch.cat([x, p], dim=1)
+            x = self.transform_pos(x)
+            x = self.stack(x)
+            encodings = x.permute(0, 2, 1)
+            # encodings = self.mixer(encodings)
+            # encodings = self.net(encodings)
+
+            # progressive generation
             # z = x
-            # a = torch.zeros(batch, 1, 265).to(z.device)
+            # a = torch.zeros(batch, 1, 19).to(z.device)
             # local_latent = torch.zeros(batch, 1, self.channels).to(z.device)
             # atoms = []
             # for layer in self.please_dear_god:
@@ -684,17 +779,20 @@ class Generator(nn.Module):
             #     atoms.append(a)
             # recon = x = torch.cat(atoms, dim=1)
 
-            encodings = self.conv_expander(x)
+            # encodings = self.conv_expander(x)
 
-            a = unit_norm(F.relu(self.atoms(encodings)))
-            b = torch.softmax(self.band(encodings), dim=-1)
-            a = torch.cat([a, b], dim=-1)
+            # a = unit_norm(F.relu(self.atoms(encodings)))
+            # b = torch.softmax(self.band(encodings), dim=-1)
+            # a = torch.cat([a, b], dim=-1)
 
-            # a = torch.softmax(self.atoms(encodings), dim=-1) @ self.embeddings[0].weight
+            
 
+            # transform encodings
+            a = unit_norm(self.atoms(encodings))
             p = torch.tanh(self.pos(encodings))
             m = torch.sigmoid(self.mag(encodings)) * 20
             recon = torch.cat([a, p, m], dim=-1)
+
 
             # shuffle so order can't be used by the discriminator
             output = torch.zeros_like(recon)

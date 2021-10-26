@@ -45,6 +45,13 @@ def pos_encode(domain, n_samples, n_freqs):
 
 
 def get_best_matches(basis, recon):
+
+    x = basis @ recon.permute(1, 0)
+    x = x.permute(1, 0)
+    indices = torch.argmax(x, dim=1)
+    return indices
+
+
     dist = torch.cdist(basis, recon)
     indices = torch.argmin(dist, dim=0)
     return indices
