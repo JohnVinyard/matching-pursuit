@@ -24,10 +24,8 @@ class Attention(nn.Module):
         self.value = nn.Linear(channels, channels, bias=False)
 
         self.reduce = reduce
-        # self.norm = nn.BatchNorm1d(self.channels)
 
     def forward(self, x):
-        batch, time, channels = x.shape
 
         q = self.query(x)
         k = self.key(x)
@@ -40,16 +38,9 @@ class Attention(nn.Module):
         x = torch.bmm(attn, v)
 
         # Pixel Norm
-        # x = x / torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + 1e-8)
+        x = x / torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + 1e-8)
 
 
-        # x = unit_norm(x) * 3.2
-
-        # x = x.permute(0, 2, 1)
-        # x = self.norm(x)
-        # x = x.permute(0, 2, 1)
-
-                
         if self.reduce:
             v = v.sum(dim=1, keepdim=True)
         return v

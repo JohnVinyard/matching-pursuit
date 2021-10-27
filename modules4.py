@@ -79,7 +79,6 @@ class MultiHeadAttention(nn.Module):
             Attention(channels) for _ in range(self.heads)
         ])
         self.fc = nn.Linear(channels * heads, channels)
-        self.norm = nn.BatchNorm1d(channels)
 
     def forward(self, x):
         orig = x
@@ -96,11 +95,8 @@ class MultiHeadAttention(nn.Module):
         x = self.fc(x)
         x = x + orig
 
-        # x = x.permute(0, 2, 1)
-        # x = self.norm(x)
-        # x = x.permute(0, 2, 1)
-
-        # x = unit_norm(x) * 6.2
+        # Pixel Norm
+        x = x / torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + 1e-8)
 
         return x
 
@@ -190,6 +186,21 @@ class Discriminator(nn.Module):
             DilatedBlock(channels, 1),
         )
 
+        self.reducer = nn.Sequential(
+            nn.Conv1d(channels, channels, 7, 2, 3),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(channels, channels, 7, 2, 3),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(channels, channels, 7, 2, 3),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(channels, channels, 7, 2, 3),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(channels, channels, 7, 2, 3),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(channels, channels, 4, 4, 0),
+            nn.LeakyReLU(0.2)
+        )
+
         self.mixer = Mixer(channels, 12)
 
         self.dense = nn.Sequential(
@@ -261,6 +272,7 @@ class Discriminator(nn.Module):
         
         x = x.permute(0, 2, 1)
         x = self.stack(x)
+        # x = self.reducer(x)
         x = x.permute(0, 2, 1)
 
         x = self.dense_judge(x)
