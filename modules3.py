@@ -40,7 +40,7 @@ class Attention(nn.Module):
         x = torch.bmm(attn, v)
 
         # Pixel Norm
-        x = x / torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + 1e-8)
+        # x = x / torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + 1e-8)
 
 
         # x = unit_norm(x) * 3.2

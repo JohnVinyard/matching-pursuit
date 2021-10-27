@@ -12,6 +12,7 @@ from enum import Enum
 from matplotlib import pyplot as plt
 from torch.nn.utils.clip_grad import clip_grad_value_
 from scipy.spatial.distance import cdist
+from sklearn.decomposition import PCA
 
 sr = zounds.SR22050()
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -28,17 +29,20 @@ def unit_norm(x):
         n = torch.norm(x, dim=-1, keepdim=True)
     return x / (n + 1e-12)
 
-embeddings = []
-for band, d in sparse_dict.items():
-    spec = unit_norm(np.abs(np.fft.rfft(d, norm='ortho')))
-    b = torch.zeros((spec.shape[0], len(sparse_dict)))
-    b[:, band] = 1
-    full = np.concatenate([spec, b], axis=-1)
-    embeddings.append(full)
+embedding_size = 32
 
-embeddings = np.concatenate(embeddings, axis=0)
-proj = np.random.normal(0, 1, (263, 17))
-embeddings = np.dot(embeddings, proj)
+# embeddings = []
+# for band, d in sparse_dict.items():
+#     spec = unit_norm(np.abs(np.fft.rfft(d, norm='ortho')))
+#     b = torch.zeros((spec.shape[0], len(sparse_dict)))
+#     b[:, band] = 1
+#     full = np.concatenate([spec, b], axis=-1)
+#     embeddings.append(full)
+
+# embeddings = np.concatenate(embeddings, axis=0)
+# proj = np.random.normal(0, 1, (263, 32))
+# embeddings = np.dot(embeddings, proj)
+# embeddings = unit_norm(np.random.normal(0, 1, (3072, 32)))
 
 
 max_atoms = 128
@@ -54,9 +58,8 @@ overfit = False
 dense_judgements = True
 gen_uses_disc_embeddings = False
 one_hot = False
-embedding_size = 17
+
 noise_level = 0.05
-evaluate_disc = False
 
 signal_sizes = [1024, 2048, 4096, 8192, 16384, 32768]
 
@@ -66,7 +69,7 @@ disc = Discriminator(
     embedding_size,
     one_hot,
     noise_level,
-    embeddings).to(device)
+    embeddings=None).to(device)
 disc_optim = Adam(disc.parameters(), lr=1e-4, betas=(0, 0.9))
 
 gen = Generator(
@@ -127,7 +130,7 @@ def decode(encoded, sparse_dict, return_audio=False):
     return zounds.AudioSamples(recomposed, sr).pad_with_silence()
 
 
-def nn_encode(encoded, max_atoms=100, pack=False):
+def nn_encode(encoded, max_atoms=100, pack=False, return_embedding=False):
     """
     Transform the encoding into a format 
     suitable for the neural network to manipulate
@@ -169,7 +172,18 @@ def nn_encode(encoded, max_atoms=100, pack=False):
     mags = torch.from_numpy(mags).float().to(device)
 
     if pack:
-        return disc.get_embeddings([atoms, positions, mags])
+        emb = disc.get_embeddings([atoms, positions, mags])
+        if not return_embedding:
+            return emb
+        else:
+            at = atoms.data.cpu().numpy()
+            local_embed = np.zeros((len(at), 3072))
+            local_embed[np.arange(len(at)), at] = mags.data.cpu().numpy()
+            local_embed = np.sum(local_embed, axis=0)
+
+            total_embed = np.zeros((3072, 3072))
+            total_embed[at] = np.repeat(local_embed[None, ...], len(at), axis=0)
+            return emb, total_embed
     else:
         return atoms, positions, mags
 
@@ -245,14 +259,6 @@ def vis_real():
     vis = _nn_decode(orig[0], visualize=True)
     return vis
 
-def vis():
-    _nn_decode(recon[0], visualize=True, save=False)
-    _nn_decode(orig[0], visualize=True, save=True)
-
-def vis_mags():
-    _nn_decode(recon[0], visualize=True, save=False, plot_mags=True)
-    _nn_decode(orig[0], visualize=True, save=True, plot_mags=True)
-
 def listen():
     index = np.random.randint(0, len(recon))
     encoded = list(nn_decode(recon[index]))
@@ -264,20 +270,6 @@ def real():
     encoded = list(nn_decode(orig[0]))
     decoded = decode(encoded, sparse_dict, return_audio=True)
     return decoded
-
-
-# def fake_spec():
-#     return r[..., :-8]
-
-# def real_spec():
-#     return o[..., :-8]
-
-
-# def fake_bands():
-#     return r[..., -8:-2]
-
-# def real_bands():
-#     return o[..., -8:-2]
 
 def real_time_dist():
     return np.sort(o[..., -2])
@@ -338,7 +330,8 @@ def train_disc(batch):
     disc_optim.zero_grad()
     with torch.no_grad():
         z = latent()
-        recon = gen.forward(z, batch)
+        recon, diff = gen.forward(z, batch)
+    
     rj = disc.forward(batch)
     fj = disc.forward(recon)
     loss = least_squares_disc_loss(rj, fj)
@@ -352,18 +345,9 @@ def train_disc(batch):
 def train_gen(batch):
     gen_optim.zero_grad()
     z = latent()
-    recon = gen.forward(z, batch)
+    recon, diff = gen.forward(z, batch)
 
-    # commitment cost
-    real = disc.atom_embedding.weight
-    fake_atoms = recon[:, :, :-2]
-    real_atoms = real[None, ...]
-
-    dist = torch.cdist(unit_norm(fake_atoms), unit_norm(real_atoms)).reshape(-1, real.shape[0])
-    indices = torch.argmin(dist, dim=1)
-
-    commitment_cost = ((fake_atoms.reshape(-1, embedding_size) - real_atoms.reshape(-1, embedding_size)[indices]) ** 2).mean()
-    commitment_cost = commitment_cost * 0.1
+    commitment_cost = (diff ** 2).mean() * 0.11
 
     fj = disc.forward(recon)
     loss = least_squares_generator_loss(fj) + commitment_cost
@@ -372,6 +356,7 @@ def train_gen(batch):
     gen_optim.step()
     print('Gen: ', loss.item())
 
+atom_embeddings = np.zeros((3072, 3072))
 
 class BatchGenerator(object):
     def __init__(self, overfit=False):
@@ -380,15 +365,20 @@ class BatchGenerator(object):
             cycle([next(iter_training_examples())]) \
             if overfit else iter_training_examples()
 
-    def __call__(self, batch_size, max_atoms):
+    def __call__(self, batch_size, max_atoms, return_embeddings=False):
 
         if self.overfit:
             batch_size = 1
 
+        atom_embeddings = np.zeros((3072, 3072))
         examples = []
         for example in self._iter:
             encoded = decode(example, sparse_dict)
-            x = nn_encode(encoded, max_atoms=max_atoms, pack=True)
+            if return_embeddings:
+                x, local_embed = nn_encode(encoded, max_atoms=max_atoms, pack=True, return_embedding=True)
+                atom_embeddings += local_embed
+            else:
+                x = nn_encode(encoded, max_atoms=max_atoms, pack=True, return_embedding=False)
             if x.shape[0] != max_atoms:
                 continue
             examples.append(x)
@@ -396,7 +386,10 @@ class BatchGenerator(object):
                 break
 
         output = torch.stack(examples)
-        return output
+        if return_embeddings:
+            return output, atom_embeddings
+        else:
+            return output
 
 
 get_batch = BatchGenerator(overfit=overfit)
@@ -413,31 +406,36 @@ if __name__ == '__main__':
     app = zounds.ZoundsApp(locals=locals(), globals=globals())
     app.start_in_thread(9999)
 
-    if evaluate_disc:
-        disc.load_state_dict(torch.load('disc.dat'))
+    for i in range(100):
+        batch, at_emb = get_batch(batch_size=batch_size, max_atoms=max_atoms, return_embeddings=True)
+        atom_embeddings += at_emb
+        print(i)
+    
+    atom_embeddings /= (atom_embeddings.std() + 1e-12)
+    pca = PCA(n_components=embedding_size)
+    print('Starting to learn PCA')
+    pca.fit(atom_embeddings)
+    coeffs = pca.transform(atom_embeddings)
+    recon_embeddings = pca.inverse_transform(coeffs)
+    coeffs = unit_norm(coeffs)
 
-        result = torch.nn.Parameter(torch.FloatTensor(batch_size, max_atoms, 18).uniform_(-1, 1).to(device))
-        optim = Adam([result], lr=1e-3, betas=(0, 0.9))        
-        while True:
-            j = disc(result).mean()
-            loss = least_squares_generator_loss(j)
-            loss.backward()
-            optim.step()
-            recon = result
-            print(loss.item())
-    else:
-        turn = cycle([
-            Turn.GEN, 
-            Turn.DISC
-        ])
+    disc.atom_embedding.weight[:] = torch.from_numpy(coeffs).to(device)
 
-        for i, t in enumerate(turn):
-            batch = get_batch(batch_size=batch_size, max_atoms=max_atoms)
-            if t == Turn.GEN:
-                train_gen(batch)
-            elif t == Turn.DISC:
-                orig, recon = train_disc(batch)
-                o = orig[0].data.cpu().numpy()
-                r = recon[0].data.cpu().numpy()
+    input('Done learning word embeddings.  Continue?')
+
+    
+    turn = cycle([
+        Turn.GEN, 
+        Turn.DISC
+    ])
+
+    for i, t in enumerate(turn):
+        batch = get_batch(batch_size=batch_size, max_atoms=max_atoms, return_embeddings=False)
+        if t == Turn.GEN:
+            train_gen(batch)
+        elif t == Turn.DISC:
+            orig, recon = train_disc(batch)
+            o = orig[0].data.cpu().numpy()
+            r = recon[0].data.cpu().numpy()
                 
             
