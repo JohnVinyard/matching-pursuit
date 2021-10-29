@@ -275,6 +275,11 @@ class Discriminator(nn.Module):
         # x = self.reducer(x)
         x = x.permute(0, 2, 1)
 
+        # x = self.mixer(x)
+        # x = self.dense(x)
+
+        x = x.mean(dim=1)
+
         x = self.dense_judge(x)
         x = torch.sigmoid(x)
         return x
@@ -505,6 +510,8 @@ class Generator(nn.Module):
         x = self.transform_pos(x)
         x = self.stack(x)
         encodings = x.permute(0, 2, 1)
+        # x = self.mixer(x)
+        # x = self.net(x)
         
         # transform encodings
         a = unit_norm(self.atoms(encodings))
