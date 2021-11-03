@@ -13,6 +13,7 @@ from matplotlib import pyplot as plt
 from torch.nn.utils.clip_grad import clip_grad_value_
 from scipy.spatial.distance import cdist
 from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
 
 sr = zounds.SR22050()
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -215,6 +216,9 @@ def _nn_decode(encoded, visualize=False, save=True, plot_mags=False):
     if visualize:
         t = ((pos * signal_sizes[-1])).astype(np.int32)
         sizes = list(mags * 5)
+
+        atom_colors = colors[atom_indices]
+
         plt.xlim([0, signal_sizes[-1]])
 
         if plot_mags:
@@ -222,7 +226,7 @@ def _nn_decode(encoded, visualize=False, save=True, plot_mags=False):
             plt.scatter(t, mags, alpha=0.5)
         else:
             plt.ylim([0, 3072])
-            plt.scatter(t, atom_indices, sizes, alpha=0.5)
+            plt.scatter(t, atom_indices, sizes, c=atom_colors)
         
         if save:
             plt.savefig('vis.png')
@@ -347,7 +351,7 @@ def train_gen(batch):
     z = latent()
     recon, diff = gen.forward(z, batch)
 
-    commitment_cost = (diff ** 2).mean() * 0.11
+    commitment_cost = (diff ** 2).mean() * 0
 
     fj = disc.forward(recon)
     loss = least_squares_generator_loss(fj) + commitment_cost
@@ -421,7 +425,13 @@ if __name__ == '__main__':
 
     disc.atom_embedding.weight[:] = torch.from_numpy(coeffs).to(device)
 
-    input('Done learning word embeddings.  Continue?')
+    print('Done learning atom embeddings')
+
+    tsne = TSNE(n_components=3)
+    colors = tsne.fit_transform(coeffs)
+
+    colors -= colors.min(axis=0, keepdims=True)
+    colors /= colors.max(axis=0, keepdims=True)
 
     
     turn = cycle([
@@ -437,5 +447,7 @@ if __name__ == '__main__':
             orig, recon = train_disc(batch)
             o = orig[0].data.cpu().numpy()
             r = recon[0].data.cpu().numpy()
+
+            
                 
             

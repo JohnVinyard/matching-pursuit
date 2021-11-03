@@ -24,8 +24,10 @@ class Attention(nn.Module):
         self.value = nn.Linear(channels, channels, bias=False)
 
         self.reduce = reduce
+        self.norm = nn.LayerNorm(channels)
 
     def forward(self, x):
+        batch, time, _ = x.shape
 
         q = self.query(x)
         k = self.key(x)
@@ -38,7 +40,10 @@ class Attention(nn.Module):
         x = torch.bmm(attn, v)
 
         # Pixel Norm
-        x = x / torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + 1e-8)
+        # x = x / torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + 1e-8)
+        # x = unit_norm(x)
+
+        x = self.norm(x)
 
 
         if self.reduce:
