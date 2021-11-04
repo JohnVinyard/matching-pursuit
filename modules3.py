@@ -24,7 +24,7 @@ class Attention(nn.Module):
         self.value = nn.Linear(channels, channels, bias=False)
 
         self.reduce = reduce
-        self.norm = nn.LayerNorm(channels)
+        self.norm = nn.BatchNorm1d(channels)
 
     def forward(self, x):
         batch, time, _ = x.shape
@@ -35,15 +35,17 @@ class Attention(nn.Module):
         
         attn = torch.bmm(q, k.permute(0, 2, 1))
         attn = attn / np.sqrt(attn.numel())
-        attn = torch.sigmoid(attn)
-        # attn = torch.softmax(attn.view(batch, -1), dim=-1).view(batch, time, time)
+        # attn = torch.sigmoid(attn)
+        attn = torch.softmax(attn.view(batch, -1), dim=-1).view(batch, time, time)
         x = torch.bmm(attn, v)
 
         # Pixel Norm
         # x = x / torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + 1e-8)
         # x = unit_norm(x)
 
+        x = x.permute(0, 2, 1)
         x = self.norm(x)
+        x = x.permute(0, 2, 1)
 
 
         if self.reduce:

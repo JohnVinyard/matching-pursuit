@@ -95,7 +95,7 @@ class MultiHeadAttention(nn.Module):
             Attention(channels) for _ in range(self.heads)
         ])
         self.fc = nn.Linear(channels * heads, channels)
-        self.norm = nn.LayerNorm(channels)
+        self.norm = nn.BatchNorm1d(channels)
 
     def forward(self, x):
         orig = x
@@ -117,7 +117,9 @@ class MultiHeadAttention(nn.Module):
 
         # x = unit_norm(x)
 
+        x = x.permute(0, 2, 1)
         x = self.norm(x)
+        x = x.permute(0, 2, 1)
 
         return x
 
@@ -182,6 +184,73 @@ class BatchDisc(nn.Module):
         x = self.net(x)
         x = torch.sigmoid(x).mean()
         return x
+
+class AutoEncoder(nn.Module):
+    def __init__(self, channels, max_atoms):
+        super().__init__()
+        self.channels = channels
+        self.max_atoms = max_atoms
+        self.pos = PositionalEncoding(1, max_atoms, 16)
+        self.pos_embedding = LinearOutputStack(channels, 3, in_channels=33)
+        self.atom_embedding = nn.Embedding(3072, channels)
+        self.pos_mag = LinearOutputStack(channels, 3, in_channels=2)
+
+        self.comb = LinearOutputStack(channels, 3, in_channels=channels * 3)
+        self.attn = AttentionStack(
+            channels, 
+            attention_heads=8, 
+            attention_layers=8, 
+            intermediate_layers=1)
+        self.final = LinearOutputStack(channels, 3)
+
+        self.mlp = LinearOutputStack(channels, 8, in_channels=33 + channels)
+        self.atom = LinearOutputStack(channels, 3, out_channels=3072)
+        self.time = LinearOutputStack(channels, 3, out_channels=1)
+        self.mag = LinearOutputStack(channels, 3, out_channels=1)
+
+        self.apply(init_weights)
+    
+    def encode(self, a, p, m):
+        a = a.view(-1, self.max_atoms, 1)
+        p = p.view(-1, self.max_atoms, 1)
+        m = m.view(-1, self.max_atoms, 1)
+
+        pos = self.pos_embedding(self.pos.pos_encode)
+        pos = pos.view(-1, self.max_atoms, self.channels).repeat(a.shape[0], 1, 1)
+
+        atom = self.atom_embedding(a).view(-1, self.max_atoms, self.channels)
+
+        pm = torch.cat([p, m], dim=-1)
+        pm = self.pos_mag(pm)
+
+        x = torch.cat([pos, atom, pm], dim=-1)
+        x = self.comb(x)
+        x = self.attn(x)
+
+        x = x.mean(dim=1)
+        x = self.final(x)
+        return x
+    
+    def decode(self, encoded):
+        encoded = encoded.view(-1, 1, self.channels).repeat(1, self.max_atoms, 1)
+        pos = self.pos.pos_encode.view(1, self.max_atoms, -1).repeat(encoded.shape[0], 1, 1)
+
+        x = torch.cat([encoded, pos], dim=-1)
+        x = self.mlp(x)
+
+        a = self.atom(x)
+        p = torch.tanh(self.time(x))
+        m = torch.sigmoid(self.mag(x)) * 20
+        return a, p, m
+    
+    def forward(self, x):
+        a, p, m = x
+
+        encoded = self.encode(a, p, m)
+        decoded = self.decode(encoded)
+
+        return encoded, decoded
+        
 
 
 class Discriminator(nn.Module):
