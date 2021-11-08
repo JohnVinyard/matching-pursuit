@@ -135,12 +135,19 @@ class LmdbCollection(object):
             map_async=True,
             metasync=True)
 
-    def iter_prefix(self, prefix):
-        prefix = prefix.encode()
+    def iter_prefix(self, start_key, prefix=None):
+
+        if isinstance(start_key, str):
+            start_key = start_key.encode()
+
+        if prefix is None:
+            prefix = start_key
+        elif isinstance(prefix, str):
+            prefix = prefix.encode()
 
         with self.env.begin(write=True, buffers=True) as txn:
             cursor = txn.cursor()
-            cursor.set_range(prefix)
+            cursor.set_range(start_key)
 
             it = cursor.iternext(keys=True, values=False)
             for key in it:

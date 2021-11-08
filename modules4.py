@@ -203,7 +203,12 @@ class AutoEncoder(nn.Module):
             intermediate_layers=1)
         self.final = LinearOutputStack(channels, 3)
 
-        self.mlp = LinearOutputStack(channels, 8, in_channels=33 + channels)
+        self.mlp = LinearOutputStack(channels, 2, in_channels=33 + channels)
+        self.attn_decoder = AttentionStack(
+            channels, 
+            attention_heads=8, 
+            attention_layers=8, 
+            intermediate_layers=1)
         self.atom = LinearOutputStack(channels, 3, out_channels=3072)
         self.time = LinearOutputStack(channels, 3, out_channels=1)
         self.mag = LinearOutputStack(channels, 3, out_channels=1)
@@ -226,7 +231,7 @@ class AutoEncoder(nn.Module):
         x = torch.cat([pos, atom, pm], dim=-1)
         x = self.comb(x)
         x = self.attn(x)
-
+        
         x = x.mean(dim=1)
         x = self.final(x)
         return x
@@ -237,6 +242,7 @@ class AutoEncoder(nn.Module):
 
         x = torch.cat([encoded, pos], dim=-1)
         x = self.mlp(x)
+        x = self.attn_decoder(x)
 
         a = self.atom(x)
         p = torch.tanh(self.time(x))
