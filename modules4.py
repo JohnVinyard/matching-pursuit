@@ -1,4 +1,6 @@
 import math
+
+from torch.nn.modules.batchnorm import BatchNorm1d
 from modules2 import Cluster, DilatedBlock, Expander, init_weights, PositionalEncoding
 from modules3 import Attention, LinearOutputStack, ToThreeD, ToTwoD
 from torch import device, nn
@@ -185,6 +187,18 @@ class BatchDisc(nn.Module):
         x = torch.sigmoid(x).mean()
         return x
 
+class MyBatchNorm(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.channels = channels
+        self.bn = BatchNorm1d(channels)
+    
+    def forward(self, x):
+        x = x.permute(0, 2, 1)
+        x = self.bn(x)
+        x = x.permute(0, 2, 1)
+        return x
+
 class AutoEncoder(nn.Module):
     def __init__(self, channels, max_atoms):
         super().__init__()
@@ -203,15 +217,67 @@ class AutoEncoder(nn.Module):
             intermediate_layers=1)
         self.final = LinearOutputStack(channels, 3)
 
-        self.mlp = LinearOutputStack(channels, 2, in_channels=33 + channels)
-        self.attn_decoder = AttentionStack(
-            channels, 
-            attention_heads=8, 
-            attention_layers=8, 
-            intermediate_layers=1)
+        self.mlp = LinearOutputStack(channels, 8, in_channels=33 + channels)
+        # self.attn_decoder = AttentionStack(
+        #     channels, 
+        #     attention_heads=8, 
+        #     attention_layers=8, 
+        #     intermediate_layers=1)
         self.atom = LinearOutputStack(channels, 3, out_channels=3072)
         self.time = LinearOutputStack(channels, 3, out_channels=1)
         self.mag = LinearOutputStack(channels, 3, out_channels=1)
+
+        self.encoder = nn.Sequential(
+            nn.Conv1d(channels, channels, 2, 2),
+            # nn.BatchNorm1d(channels),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(channels, channels, 2, 2),
+            # nn.BatchNorm1d(channels),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(channels, channels, 2, 2),
+            # nn.BatchNorm1d(channels),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(channels, channels, 2, 2),
+            # nn.BatchNorm1d(channels),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(channels, channels, 2, 2),
+            # nn.BatchNorm1d(channels),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(channels, channels, 2, 2),
+            # nn.BatchNorm1d(channels),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(channels, channels, 2, 2),
+            # nn.BatchNorm1d(channels),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(channels, channels, 1, 1)
+        )
+
+        self.decoder = nn.Sequential(
+            Expander(channels, 2),
+            # MyBatchNorm(channels),
+            nn.LeakyReLU(0.2),
+            Expander(channels, 2),
+            # MyBatchNorm(channels),
+            nn.LeakyReLU(0.2),
+            Expander(channels, 2),
+            # MyBatchNorm(channels),
+            nn.LeakyReLU(0.2),
+            Expander(channels, 2),
+            # MyBatchNorm(channels),
+            nn.LeakyReLU(0.2),
+            Expander(channels, 2),
+            # MyBatchNorm(channels),
+            nn.LeakyReLU(0.2),
+            Expander(channels, 2),
+            # MyBatchNorm(channels),
+            nn.LeakyReLU(0.2),
+            Expander(channels, 2),
+            # MyBatchNorm(channels),
+            nn.LeakyReLU(0.2),
+            LinearOutputStack(channels, 2)
+        )
+
+        
 
         self.apply(init_weights)
     
@@ -230,23 +296,32 @@ class AutoEncoder(nn.Module):
 
         x = torch.cat([pos, atom, pm], dim=-1)
         x = self.comb(x)
-        x = self.attn(x)
-        
-        x = x.mean(dim=1)
-        x = self.final(x)
+
+        # attn encoder
+        # x = self.attn(x)
+        # x = x.mean(dim=1, keepdim=True)
+        # x = self.final(x)
+
+        # conv encoder
+        x = x.permute(0, 2, 1)
+        x = self.encoder(x)
+        x = x.permute(0, 2, 1)
         return x
     
     def decode(self, encoded):
-        encoded = encoded.view(-1, 1, self.channels).repeat(1, self.max_atoms, 1)
-        pos = self.pos.pos_encode.view(1, self.max_atoms, -1).repeat(encoded.shape[0], 1, 1)
+        # encoded = encoded.view(-1, 1, self.channels).repeat(1, self.max_atoms, 1)
+        # pos = self.pos.pos_encode.view(1, self.max_atoms, -1).repeat(encoded.shape[0], 1, 1)
 
-        x = torch.cat([encoded, pos], dim=-1)
-        x = self.mlp(x)
-        x = self.attn_decoder(x)
+        # x = torch.cat([encoded, pos], dim=-1)
+        # x = self.mlp(x)
+
+        # x = self.attn_decoder(x)
+
+        x = self.decoder(encoded)
 
         a = self.atom(x)
-        p = torch.tanh(self.time(x))
-        m = torch.sigmoid(self.mag(x)) * 20
+        p = self.time(x)
+        m = self.mag(x) * 20
         return a, p, m
     
     def forward(self, x):

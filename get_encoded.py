@@ -76,59 +76,54 @@ def iter_training_examples():
 
     while True:
         key = choice(keys)
-        chunks = collection.iter_prefix(key, encode_chunk.func_hash)
 
-        txn, key1 = next(chunks)
-        try:
-            txn, key2 = next(chunks)
-        except StopIteration:
-            key2 = None
+        # Unfortunately, this doesn't work because 
+        # the keys are ordered by path and then time;  instead
+        # arguments are hashed.  In a future iteration, ensure that args
+        # are encoded so that chunks are ordered
 
-        if key2 is None:
-            value, txn = collection[key1]
-            encoded = load_pickle(value, txn)
-            yield encoded
-        else:
-            # print('TWO OF EM')
-            start = np.random.uniform(0, 1)
+        # prefix = key.split(b':')[0]
+        # chunks = collection.iter_prefix(key, prefix)
 
-            value1, txn = collection[key1]
-            value2, txn = collection[key2]
-            encoded1 = load_pickle(value1, txn)
-            encoded2 = load_pickle(value2, txn)
-
-            # print(encoded1)
-        
-            # for sig_size, atom, pos, mag in encoded:
-
-            e1 = filter(lambda x: x[2] >= (start * x[0]), encoded1)
-            e1 = map(lambda x: (x[0], x[1], x[2] - int(start * x[0]), x[3]), e1)
-
-            e2 = filter(lambda x: x[2] <= (start * x[0]), encoded2)
-            e2 = map(lambda x: (x[0], x[1], x[2] + (x[0] - (start * x[0])), x[3]), e2)
-            
-            combined = list(e1) + list(e2)
-            # print(combined)
-            yield combined
-
-
-        # chunks = collection.iter_from(key.encode(), keys=False, values=True)
-        # txn, chunk1 = next(chunks)
-
+        # txn, key1 = next(chunks)
         # try:
-        #     txn, chunk2 = next(chunks)
+        #     txn, key2 = next(chunks)
         # except StopIteration:
-        #     chunk2 = None
-        
-        # if chunk2 is None:
-        #     yield load_pickle(chunk1, txn)
+        #     key2 = None
+
+        # if key2 is None:
+        #     value, txn = collection[key1]
+        #     encoded = load_pickle(value, txn)
+        #     yield encoded
         # else:
-        #     pass
+        #     # print('TWO OF EM')
+        #     start = np.random.uniform(0, 1)
+
+        #     value1, txn = collection[key1]
+        #     value2, txn = collection[key2]
+        #     encoded1 = load_pickle(value1, txn)
+        #     encoded2 = load_pickle(value2, txn)
+
+        #     # print(encoded1)
+        
+        #     # for sig_size, atom, pos, mag in encoded:
+
+        #     e1 = filter(lambda x: x[2] >= (start * x[0]), encoded1)
+        #     e1 = map(lambda x: (x[0], x[1], x[2] - int(start * x[0]), x[3]), e1)
+
+        #     e2 = filter(lambda x: x[2] <= (start * x[0]), encoded2)
+        #     e2 = map(lambda x: (x[0], x[1], x[2] + (x[0] - (start * x[0])), x[3]), e2)
+            
+        #     combined = list(e1) + list(e2)
+        #     # print(combined)
+        #     yield combined
 
 
-        # value, txn = collection[key]
-        # encoded = load_pickle(value, txn)
-        # yield encoded
+        
+
+        value, txn = collection[key]
+        encoded = load_pickle(value, txn)
+        yield encoded
         
         # for txn, key in collection.iter_prefix(encode_chunk.func_hash):
         #     raw = txn.get(key)

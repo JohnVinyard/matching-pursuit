@@ -1,5 +1,6 @@
 *.wav
 *.png
+ae.dat
 disc.dat
 __pycache__
 audio

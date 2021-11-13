@@ -20,7 +20,7 @@ class Activation(Module):
 
 
 def pos_encode_feature(x, domain, n_samples, n_freqs):
-    batch, time, _ = x.shape
+    # batch, time, _ = x.shape
     x = torch.clamp(x, -domain, domain)
     output = [x]
     for i in range(n_freqs):

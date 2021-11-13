@@ -1,5 +1,8 @@
 from collections import defaultdict
+from learn_atom_embeddings import learn_atom_embeddings
+from modules import pos_encode_feature
 from modules4 import Discriminator, Generator, AutoEncoder
+from set_alignment import aligned, reorder
 from sparse2 import freq_recompose
 from multilevel_sparse import multilevel_sparse_decode
 from get_encoded import iter_training_examples, learn_dict
@@ -15,6 +18,7 @@ from scipy.spatial.distance import cdist
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 from torch.nn import functional as F
+from os.path import exists
 
 sr = zounds.SR22050()
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -53,7 +57,7 @@ n_atoms = 512 * 6  # 512 atoms * 6 bands
 mag_embedding_dim = 1
 pos_embedding_dim = 1
 total_vector_dim = embedding_dim + mag_embedding_dim + pos_embedding_dim
-batch_size = 16
+batch_size = 32
 overfit = False
 
 # OPTIONS
@@ -85,7 +89,14 @@ signal_sizes = [1024, 2048, 4096, 8192, 16384, 32768]
 # gen_optim = Adam(gen.parameters(), lr=1e-4, betas=(0, 0.9))
 
 ae = AutoEncoder(128, max_atoms).to(device)
-ae_optim = Adam(ae.parameters(), lr=1e-4, betas=(0, 0.9))
+ae_optim = Adam(ae.parameters(), lr=1e-3, betas=(0, 0.9))
+
+try:
+    ae.load_state_dict(torch.load('ae.dat'))
+    print('Loaded model from saved')
+except IOError:
+    print('Could not load model')
+    pass
 
 
 # class LatentGenerator(object):
@@ -213,7 +224,27 @@ def _nn_decode(encoded, visualize=False, save=True, plot_mags=False):
     pos = (p + 1) / 2
     mags = m
 
-    return atom_indices.reshape(-1), pos.reshape(-1), mags.reshape(-1)
+    if visualize:
+        t = ((pos * signal_sizes[-1])).astype(np.int32)
+        sizes = list(mags * 5)
+
+
+        plt.xlim([0, signal_sizes[-1]])
+
+        if plot_mags:
+            plt.ylim([0, 20])
+            plt.scatter(t, mags, alpha=0.5)
+        else:
+            plt.ylim([0, 3072])
+            plt.scatter(t, atom_indices, sizes, alpha=0.5)
+        
+        if save:
+            plt.savefig('vis.png')
+            plt.clf()
+    else:
+        return atom_indices.reshape(-1), pos.reshape(-1), mags.reshape(-1)
+
+    
     
 
     # size = embedding_size if not one_hot else 3072
@@ -238,26 +269,7 @@ def _nn_decode(encoded, visualize=False, save=True, plot_mags=False):
     # mags = mags[indices]
 
 
-    # if visualize:
-    #     t = ((pos * signal_sizes[-1])).astype(np.int32)
-    #     sizes = list(mags * 5)
-
-    #     atom_colors = colors[atom_indices]
-
-    #     plt.xlim([0, signal_sizes[-1]])
-
-    #     if plot_mags:
-    #         plt.ylim([0, 20])
-    #         plt.scatter(t, mags, alpha=0.5)
-    #     else:
-    #         plt.ylim([0, 3072])
-    #         plt.scatter(t, atom_indices, sizes, c=atom_colors)
-        
-    #     if save:
-    #         plt.savefig('vis.png')
-    #         plt.clf()
-    # else:
-    #     return atom_indices, pos, mags
+    
 
 
 def nn_decode(encoded):
@@ -279,14 +291,20 @@ def nn_decode(encoded):
         yield (keys[b], a, p, m)
 
 
-# def vis_fake():
-#     vis = _nn_decode(recon[0], visualize=True)
-#     return vis
+def vis_fake():
+    vis = _nn_decode(recon, visualize=True)
+    return vis
 
 
-# def vis_real():
-#     vis = _nn_decode(orig[0], visualize=True)
-#     return vis
+def vis_real():
+    vis = _nn_decode(orig, visualize=True)
+    return vis
+
+def vis():
+    o, r = orig, recon
+    _nn_decode(r, visualize=True, save=False)
+    _nn_decode(o, visualize=True, save=True)
+
 
 def listen():
     encoded = list(nn_decode(recon))
@@ -393,18 +411,33 @@ def train_ae(batch):
     encoded, decoded = ae(batch)
 
     fa, fp, fm = decoded
-    fpm = torch.cat([fp, fm], dim=-1)
-
     a, p, m = batch
-    rpm = torch.cat([p[..., None], m[..., None]], dim=-1)
 
-    loss = F.mse_loss(fpm, rpm)
+    fpm = torch.cat([fp.view(batch_size, max_atoms, 1), fm.view(batch_size, max_atoms, 1)], dim=-1)
+    rpm = torch.cat([p.view(batch_size, max_atoms, 1), m.view(batch_size, max_atoms, 1)], dim=-1)
 
-    loss = loss + F.cross_entropy(fa.view(-1, 3072), a.view(-1))
+    # mag_ratio = 1 / 20
+
+    # mag_loss = F.mse_loss(fm * mag_ratio, m[..., None] * mag_ratio)
+
+    # time_loss = F.mse_loss(fp, p[..., None])
+
+    # indices = aligned(fpm, rpm)
+    # fpm = reorder(fpm, indices)
+    # fa = reorder(fa, indices)
+
+    mse_loss = F.mse_loss(fpm, rpm)
+
+    ce_loss = F.cross_entropy(fa.view(-1, 3072), a.view(-1))
+    # weight cross-entropy loss by magnitude
+    # log_mag = torch.log(m + 1)
+    # ce_loss = (ce_loss.reshape(*log_mag.shape) * log_mag).mean()
+
+    loss = mse_loss + ce_loss
 
     loss.backward()
     ae_optim.step()
-    print(loss.item())
+    print(f'MSE: {mse_loss.item():.4f}, ATOM: {ce_loss.item():.4f}, TOTAL: {loss.item():.4f}')
 
     return batch, encoded, decoded
 
@@ -422,7 +455,7 @@ class BatchGenerator(object):
         if self.overfit:
             batch_size = 1
 
-        # atom_embeddings = np.zeros((3072, 3072))
+        
         
         atoms = []
         pos = []
@@ -460,6 +493,15 @@ if __name__ == '__main__':
 
     app = zounds.ZoundsApp(locals=locals(), globals=globals())
     app.start_in_thread(9999)
+
+    if not exists('ae.dat'):
+        print('Initializing embeddings')
+        a, p, m = get_batch(batch_size=256, max_atoms=max_atoms)
+        atom_embeddings, recon_embeddings, coeffs = learn_atom_embeddings(a, m, 128)
+        print(coeffs.std())
+        
+        with torch.no_grad():
+            ae.atom_embedding.weight[:] = torch.from_numpy(coeffs).to(device)
 
     # for i in range(100):
     #     batch, at_emb = get_batch(batch_size=batch_size, max_atoms=max_atoms, return_embeddings=True)
