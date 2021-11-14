@@ -43,9 +43,9 @@ class Attention(nn.Module):
         # x = x / torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + 1e-8)
         # x = unit_norm(x)
 
-        x = x.permute(0, 2, 1)
-        x = self.norm(x)
-        x = x.permute(0, 2, 1)
+        # x = x.permute(0, 2, 1)
+        # x = self.norm(x)
+        # x = x.permute(0, 2, 1)
 
 
         if self.reduce:

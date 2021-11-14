@@ -119,9 +119,9 @@ class MultiHeadAttention(nn.Module):
 
         # x = unit_norm(x)
 
-        x = x.permute(0, 2, 1)
-        x = self.norm(x)
-        x = x.permute(0, 2, 1)
+        # x = x.permute(0, 2, 1)
+        # x = self.norm(x)
+        # x = x.permute(0, 2, 1)
 
         return x
 
@@ -306,18 +306,18 @@ class AutoEncoder(nn.Module):
         x = x.permute(0, 2, 1)
         x = self.encoder(x)
         x = x.permute(0, 2, 1)
+
         return x
     
     def decode(self, encoded):
-        # encoded = encoded.view(-1, 1, self.channels).repeat(1, self.max_atoms, 1)
-        # pos = self.pos.pos_encode.view(1, self.max_atoms, -1).repeat(encoded.shape[0], 1, 1)
-
-        # x = torch.cat([encoded, pos], dim=-1)
-        # x = self.mlp(x)
+        encoded = encoded.view(-1, 1, self.channels).repeat(1, self.max_atoms, 1)
+        pos = self.pos.pos_encode.view(1, self.max_atoms, -1).repeat(encoded.shape[0], 1, 1)
+        x = torch.cat([encoded, pos], dim=-1)
+        x = self.mlp(x)
 
         # x = self.attn_decoder(x)
 
-        x = self.decoder(encoded)
+        # x = self.decoder(encoded)
 
         a = self.atom(x)
         p = self.time(x)
