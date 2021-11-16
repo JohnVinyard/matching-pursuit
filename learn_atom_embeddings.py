@@ -15,10 +15,13 @@ def learn_atom_embeddings(atoms, mags, embedding_size):
     
     atom_embeddings /= (atom_embeddings.std() + 1e-12)
 
-    pca = NMF(n_components=embedding_size)
+    pca = PCA(n_components=embedding_size)
     print('Starting to learn PCA')
     pca.fit(atom_embeddings)
     coeffs = pca.transform(atom_embeddings)
     recon_embeddings = pca.inverse_transform(coeffs)
     # coeffs = unit_norm(coeffs)
+
+    coeffs -= coeffs.mean(axis=0, keepdims=True)
+    coeffs /= coeffs.std(axis=0, keepdims=True)
     return atom_embeddings, recon_embeddings, coeffs

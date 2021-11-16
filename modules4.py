@@ -206,7 +206,10 @@ class AutoEncoder(nn.Module):
         self.max_atoms = max_atoms
         self.pos = PositionalEncoding(1, max_atoms, 16)
         self.pos_embedding = LinearOutputStack(channels, 3, in_channels=33)
-        self.atom_embedding = nn.Embedding(3072, channels)
+
+        # self.atom_embedding = nn.Embedding(3072, channels)
+        self.atom_embedding = LinearOutputStack(channels, 2, in_channels=128)
+
         self.pos_mag = LinearOutputStack(channels, 3, in_channels=2)
 
         self.comb = LinearOutputStack(channels, 3, in_channels=channels * 3)
@@ -223,7 +226,7 @@ class AutoEncoder(nn.Module):
         #     attention_heads=8, 
         #     attention_layers=8, 
         #     intermediate_layers=1)
-        self.atom = LinearOutputStack(channels, 3, out_channels=3072)
+        self.atom = LinearOutputStack(channels, 3, out_channels=128)
         self.time = LinearOutputStack(channels, 3, out_channels=1)
         self.mag = LinearOutputStack(channels, 3, out_channels=1)
 
@@ -282,14 +285,15 @@ class AutoEncoder(nn.Module):
         self.apply(init_weights)
     
     def encode(self, a, p, m):
-        a = a.view(-1, self.max_atoms, 1)
+        a = a.view(-1, self.max_atoms, 128)
         p = p.view(-1, self.max_atoms, 1)
         m = m.view(-1, self.max_atoms, 1)
 
         pos = self.pos_embedding(self.pos.pos_encode)
         pos = pos.view(-1, self.max_atoms, self.channels).repeat(a.shape[0], 1, 1)
 
-        atom = self.atom_embedding(a).view(-1, self.max_atoms, self.channels)
+        # atom = self.atom_embedding(a).view(-1, self.max_atoms, self.channels)
+        atom = self.atom_embedding(a)
 
         pm = torch.cat([p, m], dim=-1)
         pm = self.pos_mag(pm)
@@ -310,14 +314,14 @@ class AutoEncoder(nn.Module):
         return x
     
     def decode(self, encoded):
-        encoded = encoded.view(-1, 1, self.channels).repeat(1, self.max_atoms, 1)
-        pos = self.pos.pos_encode.view(1, self.max_atoms, -1).repeat(encoded.shape[0], 1, 1)
-        x = torch.cat([encoded, pos], dim=-1)
-        x = self.mlp(x)
+        # encoded = encoded.view(-1, 1, self.channels).repeat(1, self.max_atoms, 1)
+        # pos = self.pos.pos_encode.view(1, self.max_atoms, -1).repeat(encoded.shape[0], 1, 1)
+        # x = torch.cat([encoded, pos], dim=-1)
+        # x = self.mlp(x)
 
         # x = self.attn_decoder(x)
 
-        # x = self.decoder(encoded)
+        x = self.decoder(encoded)
 
         a = self.atom(x)
         p = self.time(x)
