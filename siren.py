@@ -18,15 +18,14 @@ n_samples = 2**15
 
 path = '/hdd/musicnet/train_data'
 
-# device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-device = torch.device('cpu')
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 torch.backends.cudnn.benchmark = True
 
 def init_weights(p):
     with torch.no_grad():
         try:
-            p.weight.uniform_(-0.02, 0.02)
+            p.weight.uniform_(-0.01, 0.01)
         except AttributeError:
             pass
 
@@ -36,7 +35,7 @@ class Layer(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
         self.linear = nn.Linear(in_channels, out_channels, bias=True)
-        self.factor = nn.Parameter(torch.FloatTensor(out_channels).fill_(30))
+        self.factor = nn.Parameter(torch.FloatTensor(out_channels).fill_(10))
     
     def forward(self, x):
         x = self.linear(x)
@@ -63,7 +62,7 @@ class Network(nn.Module):
 def to_pairs(signal):
 
     signal = torch.from_numpy(signal).to(device)
-    pos = torch.linspace(-1, 1, n_samples).view(-1, 1)
+    pos = torch.linspace(-1, 1, n_samples).view(-1, 1).to(device)
 
     pos = pos_encode_feature(pos, 1, n_samples, 16)
 
@@ -82,8 +81,10 @@ def fake():
 
 if __name__ == '__main__':
     app = zounds.ZoundsApp(locals=locals(), globals=globals())
-    app.start_in_thread(8888)
+    app.start_in_thread(9999)
     sig = next(batch_stream(path, '*.wav', batch_size, n_samples))
+    sig /= (sig.max(axis=-1) + 1e-12)
+    
 
     net = Network(4, 33, 128).to(device)
     optim = Adam(net.parameters(), lr=1e-4, betas=(0, 0.9))
