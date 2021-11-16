@@ -2,18 +2,17 @@ from typing import ForwardRef
 import torch
 from torch.optim.adam import Adam
 import zounds
-from scipy.fftpack import dct, idct
 from torch import nn
 
 from datastore import batch_stream
-from modules import PositionalEncoding, pos_encode_feature
+from modules import pos_encode_feature
 from modules3 import LinearOutputStack
-from enum import Enum
 from torch.nn import functional as F
-
+from itertools import chain
+import numpy as np
 
 sr = zounds.SR22050()
-batch_size = 1
+batch_size = 2
 n_samples = 2**15
 
 path = '/hdd/musicnet/train_data'
@@ -29,17 +28,63 @@ def init_weights(p):
         except AttributeError:
             pass
 
+
+def activation(x):
+    return torch.sin(x)
+
+
+
+
+class Encoder(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+
+        self.embed_pos = nn.Conv1d(33, 8, 1, 1, 0, bias=False)
+        self.embed_sample = nn.Conv1d(1, 8, 7, 1, 3, bias=False)
+
+        self.factor = nn.Parameter(torch.FloatTensor(1).fill_(10))
+
+        self.net = nn.Sequential(
+            nn.Conv1d(16, 16, 8, 8, 0, bias=False),
+            nn.Conv1d(16, 32, 8, 8, 0, bias=False),
+            nn.Conv1d(32, 64, 8, 8, 0, bias=False),
+            nn.Conv1d(64, 128, 8, 8, 0, bias=False),
+            nn.Conv1d(128, 128, 8, 8, 0, bias=False),
+        )
+
+        self.apply(init_weights)
+    
+    def forward(self, pos, sample):
+
+        pos = pos.permute(0, 2, 1)
+        sample = sample.permute(0, 2, 1)
+
+        pe = self.embed_pos(pos)
+        se = self.embed_sample(sample)
+
+        x = torch.cat([pe, se], dim=1)
+        x = activation(x * self.factor)
+
+        for layer in self.net:
+            x = layer(x)
+            x = activation(x * self.factor)
         
+        x = x.view(-1, 128)
+        return x
+
+
 
 class Layer(nn.Module):
-    def __init__(self, in_channels, out_channels):
+    def __init__(self, in_channels, out_channels, apply_activation=True):
         super().__init__()
         self.linear = nn.Linear(in_channels, out_channels, bias=True)
         self.factor = nn.Parameter(torch.FloatTensor(out_channels).fill_(10))
+        self.apply_activation = apply_activation
     
     def forward(self, x):
         x = self.linear(x)
-        x = torch.sin(self.factor * x)
+        if self.apply_activation:
+            x = activation(self.factor * x)
         return x
 
 class Network(nn.Module):
@@ -48,52 +93,76 @@ class Network(nn.Module):
         self.layers = layers
         self.in_channels = in_channels
         self.hidden_channels = hidden_channels
+
+        self.pos_bias = LinearOutputStack(hidden_channels, 3, out_channels=33, activation=activation)
+
+        self.mod_bias = nn.Sequential(*[LinearOutputStack(hidden_channels, 3, activation=activation) for layer in range(layers + 1)])
+
         self.net = nn.Sequential(
             Layer(in_channels, hidden_channels),
             *[Layer(hidden_channels, hidden_channels) for layer in range(layers)],
-            Layer(hidden_channels, 1)
+            Layer(hidden_channels, 1, apply_activation=True)
         )
         self.apply(init_weights)
     
-    def forward(self, x):
-        x = self.net(x)
+    def forward(self, x, latent):
+
+        pb = self.pos_bias(latent)
+        x = x + pb[:, None, :]
+
+        for i, layer in enumerate(self.net):
+            try:
+                mod_bias = self.mod_bias[i]
+                bias = mod_bias(latent)
+                x = layer(x)
+                x = x + bias[:, None, :]
+            except IndexError:
+                x = layer(x)
         return x
 
 def to_pairs(signal):
 
     signal = torch.from_numpy(signal).to(device)
+
     pos = torch.linspace(-1, 1, n_samples).view(-1, 1).to(device)
+    pos = pos_encode_feature(pos, 1, n_samples, 16).repeat(batch_size, 1, 1)
 
-    pos = pos_encode_feature(pos, 1, n_samples, 16)
+    samples = signal[..., None]
 
-    pos = pos[None, :]
-    samples = signal[None, :]
-
-    print(pos.shape, samples.shape)
     return pos, samples
 
 def real():
-    return zounds.AudioSamples(samples.data.cpu().numpy().reshape(-1), sr).pad_with_silence()
+    index = np.random.randint(0, batch_size)
+    return zounds.AudioSamples(samples[index].data.cpu().numpy().reshape(-1), sr).pad_with_silence()
 
 def fake():
-    return zounds.AudioSamples(recon.data.cpu().numpy().reshape(-1), sr).pad_with_silence()
+    index = np.random.randint(0, batch_size)
+    return zounds.AudioSamples(recon[index].data.cpu().numpy().reshape(-1), sr).pad_with_silence()
 
 
 if __name__ == '__main__':
     app = zounds.ZoundsApp(locals=locals(), globals=globals())
     app.start_in_thread(9999)
-    sig = next(batch_stream(path, '*.wav', batch_size, n_samples))
-    sig /= (sig.max(axis=-1) + 1e-12)
+    
     
 
+    encoder = Encoder(128).to(device)
     net = Network(4, 33, 128).to(device)
-    optim = Adam(net.parameters(), lr=1e-4, betas=(0, 0.9))
+    optim = Adam(chain(net.parameters(), encoder.parameters()), lr=1e-4, betas=(0, 0.9))
 
-    pos, samples = to_pairs(sig.reshape(-1))
+
+    sig = next(batch_stream(path, '*.wav', batch_size, n_samples))
+    sig /= (sig.max(axis=-1, keepdims=True) + 1e-12)
+
     while True:
         optim.zero_grad()
-        recon = net(pos)
 
+        
+        pos, samples = to_pairs(sig)
+
+        latent = encoder(pos, samples)
+        z = latent.data.cpu().numpy().squeeze()
+        recon = net(pos, latent)
 
         loss = F.mse_loss(recon.view(batch_size, n_samples), samples.view(batch_size, n_samples))
         loss.backward()
