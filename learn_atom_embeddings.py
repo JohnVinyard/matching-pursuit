@@ -22,6 +22,6 @@ def learn_atom_embeddings(atoms, mags, embedding_size):
     recon_embeddings = pca.inverse_transform(coeffs)
     # coeffs = unit_norm(coeffs)
 
-    coeffs -= coeffs.mean(axis=0, keepdims=True)
-    coeffs /= coeffs.std(axis=0, keepdims=True)
+    coeffs -= coeffs.mean()
+    coeffs /= coeffs.std()
     return atom_embeddings, recon_embeddings, coeffs

@@ -77,7 +77,7 @@ class Mixer(nn.Module):
         for layer in self.net:
             x = layer(x)
             # Pixel Norm
-            x = x / torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + 1e-8)
+            # x = x / torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + 1e-8)
             x = x.permute(0, 2, 1)
         return x
 
@@ -122,6 +122,7 @@ class MultiHeadAttention(nn.Module):
         # x = x.permute(0, 2, 1)
         # x = self.norm(x)
         # x = x.permute(0, 2, 1)
+
 
         return x
 
