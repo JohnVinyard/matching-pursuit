@@ -35,7 +35,7 @@ def init_weights(p):
 
     with torch.no_grad():
         try:
-            p.weight.uniform_(-0.11, 0.11)
+            p.weight.uniform_(-0.125, 0.125)
         except AttributeError:
             pass
 
@@ -59,7 +59,7 @@ sparse_dict = learn_dict()
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 batch_size = 16
-max_atoms = 256
+max_atoms = 128
 signal_sizes = [1024, 2048, 4096, 8192, 16384, 32768]
 embedding_size = 16
 noise_level = 0
@@ -117,6 +117,11 @@ def nn_encode(encoded, max_atoms=max_atoms):
     positions = np.array(positions)
     mags = np.array(mags)
 
+
+    at = np.zeros((atoms.shape[0], 3072), dtype=np.float32)
+    at[np.arange(atoms.shape[0]), atoms.reshape(-1)] = 1
+    atoms = at
+
     # get the N loudest
     indices = np.argsort(mags)[::-1][:max_atoms]
     atoms = atoms[indices]
@@ -135,7 +140,7 @@ def nn_encode(encoded, max_atoms=max_atoms):
     positions = positions[indices]
     mags = mags[indices]
 
-    atoms = torch.from_numpy(atoms).long().to(device)
+    atoms = torch.from_numpy(atoms).float().to(device)
     positions = (torch.from_numpy(positions).float().to(device))
     mags = torch.from_numpy(mags).float().to(device)
 
@@ -149,17 +154,21 @@ def _nn_decode(encoded, visualize=False, save=True, plot_mags=False):
     p = p[0].data.cpu().numpy()
     m = m[0].data.cpu().numpy()
 
-    all_indices = np.array(sorted(list(atom_indices)))
-    all_atoms = disc_encoder.atom_embedding.weight.data.cpu().numpy()
+    # all_indices = np.array(sorted(list(atom_indices)))
+    # all_atoms = disc_encoder.atom_embedding.weight.data.cpu().numpy()
 
 
-    if a.ndim == 2:
-        dist = cdist(all_atoms[all_indices], a)
+    # if a.ndim == 2:
+    #     dist = cdist(all_atoms[all_indices], a)
 
-        at_indices = np.argmin(dist, axis=0)
-        at_indices = all_indices[at_indices]
-    else:
-        at_indices = a
+    #     at_indices = np.argmin(dist, axis=0)
+    #     at_indices = all_indices[at_indices]
+    # else:
+    #     at_indices = a
+
+    at_indices = np.argmax(a, axis=-1)
+    
+
     pos = (p + 1) / 2
     mags = m
 
@@ -249,14 +258,14 @@ class Generator(nn.Module):
         self.pos = PositionalEncoding(1, max_atoms, 16)
         self.mlp = LinearOutputStack(channels, 8, in_channels=33 + channels)
 
-        self.atom = LinearOutputStack(channels, 3, out_channels=16)
+        self.atom = LinearOutputStack(channels, 3, out_channels=3072)
         self.time = LinearOutputStack(channels, 3, out_channels=1)
         self.mag = LinearOutputStack(channels, 3, out_channels=1)
 
         self.decoder = nn.Sequential(
-            Expander(channels, 2),
-            # MyBatchNorm(channels),
-            nn.LeakyReLU(0.2),
+            # Expander(channels, 2),
+            # # MyBatchNorm(channels),
+            # nn.LeakyReLU(0.2),
             Expander(channels, 2),
             # MyBatchNorm(channels),
             nn.LeakyReLU(0.2),
@@ -284,14 +293,14 @@ class Generator(nn.Module):
         self.apply(init_weights)
 
     def forward(self, x):
-        # encoded = x.view(-1, 1, self.channels).repeat(1, self.max_atoms, 1)
-        # pos = self.pos.pos_encode.view(
-        #     1, self.max_atoms, -1).repeat(encoded.shape[0], 1, 1)
-        # x = torch.cat([encoded, pos], dim=-1)
-        # x = self.mlp(x)
+        encoded = x.view(-1, 1, self.channels).repeat(1, self.max_atoms, 1)
+        pos = self.pos.pos_encode.view(
+            1, self.max_atoms, -1).repeat(encoded.shape[0], 1, 1)
+        x = torch.cat([encoded, pos], dim=-1)
+        x = self.mlp(x)
 
-        x = x.view(-1, 1, 128)
-        x = self.decoder(x)
+        # x = x.view(-1, 1, 128)
+        # x = self.decoder(x)
 
         a = self.atom(x)
         p = torch.tanh(self.time(x))
@@ -311,12 +320,14 @@ class Encoder(nn.Module):
         self.pos = PositionalEncoding(1, max_atoms, 16)
         self.pos_embedding = LinearOutputStack(channels, 3, in_channels=33)
 
-        self.atom_embedding = nn.Embedding(3072, 16)
-        self.atom_embedding.requires_grad = False
+        # self.atom_embedding = nn.Embedding(3072, 16)
+        # self.atom_embedding.requires_grad = False
+
+        self.atom_embedding = LinearOutputStack(channels, 3, in_channels=3072)
 
         self.pos_mag = LinearOutputStack(channels, 3, in_channels=2)
 
-        self.comb = LinearOutputStack(channels, 3, in_channels=channels * 2 + 16)
+        self.comb = LinearOutputStack(channels, 3, in_channels=channels * 3)
         self.attn = AttentionStack(
             channels,
             attention_heads=8,
@@ -327,8 +338,8 @@ class Encoder(nn.Module):
         self.mixer = Mixer(channels, 8)
 
         self.encoder = nn.Sequential(
-            nn.Conv1d(channels, channels, 2, 2),
-            nn.LeakyReLU(0.2),
+            # nn.Conv1d(channels, channels, 2, 2),
+            # nn.LeakyReLU(0.2),
             nn.Conv1d(channels, channels, 2, 2),
             nn.LeakyReLU(0.2),
             nn.Conv1d(channels, channels, 2, 2),
@@ -357,13 +368,16 @@ class Encoder(nn.Module):
         pos = pos.view(-1, self.max_atoms, self.channels).repeat(a.shape[0], 1, 1)
 
         
-        if a.shape[-1] == 1:
-            atom = self.atom_embedding(a).view(-1, self.max_atoms, 16)
-            atom = atom + torch.zeros_like(atom).uniform_(-noise_level, noise_level)
-        else:
-            atom = a
+        # if a.shape[-1] == 1:
+        #     atom = self.atom_embedding(a).view(-1, self.max_atoms, 16)
+        #     atom = atom + torch.zeros_like(atom).uniform_(-noise_level, noise_level)
+        # else:
+        #     atom = a
 
-        atom = atom
+        # atom = atom
+
+        atom = self.atom_embedding(a)
+
         pm = torch.cat([p, m], dim=-1)
         pm = self.pos_mag(pm)
 
@@ -476,7 +490,7 @@ def train_gen(batch):
 
     # try to minimze MSE *and* fool disc
     a, p, m = batch
-    a = disc_encoder.atom_embedding.weight[a.view(-1)].reshape(batch_size, max_atoms, -1)
+    # a = disc_encoder.atom_embedding.weight[a.view(-1)].reshape(batch_size, max_atoms, -1)
 
     encoded = ae_encoder(*batch)
     decoded = gen(encoded)
@@ -586,13 +600,13 @@ if __name__ == '__main__':
 
     steps = cycle([Turn.DISC, Turn.GEN])
 
-    a, p, m = get_batch(batch_size=256, max_atoms=max_atoms, embed_atoms=False)
-    atom_embeddings, recon_embeddings, coeffs = learn_atom_embeddings(a, m, embedding_size)
-    print(coeffs.std())
+    # a, p, m = get_batch(batch_size=256, max_atoms=max_atoms, embed_atoms=False)
+    # atom_embeddings, recon_embeddings, coeffs = learn_atom_embeddings(a, m, embedding_size)
+    # print(coeffs.std())
 
-    with torch.no_grad():
-        ae_encoder.atom_embedding.weight[:] = torch.from_numpy(coeffs).to(device)
-        disc_encoder.atom_embedding.weight[:] = torch.from_numpy(coeffs).to(device)
+    # with torch.no_grad():
+    #     ae_encoder.atom_embedding.weight[:] = torch.from_numpy(coeffs).to(device)
+    #     disc_encoder.atom_embedding.weight[:] = torch.from_numpy(coeffs).to(device)
 
     while True:
         batch = get_batch(batch_size=batch_size, max_atoms=max_atoms)
