@@ -3,17 +3,24 @@ from sklearn.decomposition import PCA, NMF
 import torch
 from itertools import product
 
-def learn_atom_embeddings(atoms, mags, embedding_size):
-    atom_embeddings = torch.zeros((3072, 3072))
+def learn_atom_embeddings(atoms, mags, embedding_size, atom_dict):
 
-    for i, seq in enumerate(atoms):
-        print(i)
-        # TODO: Should I be using the magnitude to denote "relevance?"
-        seq = list(x.item() for x in seq)
-        indices = list(zip(*product(seq, seq)))
-        atom_embeddings[indices[0], indices[1]] += 1
+    atoms = np.concatenate(list(atom_dict.values()), axis=0)
+    print(atoms.shape)
+    atoms = np.abs(np.fft.rfft(atoms, axis=-1))
+    atom_embeddings = atoms
+
+    # atom_embeddings = torch.zeros((3072, 3072))
+
+    # for i, seq in enumerate(atoms):
+    #     seq = torch.argmax(seq, axis=-1)
+    #     print(i)
+    #     # TODO: Should I be using the magnitude to denote "relevance?"
+    #     seq = list(x.item() for x in seq)
+    #     indices = list(zip(*product(seq, seq)))
+    #     atom_embeddings[indices[0], indices[1]] += 1
     
-    atom_embeddings /= (atom_embeddings.std() + 1e-12)
+    # atom_embeddings /= (atom_embeddings.std() + 1e-12)
 
     pca = PCA(n_components=embedding_size)
     print('Starting to learn PCA')

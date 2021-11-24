@@ -61,7 +61,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 batch_size = 16
 max_atoms = 128
 signal_sizes = [1024, 2048, 4096, 8192, 16384, 32768]
-embedding_size = 16
+embedding_size = 128
 noise_level = 0
 
 
@@ -293,16 +293,16 @@ class Generator(nn.Module):
         self.apply(init_weights)
 
     def forward(self, x):
-        encoded = x.view(-1, 1, self.channels).repeat(1, self.max_atoms, 1)
-        pos = self.pos.pos_encode.view(
-            1, self.max_atoms, -1).repeat(encoded.shape[0], 1, 1)
-        x = torch.cat([encoded, pos], dim=-1)
-        x = self.mlp(x)
+        # encoded = x.view(-1, 1, self.channels).repeat(1, self.max_atoms, 1)
+        # pos = self.pos.pos_encode.view(
+        #     1, self.max_atoms, -1).repeat(encoded.shape[0], 1, 1)
+        # x = torch.cat([encoded, pos], dim=-1)
+        # x = self.mlp(x)
 
-        # x = x.view(-1, 1, 128)
-        # x = self.decoder(x)
+        x = x.view(-1, 1, 128)
+        x = self.decoder(x)
 
-        a = self.atom(x)
+        a = torch.softmax(self.atom(x), dim=-1)
         p = torch.tanh(self.time(x))
         m = torch.sigmoid(self.mag(x)) * 20
         return a, p, m
@@ -323,7 +323,8 @@ class Encoder(nn.Module):
         # self.atom_embedding = nn.Embedding(3072, 16)
         # self.atom_embedding.requires_grad = False
 
-        self.atom_embedding = LinearOutputStack(channels, 3, in_channels=3072)
+        # self.atom_embedding = LinearOutputStack(channels, 3, in_channels=3072)
+        self.atom_embedding = nn.Linear(3072, channels)
 
         self.pos_mag = LinearOutputStack(channels, 3, in_channels=2)
 
@@ -357,6 +358,9 @@ class Encoder(nn.Module):
             nn.Conv1d(channels, channels, 1, 1)
         )
         self.apply(init_weights)
+    
+    def embed_atoms(self, x):
+        return self.atom_embedding(x)
 
     def forward(self, a, p, m, indices=None):
 
@@ -437,7 +441,7 @@ gen = Generator(128, max_atoms).to(device)
 
 # shuffle time so that non-monotonically-increasing time atoms
 # can't be used to identify generated samples
-disc_encoder = Encoder(128, max_atoms, return_features=True).to(device)
+disc_encoder = Encoder(128, max_atoms).to(device)
 disc = Discriminator(128, max_atoms).to(device)
 
 
@@ -469,13 +473,13 @@ def train_disc(batch):
     disc_optim.zero_grad()
 
     # judge real
-    re, _ = disc_encoder(*batch)
+    re = disc_encoder(*batch)
     rj = disc(re)
 
     # judge reconstruction
     fe = ae_encoder(*batch)
     fd = gen(fe)
-    fje, _ = disc_encoder(*fd)
+    fje = disc_encoder(*fd)
     fj = disc(fje)
 
     loss = least_squares_disc_loss(rj, fj)
@@ -488,35 +492,47 @@ def train_disc(batch):
 def train_gen(batch):
     gen_optim.zero_grad()
 
-    # try to minimze MSE *and* fool disc
-    a, p, m = batch
-    # a = disc_encoder.atom_embedding.weight[a.view(-1)].reshape(batch_size, max_atoms, -1)
-
     encoded = ae_encoder(*batch)
     decoded = gen(encoded)
 
-    indices = torch.randperm(max_atoms)
+    a, p, m = batch
+    fa, fp, fm = decoded
 
-    fj, fake_feat = disc_encoder(*decoded, indices)
-    rj, real_feat = disc_encoder(*batch, indices)
-    # j = disc(fj)
+    # atom embedding relationships
+    real_atom_embed = disc_encoder.embed_atoms(a)
+    fake_atom_embed = disc_encoder.embed_atoms(fa)
+    rel_real_atoms = torch.cdist(real_atom_embed, real_atom_embed)
+    rel_fake_atoms = torch.cdist(fake_atom_embed, fake_atom_embed)
+    rel_atom_loss = F.mse_loss(rel_fake_atoms, rel_real_atoms) * 0.001
 
-    # fa, fp, fm = decoded
-    
-    # fpm = torch.cat(decoded[1:], dim=-1)
-    # rpm = torch.cat([p[..., None], m[..., None]], dim=-1)
+    # adversarial loss
+    f_encoded = disc_encoder(*decoded)
+    fj = disc(f_encoded)
+    adv_loss = least_squares_generator_loss(fj)
 
-    # mse = F.mse_loss(fj, rj) #+ F.mse_loss(fpm, rpm) + F.mse_loss(decoded[0], a)
-    # adv = least_squares_generator_loss(j)
+    # time and magnitude relationships
+    pm = torch.cat([p.view(-1, max_atoms, 1), m.view(-1, max_atoms, 1)], dim=-1)
+    fpm = torch.cat([fp.view(-1, max_atoms, 1), fm.view(-1, max_atoms, 1)], dim=-1)
+    real_rel = pm[:, None, :, :] - pm[:, :, None, :]
+    fake_rel = fpm[:, None, :, :] - fpm[:, :, None, :]
+    rel_loss = F.mse_loss(fake_rel, real_rel)
 
-    loss = torch.abs(fake_feat - real_feat).sum()
+    # means, to enforce absolute positions
+    real_mean = torch.mean(pm, dim=1)
+    fake_mean = torch.mean(fpm, dim=1)
+    mean_loss = F.mse_loss(fake_mean, real_mean)
 
-    # loss = mse #+ adv
+    # atom histogram loss
+    fa = fa.sum(axis=1)
+    a = a.sum(axis=1)
+    atom_loss = F.mse_loss(fa, a) * 10
+
+    loss = rel_loss + mean_loss + atom_loss + adv_loss + rel_atom_loss
+
     loss.backward()
     gen_optim.step()
-    # print(f'Gen: MSE:{mse:.2f} ADV:{adv:.2f} TOTAL:{loss:.2f}')
     print('Gen: ', loss.item())
-    return encoded
+    return encoded, batch, decoded, real_atom_embed, fake_atom_embed
 
 
 def train_latent(batch):
@@ -598,15 +614,15 @@ if __name__ == '__main__':
     app = zounds.ZoundsApp(locals=locals(), globals=globals())
     app.start_in_thread(9999)
 
-    steps = cycle([Turn.DISC, Turn.GEN])
+    steps = cycle([Turn.GEN, Turn.DISC])
 
-    # a, p, m = get_batch(batch_size=256, max_atoms=max_atoms, embed_atoms=False)
-    # atom_embeddings, recon_embeddings, coeffs = learn_atom_embeddings(a, m, embedding_size)
-    # print(coeffs.std())
+    a, p, m = get_batch(batch_size=256, max_atoms=max_atoms, embed_atoms=False)
+    atom_embeddings, recon_embeddings, coeffs = learn_atom_embeddings(a, m, embedding_size, sparse_dict)
+    print(coeffs.std())
 
-    # with torch.no_grad():
-    #     ae_encoder.atom_embedding.weight[:] = torch.from_numpy(coeffs).to(device)
-    #     disc_encoder.atom_embedding.weight[:] = torch.from_numpy(coeffs).to(device)
+    with torch.no_grad():
+        ae_encoder.atom_embedding.weight[:] = torch.from_numpy(coeffs).to(device).T
+        disc_encoder.atom_embedding.weight[:] = torch.from_numpy(coeffs).to(device).T
 
     while True:
         batch = get_batch(batch_size=batch_size, max_atoms=max_atoms)
@@ -614,8 +630,10 @@ if __name__ == '__main__':
 
         t = next(steps)
         if t == Turn.GEN:
-            ae_encode = train_gen(batch)
+            ae_encode, orig, recon, real_embed, fake_embed = train_gen(batch)
             e = ae_encode.data.cpu().numpy().squeeze()
+            re = real_embed.data.cpu().numpy()[0]
+            fe = fake_embed.data.cpu().numpy()[0]
         elif t == Turn.DISC:
             orig, recon, r_encode, f_encode = train_disc(batch)
             rz = r_encode.data.cpu().numpy().squeeze()
