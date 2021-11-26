@@ -58,7 +58,7 @@ sparse_dict = learn_dict()
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-batch_size = 16
+batch_size = 8
 max_atoms = 128
 signal_sizes = [1024, 2048, 4096, 8192, 16384, 32768]
 embedding_size = 128
@@ -501,14 +501,14 @@ def train_gen(batch):
     # atom embedding relationships
     real_atom_embed = disc_encoder.embed_atoms(a)
     fake_atom_embed = disc_encoder.embed_atoms(fa)
-    rel_real_atoms = torch.cdist(real_atom_embed, real_atom_embed)
-    rel_fake_atoms = torch.cdist(fake_atom_embed, fake_atom_embed)
-    rel_atom_loss = F.mse_loss(rel_fake_atoms, rel_real_atoms) * 0.001
+    rel_real_atoms = real_atom_embed[:, None, :, :] - real_atom_embed[:, :, None, :]
+    rel_fake_atoms = fake_atom_embed[:, None, :, :] - fake_atom_embed[:, :, None, :]
+    rel_atom_loss = F.mse_loss(rel_fake_atoms, rel_real_atoms)
 
     # adversarial loss
-    f_encoded = disc_encoder(*decoded)
-    fj = disc(f_encoded)
-    adv_loss = least_squares_generator_loss(fj)
+    # f_encoded = disc_encoder(*decoded)
+    # fj = disc(f_encoded)
+    # adv_loss = least_squares_generator_loss(fj)
 
     # time and magnitude relationships
     pm = torch.cat([p.view(-1, max_atoms, 1), m.view(-1, max_atoms, 1)], dim=-1)
@@ -527,7 +527,7 @@ def train_gen(batch):
     a = a.sum(axis=1)
     atom_loss = F.mse_loss(fa, a) * 10
 
-    loss = rel_loss + mean_loss + atom_loss + adv_loss + rel_atom_loss
+    loss = rel_loss + mean_loss + atom_loss + rel_atom_loss
 
     loss.backward()
     gen_optim.step()
@@ -614,7 +614,7 @@ if __name__ == '__main__':
     app = zounds.ZoundsApp(locals=locals(), globals=globals())
     app.start_in_thread(9999)
 
-    steps = cycle([Turn.GEN, Turn.DISC])
+    steps = cycle([Turn.GEN])
 
     a, p, m = get_batch(batch_size=256, max_atoms=max_atoms, embed_atoms=False)
     atom_embeddings, recon_embeddings, coeffs = learn_atom_embeddings(a, m, embedding_size, sparse_dict)
