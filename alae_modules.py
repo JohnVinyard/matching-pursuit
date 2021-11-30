@@ -441,7 +441,7 @@ gen = Generator(128, max_atoms).to(device)
 
 # shuffle time so that non-monotonically-increasing time atoms
 # can't be used to identify generated samples
-disc_encoder = Encoder(128, max_atoms).to(device)
+disc_encoder = Encoder(128, max_atoms, return_features=True).to(device)
 disc = Discriminator(128, max_atoms).to(device)
 
 
@@ -473,13 +473,13 @@ def train_disc(batch):
     disc_optim.zero_grad()
 
     # judge real
-    re = disc_encoder(*batch)
+    re, _ = disc_encoder(*batch)
     rj = disc(re)
 
     # judge reconstruction
     fe = ae_encoder(*batch)
     fd = gen(fe)
-    fje = disc_encoder(*fd)
+    fje, _ = disc_encoder(*fd)
     fj = disc(fje)
 
     loss = least_squares_disc_loss(rj, fj)
@@ -499,58 +499,64 @@ def train_gen(batch):
     fa, fp, fm = decoded
 
     # atom embedding relationships
-    real_atom_embed = disc_encoder.embed_atoms(a)
-    fake_atom_embed = disc_encoder.embed_atoms(fa)
-    rel_real_atoms = real_atom_embed[:, None, :, :] - real_atom_embed[:, :, None, :]
-    rel_fake_atoms = fake_atom_embed[:, None, :, :] - fake_atom_embed[:, :, None, :]
-    rel_atom_loss = F.mse_loss(rel_fake_atoms, rel_real_atoms)
+    # real_atom_embed = disc_encoder.embed_atoms(a)
+    # fake_atom_embed = disc_encoder.embed_atoms(fa)
+    # rel_real_atoms = real_atom_embed[:, None, :, :] - real_atom_embed[:, :, None, :]
+    # rel_fake_atoms = fake_atom_embed[:, None, :, :] - fake_atom_embed[:, :, None, :]
+    # rel_atom_loss = F.mse_loss(rel_fake_atoms, rel_real_atoms)
 
     # adversarial loss
-    # f_encoded = disc_encoder(*decoded)
+    f_encoded, fake_features = disc_encoder(*decoded)
     # fj = disc(f_encoded)
+
     # adv_loss = least_squares_generator_loss(fj)
 
+    _, real_features = disc_encoder(*batch)
+
+    feature_loss = torch.abs(fake_features - real_features).sum()
+
     # time and magnitude relationships
-    pm = torch.cat([p.view(-1, max_atoms, 1), m.view(-1, max_atoms, 1)], dim=-1)
-    fpm = torch.cat([fp.view(-1, max_atoms, 1), fm.view(-1, max_atoms, 1)], dim=-1)
-    real_rel = pm[:, None, :, :] - pm[:, :, None, :]
-    fake_rel = fpm[:, None, :, :] - fpm[:, :, None, :]
-    rel_loss = F.mse_loss(fake_rel, real_rel)
+    # pm = torch.cat([p.view(-1, max_atoms, 1), m.view(-1, max_atoms, 1)], dim=-1)
+    # fpm = torch.cat([fp.view(-1, max_atoms, 1), fm.view(-1, max_atoms, 1)], dim=-1)
+    # real_rel = pm[:, None, :, :] - pm[:, :, None, :]
+    # fake_rel = fpm[:, None, :, :] - fpm[:, :, None, :]
+    # rel_loss = F.mse_loss(fake_rel, real_rel)
 
     # means, to enforce absolute positions
-    real_mean = torch.mean(pm, dim=1)
-    fake_mean = torch.mean(fpm, dim=1)
-    mean_loss = F.mse_loss(fake_mean, real_mean)
+    # real_mean = torch.mean(pm, dim=1)
+    # fake_mean = torch.mean(fpm, dim=1)
+    # mean_loss = F.mse_loss(fake_mean, real_mean)
 
     # atom histogram loss
-    fa = fa.sum(axis=1)
-    a = a.sum(axis=1)
-    atom_loss = F.mse_loss(fa, a) * 10
+    # fa = fa.sum(axis=1)
+    # a = a.sum(axis=1)
+    # atom_loss = F.mse_loss(fa, a) * 10
 
-    loss = rel_loss + mean_loss + atom_loss + rel_atom_loss
+    # loss = rel_loss + mean_loss + atom_loss + rel_atom_loss + adv_loss
+    loss = feature_loss
 
     loss.backward()
     gen_optim.step()
     print('Gen: ', loss.item())
-    return encoded, batch, decoded, real_atom_embed, fake_atom_embed
+    return encoded, batch, decoded
 
 
-def train_latent(batch):
-    disc_optim.zero_grad()
-    gen_optim.zero_grad()
+# def train_latent(batch):
+#     disc_optim.zero_grad()
+#     gen_optim.zero_grad()
 
-    z = latent()
-    inner_latent = fnet(z)
-    fake = gen(inner_latent)
-    encoded = encoder(*fake)
+#     z = latent()
+#     inner_latent = fnet(z)
+#     fake = gen(inner_latent)
+#     encoded = encoder(*fake)
 
-    loss = F.mse_loss(encoded.view(batch_size, -1),
-                      inner_latent.view(batch_size, -1).clone().detach())
-    loss.backward()
-    disc_optim.step()
-    gen_optim.step()
-    print('Latent: ', loss.item())
-    return z, inner_latent, encoded
+#     loss = F.mse_loss(encoded.view(batch_size, -1),
+#                       inner_latent.view(batch_size, -1).clone().detach())
+#     loss.backward()
+#     disc_optim.step()
+#     gen_optim.step()
+#     print('Latent: ', loss.item())
+#     return z, inner_latent, encoded
 
 
 class BatchGenerator(object):
@@ -596,6 +602,7 @@ def listen():
     decoded = decode(encoded, sparse_dict, return_audio=True)
     return decoded
 
+fake = listen
 
 def real():
     encoded = list(nn_decode(orig))
@@ -609,20 +616,22 @@ class Turn(Enum):
     LATENT = 'latent'
 
 
+# TODO: overfit with ordered vs un-ordered
+# TODO: minimize/overfit against a trained discriminator
 if __name__ == '__main__':
 
     app = zounds.ZoundsApp(locals=locals(), globals=globals())
     app.start_in_thread(9999)
 
-    steps = cycle([Turn.GEN])
+    steps = cycle([Turn.GEN, Turn.DISC])
 
     a, p, m = get_batch(batch_size=256, max_atoms=max_atoms, embed_atoms=False)
     atom_embeddings, recon_embeddings, coeffs = learn_atom_embeddings(a, m, embedding_size, sparse_dict)
     print(coeffs.std())
 
-    with torch.no_grad():
-        ae_encoder.atom_embedding.weight[:] = torch.from_numpy(coeffs).to(device).T
-        disc_encoder.atom_embedding.weight[:] = torch.from_numpy(coeffs).to(device).T
+    # with torch.no_grad():
+    #     ae_encoder.atom_embedding.weight[:] = torch.from_numpy(coeffs).to(device).T
+    #     disc_encoder.atom_embedding.weight[:] = torch.from_numpy(coeffs).to(device).T
 
     while True:
         batch = get_batch(batch_size=batch_size, max_atoms=max_atoms)
@@ -630,10 +639,10 @@ if __name__ == '__main__':
 
         t = next(steps)
         if t == Turn.GEN:
-            ae_encode, orig, recon, real_embed, fake_embed = train_gen(batch)
+            ae_encode, orig, recon = train_gen(batch)
             e = ae_encode.data.cpu().numpy().squeeze()
-            re = real_embed.data.cpu().numpy()[0]
-            fe = fake_embed.data.cpu().numpy()[0]
+            # re = real_embed.data.cpu().numpy()[0]
+            # fe = fake_embed.data.cpu().numpy()[0]
         elif t == Turn.DISC:
             orig, recon, r_encode, f_encode = train_disc(batch)
             rz = r_encode.data.cpu().numpy().squeeze()
