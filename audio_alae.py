@@ -78,10 +78,28 @@ class Generator(nn.Module):
             )
              for _ in range(layers)
         ])
-        self.final = nn.Conv1d(channels, channels, 25, 1, 12)
-        self.amp = nn.Conv1d(channels, 1, 1, 1, 0)
-        self.freq = nn.Conv1d(channels, 1, 1, 1, 0)
+        self.final = nn.Conv1d(channels, 1, 25, 1, 12)
+        # self.amp = nn.Conv1d(channels, 1, 1, 1, 0)
+        # self.freq = nn.Conv1d(channels, 1, 1, 1, 0)
 
+        self.embed = nn.Conv1d(33 + latent_dim, channels, 1, 1, 0)
+
+        self.full = nn.Sequential(*[
+            nn.Conv1d(channels, channels, 7, 1, 3),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(channels, channels, 7, 1, 3),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(channels, channels, 7, 1, 3),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(channels, channels, 7, 1, 3),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(channels, channels, 7, 1, 3),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(channels, channels, 7, 1, 3),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(channels, channels, 7, 1, 3),
+            nn.LeakyReLU(0.2),
+        ])
         
 
         self.apply(init_weights)
@@ -92,18 +110,27 @@ class Generator(nn.Module):
         return encoded
     
     def generate(self, x):
-        x = self.expand(x)
-        x = x.view(-1, self.channels, 4)
-        x = self.net(x)
+
+        pos = pos_encode_feature(torch.linspace(-1, 1, n_samples), 1, n_samples, 16)
+        pos = pos.view(1, -1, n_samples).repeat(batch_size, 1, 1)
+
+        x = torch.cat([pos, x], dim=1)
+        x = self.embed(x)
+        x = self.full(x)
         x = self.final(x)
 
-        amp = torch.relu(self.amp(x))
-        amp = F.avg_pool1d(amp, 255, 1, 127)
+        # x = self.expand(x)
+        # x = x.view(-1, self.channels, 4)
+        # x = self.net(x)
+        # x = self.final(x)
 
-        freq = torch.sigmoid((self.freq(x))) * nyquist_radians_per_sample * freq_bands[None, :, None]
+        # amp = torch.relu(self.amp(x))
+        # amp = F.avg_pool1d(amp, 255, 1, 127)
 
-        x = amp * torch.sin(torch.cumsum(freq, dim=-1))
-        x = x.sum(dim=1, keepdim=True)
+        # freq = torch.sigmoid((self.freq(x))) * nyquist_radians_per_sample * freq_bands[None, :, None]
+
+        # x = amp * torch.sin(torch.cumsum(freq, dim=-1))
+        # x = x.sum(dim=1, keepdim=True)
         return x
 
 

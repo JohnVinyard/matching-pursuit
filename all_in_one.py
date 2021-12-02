@@ -7,6 +7,7 @@ import zounds
 from torch import nn
 
 from datastore import batch_stream
+from modules import pos_encode_feature
 from modules3 import LinearOutputStack
 from torch.nn import functional as F
 import numpy as np
@@ -85,18 +86,28 @@ class Generator(nn.Module):
             in_channels=latent_dim,
             out_channels=latent_dim)
         
-        self.expand = nn.Linear(latent_dim, channels * 4)
-        
-        layers = int(math.log(n_samples, 4)) - int(math.log(4, 4))
+        self.final = nn.Conv1d(channels, n_filters, 7, 1, 3)
+        # self.amp = nn.Conv1d(channels, 1, 1, 1, 0)
+        # self.freq = nn.Conv1d(channels, 1, 1, 1, 0)
 
-        self.net = nn.Sequential(*[
-            nn.Sequential(
-                nn.ConvTranspose1d(channels, channels, 26, 4, 11),
-                nn.LeakyReLU(0.2)
-            )
-             for _ in range(layers)
+        self.embed = nn.Conv1d(33 + latent_dim, channels, 1, 1, 0)
+
+        self.full = nn.Sequential(*[
+            nn.Conv1d(channels, channels, 7, 1, 3),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(channels, channels, 7, 1, 3),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(channels, channels, 7, 1, 3),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(channels, channels, 7, 1, 3),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(channels, channels, 7, 1, 3),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(channels, channels, 7, 1, 3),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(channels, channels, 7, 1, 3),
+            nn.LeakyReLU(0.2),
         ])
-        self.final = nn.Conv1d(channels, n_filters, 25, 1, 12)
 
         self.apply(init_weights)
     
@@ -114,7 +125,15 @@ class Generator(nn.Module):
 
     def forward(self, z):
         encoded = self.transform_latent(z)
-        x = self.generate(encoded)
+        encoded = encoded.view(batch_size, latent_dim, 1).repeat(1, 1, n_samples)
+        
+        pos = pos_encode_feature(torch.linspace(-1, 1, n_samples).to(device), 1, n_samples, 16)
+        pos = pos.view(1, -1, n_samples).repeat(batch_size, 1, 1)
+
+        x = torch.cat([pos, encoded], dim=1)
+        x = self.embed(x)
+        x = self.full(x)
+        x = self.final(x)
 
         x = F.pad(x, (0, 1))
         x = fb.transposed_convolve(x)
@@ -193,7 +212,8 @@ def train_gen(samples):
     fake_features, fe, fj = disc(fake, return_features=True)
 
     # minimize distance between disc feature spaces
-    feature_loss = torch.abs(fe - encoded.clone().detach()).sum()
+    feature_loss = torch.abs(features - fake_features).sum()
+
     loss = feature_loss
     loss.backward()
     gen_optim.step()
