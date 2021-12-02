@@ -226,7 +226,7 @@ class Decoder(nn.Module):
             self.channels, 
             band_size, 
             use_filters=True, 
-            use_transposed_conv=False)
+            use_transposed_conv=True)
 
     def forward(self, x):
         return {int(k): decoder(x) for k, decoder in self.bands.items()}
