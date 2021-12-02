@@ -16,7 +16,7 @@ path = '/hdd/musicnet/train_data'
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 sr = zounds.SR22050()
 overfit = False
-batch_size = 1 if overfit else 4
+batch_size = 1 if overfit else 2
 min_band_size = 512
 n_samples = 2**14
 network_channels = 64
@@ -222,11 +222,17 @@ class Decoder(nn.Module):
         self.apply(init_weights)
     
     def _make_decoder(self, band_size):
-        return ConvBandDecoder(
+        # return ConvBandDecoder(
+        #     self.channels, 
+        #     band_size, 
+        #     use_filters=True, 
+        #     use_transposed_conv=True)
+        return PosEncodedDecoder(
             self.channels, 
             band_size, 
-            use_filters=True, 
-            use_transposed_conv=True)
+            use_filter=True, 
+            learned_encoding=False, 
+            use_mlp=False)
 
     def forward(self, x):
         return {int(k): decoder(x) for k, decoder in self.bands.items()}
@@ -270,6 +276,8 @@ if __name__ == '__main__':
     stream = sample_stream()
     bands, feat = next(stream)
 
+    iterations = 0
+
     while True:
         optim.zero_grad()
 
@@ -286,6 +294,7 @@ if __name__ == '__main__':
         loss = F.mse_loss(fake_features, real_features)
         loss.backward()
         optim.step()
-        print(loss.item())
+        print(iterations + 1, loss.item())
 
         e = encoded.data.cpu().numpy()
+        iterations += 1
