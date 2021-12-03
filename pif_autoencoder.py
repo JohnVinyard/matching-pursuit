@@ -165,7 +165,7 @@ class PosEncodedDecoder(nn.Module):
         
         if self.use_mlp:
             self.to_channels = LinearOutputStack(
-                channels, 7, in_channels=33 + channels, out_channels=64 if use_filter else 1, activation=torch.sin)
+                channels, 7, in_channels=33 + channels, out_channels=64 if use_filter else 1)
         else:
             self.net = nn.Sequential(
                 nn.Conv1d(33 + channels, channels, 7, 1, 3),
@@ -232,7 +232,7 @@ class Decoder(nn.Module):
             band_size, 
             use_filter=True, 
             learned_encoding=False, 
-            use_mlp=False)
+            use_mlp=True)
 
     def forward(self, x):
         return {int(k): decoder(x) for k, decoder in self.bands.items()}
