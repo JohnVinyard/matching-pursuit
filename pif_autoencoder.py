@@ -346,7 +346,7 @@ def train_gen(feat):
     ff, e = disc_encoder(fake_feat)
     j = judge(e)
 
-    feature_loss = F.mse_loss(ff, rf) * 100
+    feature_loss = torch.abs(ff - rf).sum()
     loss = torch.abs(1 - j).mean() + feature_loss
     loss.backward()
     gen_optim.step()
