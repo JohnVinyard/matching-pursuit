@@ -8,6 +8,7 @@ from modules import pos_encode_feature
 from modules3 import LinearOutputStack
 import numpy as np
 from torch.nn import functional as F
+from modules2 import DilatedBlock
 
 from test_optisynth import PsychoacousticFeature
 from itertools import chain
@@ -16,7 +17,7 @@ path = '/hdd/musicnet/train_data'
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 sr = zounds.SR22050()
 overfit = False
-batch_size = 1 if overfit else 4
+batch_size = 1 if overfit else 2
 min_band_size = 512
 n_samples = 2**14
 network_channels = 64
@@ -41,9 +42,50 @@ def init_weights(p):
 
     with torch.no_grad():
         try:
-            p.weight.uniform_(-0.125, 0.125)
+            p.weight.uniform_(-0.1, 0.1)
         except AttributeError:
             pass
+
+
+class DilatedDiscEncoder(nn.Module):
+    def __init__(self, channels, periodicity_feature_size, return_features=False):
+        super().__init__()
+        self.channels = channels
+        self.periodicity_feature_size = periodicity_feature_size
+        self.period = LinearOutputStack(
+            channels, 3, in_channels=periodicity_feature_size, out_channels=8)
+        self.return_features = return_features
+
+        self.net = nn.Sequential(
+            nn.Conv1d(512, channels, 1, 1, 0),
+            DilatedBlock(channels, 1),
+            DilatedBlock(channels, 2),
+            DilatedBlock(channels, 4),
+            DilatedBlock(channels, 8),
+            DilatedBlock(channels, 1),
+        )
+    
+    def forward(self, x):
+        # (batch, 64, 32, N)
+        x = x.view(batch_size, 64, 32, self.periodicity_feature_size)
+        x = self.period(x)
+        # (batch, 64, 32, 8)
+        x = x.permute(0, 3, 1, 2)
+        # (batch, 8, 64, 32)
+        x = x.reshape(batch_size, 512, 32)
+        if self.return_features:
+            features = []
+            for layer in self.net:
+                x = layer(x)
+                features.append(x.view(batch_size, -1))
+            
+            x = x.permute(0, 2, 1)
+            features = torch.cat(features, dim=-1)
+            return features, x
+        else:
+            x = self.net(x)
+            x = x.permute(0, 2, 1)
+            return x
 
 
 class BandEncoder(nn.Module):
@@ -79,8 +121,8 @@ class BandEncoder(nn.Module):
             features = []
             for layer in self.collapse:
                 x = layer(x)
-                if isinstance(layer, nn.LeakyReLU):
-                    features.append(x.view(batch_size, -1))
+                if isinstance(layer, nn.Conv2d):
+                    features.append(x.reshape(batch_size, -1))
             # (batch, 128, 1, 1)
             x = x.view(batch_size, self.channels)
             features = torch.cat(features, dim=-1)
@@ -93,34 +135,42 @@ class BandEncoder(nn.Module):
 
 
 class Encoder(nn.Module):
-    def __init__(self, channels, return_features=False):
+    def __init__(self, channels, return_features=False, compact=True):
         super().__init__()
         self.channels = channels
+        self.compact = compact
+        self.return_features = return_features
 
-        bands = {str(k): BandEncoder(channels, v, return_features)
+        bands = {str(k): self._make_encoder(v)
                  for k, v in feature.kernel_sizes.items()}
         self.bands = nn.ModuleDict(bands)
         self.encoder = LinearOutputStack(
             channels, 5, in_channels=channels * len(self.bands))
-        self.return_features = return_features
+        
         self.apply(init_weights)
+    
+    def _make_encoder(self, periodicity_size):
+        if self.compact:
+            return BandEncoder(self.channels, periodicity_size, self.return_features)
+        else:
+            return DilatedDiscEncoder(self.channels, periodicity_size, self.return_features)
 
     def forward(self, x):
         if self.return_features:
             features, encodings = zip(*[self.bands[str(k)](v) for k, v in x.items()])
-            encodings = torch.cat(encodings, dim=1)
+            encodings = torch.cat(encodings, dim=-1)
             x = self.encoder(encodings)
             features = torch.cat(features, dim=-1)
             return features, x
         else:
             encodings = [self.bands[str(k)](v) for k, v in x.items()]
-            encodings = torch.cat(encodings, dim=1)
+            encodings = torch.cat(encodings, dim=-1)
             x = self.encoder(encodings)
             return x
 
 
 class ConvBandDecoder(nn.Module):
-    def __init__(self, channels, band_size, use_filters=False, use_transposed_conv=False):
+    def __init__(self, channels, band_size, use_filters=False, use_transposed_conv=False, use_ddsp=False):
         super().__init__()
         self.channels = channels
         self.band_size = band_size
@@ -129,6 +179,7 @@ class ConvBandDecoder(nn.Module):
         self.expand = LinearOutputStack(channels, 3, out_channels=channels * 4)
         self.use_filters = use_filters
         self.use_transposed_conv = use_transposed_conv
+        self.use_ddsp = use_ddsp
 
         if self.use_transposed_conv:
             self.upsample = nn.Sequential(*[
@@ -147,6 +198,11 @@ class ConvBandDecoder(nn.Module):
                 for _ in range(self.n_layers)])
         self.to_samples = nn.Conv1d(
             channels, 64 if use_filters else 1, 7, 1, 3)
+        
+        if self.use_ddsp:
+            self.amp = nn.Conv1d(64, 64, 1, 1, 0)
+            self.freq = nn.Conv1d(64, 64, 1, 1, 0)
+            self.bands = torch.from_numpy(np.geomspace(0.01, 1, 64) * np.pi).float().to(device)
 
     def forward(self, x):
         x = x.view(batch_size, self.channels)
@@ -155,6 +211,16 @@ class ConvBandDecoder(nn.Module):
         x = self.expand(x).view(batch_size, self.channels, 4)
         x = self.upsample(x)
         x = self.to_samples(x)
+
+        if self.use_ddsp:
+            amp = torch.sigmoid(self.amp(x))
+            freq = torch.sigmoid(self.freq(x))
+            amp = F.avg_pool1d(amp, 64, 1, 32)[..., :-1]
+            freq = F.avg_pool1d(freq, 64, 1, 32)[..., :-1]
+            freq = freq * self.bands[None, :, None]
+            freq = torch.sin(torch.cumsum(freq, dim=-1)) * amp
+            x = torch.mean(x, dim=1, keepdim=True)
+            return x
 
         if not self.use_filters:
             return x
@@ -171,7 +237,8 @@ class PosEncodedDecoder(nn.Module):
             band_size,
             use_filter=True,
             learned_encoding=False, 
-            use_mlp=True):
+            use_mlp=True,
+            use_ddsp=False):
 
         super().__init__()
         self.channels = channels
@@ -179,6 +246,8 @@ class PosEncodedDecoder(nn.Module):
         self.use_filter = use_filter
         self.learned_encoding = learned_encoding
         self.use_mlp = use_mlp
+
+        self.use_ddsp = use_ddsp
 
         self.band_specific = LinearOutputStack(channels, 3)
 
@@ -204,6 +273,10 @@ class PosEncodedDecoder(nn.Module):
                 nn.Conv1d(channels, 64 if use_filter else 1, 7, 1, 3),
             )
         
+        if self.use_ddsp:
+            self.amp = nn.Conv1d(64, 64, 1, 1, 0)
+            self.freq = nn.Conv1d(64, 64, 1, 1, 0)
+            self.bands = torch.from_numpy(np.geomspace(0.01, 1, 64) * np.pi).float().to(device)
     
     def forward(self, x):
         x = x.view(batch_size, self.channels)
@@ -228,6 +301,17 @@ class PosEncodedDecoder(nn.Module):
         if not self.use_filter:
             return x
         
+        if self.use_ddsp:
+            amp = torch.sigmoid(self.amp(x))
+            freq = torch.sigmoid(self.freq(x))
+            amp = F.avg_pool1d(amp, 64, 1, 32)[..., :-1]
+            freq = F.avg_pool1d(freq, 64, 1, 32)[..., :-1]
+            freq = freq * self.bands[None, :, None]
+            freq = torch.sin(torch.cumsum(freq, dim=-1)) * amp
+            x = torch.mean(x, dim=1, keepdim=True)
+            return x
+
+        
         x = F.pad(x, (0, 1))
         x = feature.banks[self.band_size][0].transposed_convolve(x) * 0.1
         return x
@@ -250,13 +334,15 @@ class Decoder(nn.Module):
             self.channels, 
             band_size, 
             use_filters=True, 
-            use_transposed_conv=True)
+            use_transposed_conv=True,
+            use_ddsp=True)
         # return PosEncodedDecoder(
         #     self.channels, 
         #     band_size, 
         #     use_filter=True, 
         #     learned_encoding=False, 
-        #     use_mlp=True)
+        #     use_mlp=True,
+        #     use_ddsp=True)
 
     def forward(self, x):
         return {int(k): decoder(x) for k, decoder in self.bands.items()}
@@ -304,7 +390,7 @@ class Judge(nn.Module):
         self.net = LinearOutputStack(channels, 5, out_channels=1)
     
     def forward(self, x):
-        x = x.view(batch_size, self.channels)
+        x = x.view(batch_size, -1, self.channels)
         return torch.sigmoid(self.net(x))
 
 
@@ -315,7 +401,7 @@ gen_optim = Adam(
     lr=1e-4, 
     betas=(0, 0.9))
 
-disc_encoder = Encoder(network_channels, return_features=True).to(device)
+disc_encoder = Encoder(network_channels, return_features=True, compact=False).to(device)
 judge = Judge(network_channels).to(device)
 disc_optim = Adam(chain(disc_encoder.parameters(), judge.parameters()), lr=1e-4, betas=(0, 0.9))
 
@@ -339,10 +425,12 @@ def train_gen(feat):
     rf, _ = disc_encoder(feat)
 
 
-    # encode, decode, and compute fake disc features
+    # encode, decode, and compute PIF features
     enc = encoder(feat)
     fake = decoder(enc)
     fake_feat = compute_feature_dict(fake)
+
+    # judge the reconstruction and return intermediate features
     ff, e = disc_encoder(fake_feat)
     j = judge(e)
 
@@ -356,14 +444,17 @@ def train_gen(feat):
 def train_disc(feat):
     disc_optim.zero_grad()
 
+    # encode, decode and compute PIF features
     enc = encoder(feat)
     fake = decoder(enc)
     fake_feat = compute_feature_dict(fake)
 
-    renc = encoder(feat)
+    # judge the real input
+    _, renc = disc_encoder(feat)
     rj = judge(renc)
 
-    fenc = encoder(fake_feat)
+    # judge the fake input
+    _, fenc = disc_encoder(fake_feat)
     fj = judge(fenc)
 
     loss = (torch.abs(1 - rj).mean() + torch.abs(0 - fj).mean()) * 0.5
