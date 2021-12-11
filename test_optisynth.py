@@ -95,7 +95,7 @@ class PsychoacousticFeature(nn.Module):
                 sr,
                 size,
                 scale,
-                0.01,
+                np.geomspace(0.25, 0.9, num=64),
                 normalize_filters=True,
                 a_weighting=False).to(device)
             bank_dict[key] = (fb, span, size)
@@ -129,8 +129,6 @@ class PsychoacousticFeature(nn.Module):
 
             spec = F.pad(spec, (kernel_size // 4, kernel_size // 4))
             spec = spec.unfold(-1, kernel_size, kernel_size // 2)
-            win = torch.hamming_window(spec.shape[-1])[None, None, None, :].to(device)
-            spec = spec * win
 
 
             spec = torch.norm(torch.rfft(spec, signal_ndim=1), dim=-1)
@@ -164,8 +162,6 @@ class PsychoacousticFeature(nn.Module):
 
             spec = F.pad(spec, (kernel_size // 4, kernel_size // 4))
             spec = spec.unfold(-1, kernel_size, kernel_size // 2)
-            win = torch.hamming_window(spec.shape[-1])[None, None, None, :].to(device)
-            spec = spec * win
 
 
             if span[0] > 99999:
