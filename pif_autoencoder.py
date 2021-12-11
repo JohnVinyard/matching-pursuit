@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+from torch.nn.modules.conv import Conv1d
 from torch.optim.adam import Adam
 import zounds
 from all_in_one import covariance
@@ -24,7 +25,7 @@ batch_size = 1 if overfit else 4
 min_band_size = 512
 n_samples = 2**14
 network_channels = 64
-gen_uses_sine_activation = False
+gen_uses_sine_activation = True
 compact_disc = True
 init_value = 0.125
 
@@ -57,6 +58,60 @@ def init_weights(p):
             pass
 
 
+class PosEncodedEncoder(nn.Module):
+    def __init__(self, channels, periodicity_feature_size, return_features=False):
+        super().__init__()
+        self.channels = channels
+        self.periodicity_feature_size = periodicity_feature_size
+        self.return_features = return_features
+
+        self.periodicity_feature_size = periodicity_feature_size
+        self.period = LinearOutputStack(
+            channels, 3, in_channels=periodicity_feature_size, out_channels=8)
+
+        self.embed_periodicity = nn.Conv1d(512, channels, 1, 1, 0)
+        self.embed_pos = nn.Conv1d(33, channels, 1, 1, 0)
+
+        n_layers = int(np.log2(32))
+
+        self.net = nn.Sequential(
+            nn.Conv1d(channels * 2, channels, 1, 1, 0),
+            nn.LeakyReLU(0.2),
+            *[
+                nn.Sequential(
+                    nn.Conv1d(channels, channels, 2, 2, 0),
+                    nn.LeakyReLU(0.2)
+                )
+                for _ in range(n_layers)],
+            nn.Conv1d(channels, channels, 1, 1, 0)
+        )
+
+    def forward(self, x):
+
+        time_dim = 32
+
+        pos = pos_encode_feature(torch.linspace(-1, 1, time_dim).view(-1, 1), 1, time_dim, 16)\
+            .view(1, time_dim, 33)\
+            .repeat(batch_size, 1, 1)\
+            .permute(0, 2, 1).to(device)
+        pos = self.embed_pos(pos)
+
+        x = x.view(batch_size, 64, time_dim, self.periodicity_feature_size)
+        x = self.period(x)
+        x = x.permute(0, 1, 3, 2).reshape(batch_size, 8 * 64, time_dim)
+        x = self.embed_periodicity(x)
+
+        x = torch.cat([pos, x], dim=1)
+
+        if self.return_features:
+            raise NotImplementedError(
+                'TODO: implement return features if used in discriminator')
+        else:
+            x = self.net(x)
+            x = x.view(batch_size, self.channels)
+            return x
+
+
 class DilatedDiscEncoder(nn.Module):
     def __init__(self, channels, periodicity_feature_size, return_features=False):
         super().__init__()
@@ -87,7 +142,7 @@ class DilatedDiscEncoder(nn.Module):
             features = []
             for layer in self.net:
                 x = layer(x)
-                features.append(x.view(batch_size, -1) / x.numel())
+                features.append(x.view(batch_size, -1))
 
             x = x.permute(0, 2, 1)
             features = torch.cat(features, dim=-1)
@@ -132,7 +187,7 @@ class BandEncoder(nn.Module):
             for layer in self.collapse:
                 x = layer(x)
                 if isinstance(layer, nn.Conv2d):
-                    features.append(x.reshape(batch_size, -1) / x.numel())
+                    features.append(x.reshape(batch_size, -1))
             # (batch, 128, 1, 1)
             x = x.view(batch_size, self.channels)
             features = torch.cat(features, dim=-1)
@@ -145,13 +200,14 @@ class BandEncoder(nn.Module):
 
 
 class Encoder(nn.Module):
-    def __init__(self, channels, return_features=False, compact=True):
+    def __init__(self, channels, return_features=False, compact=True, use_pos_encoding=False):
         super().__init__()
         self.channels = channels
         self.compact = compact
         self.return_features = return_features
+        self.use_pos_encoding = use_pos_encoding
 
-        bands = {str(k): self._make_encoder(v)
+        bands = {str(k): self._make_encoder(v, use_pos_encoding)
                  for k, v in feature.kernel_sizes.items()}
         self.bands = nn.ModuleDict(bands)
         self.encoder = LinearOutputStack(
@@ -159,8 +215,10 @@ class Encoder(nn.Module):
 
         self.apply(init_weights)
 
-    def _make_encoder(self, periodicity_size):
-        if self.compact:
+    def _make_encoder(self, periodicity_size, use_pos_encoding):
+        if use_pos_encoding:
+            return PosEncodedEncoder(self.channels, periodicity_size, self.return_features)
+        elif self.compact:
             return BandEncoder(self.channels, periodicity_size, self.return_features)
         else:
             return DilatedDiscEncoder(self.channels, periodicity_size, self.return_features)
@@ -311,9 +369,7 @@ class PosEncodedDecoder(nn.Module):
             x = x.permute(0, 2, 1)
         else:
             x = self.net(x)
-
-        if not self.use_filter:
-            return x
+        
 
         if self.use_ddsp:
             amp = torch.sigmoid(self.amp(x))
@@ -325,6 +381,10 @@ class PosEncodedDecoder(nn.Module):
             x = torch.mean(x, dim=1, keepdim=True)
             return x
 
+        if not self.use_filter:
+            return x
+
+        
         x = F.pad(x, (0, 1))
         x = feature.banks[self.band_size][0].transposed_convolve(x) * 0.1
         return x
@@ -347,14 +407,14 @@ class Decoder(nn.Module):
             band_size,
             use_filters=True,
             use_transposed_conv=False,
-            use_ddsp=True)
+            use_ddsp=False)
         # return PosEncodedDecoder(
         #     self.channels,
         #     band_size,
         #     use_filter=True,
-        #     learned_encoding=False,
-        #     use_mlp=False,
-        #     use_ddsp=False)
+        #     learned_encoding=True,
+        #     use_mlp=True,
+        #     use_ddsp=True)
 
     def forward(self, x):
         return {int(k): decoder(x) for k, decoder in self.bands.items()}
@@ -410,18 +470,25 @@ class Judge(nn.Module):
         return self.net(x)
 
 
-encoder = Encoder(network_channels).to(device)
+encoder = Encoder(
+    network_channels,
+    use_pos_encoding=False).to(device)
 decoder = Decoder(network_channels).to(device)
 gen_optim = Adam(
     chain(encoder.parameters(), decoder.parameters()),
     lr=1e-4,
     betas=(0, 0.9))
 
+
 disc_encoder = Encoder(
-    network_channels, return_features=True, compact=compact_disc).to(device)
+    network_channels,
+    return_features=True,
+    compact=compact_disc).to(device)
 judge = Judge(network_channels).to(device)
-disc_optim = Adam(chain(disc_encoder.parameters(),
-                  judge.parameters()), lr=1e-4, betas=(0, 0.9))
+disc_optim = Adam(
+    chain(disc_encoder.parameters(), judge.parameters()),
+    lr=1e-4,
+    betas=(0, 0.9))
 
 
 def real():
