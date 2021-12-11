@@ -199,6 +199,19 @@ class BandEncoder(nn.Module):
             return x
 
 
+class MFCC(nn.Module):
+    def __init__(self, n_coeffs=12):
+        super().__init__()
+        self.n_coeffs = n_coeffs
+    
+    def forward(self, x):
+        x = x.view(batch_size, 64, 32, -1)
+        x = torch.norm(x, dim=-1)
+        x = torch.fft.rfft(x, dim=-1, norm='ortho')
+        x = torch.abs(x)
+        x = x[:, 1:self.n_coeffs + 1, :]
+        return x
+
 class Encoder(nn.Module):
     def __init__(self, channels, return_features=False, compact=True, use_pos_encoding=False):
         super().__init__()
