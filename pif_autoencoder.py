@@ -1,10 +1,12 @@
 import torch
-from torch import nn
+from torch import nn, std
 from torch.nn.modules.conv import Conv1d
 from torch.optim.adam import Adam
 import zounds
+from zounds import loudness
 from all_in_one import covariance
 from datastore import batch_stream
+from ddsp import noise_bank2
 from decompose import fft_frequency_decompose, fft_frequency_recompose
 from modules import pos_encode_feature
 from modules3 import LinearOutputStack
@@ -25,8 +27,8 @@ batch_size = 1 if overfit else 4
 min_band_size = 512
 n_samples = 2**14
 network_channels = 64
-gen_uses_sine_activation = True
-compact_disc = True
+gen_uses_sine_activation = False
+compact_disc = False
 init_value = 0.125
 
 n_bands = int(np.log2(n_samples) - np.log2(min_band_size))
@@ -113,16 +115,22 @@ class PosEncodedEncoder(nn.Module):
 
 
 class DilatedDiscEncoder(nn.Module):
-    def __init__(self, channels, periodicity_feature_size, return_features=False):
+    def __init__(self, channels, periodicity_feature_size, band_size, return_features=False):
         super().__init__()
         self.channels = channels
+        self.band_size = band_size
         self.periodicity_feature_size = periodicity_feature_size
         self.period = LinearOutputStack(
             channels, 3, in_channels=periodicity_feature_size, out_channels=8)
         self.return_features = return_features
 
+        self.mfcc = MFCC()
+        self.chroma = Chroma(feature.chroma_basis(band_size))
+        self.loudness = Envelope()
+        self.reduce = nn.Conv1d(512, channels, 1, 1, 0)
+
         self.net = nn.Sequential(
-            nn.Conv1d(512, channels, 1, 1, 0),
+            nn.Conv1d(channels * 4, channels, 1, 1, 0),
             DilatedBlock(channels, 1),
             DilatedBlock(channels, 2),
             DilatedBlock(channels, 4),
@@ -131,6 +139,12 @@ class DilatedDiscEncoder(nn.Module):
         )
 
     def forward(self, x):
+        mfcc = self.mfcc(x)
+        
+        chroma = self.chroma(x) * 0.1
+        env = self.loudness(x) * 0.1
+
+
         # (batch, 64, 32, N)
         x = x.view(batch_size, 64, 32, self.periodicity_feature_size)
         x = self.period(x)
@@ -138,6 +152,11 @@ class DilatedDiscEncoder(nn.Module):
         x = x.permute(0, 3, 1, 2)
         # (batch, 8, 64, 32)
         x = x.reshape(batch_size, 512, 32)
+        x = self.reduce(x)
+
+
+        x = torch.cat([mfcc, x, chroma, env], dim=1)
+
         if self.return_features:
             features = []
             for layer in self.net:
@@ -154,9 +173,10 @@ class DilatedDiscEncoder(nn.Module):
 
 
 class BandEncoder(nn.Module):
-    def __init__(self, channels, periodicity_feature_size, return_features=False):
+    def __init__(self, channels, periodicity_feature_size, band_size, return_features=False):
         super().__init__()
         self.channels = channels
+        self.band_size = band_size
         self.periodicity_feature_size = periodicity_feature_size
         self.period = LinearOutputStack(
             channels, 3, in_channels=periodicity_feature_size, out_channels=8)
@@ -199,17 +219,50 @@ class BandEncoder(nn.Module):
             return x
 
 
+class Envelope(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.transform = nn.Conv1d(1, network_channels, 7, 1, 3)
+    
+    def forward(self, x):
+        x = x.view(batch_size, 64, 32, -1)
+        x = torch.norm(x, dim=-1) # (batch, 64, 32)
+        x = torch.norm(x, dim=1, keepdim=True)
+        x = self.transform(x)
+        return x
+
 class MFCC(nn.Module):
     def __init__(self, n_coeffs=12):
         super().__init__()
         self.n_coeffs = n_coeffs
+        self.transform = nn.Conv1d(n_coeffs, network_channels, 1, 1, 0)
     
     def forward(self, x):
         x = x.view(batch_size, 64, 32, -1)
         x = torch.norm(x, dim=-1)
-        x = torch.fft.rfft(x, dim=-1, norm='ortho')
-        x = torch.abs(x)
+        x = x.permute(0, 2, 1) # (batch, 32, 64)
+        x = torch.rfft(x, signal_ndim=1, normalized=True) # (batch, 32, 33, 2)
+        x = torch.norm(x, dim=-1) # (bach, 32, 33)
+        x = x.permute(0, 2, 1) # (batch, 33, 32)
         x = x[:, 1:self.n_coeffs + 1, :]
+
+        x = self.transform(x)
+        return x
+
+
+class Chroma(nn.Module):
+    def __init__(self, basis):
+        super().__init__()
+        self.register_buffer('basis', torch.from_numpy(basis).float())
+        self.transform = nn.Conv1d(12, network_channels, 1, 1, 0)
+    
+    def forward(self, x):
+        x = x.view(batch_size, 64, 32, -1)
+        x = torch.norm(x, dim=-1)
+        x = x.permute(0, 2, 1) # (batch, 32, 64)
+        x = torch.matmul(x, self.basis.permute(1, 0))
+        x = x.permute(0, 2, 1) # (batch, 12, 32)
+        x = self.transform(x)
         return x
 
 class Encoder(nn.Module):
@@ -220,7 +273,7 @@ class Encoder(nn.Module):
         self.return_features = return_features
         self.use_pos_encoding = use_pos_encoding
 
-        bands = {str(k): self._make_encoder(v, use_pos_encoding)
+        bands = {str(k): self._make_encoder(v, use_pos_encoding, k)
                  for k, v in feature.kernel_sizes.items()}
         self.bands = nn.ModuleDict(bands)
         self.encoder = LinearOutputStack(
@@ -228,13 +281,14 @@ class Encoder(nn.Module):
 
         self.apply(init_weights)
 
-    def _make_encoder(self, periodicity_size, use_pos_encoding):
+    def _make_encoder(self, periodicity_size, use_pos_encoding, band_size):
         if use_pos_encoding:
+            raise NotImplementedError()
             return PosEncodedEncoder(self.channels, periodicity_size, self.return_features)
         elif self.compact:
-            return BandEncoder(self.channels, periodicity_size, self.return_features)
+            return BandEncoder(self.channels, periodicity_size, band_size, self.return_features)
         else:
-            return DilatedDiscEncoder(self.channels, periodicity_size, self.return_features)
+            return DilatedDiscEncoder(self.channels, periodicity_size, band_size, self.return_features)
 
     def forward(self, x):
         if self.return_features:
@@ -282,10 +336,18 @@ class ConvBandDecoder(nn.Module):
             channels, 64 if use_filters else 1, 7, 1, 3)
 
         if self.use_ddsp:
+            noise_samples = 64
+            self.noise_frames = band_size // noise_samples
+            self.noise_coeffs = (self.noise_frames // 2) + 1
+            
             self.amp = nn.Conv1d(64, 64, 1, 1, 0)
             self.freq = nn.Conv1d(64, 64, 1, 1, 0)
             self.bands = torch.from_numpy(np.geomspace(
                 0.01, 1, 64) * np.pi).float().to(device)
+            self.noise = nn.Conv1d(64, self.noise_coeffs, 1, 1, 0)
+            self.noise_factor = nn.Parameter(torch.FloatTensor(1).fill_(1e-5))
+            
+            
 
     def forward(self, x):
         x = x.view(batch_size, self.channels)
@@ -296,6 +358,11 @@ class ConvBandDecoder(nn.Module):
         x = self.to_samples(x)
 
         if self.use_ddsp:
+            noise = torch.sigmoid(self.noise(x))
+            noise_step = self.noise_frames // 2
+            noise = F.avg_pool1d(noise, noise_step, noise_step)
+            noise = noise_bank2(noise) * self.noise_factor
+
             amp = torch.sigmoid(self.amp(x))
             freq = torch.sigmoid(self.freq(x))
             amp = F.avg_pool1d(amp, 64, 1, 32)[..., :-1]
@@ -303,7 +370,8 @@ class ConvBandDecoder(nn.Module):
             freq = freq * self.bands[None, :, None]
             freq = torch.sin(torch.cumsum(freq, dim=-1)) * amp
             x = torch.mean(x, dim=1, keepdim=True)
-            return x
+            
+            return x + noise
 
         if not self.use_filters:
             return x
@@ -420,7 +488,7 @@ class Decoder(nn.Module):
             band_size,
             use_filters=True,
             use_transposed_conv=False,
-            use_ddsp=False)
+            use_ddsp=True)
         # return PosEncodedDecoder(
         #     self.channels,
         #     band_size,
@@ -539,23 +607,24 @@ def train_gen(feat):
 
     # judge the reconstruction and return intermediate features
     ff, e = disc_encoder(fake_feat)
-    j = judge(e)
+    # j = judge(e)
 
     # ensure that each feature has zero mean, unit variance,
     # and that features are as independent as possible
-    # enc = enc.view(batch_size, network_channels)
-    # mean_loss = torch.abs(0 - enc.mean(dim=0)).mean()
-    # std_loss = torch.abs(1 - enc.std(dim=0)).mean()
-    # cov = covariance(enc)
-    # d = torch.sqrt(torch.diag(cov))
-    # cov = cov / d[None, :]
-    # cov = cov / d[:, None]
-    # cov = torch.abs(cov)
-    # cov = cov.mean()
+    enc = enc.view(batch_size, network_channels)
+    mean_loss = torch.abs(0 - enc.mean(dim=0)).mean()
+    std_loss = torch.abs(1 - enc.std(dim=0)).mean()
+    cov = covariance(enc)
+    d = torch.sqrt(torch.diag(cov))
+    cov = cov / d[None, :]
+    cov = cov / d[:, None]
+    cov = torch.abs(cov)
+    cov = cov.mean()
+    latent_loss = mean_loss + std_loss + cov
 
-    feature_loss = torch.abs(ff - rf).sum()
+    feature_loss = F.mse_loss(ff, rf)
     # + mean_loss + std_loss + cov
-    loss = torch.abs(1 - j).mean() + feature_loss
+    loss = (feature_loss * 10) + latent_loss
     loss.backward()
     gen_optim.step()
     print('G', loss.item())

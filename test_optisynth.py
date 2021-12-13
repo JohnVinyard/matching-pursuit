@@ -100,6 +100,14 @@ class PsychoacousticFeature(nn.Module):
                 a_weighting=False).to(device)
             bank_dict[key] = (fb, span, size)
         return bank_dict
+    
+    def chroma_basis(self, size):
+        fb, span, size = self.banks[size]
+        band = zounds.FrequencyBand(*span)
+        chr = zounds.ChromaScale(band)
+        basis = chr._basis(fb.scale, zounds.OggVorbisWindowingFunc())
+        x = np.array(basis)
+        return x
 
     @property
     def band_sizes(self):
