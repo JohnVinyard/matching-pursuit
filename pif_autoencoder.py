@@ -23,11 +23,11 @@ torch.backends.cudnn.benchmark = True
 
 sr = zounds.SR22050()
 overfit = False
-batch_size = 1 if overfit else 2
+batch_size = 1 if overfit else 4
 min_band_size = 512
 n_samples = 2**14
 network_channels = 64
-gen_uses_sine_activation = True
+gen_uses_sine_activation = False
 compact_disc = False
 init_value = 0.125
 
@@ -106,8 +106,13 @@ class PosEncodedEncoder(nn.Module):
         x = torch.cat([pos, x], dim=1)
 
         if self.return_features:
-            raise NotImplementedError(
-                'TODO: implement return features if used in discriminator')
+            features = []
+            for layer in self.net:
+                x = layer(x)
+                features.append(x.view(batch_size, -1))
+            features = torch.cat(features, dim=-1)
+            x = x.view(batch_size, self.channels)
+            return features, x
         else:
             x = self.net(x)
             x = x.view(batch_size, self.channels)
@@ -295,7 +300,6 @@ class Encoder(nn.Module):
 
     def _make_encoder(self, periodicity_size, use_pos_encoding, band_size):
         if use_pos_encoding:
-            raise NotImplementedError()
             return PosEncodedEncoder(self.channels, periodicity_size, self.return_features)
         elif self.compact:
             return BandEncoder(self.channels, periodicity_size, band_size, self.return_features)
@@ -521,20 +525,20 @@ class Decoder(nn.Module):
         self.apply(init_weights)
 
     def _make_decoder(self, band_size):
-        # return ConvBandDecoder(
-        #     self.channels,
-        #     band_size,
-        #     use_filters=True,
-        #     use_transposed_conv=False,
-        #     use_ddsp=True)
-        
-        return PosEncodedDecoder(
+        return ConvBandDecoder(
             self.channels,
             band_size,
-            use_filter=False,
-            learned_encoding=False,
-            use_mlp=False,
+            use_filters=True,
+            use_transposed_conv=False,
             use_ddsp=True)
+        
+        # return PosEncodedDecoder(
+        #     self.channels,
+        #     band_size,
+        #     use_filter=False,
+        #     learned_encoding=False,
+        #     use_mlp=False,
+        #     use_ddsp=True)
 
     def forward(self, x):
         return {int(k): decoder(x) for k, decoder in self.bands.items()}
@@ -603,7 +607,8 @@ gen_optim = Adam(
 disc_encoder = Encoder(
     network_channels,
     return_features=True,
-    compact=compact_disc).to(device)
+    compact=compact_disc,
+    use_pos_encoding=True).to(device)
 judge = Judge(network_channels).to(device)
 disc_optim = Adam(
     chain(disc_encoder.parameters(), judge.parameters()),
