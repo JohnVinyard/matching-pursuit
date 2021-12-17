@@ -26,6 +26,7 @@ n_samples = 2**14
 network_channels = 64
 gen_uses_sine_activation = False
 init_value = 0.125
+upsampling_mode = 'nearest'
 
 n_bands = int(np.log2(n_samples) - np.log2(min_band_size))
 
@@ -393,7 +394,7 @@ class DDSP(nn.Module):
         amp = F.avg_pool1d(amp, 64, 1, 32)[..., :-1]
         freq = F.avg_pool1d(freq, 64, 1, 32)[..., :-1]
 
-        # freq = self.bands[None, :, None] + (freq * self.spans[None, :, None])
+        freq = self.bands[None, :, None] + (freq * self.spans[None, :, None])
 
         freq = torch.sin(torch.cumsum(freq, dim=-1)) * amp
         x = torch.mean(x, dim=1, keepdim=True)
@@ -413,6 +414,7 @@ class ConvBandDecoder(nn.Module):
         self.use_ddsp = use_ddsp
 
         if self.use_transposed_conv:
+            raise NotImplementedError('This introduces too many artifacts')
             self.upsample = nn.Sequential(*[
                 nn.Sequential(
                     nn.ConvTranspose1d(channels, channels, 4, 2, 1),
@@ -422,7 +424,7 @@ class ConvBandDecoder(nn.Module):
         else:
             self.upsample = nn.Sequential(*[
                 nn.Sequential(
-                    nn.Upsample(scale_factor=2, mode='nearest'),
+                    nn.Upsample(scale_factor=2, mode=upsampling_mode),
                     nn.Conv1d(channels, channels, 7, 1, 3),
                     Activation()
                 )
@@ -571,7 +573,7 @@ class Decoder(nn.Module):
 
         self.upsample = nn.Sequential(*[
             nn.Sequential(
-                nn.Upsample(scale_factor=2, mode='nearest'),
+                nn.Upsample(scale_factor=2, mode=upsampling_mode),
                 nn.Conv1d(channels, channels, 7, 1, 3),
                 Activation()
             )
