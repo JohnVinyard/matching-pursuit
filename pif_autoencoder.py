@@ -27,6 +27,7 @@ network_channels = 64
 gen_uses_sine_activation = False
 init_value = 0.125
 upsampling_mode = 'nearest'
+constrain_ddsp = True
 
 n_bands = int(np.log2(n_samples) - np.log2(min_band_size))
 
@@ -134,7 +135,7 @@ class DilatedDiscEncoder(nn.Module):
         self.transform_pos = nn.Conv1d(33, channels, 1, 1, 0)
 
         self.net = nn.Sequential(
-            nn.Conv1d(channels * 5, channels, 1, 1, 0),
+            nn.Conv1d(channels * 2, channels, 1, 1, 0),
 
             nn.Sequential(
                 nn.Conv1d(channels, channels, 7, 1, 3),
@@ -143,9 +144,9 @@ class DilatedDiscEncoder(nn.Module):
         )
 
     def forward(self, x):
-        mfcc_feature, mfcc = self.mfcc(x)
-        chroma_feature, chroma = self.chroma(x)
-        env_feature, env = self.loudness(x)
+        # mfcc_feature, mfcc = self.mfcc(x)
+        # chroma_feature, chroma = self.chroma(x)
+        # env_feature, env = self.loudness(x)
 
         time_dim = 32
 
@@ -166,7 +167,8 @@ class DilatedDiscEncoder(nn.Module):
         x = self.reduce(x)
 
 
-        x = torch.cat([mfcc, x, chroma, env, pos], dim=1)
+
+        x = torch.cat([x, pos], dim=1)
 
         if self.return_features:
             features = []
@@ -176,7 +178,7 @@ class DilatedDiscEncoder(nn.Module):
 
             x = x.permute(0, 2, 1)
             features = torch.cat(features, dim=-1)
-            return features, x, [mfcc_feature, chroma_feature, env_feature]
+            return features, x, None
         else:
             x = self.net(x)
             x = x.permute(0, 2, 1)
@@ -394,7 +396,8 @@ class DDSP(nn.Module):
         amp = F.avg_pool1d(amp, 64, 1, 32)[..., :-1]
         freq = F.avg_pool1d(freq, 64, 1, 32)[..., :-1]
 
-        freq = self.bands[None, :, None] + (freq * self.spans[None, :, None])
+        if constrain_ddsp:
+            freq = self.bands[None, :, None] + (freq * self.spans[None, :, None])
 
         freq = torch.sin(torch.cumsum(freq, dim=-1)) * amp
         x = torch.mean(x, dim=1, keepdim=True)
@@ -782,10 +785,10 @@ if __name__ == '__main__':
 
         decoded, encoded, audio_features = train_gen(feat)
         e = encoded.data.cpu().numpy().squeeze()
-        for i in range(len(audio_features)):
-            group = audio_features[i]
-            for j in range(len(group)):
-                group[j] = group[j].data.cpu().numpy().squeeze()
+        # for i in range(len(audio_features)):
+        #     group = audio_features[i]
+        #     for j in range(len(group)):
+        #         group[j] = group[j].data.cpu().numpy().squeeze()
 
 
         if not overfit:
