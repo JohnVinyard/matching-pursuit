@@ -24,10 +24,16 @@ batch_size = 1 if overfit else 4
 min_band_size = 512
 n_samples = 2**14
 network_channels = 64
-gen_uses_sine_activation = False
-init_value = 0.125
+init_value = 0.124
 upsampling_mode = 'nearest'
-constrain_ddsp = True
+use_fft_upsampling = False
+
+constrain_ddsp = False
+use_ddsp = True
+
+pos_encoded_decoder = False
+multiplicative = True
+
 
 n_bands = int(np.log2(n_samples) - np.log2(min_band_size))
 
@@ -38,15 +44,27 @@ def latent(batch_size=batch_size):
     return torch.FloatTensor(batch_size, network_channels).normal_(0, 1).to(device)
 
 
+class FFTUpsample(nn.Module):
+    def __init__(self):
+        super().__init__()
+    
+    def forward(self, x):
+        batch, channels, time = x.shape
+        new_time = time * 2
+        coeffs = torch.rfft(x, 1, normalized=True)
+        new_coeffs = torch.zeros(batch, channels, new_time // 2 + 1, 2).to(device)
+        new_coeffs[:, :, :(time // 2 + 1), :] = coeffs
+        x = torch.irfft(new_coeffs, 1, signal_sizes=(new_time,), normalized=True)
+        return x
+        
+
+
 class Activation(nn.Module):
     def __init__(self):
         super().__init__()
 
     def forward(self, x):
-        if gen_uses_sine_activation:
-            return torch.sin(x)
-        else:
-            return F.leaky_relu(x, 0.2)
+        return F.leaky_relu(x, 0.2)
 
 
 def init_weights(p):
@@ -127,9 +145,6 @@ class DilatedDiscEncoder(nn.Module):
             channels, 3, in_channels=periodicity_feature_size, out_channels=8)
         self.return_features = return_features
 
-        self.mfcc = MFCC()
-        self.chroma = Chroma(feature.chroma_basis(band_size))
-        self.loudness = Envelope()
         self.reduce = nn.Conv1d(512, channels, 1, 1, 0)
 
         self.transform_pos = nn.Conv1d(33, channels, 1, 1, 0)
@@ -230,69 +245,6 @@ class BandEncoder(nn.Module):
             # (batch, 128, 1, 1)
             x = x.view(batch_size, self.channels)
             return x
-
-
-class Envelope(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.transform = nn.Conv1d(1, network_channels, 7, 1, 3)
-    
-    def envelope(self, x):
-        x = x.view(batch_size, 64, 32, -1)
-        x = torch.norm(x, dim=-1) # (batch, 64, 32)
-        x = torch.norm(x, dim=1, keepdim=True)
-        x = x * 0.01
-        return x
-    
-    def forward(self, x):
-        env = x = self.envelope(x)
-        x = self.transform(x)
-        return env, x
-
-class MFCC(nn.Module):
-    def __init__(self, n_coeffs=12):
-        super().__init__()
-        self.n_coeffs = n_coeffs
-        self.transform = nn.Conv1d(n_coeffs, network_channels, 1, 1, 0)
-    
-    def mfcc(self, x):
-        x = x.view(batch_size, 64, 32, -1)
-        x = torch.norm(x, dim=-1)
-        x = x.permute(0, 2, 1) # (batch, 32, 64)
-        x = torch.rfft(x, signal_ndim=1, normalized=True) # (batch, 32, 33, 2)
-        x = torch.norm(x, dim=-1) # (bach, 32, 33)
-        x = x.permute(0, 2, 1) # (batch, 33, 32)
-        x = x[:, 1:self.n_coeffs + 1, :]
-        norms = torch.norm(x, dim=1, keepdim=True)
-        x = x / (norms + 1e-12)
-        return x
-    
-    def forward(self, x):
-        mfcc = x = self.mfcc(x)
-        x = self.transform(x)
-        return mfcc, x
-
-
-class Chroma(nn.Module):
-    def __init__(self, basis):
-        super().__init__()
-        self.register_buffer('basis', torch.from_numpy(basis).float())
-        self.transform = nn.Conv1d(12, network_channels, 1, 1, 0)
-    
-    def chroma(self, x):
-        x = x.view(batch_size, 64, 32, -1)
-        x = torch.norm(x, dim=-1)
-        x = x.permute(0, 2, 1) # (batch, 32, 64)
-        x = torch.matmul(x, self.basis.permute(1, 0))
-        x = x.permute(0, 2, 1) # (batch, 12, 32)
-        norms = torch.norm(x, dim=1, keepdim=True)
-        x = x / (norms + 1e-12)
-        return x
-    
-    def forward(self, x):
-        chroma = x = self.chroma(x)
-        x = self.transform(x)
-        return chroma, x
 
 class Encoder(nn.Module):
     def __init__(self, channels, return_features=False, compact=True, use_pos_encoding=False):
@@ -427,7 +379,7 @@ class ConvBandDecoder(nn.Module):
         else:
             self.upsample = nn.Sequential(*[
                 nn.Sequential(
-                    nn.Upsample(scale_factor=2, mode=upsampling_mode),
+                    FFTUpsample() if use_fft_upsampling else nn.Upsample(scale_factor=2, mode=upsampling_mode),
                     nn.Conv1d(channels, channels, 7, 1, 3),
                     Activation()
                 )
@@ -459,110 +411,70 @@ class ConvBandDecoder(nn.Module):
         return x
 
 
-# class PosEncodedDecoder(nn.Module):
-#     def __init__(
-#             self,
-#             channels,
-#             band_size,
-#             use_filter=True,
-#             learned_encoding=False,
-#             use_mlp=True,
-#             use_ddsp=False):
+class PosEncodedDecoder(nn.Module):
+    def __init__(
+            self,
+            channels,
+            band_size,
+            use_ddsp=True,
+            use_filter=True):
 
-#         super().__init__()
-#         self.channels = channels
-#         self.band_size = band_size
-#         self.use_filter = use_filter
-#         self.learned_encoding = learned_encoding
-#         self.use_mlp = use_mlp
-
-#         self.use_ddsp = use_ddsp
-
-#         self.band_specific = LinearOutputStack(channels, 3)
-
-#         if self.learned_encoding:
-#             with torch.no_grad():
-#                 pos = pos_encode_feature(torch.linspace(-1, 1, self.band_size).view(-1, 1), 1, self.band_size, 16)\
-#                     .view(1, self.band_size, 33).permute(0, 2, 1).to(device)
-#                 self.pos = nn.Parameter(torch.FloatTensor(
-#                     1, 33, self.band_size).uniform_(-1, 1))
-#                 self.pos[:] = pos
-
-#         self.transform_pos = nn.Conv1d(33, channels, 1, 1, 0)
-#         self.pos_bias = nn.Conv1d(33, channels, 1, 1, 0)
-
-#         self.transform_latent = nn.Conv1d(channels, channels, 1, 1, 0)
-#         self.latent_bias = nn.Conv1d(channels, channels, 1, 1, 0)
-
-#         if self.use_mlp:
-#             self.to_channels = LinearOutputStack(
-#                 channels, 7, out_channels=64 if (use_filter or use_ddsp) else 1)
-#         else:
-#             self.net = nn.Sequential(
-#                 nn.Conv1d(channels, channels, 7, 1, 3),
-#                 Activation(),
-#                 nn.Conv1d(channels, channels, 7, 1, 3),
-#                 Activation(),
-#                 nn.Conv1d(channels, channels, 7, 1, 3),
-#                 Activation(),
-#                 nn.Conv1d(channels, channels, 7, 1, 3),
-#                 Activation(),
-#                 nn.Conv1d(channels, channels, 7, 1, 3),
-#                 Activation(),
-#                 nn.Conv1d(channels, channels, 7, 1, 3),
-#                 Activation(),
-#                 nn.Conv1d(channels, channels, 7, 1, 3),
-#                 Activation(),
-#                 nn.Conv1d(channels, 64 if (use_filter or use_ddsp) else 1, 7, 1, 3),
-#             )
-
-#         if self.use_ddsp:
-#             self.ddsp = DDSP(channels, band_size)
+        super().__init__()
+        self.channels = channels
+        self.band_size = band_size
+        self.use_filter = use_filter
+        self.use_ddsp = use_ddsp
+        self.pos_encoded = PosEncoded(self.band_size, channels, 4)
+        if self.use_ddsp:
+            self.ddsp = DDSP(channels, band_size)
         
-
-#         self.apply(init_weights)
+        self.apply(init_weights)
             
 
-#     def forward(self, x):
-#         x = x.view(batch_size, self.channels)
-#         x = self.band_specific(x)
+    def forward(self, x):
+        x = x.view(batch_size, self.channels, -1)
+        x = self.pos_encoded(x)        
+        if self.use_ddsp:
+            return self.ddsp(x)
+        else:
+            x = F.pad(x, (0, 1))
+            x = feature.banks[self.band_size][0].transposed_convolve(x) * 0.1
+            return x
 
-#         if not self.learned_encoding:
-#             pos = pos_encode_feature(torch.linspace(-1, 1, self.band_size).view(-1, 1), 1, self.band_size, 16)\
-#                 .view(1, self.band_size, 33).repeat(batch_size, 1, 1).permute(0, 2, 1).to(device)
-#         else:
-#             pos = self.pos.repeat(batch_size, 1, 1)
 
-#         latent = x.view(batch_size, self.channels,
-#                         1).repeat(1, 1, self.band_size)
-#         # x = torch.cat([pos, latent], dim=1)
+class PosEncoded(nn.Module):
+    def __init__(self, size, channels, transform_layers, multiplicative=multiplicative):
+        super().__init__()
+        self.size = size
+        self.channels = channels
+        self.transform_layers = transform_layers
+        self.transform_pos = nn.Conv1d(33, channels, 1, 1, 0)
+        self.transform_latent = nn.Conv1d(channels, channels, 1, 1, 0)
+        self.bias = nn.Conv1d(channels * 2, channels, 1, 1, 0)
+        self.transform = LinearOutputStack(channels, transform_layers, in_channels=channels if multiplicative else channels * 2)
+        self.multiplicative = multiplicative
+        self.apply(init_weights)
+    
+    def forward(self, x):
+        x = F.upsample(x, size=self.size, mode=upsampling_mode)
+        z = torch.linspace(-1, 1, self.size).view(-1, 1)
 
-#         pos_w = self.transform_pos(pos)
-#         pos_bias = self.pos_bias(pos)
+        pos = pos_encode_feature(z, 1, self.size, 16)\
+                 .view(1, self.size, 33).repeat(batch_size, 1, 1).permute(0, 2, 1).to(device)
+        pos = self.transform_pos(pos)
 
-#         latent_w = self.transform_latent(latent)
-#         latent_bias = self.latent_bias(latent)
+        x = self.transform_latent(x)
+        bias = self.bias(torch.cat([pos, x], dim=1))
 
-#         x = (pos_w + pos_bias) * (latent_w + latent_bias)
+        if self.multiplicative:
+            x = (pos * x) + bias
+        else:
+            x = torch.cat([x, pos], dim=1)
 
-#         if self.use_mlp:
-#             x = x.permute(0, 2, 1)
-#             x = self.to_channels(x)
-#             x = x.permute(0, 2, 1)
-#         else:
-#             x = self.net(x)
-        
-
-#         if self.use_ddsp:
-#             return self.ddsp(x)
-
-#         if not self.use_filter:
-#             return x
-
-        
-#         x = F.pad(x, (0, 1))
-#         x = feature.banks[self.band_size][0].transposed_convolve(x) * 0.1
-#         return x
+        x = x.permute(0, 2, 1)
+        x = self.transform(x)
+        x = x.permute(0, 2, 1)
+        return x
 
 
 class Decoder(nn.Module):
@@ -574,13 +486,16 @@ class Decoder(nn.Module):
 
         self.n_layers = int(np.log2(32) - np.log2(4))        
 
-        self.upsample = nn.Sequential(*[
-            nn.Sequential(
-                nn.Upsample(scale_factor=2, mode=upsampling_mode),
-                nn.Conv1d(channels, channels, 7, 1, 3),
-                Activation()
-            )
-            for _ in range(self.n_layers)])
+        if pos_encoded_decoder:
+            self.upsample = PosEncoded(32, channels, 4)
+        else:
+            self.upsample = nn.Sequential(*[
+                nn.Sequential(
+                    FFTUpsample() if use_fft_upsampling else nn.Upsample(scale_factor=2, mode=upsampling_mode),
+                    nn.Conv1d(channels, channels, 7, 1, 3),
+                    Activation()
+                )
+                for _ in range(self.n_layers)])
 
         bands = {str(k): self._make_decoder(k)
                  for k, v in zip(feature.band_sizes, feature.kernel_sizes)}
@@ -589,20 +504,21 @@ class Decoder(nn.Module):
         self.apply(init_weights)
 
     def _make_decoder(self, band_size):
-        return ConvBandDecoder(
-            self.channels,
-            band_size,
-            use_filters=True,
-            use_transposed_conv=False,
-            use_ddsp=True)
+        if pos_encoded_decoder:
+            return PosEncodedDecoder(
+                    self.channels,
+                    band_size,
+                    use_filter=False,
+                    use_ddsp=True)
+        else:
+            return ConvBandDecoder(
+                self.channels,
+                band_size,
+                use_filters=True,
+                use_transposed_conv=False,
+                use_ddsp=use_ddsp)
         
-        # return PosEncodedDecoder(
-        #     self.channels,
-        #     band_size,
-        #     use_filter=False,
-        #     learned_encoding=False,
-        #     use_mlp=False,
-        #     use_ddsp=True)
+        
 
     def forward(self, x):
         x = self.expand(x).view(batch_size, self.channels, 4)
@@ -681,7 +597,8 @@ judge = Judge(network_channels).to(device)
 disc_optim = Adam(
     chain(disc_encoder.parameters(), judge.parameters()),
     lr=1e-4,
-    betas=(0, 0.9))
+    betas=(0, 0.9),
+    weight_decay=0.01)
 
 
 def real():
@@ -739,7 +656,7 @@ def train_gen(feat):
 
     feature_loss = F.mse_loss(ff, rf)
     # + mean_loss + std_loss + cov
-    loss = (torch.abs(1 - j).mean() * 0) + (feature_loss * 10) + latent_loss
+    loss = (torch.abs(1 - j).mean() * 0) + (feature_loss * 1) + latent_loss
     loss.backward()
     gen_optim.step()
     print('G', loss.item())
@@ -785,10 +702,6 @@ if __name__ == '__main__':
 
         decoded, encoded, audio_features = train_gen(feat)
         e = encoded.data.cpu().numpy().squeeze()
-        # for i in range(len(audio_features)):
-        #     group = audio_features[i]
-        #     for j in range(len(group)):
-        #         group[j] = group[j].data.cpu().numpy().squeeze()
 
 
         if not overfit:
