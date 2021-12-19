@@ -28,7 +28,7 @@ init_value = 0.124
 upsampling_mode = 'nearest'
 use_fft_upsampling = False
 
-constrain_ddsp = False
+constrain_ddsp = True
 use_ddsp = True
 
 pos_encoded_decoder = False
