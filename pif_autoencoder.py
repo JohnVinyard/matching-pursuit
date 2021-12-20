@@ -25,16 +25,20 @@ batch_size = 1 if overfit else 4
 min_band_size = 512
 n_samples = 2**14
 network_channels = 64
-init_value = 0.16
+init_value = 0.1
 upsampling_mode = 'nearest'
 use_fft_upsampling = False
+learning_rate = 1e-3
 
+
+short_decoder = True
 twod_decoder = True
-constrain_ddsp = True
+
+constrain_ddsp = False
 use_ddsp = True
 
 pos_encoded_decoder = False
-multiplicative = True
+multiplicative = False
 
 
 n_bands = int(np.log2(n_samples) - np.log2(min_band_size))
@@ -431,6 +435,62 @@ class DDSP(nn.Module):
         
         return x + noise
 
+class ShortPosEncodedDecoder(nn.Module):
+    def __init__(self, channels, band_size):
+        super().__init__()
+        self.channels = channels
+        self.band_size = band_size
+
+        self.noise_frames = 32
+        self.noise_samples = (band_size // self.noise_frames) * 2
+        self.noise_coeffs = self.noise_samples // 2 + 1
+
+        self.noise_samples = band_size // 32
+
+
+        self.pos_encoded = PosEncoded(32, self.channels, 5, multiplicative=multiplicative)
+        
+        self.factor = band_size // 32
+
+        bands = np.geomspace(0.01, 1, 64) * np.pi
+        bp = np.concatenate([[0], bands])
+        spans = np.diff(bp)
+
+        self.bands = torch.from_numpy(bands).float().to(device)
+        self.spans = torch.from_numpy(spans).float().to(device)
+
+        self.noise_factor = nn.Parameter(torch.FloatTensor(1).fill_(1e-5))
+
+        self.amp = LinearOutputStack(channels, 3)
+        self.freq = LinearOutputStack(channels, 3)
+        self.noise = LinearOutputStack(channels, 3, out_channels=self.noise_coeffs)
+    
+    def forward(self, x):
+        x = self.pos_encoded(x) # (batch, 64, 32)
+
+        x = x.permute(0, 2, 1)
+
+        amp = self.amp(x)
+        freq = self.freq(x)
+        noise = self.noise(x)
+
+        amp = amp.permute(0, 2, 1)
+        freq = freq.permute(0, 2, 1)
+        noise = noise.permute(0, 2, 1)
+
+        amp = F.upsample(amp, scale_factor=self.factor, mode='linear')
+        freq = F.upsample(freq, scale_factor=self.factor, mode='linear')
+        noise = noise_bank2(noise) * self.noise_factor
+
+
+        if constrain_ddsp:
+            freq = self.bands[None, :, None] + (freq * self.spans[None, :, None])
+        
+        x = torch.sin(torch.cumsum(freq, dim=-1)) * amp
+        x = torch.mean(x, dim=1, keepdim=True)
+
+        return x + noise
+
 class Conv2DDecoder(nn.Module):
     def __init__(self, channels, band_size):
         super().__init__()
@@ -459,7 +519,6 @@ class Conv2DDecoder(nn.Module):
             nn.Conv2d(8, 3, (1, 1), (1, 1), (0, 0))
         )
         self.factor = band_size // 32
-        self.ddsp = DDSP(self.channels, band_size)
 
         bands = np.geomspace(0.01, 1, 64) * np.pi
         bp = np.concatenate([[0], bands])
@@ -649,8 +708,11 @@ class Decoder(nn.Module):
                     use_filter=False,
                     use_ddsp=True)
         else:
-            if twod_decoder:
-                return Conv2DDecoder(self.channels, band_size)
+            if short_decoder:
+                if twod_decoder:
+                    return Conv2DDecoder(self.channels, band_size)
+                else:
+                    return ShortPosEncodedDecoder(self.channels, band_size)
             else:
                 return ConvBandDecoder(
                     self.channels,
@@ -734,10 +796,10 @@ encoder = Encoder(
     use_pos_encoding=False,
     compact=True).to(device)
 decoder = Decoder(network_channels).to(device)
-decoder_optim = Adam(decoder.parameters(), lr=1e-4, betas=(0, 0.9))
+decoder_optim = Adam(decoder.parameters(), lr=learning_rate, betas=(0, 0.9))
 gen_optim = Adam(
     chain(encoder.parameters(), decoder.parameters()),
-    lr=1e-4,
+    lr=learning_rate,
     betas=(0, 0.9))
 
 
@@ -749,7 +811,7 @@ disc_encoder = Encoder(
 judge = Judge(network_channels).to(device)
 disc_optim = Adam(
     chain(disc_encoder.parameters(), judge.parameters()),
-    lr=1e-4,
+    lr=learning_rate,
     betas=(0, 0.9),
     weight_decay=0.01)
 
@@ -918,6 +980,8 @@ if __name__ == '__main__':
         # bands, feat = next(stream)
         # decoded = train_decoder(feat)
 
-        bands, feat = next(stream)
+
+        if not overfit:
+            bands, feat = next(stream)
         decoded = train_autoencoder(feat)
 
