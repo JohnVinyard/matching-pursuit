@@ -11,9 +11,9 @@ from modules3 import LinearOutputStack
 import numpy as np
 from torch.nn import functional as F
 from random import choice
-
 from test_optisynth import PsychoacousticFeature
 from itertools import chain
+from enum import Enum
 
 path = '/hdd/musicnet/train_data'
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -25,21 +25,27 @@ batch_size = 1 if overfit else 4
 min_band_size = 512
 n_samples = 2**14
 network_channels = 64
-init_value = 0.1
+init_value = 0.125
 upsampling_mode = 'nearest'
 use_fft_upsampling = False
-learning_rate = 1e-3
+learning_rate = 1e-4
 
-
-short_decoder = True
-twod_decoder = True
-
+# decoder options
+use_ddsp = False
+short_decoder = False
+oned_decoder = False
+twod_decoder = False
 constrain_ddsp = False
-use_ddsp = True
-
-pos_encoded_decoder = False
 multiplicative = False
+pos_encoded_decoder = False
 
+
+class ExperimentType(Enum):
+    autoencoder = 1
+    adversarial = 2
+    embedding = 3
+
+experiment_type = ExperimentType.adversarial
 
 n_bands = int(np.log2(n_samples) - np.log2(min_band_size))
 
@@ -478,6 +484,10 @@ class ShortPosEncodedDecoder(nn.Module):
         freq = freq.permute(0, 2, 1)
         noise = noise.permute(0, 2, 1)
 
+        amp = torch.clamp(amp, 0, 1)
+        freq = torch.clamp(freq, 0, 1)
+        noise = torch.clamp(noise, 0, 1)
+
         amp = F.upsample(amp, scale_factor=self.factor, mode='linear')
         freq = F.upsample(freq, scale_factor=self.factor, mode='linear')
         noise = noise_bank2(noise) * self.noise_factor
@@ -551,7 +561,73 @@ class Conv2DDecoder(nn.Module):
 
         return x + noise
 
+
+class Short1DDecoder(nn.Module):
+    def __init__(self, channels, band_size):
+        super().__init__()
+        self.channels = channels
+        self.band_size = band_size
+
+        self.noise_frames = 32
+        self.noise_samples = (band_size // self.noise_frames) * 2
+        self.noise_coeffs = self.noise_samples // 2 + 1
+
+        self.noise_samples = band_size // 32
+
+        self.amp = nn.Conv1d(channels, channels, 1, 1, 0)
+        self.freq = nn.Conv1d(channels, channels, 1, 1, 0)
+        self.noise_projection = nn.Conv1d(self.channels, self.noise_coeffs, 1, 1, 0)
+
+        self.expand = nn.Sequential(
+            nn.Conv1d(channels, channels, 3, 1, 1),
+            nn.LeakyReLU(0.2),
+            nn.Upsample(scale_factor=2, mode=upsampling_mode),
+
+            nn.Conv1d(channels, channels, 3, 1, 1),
+            nn.LeakyReLU(0.2),
+            nn.Upsample(scale_factor=2, mode=upsampling_mode),
+
+            nn.Conv1d(channels, channels, 3, 1, 1),
+            nn.LeakyReLU(0.2),
+            nn.Upsample(scale_factor=2, mode=upsampling_mode),
+            nn.Conv1d(channels, channels, 3, 1, 1),
+
+        )
+        self.factor = band_size // 32
+
+        bands = np.geomspace(0.01, 1, 64) * np.pi
+        bp = np.concatenate([[0], bands])
+        spans = np.diff(bp)
+
+        self.bands = torch.from_numpy(bands).float().to(device)
+        self.spans = torch.from_numpy(spans).float().to(device)
+
+        self.noise_factor = nn.Parameter(torch.FloatTensor(1).fill_(1e-5))
+    
+    def forward(self, x):
+        x = x.view(batch_size, network_channels, 4)
+        x = self.expand(x)
+
+        amp = self.amp(x)
+        freq = self.freq(x)
+        noise = self.noise_projection(x)
         
+        amp = torch.clamp(amp, 0, 1)
+        freq = torch.clamp(freq, 0, 1)
+        noise = torch.clamp(noise, 0, 1)
+
+
+        amp = F.upsample(amp, scale_factor=self.factor, mode='linear')
+        freq = F.upsample(freq, scale_factor=self.factor, mode='linear')
+        noise = noise_bank2(noise) * self.noise_factor
+
+        if constrain_ddsp:
+            freq = self.bands[None, :, None] + (freq * self.spans[None, :, None])
+        
+        x = torch.sin(torch.cumsum(freq, dim=-1)) * amp
+        x = torch.mean(x, dim=1, keepdim=True)
+
+        return x + noise
 
 class ConvBandDecoder(nn.Module):
     def __init__(self, channels, band_size, use_filters=False, use_transposed_conv=False, use_ddsp=False):
@@ -711,6 +787,8 @@ class Decoder(nn.Module):
             if short_decoder:
                 if twod_decoder:
                     return Conv2DDecoder(self.channels, band_size)
+                elif oned_decoder:
+                    return Short1DDecoder(self.channels, band_size)
                 else:
                     return ShortPosEncodedDecoder(self.channels, band_size)
             else:
@@ -725,7 +803,7 @@ class Decoder(nn.Module):
 
     def forward(self, x):
         x = self.expand(x).view(batch_size, self.channels, 4)
-        if not twod_decoder:
+        if not short_decoder:
             x = self.upsample(x)
             x = x.permute(0, 2, 1).view(batch_size, 32, self.channels)
         return {int(k): decoder(x) for k, decoder in self.bands.items()}
@@ -897,7 +975,7 @@ def train_autoencoder(feat):
     loss.backward()
     gen_optim.step()
     print('AE', loss.item())
-    return fake
+    return enc, fake
 
 def train_gen(feat):
     gen_optim.zero_grad()
@@ -960,6 +1038,41 @@ def train_disc(feat):
     print('D', loss.item())
 
 
+def adversarial_loop(bands, feat):
+    if not overfit:
+        bands, feat = next(stream)
+    
+    decoded, encoded, _ = train_gen(feat)
+    e = encoded.data.cpu().numpy().squeeze()
+
+    if not overfit:
+        bands, feat = next(stream)
+    
+    train_disc(feat)
+
+    return decoded, e, bands
+
+
+def autoencoder_loop(bands, feat):
+    if not overfit:
+        bands, feat = next(stream)
+    
+    encoded, decoded = train_autoencoder(feat)
+    e = encoded.data.cpu().numpy().squeeze()
+
+    return decoded, e, bands
+
+
+def embedding_loop(bands, feat):
+    a, af, b, bf = next(la)
+    encoded = train_embedder(af, bf)
+    e = encoded.data.cpu().numpy().squeeze()
+
+    bands, feat = next(stream)
+    decoded = train_decoder(feat)
+
+    return decoded, e, bands
+
 
 if __name__ == '__main__':
     app = zounds.ZoundsApp(locals=locals(), globals=globals())
@@ -972,16 +1085,13 @@ if __name__ == '__main__':
 
     iterations = 0
 
+    if experiment_type == ExperimentType.autoencoder:
+        main_loop = autoencoder_loop
+    elif experiment_type == ExperimentType.embedding:
+        main_loop = embedding_loop
+    else:
+        main_loop = adversarial_loop
+
     while True:
-        # a, af, b, bf = next(la)
-        # encoded = train_embedder(af, bf)
-        # e = encoded.data.cpu().numpy().squeeze()
-
-        # bands, feat = next(stream)
-        # decoded = train_decoder(feat)
-
-
-        if not overfit:
-            bands, feat = next(stream)
-        decoded = train_autoencoder(feat)
+        decoded, e, bands = main_loop(bands, feat)
 
