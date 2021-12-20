@@ -1009,7 +1009,7 @@ def train_gen(feat):
         latent_loss = 0
 
     feature_loss = F.mse_loss(ff, rf)
-    loss = (torch.abs(1 - j).mean() * 0) + (feature_loss * 10) + latent_loss
+    loss = (torch.abs(1 - j).mean() * 0) + (feature_loss * 10) + (latent_loss * 0)
     loss.backward()
     gen_optim.step()
     print('G', loss.item())
