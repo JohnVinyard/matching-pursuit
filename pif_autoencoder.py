@@ -10,6 +10,7 @@ from modules import pos_encode_feature
 from modules3 import LinearOutputStack
 import numpy as np
 from torch.nn import functional as F
+from random import choice
 
 from test_optisynth import PsychoacousticFeature
 from itertools import chain
@@ -24,10 +25,11 @@ batch_size = 1 if overfit else 4
 min_band_size = 512
 n_samples = 2**14
 network_channels = 64
-init_value = 0.124
+init_value = 0.16
 upsampling_mode = 'nearest'
 use_fft_upsampling = False
 
+twod_decoder = True
 constrain_ddsp = True
 use_ddsp = True
 
@@ -199,6 +201,67 @@ class DilatedDiscEncoder(nn.Module):
             x = x.permute(0, 2, 1)
             return x
 
+class Envelope(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.transform = nn.Conv1d(1, network_channels, 7, 1, 3)
+    
+    def envelope(self, x):
+        x = x.view(batch_size, 64, 32, -1)
+        x = torch.norm(x, dim=-1) # (batch, 64, 32)
+        x = torch.norm(x, dim=1, keepdim=True)
+        x = x * 0.01
+        return x
+    
+    def forward(self, x):
+        env = x = self.envelope(x)
+        x = self.transform(x)
+        return env, x
+
+class MFCC(nn.Module):
+    def __init__(self, n_coeffs=12):
+        super().__init__()
+        self.n_coeffs = n_coeffs
+        self.transform = nn.Conv1d(n_coeffs, network_channels, 1, 1, 0)
+    
+    def mfcc(self, x):
+        x = x.view(batch_size, 64, 32, -1)
+        x = torch.norm(x, dim=-1)
+        x = x.permute(0, 2, 1) # (batch, 32, 64)
+        x = torch.rfft(x, signal_ndim=1, normalized=True) # (batch, 32, 33, 2)
+        x = torch.norm(x, dim=-1) # (bach, 32, 33)
+        x = x.permute(0, 2, 1) # (batch, 33, 32)
+        x = x[:, 1:self.n_coeffs + 1, :]
+        norms = torch.norm(x, dim=1, keepdim=True)
+        x = x / (norms + 1e-12)
+        return x
+    
+    def forward(self, x):
+        mfcc = x = self.mfcc(x)
+        x = self.transform(x)
+        return mfcc, x
+
+
+class Chroma(nn.Module):
+    def __init__(self, basis):
+        super().__init__()
+        self.register_buffer('basis', torch.from_numpy(basis).float())
+        self.transform = nn.Conv1d(12, network_channels, 1, 1, 0)
+    
+    def chroma(self, x):
+        x = x.view(batch_size, 64, 32, -1)
+        x = torch.norm(x, dim=-1)
+        x = x.permute(0, 2, 1) # (batch, 32, 64)
+        x = torch.matmul(x, self.basis.permute(1, 0))
+        x = x.permute(0, 2, 1) # (batch, 12, 32)
+        norms = torch.norm(x, dim=1, keepdim=True)
+        x = x / (norms + 1e-12)
+        return x
+    
+    def forward(self, x):
+        chroma = x = self.chroma(x)
+        x = self.transform(x)
+        return chroma, x
 
 class BandEncoder(nn.Module):
     def __init__(self, channels, periodicity_feature_size, band_size, return_features=False):
@@ -212,15 +275,15 @@ class BandEncoder(nn.Module):
 
         self.collapse = nn.Sequential(
             nn.Conv2d(8, 16, (3, 3), (2, 2), (1, 1)),  # 32, 16
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(16, 32, (3, 3), (2, 2), (1, 1)),  # 16, 8
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(32, 64, (3, 3), (2, 2), (1, 1)),  # 8, 4
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(64, self.channels, (3, 3), (2, 2), (1, 1)),  # 4, 2
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(self.channels, self.channels,
-                      (4, 2), (4, 2), (0, 0)),  # 4, 2
+            # nn.LeakyReLU(0.2),
+            # nn.Conv2d(16, 32, (3, 3), (2, 2), (1, 1)),  # 16, 8
+            # nn.LeakyReLU(0.2),
+            # nn.Conv2d(32, 64, (3, 3), (2, 2), (1, 1)),  # 8, 4
+            # nn.LeakyReLU(0.2),
+            # nn.Conv2d(64, self.channels, (3, 3), (2, 2), (1, 1)),  # 4, 2
+            # nn.LeakyReLU(0.2),
+            # nn.Conv2d(self.channels, self.channels,
+            #           (4, 2), (4, 2), (0, 0)),  # 4, 2
         )
 
     def forward(self, x):
@@ -243,7 +306,7 @@ class BandEncoder(nn.Module):
         else:
             x = self.collapse(x)
             # (batch, 128, 1, 1)
-            x = x.view(batch_size, self.channels)
+            # x = x.view(batch_size, self.channels)
             return x
 
 class Encoder(nn.Module):
@@ -257,8 +320,7 @@ class Encoder(nn.Module):
         bands = {str(k): self._make_encoder(v, use_pos_encoding, k)
                  for k, v in feature.kernel_sizes.items()}
         self.bands = nn.ModuleDict(bands)
-        self.encoder = LinearOutputStack(
-            channels, 5, in_channels=channels * len(self.bands))
+        self.encoder = LinearOutputStack(channels, 5)
 
         self.combined = nn.Sequential(
             nn.Conv1d(channels * len(self.bands), channels, 1, 1, 0),
@@ -271,6 +333,17 @@ class Encoder(nn.Module):
                 nn.LeakyReLU(0.2)
             ),
             nn.Conv1d(channels, channels, 1, 1, 0)
+        )
+
+        self.collapse = nn.Sequential(
+            nn.Conv2d(16 * len(self.bands), 32, (3, 3), (2, 2), (1, 1)),  # 16, 8
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(32, 64, (3, 3), (2, 2), (1, 1)),  # 8, 4
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(64, self.channels, (3, 3), (2, 2), (1, 1)),  # 4, 2
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(self.channels, self.channels,
+                      (4, 2), (4, 2), (0, 0)),  # 1, 1
         )
 
         self.apply(init_weights)
@@ -303,7 +376,9 @@ class Encoder(nn.Module):
             return features, x, audio_features
         else:
             encodings = [self.bands[str(k)](v) for k, v in x.items()]
-            encodings = torch.cat(encodings, dim=-1)
+            encodings = torch.cat(encodings, dim=1)
+            encodings = self.collapse(encodings)
+            encodings = encodings.view(batch_size, self.channels)
             x = self.encoder(encodings)
             return x
 
@@ -355,6 +430,69 @@ class DDSP(nn.Module):
         x = torch.mean(x, dim=1, keepdim=True)
         
         return x + noise
+
+class Conv2DDecoder(nn.Module):
+    def __init__(self, channels, band_size):
+        super().__init__()
+        self.channels = channels
+        self.band_size = band_size
+
+        self.noise_frames = 32
+        self.noise_samples = (band_size // self.noise_frames) * 2
+        self.noise_coeffs = self.noise_samples // 2 + 1
+
+        self.noise_samples = band_size // 32
+
+        self.noise_projection = nn.Conv1d(self.channels, self.noise_coeffs, 1, 1, 0)
+
+        self.expand = nn.Sequential(
+            nn.ConvTranspose2d(channels, channels, (4, 4), (2, 2), (1, 1)), # (4, 4)
+            nn.LeakyReLU(0.2),
+            nn.ConvTranspose2d(channels, 32, (4, 4), (2, 2), (1, 1)), # (8, 8)
+            nn.LeakyReLU(0.2),
+            nn.ConvTranspose2d(32, 32, (4, 4), (2, 2), (1, 1)), # (16, 16)
+            nn.LeakyReLU(0.2),
+            nn.ConvTranspose2d(32, 16, (4, 4), (2, 2), (1, 1)), # (32, 32)
+            nn.LeakyReLU(0.2),
+            nn.ConvTranspose2d(16, 8, (4, 1), (2, 1), (1, 0)), # (64, 32)
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(8, 3, (1, 1), (1, 1), (0, 0))
+        )
+        self.factor = band_size // 32
+        self.ddsp = DDSP(self.channels, band_size)
+
+        bands = np.geomspace(0.01, 1, 64) * np.pi
+        bp = np.concatenate([[0], bands])
+        spans = np.diff(bp)
+
+        self.bands = torch.from_numpy(bands).float().to(device)
+        self.spans = torch.from_numpy(spans).float().to(device)
+
+        self.noise_factor = nn.Parameter(torch.FloatTensor(1).fill_(1e-5))
+    
+    def forward(self, x):
+        x = x.view(batch_size, network_channels, 2, 2)
+        x = self.expand(x)
+        x = x.view(batch_size, 3, 64, 32)
+        
+        x = torch.clamp(x, 0, 1)
+
+        amp, freq, noise = x[:, 0, :, :], x[:, 1, :, :], x[:, 2, :, :]
+
+        amp = F.upsample(amp, scale_factor=self.factor, mode='linear')
+        freq = F.upsample(freq, scale_factor=self.factor, mode='linear')
+        noise = self.noise_projection(noise)
+        noise = noise_bank2(noise) * self.noise_factor
+
+        if constrain_ddsp:
+            freq = self.bands[None, :, None] + (freq * self.spans[None, :, None])
+        
+        x = torch.sin(torch.cumsum(freq, dim=-1)) * amp
+        x = torch.mean(x, dim=1, keepdim=True)
+
+        return x + noise
+
+        
 
 class ConvBandDecoder(nn.Module):
     def __init__(self, channels, band_size, use_filters=False, use_transposed_conv=False, use_ddsp=False):
@@ -511,19 +649,23 @@ class Decoder(nn.Module):
                     use_filter=False,
                     use_ddsp=True)
         else:
-            return ConvBandDecoder(
-                self.channels,
-                band_size,
-                use_filters=True,
-                use_transposed_conv=False,
-                use_ddsp=use_ddsp)
+            if twod_decoder:
+                return Conv2DDecoder(self.channels, band_size)
+            else:
+                return ConvBandDecoder(
+                    self.channels,
+                    band_size,
+                    use_filters=True,
+                    use_transposed_conv=False,
+                    use_ddsp=use_ddsp)
         
         
 
     def forward(self, x):
         x = self.expand(x).view(batch_size, self.channels, 4)
-        x = self.upsample(x)
-        x = x.permute(0, 2, 1).view(batch_size, 32, self.channels)
+        if not twod_decoder:
+            x = self.upsample(x)
+            x = x.permute(0, 2, 1).view(batch_size, 32, self.channels)
         return {int(k): decoder(x) for k, decoder in self.bands.items()}
 
 
@@ -566,6 +708,16 @@ def sample_stream():
         yield bands, feat
 
 
+def long_stream():
+    stream = batch_stream(path, '*.wav', batch_size, n_samples * 2)
+    for s in stream:
+        a, b = s[..., :n_samples], s[..., n_samples:]
+        a = process_batch(a)
+        b = process_batch(b)
+        a_feat = compute_feature_dict(a)
+        b_feat = compute_feature_dict(b)
+        yield a, a_feat, b, b_feat
+
 class Judge(nn.Module):
     def __init__(self, channels):
         super().__init__()
@@ -582,6 +734,7 @@ encoder = Encoder(
     use_pos_encoding=False,
     compact=True).to(device)
 decoder = Decoder(network_channels).to(device)
+decoder_optim = Adam(decoder.parameters(), lr=1e-4, betas=(0, 0.9))
 gen_optim = Adam(
     chain(encoder.parameters(), decoder.parameters()),
     lr=1e-4,
@@ -622,6 +775,67 @@ def fake():
 def fake_spec():
     return np.log(0.01 + np.abs(zounds.spectral.stft(fake())))
 
+def train_embedder(a, b):
+    gen_optim.zero_grad()
+
+    a = encoder(a)
+    b = encoder(b)
+
+    enc = choice([a, b])
+    enc = enc.view(batch_size, network_channels)
+    mean_loss = torch.abs(0 - enc.mean(dim=0)).mean()
+    std_loss = torch.abs(1 - enc.std(dim=0)).mean()
+    cov = covariance(enc)
+    d = torch.sqrt(torch.diag(cov))
+    cov = cov / d[None, :]
+    cov = cov / d[:, None]
+    cov = torch.abs(cov)
+    cov = cov.mean()
+    latent_loss = mean_loss + std_loss + cov
+
+    loss = F.mse_loss(a, b)
+
+    # adjacent audio segments should be close together 
+    # and encoded with features that have zero-mean, unit
+    # variance and no correlation between features
+    total_loss = latent_loss + loss
+    total_loss.backward()
+    gen_optim.step()
+    print('E', total_loss.item())
+    return a
+
+def train_decoder(feat):
+    decoder_optim.zero_grad()
+
+    embedded = encoder(feat).clone().detach()
+
+    fake = decoder(embedded)
+    fake_feat = compute_feature_dict(fake)
+
+    embed_again = encoder(fake_feat)
+
+    # enforce reciprocity
+    loss = F.mse_loss(embed_again, embedded)
+    loss.backward()
+    decoder_optim.step()
+    print('G', loss.item())
+    return fake
+
+def train_autoencoder(feat):
+    gen_optim.zero_grad()
+
+    enc = encoder(feat)
+    fake = decoder(enc)
+    fake_feat = compute_feature_dict(fake)
+
+    loss = 0
+    for k, v in feat.items():
+        loss = loss + F.mse_loss(fake_feat[k], v)
+    
+    loss.backward()
+    gen_optim.step()
+    print('AE', loss.item())
+    return fake
 
 def train_gen(feat):
     gen_optim.zero_grad()
@@ -655,7 +869,6 @@ def train_gen(feat):
         latent_loss = 0
 
     feature_loss = F.mse_loss(ff, rf)
-    # + mean_loss + std_loss + cov
     loss = (torch.abs(1 - j).mean() * 0) + (feature_loss * 10) + latent_loss
     loss.backward()
     gen_optim.step()
@@ -691,20 +904,20 @@ if __name__ == '__main__':
     app.start_in_thread(9999)
 
     stream = sample_stream()
+    la = long_stream()
+
     bands, feat = next(stream)
 
     iterations = 0
 
     while True:
+        # a, af, b, bf = next(la)
+        # encoded = train_embedder(af, bf)
+        # e = encoded.data.cpu().numpy().squeeze()
 
-        if not overfit:
-            bands, feat = next(stream)
+        # bands, feat = next(stream)
+        # decoded = train_decoder(feat)
 
-        decoded, encoded, audio_features = train_gen(feat)
-        e = encoded.data.cpu().numpy().squeeze()
+        bands, feat = next(stream)
+        decoded = train_autoencoder(feat)
 
-
-        if not overfit:
-            bands, feat = next(stream)
-
-        train_disc(feat)
