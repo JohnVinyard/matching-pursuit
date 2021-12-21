@@ -31,11 +31,13 @@ use_fft_upsampling = False
 learning_rate = 1e-4
 
 # decoder options
-use_ddsp = False
+use_ddsp = True
 short_decoder = False
 oned_decoder = False
 twod_decoder = False
-constrain_ddsp = False
+
+constrain_ddsp = True
+
 multiplicative = False
 pos_encoded_decoder = False
 
@@ -159,10 +161,9 @@ class DilatedDiscEncoder(nn.Module):
 
         self.reduce = nn.Conv1d(512, channels, 1, 1, 0)
 
-        self.transform_pos = nn.Conv1d(33, channels, 1, 1, 0)
 
         self.net = nn.Sequential(
-            nn.Conv1d(channels * 2, channels, 1, 1, 0),
+            nn.Conv1d(channels, channels, 1, 1, 0),
 
             nn.Sequential(
                 nn.Conv1d(channels, channels, 7, 1, 3),
@@ -175,14 +176,6 @@ class DilatedDiscEncoder(nn.Module):
         # chroma_feature, chroma = self.chroma(x)
         # env_feature, env = self.loudness(x)
 
-        time_dim = 32
-
-        pos = pos_encode_feature(torch.linspace(-1, 1, time_dim).view(-1, 1), 1, time_dim, 16)\
-            .view(1, time_dim, 33)\
-            .repeat(batch_size, 1, 1)\
-            .permute(0, 2, 1).to(device)
-        pos = self.transform_pos(pos)
-
 
         # (batch, 64, 32, N)
         x = x.view(batch_size, 64, 32, self.periodicity_feature_size)
@@ -193,9 +186,6 @@ class DilatedDiscEncoder(nn.Module):
         x = x.reshape(batch_size, 512, 32)
         x = self.reduce(x)
 
-
-
-        x = torch.cat([x, pos], dim=1)
 
         if self.return_features:
             features = []
@@ -335,11 +325,23 @@ class Encoder(nn.Module):
         self.combined = nn.Sequential(
             nn.Conv1d(channels * len(self.bands), channels, 1, 1, 0),
             nn.Sequential(
-                nn.Conv1d(channels, channels, 7, 1, 3),
+                nn.Conv1d(channels, channels, 7, 2, 3),
                 nn.LeakyReLU(0.2)
             ),
             nn.Sequential(
-                nn.Conv1d(channels, channels, 7, 1, 3),
+                nn.Conv1d(channels, channels, 7, 2, 3),
+                nn.LeakyReLU(0.2)
+            ),
+            nn.Sequential(
+                nn.Conv1d(channels, channels, 7, 2, 3),
+                nn.LeakyReLU(0.2)
+            ),
+            nn.Sequential(
+                nn.Conv1d(channels, channels, 7, 2, 3),
+                nn.LeakyReLU(0.2)
+            ),
+            nn.Sequential(
+                nn.Conv1d(channels, channels, 7, 2, 3),
                 nn.LeakyReLU(0.2)
             ),
             nn.Conv1d(channels, channels, 1, 1, 0)
@@ -421,7 +423,7 @@ class DDSP(nn.Module):
         
         noise = torch.clamp(self.noise(x), 0, 1)
         noise_step = self.noise_frames // 2
-        noise = F.avg_pool1d(noise, noise_step, noise_step)
+        noise = F.avg_pool1d(noise, noise_step, noise_step) ** 2
         noise = noise_bank2(noise) * self.noise_factor
 
         # amp = torch.sigmoid(self.amp(x))
@@ -430,7 +432,7 @@ class DDSP(nn.Module):
         amp = torch.clamp(self.amp(x), 0, 1)
         freq = torch.clamp(self.freq(x), 0, 1)
 
-        amp = F.avg_pool1d(amp, 64, 1, 32)[..., :-1]
+        amp = F.avg_pool1d(amp, 64, 1, 32)[..., :-1] ** 2
         freq = F.avg_pool1d(freq, 64, 1, 32)[..., :-1]
 
         if constrain_ddsp:
@@ -890,8 +892,7 @@ judge = Judge(network_channels).to(device)
 disc_optim = Adam(
     chain(disc_encoder.parameters(), judge.parameters()),
     lr=learning_rate,
-    betas=(0, 0.9),
-    weight_decay=0.01)
+    betas=(0, 0.9))
 
 
 def real():
