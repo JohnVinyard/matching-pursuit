@@ -36,7 +36,7 @@ short_decoder = False
 oned_decoder = False
 twod_decoder = False
 
-constrain_ddsp = True
+constrain_ddsp = False
 
 multiplicative = False
 pos_encoded_decoder = False
