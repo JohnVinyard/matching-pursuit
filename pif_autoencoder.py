@@ -30,6 +30,10 @@ upsampling_mode = 'nearest'
 use_fft_upsampling = False
 learning_rate = 1e-4
 
+
+long_sequence = True
+
+
 # decoder options
 use_ddsp = True
 short_decoder = False
@@ -850,8 +854,8 @@ def sample_stream():
         yield bands, feat
 
 
-def long_stream():
-    stream = batch_stream(path, '*.wav', batch_size, n_samples * 2)
+def long_stream(batch_size=batch_size, n_samples=n_samples * 2):
+    stream = batch_stream(path, '*.wav', batch_size, n_samples)
     for s in stream:
         a, b = s[..., :n_samples], s[..., n_samples:]
         a = process_batch(a)
@@ -1075,9 +1079,56 @@ def embedding_loop(bands, feat):
     return decoded, e, bands
 
 
+def long_sequence():
+
+    stream = batch_stream(path, '*.wav', 1, n_samples * 4)
+    batch = next(stream)
+
+    bands = process_batch(batch)
+    feat = compute_feature_dict(bands)
+    
+    enc = Encoder(network_channels).to(device)
+    dec = Decoder(network_channels).to(device)
+
+    enc.load_state_dict(torch.load('encoder.dat'))
+    dec.load_state_dict(torch.load('decoder.dat'))
+
+
+    flat = {}
+    for k, v in feat.items():
+        flat[k] = v.reshape(1, 1, -1).reshape(4, 1, -1)
+
+    with torch.no_grad():
+        e = enc(flat)
+        d = dec(e)
+
+    e = e.data.cpu().numpy().squeeze()
+
+    flat = {}
+    for k, v in d.items():
+        flat[k] = v.reshape(1, 1, -1)
+        print(flat[k].shape)
+    
+    orig = fft_frequency_recompose(bands, n_samples)
+    orig = zounds.AudioSamples(orig.data.cpu().numpy().reshape(-1).squeeze(), sr).pad_with_silence()
+
+    audio = fft_frequency_recompose(flat, n_samples * 4)
+    recon = zounds.AudioSamples(audio.data.cpu().numpy().squeeze(), sr).pad_with_silence()
+
+    return e, orig, recon
+
+    
+
+
 if __name__ == '__main__':
     app = zounds.ZoundsApp(locals=locals(), globals=globals())
     app.start_in_thread(9999)
+
+    if long_sequence:
+        while True:
+            e, o, r = long_sequence()
+            input('next...')
+    
 
     stream = sample_stream()
     la = long_stream()
