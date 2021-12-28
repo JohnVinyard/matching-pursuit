@@ -31,7 +31,7 @@ use_fft_upsampling = False
 learning_rate = 1e-4
 
 
-long_sequence = True
+make_long_sequence = False
 
 
 # decoder options
@@ -898,6 +898,13 @@ disc_optim = Adam(
     lr=learning_rate,
     betas=(0, 0.9))
 
+# try:
+#     encoder.load_state_dict(torch.load('encoder.dat'))
+#     decoder.load_state_dict(torch.load('decoder.dat'))
+#     print('Successfully loaded trained models')
+# except IOError:
+#     print('Could not find encoder.dat and/or decoder.dat')
+
 
 def real():
     with torch.no_grad():
@@ -999,7 +1006,7 @@ def train_gen(feat):
 
     # ensure that each feature has zero mean, unit variance,
     # and that features are as independent as possible
-    if not overfit:
+    if batch_size > 1:
         enc = enc.view(batch_size, network_channels)
         mean_loss = torch.abs(0 - enc.mean(dim=0)).mean()
         std_loss = torch.abs(1 - enc.std(dim=0)).mean()
@@ -1014,7 +1021,7 @@ def train_gen(feat):
         latent_loss = 0
 
     feature_loss = F.mse_loss(ff, rf)
-    loss = (torch.abs(1 - j).mean() * 0) + (feature_loss * 10) + (latent_loss * 0)
+    loss = (torch.abs(1 - j).mean() * 0) + (feature_loss * 10) + (latent_loss * 1)
     loss.backward()
     gen_optim.step()
     print('G', loss.item())
@@ -1124,7 +1131,7 @@ if __name__ == '__main__':
     app = zounds.ZoundsApp(locals=locals(), globals=globals())
     app.start_in_thread(9999)
 
-    if long_sequence:
+    if make_long_sequence:
         while True:
             e, o, r = long_sequence()
             input('next...')
