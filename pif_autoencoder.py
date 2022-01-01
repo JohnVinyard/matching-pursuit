@@ -165,9 +165,13 @@ class DilatedDiscEncoder(nn.Module):
 
         self.reduce = nn.Conv1d(512, channels, 1, 1, 0)
 
+        self.mfcc = MFCC()
+        self.chroma = Chroma(feature.chroma_basis(band_size))
+        self.loudness = Envelope()
+
 
         self.net = nn.Sequential(
-            nn.Conv1d(channels, channels, 1, 1, 0),
+            nn.Conv1d(channels * 4, channels, 1, 1, 0),
 
             nn.Sequential(
                 nn.Conv1d(channels, channels, 7, 1, 3),
@@ -176,9 +180,9 @@ class DilatedDiscEncoder(nn.Module):
         )
 
     def forward(self, x):
-        # mfcc_feature, mfcc = self.mfcc(x)
-        # chroma_feature, chroma = self.chroma(x)
-        # env_feature, env = self.loudness(x)
+        mfcc_feature, mfcc = self.mfcc(x)
+        chroma_feature, chroma = self.chroma(x)
+        env_feature, env = self.loudness(x)
 
 
         # (batch, 64, 32, N)
@@ -188,7 +192,10 @@ class DilatedDiscEncoder(nn.Module):
         x = x.permute(0, 3, 1, 2)
         # (batch, 8, 64, 32)
         x = x.reshape(batch_size, 512, 32)
+
         x = self.reduce(x)
+
+        x = torch.cat([x, mfcc, chroma, env], dim=1)
 
 
         if self.return_features:
@@ -277,18 +284,27 @@ class BandEncoder(nn.Module):
             channels, 3, in_channels=periodicity_feature_size, out_channels=8)
         self.return_features = return_features
 
-        self.collapse = nn.Sequential(
-            nn.Conv2d(8, 16, (3, 3), (2, 2), (1, 1)),  # 32, 16
-            # nn.LeakyReLU(0.2),
-            # nn.Conv2d(16, 32, (3, 3), (2, 2), (1, 1)),  # 16, 8
-            # nn.LeakyReLU(0.2),
-            # nn.Conv2d(32, 64, (3, 3), (2, 2), (1, 1)),  # 8, 4
-            # nn.LeakyReLU(0.2),
-            # nn.Conv2d(64, self.channels, (3, 3), (2, 2), (1, 1)),  # 4, 2
-            # nn.LeakyReLU(0.2),
-            # nn.Conv2d(self.channels, self.channels,
-            #           (4, 2), (4, 2), (0, 0)),  # 4, 2
+        self.net = nn.Sequential(
+            nn.Conv1d(512, channels, 1, 1, 0),
+
+            nn.Sequential(
+                nn.Conv1d(channels, channels, 7, 1, 3),
+                nn.LeakyReLU(0.2)
+            ),
         )
+
+        # self.collapse = nn.Sequential(
+        #     nn.Conv2d(8, 16, (3, 3), (2, 2), (1, 1)),  # 32, 16
+        #     # nn.LeakyReLU(0.2),
+        #     # nn.Conv2d(16, 32, (3, 3), (2, 2), (1, 1)),  # 16, 8
+        #     # nn.LeakyReLU(0.2),
+        #     # nn.Conv2d(32, 64, (3, 3), (2, 2), (1, 1)),  # 8, 4
+        #     # nn.LeakyReLU(0.2),
+        #     # nn.Conv2d(64, self.channels, (3, 3), (2, 2), (1, 1)),  # 4, 2
+        #     # nn.LeakyReLU(0.2),
+        #     # nn.Conv2d(self.channels, self.channels,
+        #     #           (4, 2), (4, 2), (0, 0)),  # 4, 2
+        # )
 
     def forward(self, x):
         # (batch, 64, 32, N)
@@ -297,9 +313,12 @@ class BandEncoder(nn.Module):
         # (batch, 64, 32, 8)
         x = x.permute(0, 3, 1, 2)
         # (batch, 8, 64, 32)
+
+        x = x.reshape(batch_size, 512, 32)
+
         if self.return_features:
             features = []
-            for layer in self.collapse:
+            for layer in self.net:
                 x = layer(x)
                 if isinstance(layer, nn.Conv2d):
                     features.append(x.reshape(batch_size, -1))
@@ -308,7 +327,7 @@ class BandEncoder(nn.Module):
             features = torch.cat(features, dim=-1)
             return features, x, None
         else:
-            x = self.collapse(x)
+            x = self.net(x)
             # (batch, 128, 1, 1)
             # x = x.view(batch_size, self.channels)
             return x
@@ -351,16 +370,16 @@ class Encoder(nn.Module):
             nn.Conv1d(channels, channels, 1, 1, 0)
         )
 
-        self.collapse = nn.Sequential(
-            nn.Conv2d(16 * len(self.bands), 32, (3, 3), (2, 2), (1, 1)),  # 16, 8
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(32, 64, (3, 3), (2, 2), (1, 1)),  # 8, 4
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(64, self.channels, (3, 3), (2, 2), (1, 1)),  # 4, 2
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(self.channels, self.channels,
-                      (4, 2), (4, 2), (0, 0)),  # 1, 1
-        )
+        # self.collapse = nn.Sequential(
+        #     nn.Conv2d(16 * len(self.bands), 32, (3, 3), (2, 2), (1, 1)),  # 16, 8
+        #     nn.LeakyReLU(0.2),
+        #     nn.Conv2d(32, 64, (3, 3), (2, 2), (1, 1)),  # 8, 4
+        #     nn.LeakyReLU(0.2),
+        #     nn.Conv2d(64, self.channels, (3, 3), (2, 2), (1, 1)),  # 4, 2
+        #     nn.LeakyReLU(0.2),
+        #     nn.Conv2d(self.channels, self.channels,
+        #               (4, 2), (4, 2), (0, 0)),  # 1, 1
+        # )
 
         self.apply(init_weights)
 
@@ -393,7 +412,8 @@ class Encoder(nn.Module):
         else:
             encodings = [self.bands[str(k)](v) for k, v in x.items()]
             encodings = torch.cat(encodings, dim=1)
-            encodings = self.collapse(encodings)
+            # encodings = self.collapse(encodings)
+            encodings = self.combined(encodings)
             encodings = encodings.view(batch_size, self.channels)
             x = self.encoder(encodings)
             return x
@@ -817,7 +837,6 @@ class Decoder(nn.Module):
 
 def process_batch(s):
     s = s.reshape(-1, 1, n_samples)
-    s /= (s.max(axis=-1, keepdims=True) + 1e-12)
     s = torch.from_numpy(s).to(device).float()
     bands = fft_frequency_decompose(s, min_band_size)
     return bands
