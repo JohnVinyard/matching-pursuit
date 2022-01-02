@@ -31,11 +31,11 @@ use_fft_upsampling = False
 learning_rate = 1e-4
 
 
-make_long_sequence = False
+make_long_sequence = True
 
 
 # decoder options
-use_ddsp = True
+use_ddsp = False
 short_decoder = False
 oned_decoder = False
 twod_decoder = False
@@ -284,27 +284,20 @@ class BandEncoder(nn.Module):
             channels, 3, in_channels=periodicity_feature_size, out_channels=8)
         self.return_features = return_features
 
-        self.net = nn.Sequential(
-            nn.Conv1d(512, channels, 1, 1, 0),
+        
 
-            nn.Sequential(
-                nn.Conv1d(channels, channels, 7, 1, 3),
-                nn.LeakyReLU(0.2)
-            ),
+        self.collapse = nn.Sequential(
+            nn.Conv2d(8, 16, (3, 3), (2, 2), (1, 1)),  # 32, 16
+            # nn.LeakyReLU(0.2),
+            # nn.Conv2d(16, 32, (3, 3), (2, 2), (1, 1)),  # 16, 8
+            # nn.LeakyReLU(0.2),
+            # nn.Conv2d(32, 64, (3, 3), (2, 2), (1, 1)),  # 8, 4
+            # nn.LeakyReLU(0.2),
+            # nn.Conv2d(64, self.channels, (3, 3), (2, 2), (1, 1)),  # 4, 2
+            # nn.LeakyReLU(0.2),
+            # nn.Conv2d(self.channels, self.channels,
+            #           (4, 2), (4, 2), (0, 0)),  # 4, 2
         )
-
-        # self.collapse = nn.Sequential(
-        #     nn.Conv2d(8, 16, (3, 3), (2, 2), (1, 1)),  # 32, 16
-        #     # nn.LeakyReLU(0.2),
-        #     # nn.Conv2d(16, 32, (3, 3), (2, 2), (1, 1)),  # 16, 8
-        #     # nn.LeakyReLU(0.2),
-        #     # nn.Conv2d(32, 64, (3, 3), (2, 2), (1, 1)),  # 8, 4
-        #     # nn.LeakyReLU(0.2),
-        #     # nn.Conv2d(64, self.channels, (3, 3), (2, 2), (1, 1)),  # 4, 2
-        #     # nn.LeakyReLU(0.2),
-        #     # nn.Conv2d(self.channels, self.channels,
-        #     #           (4, 2), (4, 2), (0, 0)),  # 4, 2
-        # )
 
     def forward(self, x):
         # (batch, 64, 32, N)
@@ -314,11 +307,10 @@ class BandEncoder(nn.Module):
         x = x.permute(0, 3, 1, 2)
         # (batch, 8, 64, 32)
 
-        x = x.reshape(batch_size, 512, 32)
 
         if self.return_features:
             features = []
-            for layer in self.net:
+            for layer in self.collapse:
                 x = layer(x)
                 if isinstance(layer, nn.Conv2d):
                     features.append(x.reshape(batch_size, -1))
@@ -327,7 +319,7 @@ class BandEncoder(nn.Module):
             features = torch.cat(features, dim=-1)
             return features, x, None
         else:
-            x = self.net(x)
+            x = self.collapse(x)
             # (batch, 128, 1, 1)
             # x = x.view(batch_size, self.channels)
             return x
@@ -370,16 +362,16 @@ class Encoder(nn.Module):
             nn.Conv1d(channels, channels, 1, 1, 0)
         )
 
-        # self.collapse = nn.Sequential(
-        #     nn.Conv2d(16 * len(self.bands), 32, (3, 3), (2, 2), (1, 1)),  # 16, 8
-        #     nn.LeakyReLU(0.2),
-        #     nn.Conv2d(32, 64, (3, 3), (2, 2), (1, 1)),  # 8, 4
-        #     nn.LeakyReLU(0.2),
-        #     nn.Conv2d(64, self.channels, (3, 3), (2, 2), (1, 1)),  # 4, 2
-        #     nn.LeakyReLU(0.2),
-        #     nn.Conv2d(self.channels, self.channels,
-        #               (4, 2), (4, 2), (0, 0)),  # 1, 1
-        # )
+        self.collapse = nn.Sequential(
+            nn.Conv2d(16 * len(self.bands), 32, (3, 3), (2, 2), (1, 1)),  # 16, 8
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(32, 64, (3, 3), (2, 2), (1, 1)),  # 8, 4
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(64, self.channels, (3, 3), (2, 2), (1, 1)),  # 4, 2
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(self.channels, self.channels,
+                      (4, 2), (4, 2), (0, 0)),  # 1, 1
+        )
 
         self.apply(init_weights)
 
@@ -412,8 +404,7 @@ class Encoder(nn.Module):
         else:
             encodings = [self.bands[str(k)](v) for k, v in x.items()]
             encodings = torch.cat(encodings, dim=1)
-            # encodings = self.collapse(encodings)
-            encodings = self.combined(encodings)
+            encodings = self.collapse(encodings)
             encodings = encodings.view(batch_size, self.channels)
             x = self.encoder(encodings)
             return x
@@ -1038,9 +1029,14 @@ def train_gen(feat):
         latent_loss = mean_loss + std_loss + cov
     else:
         latent_loss = 0
+    
+    loss = 0
+    for k, v in feat.items():
+        loss = loss + F.mse_loss(fake_feat[k], v)
 
-    feature_loss = F.mse_loss(ff, rf)
-    loss = (torch.abs(1 - j).mean() * 0) + (feature_loss * 10) + (latent_loss * 1)
+    # feature_loss = F.mse_loss(ff, rf)
+    # loss = (torch.abs(1 - j).mean() * 0) + (feature_loss * 10) + (latent_loss * 1)
+    loss = loss + latent_loss
     loss.backward()
     gen_optim.step()
     print('G', loss.item())
