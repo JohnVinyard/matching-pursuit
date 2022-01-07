@@ -31,11 +31,11 @@ use_fft_upsampling = False
 learning_rate = 1e-4
 
 
-make_long_sequence = True
+make_long_sequence = False
 
 
 # decoder options
-use_ddsp = False
+use_ddsp = True
 short_decoder = False
 oned_decoder = False
 twod_decoder = False
@@ -1034,9 +1034,9 @@ def train_gen(feat):
     for k, v in feat.items():
         loss = loss + F.mse_loss(fake_feat[k], v)
 
-    # feature_loss = F.mse_loss(ff, rf)
-    # loss = (torch.abs(1 - j).mean() * 0) + (feature_loss * 10) + (latent_loss * 1)
-    loss = loss + latent_loss
+    adv_loss = torch.abs(1 - j).mean()
+    print(adv_loss.item(), loss.item(), latent_loss.item())
+    loss = loss + latent_loss + adv_loss
     loss.backward()
     gen_optim.step()
     print('G', loss.item())
