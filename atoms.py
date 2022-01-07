@@ -142,7 +142,7 @@ class Harmonic(nn.Module):
             channels,
             min_f0=20,
             max_f0=800,
-            n_harmonics=32,
+            n_harmonics=8,
             sr=zounds.SR22050()):
 
         super().__init__()
@@ -162,6 +162,8 @@ class Harmonic(nn.Module):
         self.harmonic_amp = Sequence(atom_latent, n_harmonics, channels, 1)
 
         self.amp_factor = nn.Parameter(torch.FloatTensor(1).fill_(0.01))
+
+        self.register_buffer('harmonic_factor', torch.arange(2, 2 + n_harmonics, 1))
     
     def forward(self, x):
         batch, atoms, latent = x.shape
@@ -173,7 +175,7 @@ class Harmonic(nn.Module):
         f0 = self.min_f0 + (nl(self.f0(x)).view(batch, atoms, -1, 1) * self.f0_diff)
         f0 = smooth(f0)
 
-        harm = 1 + (nl(self.harmonics(x)).view(batch, atoms, 1, self.n_harmonics) * 10)
+        # harm = 1 + (nl(self.harmonics(x)).view(batch, atoms, 1, self.n_harmonics) * 10)
         harm_amp = nl(self.harmonic_amp(x)).view(batch, atoms, 1, self.n_harmonics)
 
         # harmonic amps are a factor of envelope
@@ -183,7 +185,9 @@ class Harmonic(nn.Module):
         env_params = env
 
         # harmonics are factors of f0
-        f = f0 * harm
+        print(f0.shape)
+        f = f0 * self.harmonic_factor[None, None, None, :]
+        print(f.shape)
 
         env = upsample(env, self.n_audio_samples)
         f0 = upsample(f0, self.n_audio_samples)
