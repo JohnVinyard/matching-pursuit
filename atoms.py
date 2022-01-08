@@ -41,7 +41,7 @@ def unit_norm(x, axis=-1):
 
 def nl(x):
     # return torch.clamp(x, 0, 1)
-    return torch.sigmoid(x)
+    return torch.sigmoid(x) ** 2
     # return ((torch.sin(x) + 1) / 2) ** 2
 
 class Sequence(nn.Module):
@@ -101,7 +101,7 @@ class Noise(nn.Module):
         batch, atoms, latent = x.shape
 
         env = nl(self.env(x)) * self.amp_factor
-        noise = unit_norm(F.relu(self.noise(x)), axis=1)
+        noise = unit_norm(self.noise(x), axis=1)
 
         x = env * noise
         x = x.reshape(batch * atoms, self.n_noise_samples, self.noise_coeffs)
@@ -176,7 +176,7 @@ class Harmonic(nn.Module):
 
         # (batch, atoms, frames, channels)
         env = nl(self.env(x)).view(batch, atoms, -1, 1) * self.amp_factor
-        env = smooth(env)
+        env = smooth(env, kernel=3)
 
         f0 = self.min_f0 + (nl(self.f0(x)).view(batch, atoms, -1, 1) * self.f0_diff)
         f0 = smooth(f0, kernel=13)
@@ -231,7 +231,7 @@ class Model(nn.Module):
         super().__init__()
 
         latent = 16
-        n_atoms = 8
+        n_atoms = 16
         channels = 64
 
         self.params = nn.Parameter(torch.FloatTensor(1, n_atoms, latent).normal_(0, 1))
