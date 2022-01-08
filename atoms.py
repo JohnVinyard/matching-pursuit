@@ -22,7 +22,7 @@ def init_weights(p):
 
     with torch.no_grad():
         try:
-            p.weight.uniform_(-0.01, 0.01)
+            p.weight.uniform_(-0.1, 0.1)
         except AttributeError:
             pass
 
@@ -41,8 +41,8 @@ def unit_norm(x, axis=-1):
 
 def nl(x):
     # return torch.clamp(x, 0, 1)
-    # return torch.sigmoid(x)
-    return ((torch.sin(x) + 1) / 2) ** 2
+    return torch.sigmoid(x)
+    # return ((torch.sin(x) + 1) / 2) ** 2
 
 class Sequence(nn.Module):
     def __init__(self, atom_latent, n_frames, channels, out_channels):
@@ -95,6 +95,7 @@ class Noise(nn.Module):
         self.noise = Sequence(atom_latent, n_noise_samples,
                               channels, self.noise_coeffs)
         self.amp_factor = nn.Parameter(torch.FloatTensor(1).fill_(0.01))
+        self.apply(init_weights)
 
     def forward(self, x):
         batch, atoms, latent = x.shape
@@ -121,13 +122,16 @@ def upsample(x, size):
     x = x.view(batch, atoms, size, channels)
     return x
 
-def smooth(x):
+def smooth(x, kernel=7):
+
+    padding = kernel // 2
+
     batch, atoms, frames, channels = x.shape
     x = x.view(batch * atoms, frames, channels)
     x = x.permute(0, 2, 1)
 
-    x = F.pad(x, (1, 1), mode='reflect')
-    x = F.avg_pool1d(x, 3, 1)
+    x = F.pad(x, (padding, padding), mode='reflect')
+    x = F.avg_pool1d(x, kernel, 1)
 
     x = x.permute(0, 2, 1)
     x = x.view(batch, atoms, frames, channels)
@@ -164,6 +168,7 @@ class Harmonic(nn.Module):
         self.amp_factor = nn.Parameter(torch.FloatTensor(1).fill_(0.01))
 
         self.register_buffer('harmonic_factor', torch.arange(2, 2 + n_harmonics, 1))
+        self.apply(init_weights)
     
     def forward(self, x):
         batch, atoms, latent = x.shape
@@ -171,9 +176,10 @@ class Harmonic(nn.Module):
 
         # (batch, atoms, frames, channels)
         env = nl(self.env(x)).view(batch, atoms, -1, 1) * self.amp_factor
+        env = smooth(env)
 
         f0 = self.min_f0 + (nl(self.f0(x)).view(batch, atoms, -1, 1) * self.f0_diff)
-        f0 = smooth(f0)
+        f0 = smooth(f0, kernel=13)
 
         # harm = 1 + (nl(self.harmonics(x)).view(batch, atoms, 1, self.n_harmonics) * 10)
         harm_amp = nl(self.harmonic_amp(x)).view(batch, atoms, 1, self.n_harmonics)
@@ -225,11 +231,12 @@ class Model(nn.Module):
         super().__init__()
 
         latent = 16
-        n_atoms = 4
+        n_atoms = 8
         channels = 64
 
         self.params = nn.Parameter(torch.FloatTensor(1, n_atoms, latent).normal_(0, 1))
         self.atoms = Atoms(latent, n_samples, channels)
+        self.apply(init_weights)
 
     
     def forward(self, x):
@@ -240,10 +247,10 @@ model = Model().to(device)
 optim = Adam(model.parameters(), lr=1e-4, betas=(0, 0.9))
 
 def fake_spec():
-    return np.log(1 + np.abs(zounds.spectral.stft(r)))
+    return np.log(0.1 + np.abs(zounds.spectral.stft(r)))
 
 def real_spec():
-    return np.log(1 + np.abs(zounds.spectral.stft(o)))
+    return np.log(0.1 + np.abs(zounds.spectral.stft(o)))
 
 if __name__ == '__main__':
     app = zounds.ZoundsApp(locals=locals(), globals=globals())
