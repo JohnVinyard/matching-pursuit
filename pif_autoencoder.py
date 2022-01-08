@@ -31,7 +31,7 @@ use_fft_upsampling = False
 learning_rate = 1e-4
 
 
-make_long_sequence = False
+make_long_sequence = True
 
 
 # decoder options
