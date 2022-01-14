@@ -28,9 +28,19 @@ def init_weights(p):
 
 
 def loss(a, b):
-    a, _ = feature(a)
-    b, _ = feature(b)
-    return F.mse_loss(a, b)
+    # a, _ = feature(a)
+    # b, _ = feature(b)
+    # return F.mse_loss(a, b)
+
+    a = feature.compute_feature_dict(a)
+    b = feature.compute_feature_dict(b)
+
+    loss = 0
+    for k, v in a.items():
+        loss = loss + F.mse_loss(v, b[k])
+    
+    return loss
+
 
 def unit_norm(x, axis=-1):
     if isinstance(x, np.ndarray):
@@ -40,9 +50,8 @@ def unit_norm(x, axis=-1):
     return x / (n + 1e-12)
 
 def nl(x):
-    # return torch.clamp(x, 0, 1)
-    return torch.sigmoid(x) ** 2
-    # return ((torch.sin(x) + 1) / 2) ** 2
+    return torch.clamp(x, 0, 1)
+    # return torch.sigmoid(x)
 
 class Sequence(nn.Module):
     def __init__(self, atom_latent, n_frames, channels, out_channels):
@@ -100,7 +109,7 @@ class Noise(nn.Module):
     def forward(self, x):
         batch, atoms, latent = x.shape
 
-        env = nl(self.env(x)) * self.amp_factor
+        env = (nl(self.env(x)) ** 2) * self.amp_factor
         noise = unit_norm(self.noise(x), axis=1)
 
         x = env * noise
@@ -145,8 +154,8 @@ class Harmonic(nn.Module):
             n_frames,
             channels,
             min_f0=20,
-            max_f0=800,
-            n_harmonics=8,
+            max_f0=8000,
+            n_harmonics=16,
             sr=zounds.SR22050()):
 
         super().__init__()
@@ -162,6 +171,7 @@ class Harmonic(nn.Module):
 
         self.env = Sequence(atom_latent, n_frames, channels, 1)
         self.f0 = Sequence(atom_latent, n_frames, channels, 1)
+
         self.harmonics = Sequence(atom_latent, n_harmonics, channels, 1)
         self.harmonic_amp = Sequence(atom_latent, n_harmonics, channels, 1)
 
@@ -175,10 +185,10 @@ class Harmonic(nn.Module):
 
 
         # (batch, atoms, frames, channels)
-        env = nl(self.env(x)).view(batch, atoms, -1, 1) * self.amp_factor
+        env = (nl(self.env(x)).view(batch, atoms, -1, 1) ** 2) * self.amp_factor
         env = smooth(env, kernel=3)
 
-        f0 = self.min_f0 + (nl(self.f0(x)).view(batch, atoms, -1, 1) * self.f0_diff)
+        f0 = self.min_f0 + (nl(self.f0(x) ** 2).view(batch, atoms, -1, 1) * self.f0_diff)
         f0 = smooth(f0, kernel=13)
 
         # harm = 1 + (nl(self.harmonics(x)).view(batch, atoms, 1, self.n_harmonics) * 10)
@@ -191,9 +201,7 @@ class Harmonic(nn.Module):
         env_params = env
 
         # harmonics are factors of f0
-        print(f0.shape)
         f = f0 * self.harmonic_factor[None, None, None, :]
-        print(f.shape)
 
         env = upsample(env, self.n_audio_samples)
         f0 = upsample(f0, self.n_audio_samples)
