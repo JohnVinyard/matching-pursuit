@@ -6,6 +6,7 @@ from torch.nn import functional as F
 from datastore import batch_stream
 from torch.optim import Adam
 import torch
+from scipy.signal import stft, istft, hann
 
 from modules import pos_encode_feature
 
@@ -22,12 +23,12 @@ def do_fft(x):
     return torch.fft.rfft(x).real
 
 
-def stft(x):
-    x = x.unfold(-1, 512, 256)
-    x = x * torch.hamming_window(512)[None, None, None, :].to(device)
-    x = torch.fft.rfft(x)
-    x = torch.abs(x)
-    return x
+# def stft(x):
+#     x = x.unfold(-1, 512, 256)
+#     x = x * torch.hamming_window(512)[None, None, None, :].to(device)
+#     x = torch.fft.rfft(x)
+#     x = torch.abs(x)
+#     return x
 
 
 def mse_loss(generated, orig):
@@ -165,32 +166,60 @@ def fake():
         recon.data.cpu().numpy().reshape(-1), samplerate).pad_with_silence()
 
 
+def lws_test():
+    import lws
+    ws = 512
+    step = 256
+
+    window = np.sqrt(hann(ws))
+
+    op = lws.lws(ws, step, mode='speech')
+    stream = batch_stream(path, '*.wav', 1, n_samples)
+    b = next(stream).squeeze()
+
+    _, _, spec = stft(b, nperseg=ws, noverlap=step, window=window)
+    orig_spec = spec = np.abs(spec)
+    print(spec.shape)
+    spec = op.run_lws(spec.T).T
+    print(spec.dtype)
+    _, recon = istft(spec, nperseg=ws, noverlap=step, window=window)
+
+
+    o = zounds.AudioSamples(b, samplerate).pad_with_silence()
+    r = zounds.AudioSamples(recon.squeeze(), samplerate).pad_with_silence()
+
+    return orig_spec, o, r
+
 if __name__ == '__main__':
     app = zounds.ZoundsApp(locals=locals(), globals=globals())
     app.start_in_thread(9999)
 
-    model = PosEncodedGenerator
+    spec,   o, r = lws_test()
 
-    gen = model(n_samples, latent_dim, n_channels)
-    optim = Adam(gen.parameters(), lr=1e-3, betas=(0, 0.9))
+    input('check it out...')
 
-    stream = batch_stream(path, '*.wav', 1, n_samples)
+    # model = PosEncodedGenerator
 
-    samples = next(stream)
-    orig = zounds.AudioSamples(
-        samples.reshape(-1), samplerate).pad_with_silence()
+    # gen = model(n_samples, latent_dim, n_channels)
+    # optim = Adam(gen.parameters(), lr=1e-3, betas=(0, 0.9))
 
-    samples = torch.from_numpy(samples).float().to(
-        device).view(1, 1, n_samples)
+    # stream = batch_stream(path, '*.wav', 1, n_samples)
 
-    latent = torch.FloatTensor(1, latent_dim, 1).normal_(0, 1).to(device)
+    # samples = next(stream)
+    # orig = zounds.AudioSamples(
+    #     samples.reshape(-1), samplerate).pad_with_silence()
 
-    while True:
-        optim.zero_grad()
+    # samples = torch.from_numpy(samples).float().to(
+    #     device).view(1, 1, n_samples)
 
-        recon = gen.forward(latent)
-        l, spec = mse_loss(recon, samples)
-        ospec = spec.data.cpu().numpy().squeeze()
-        l.backward()
-        optim.step()
-        print('TIME', l.item())
+    # latent = torch.FloatTensor(1, latent_dim, 1).normal_(0, 1).to(device)
+
+    # while True:
+    #     optim.zero_grad()
+
+    #     recon = gen.forward(latent)
+    #     l, spec = mse_loss(recon, samples)
+    #     ospec = spec.data.cpu().numpy().squeeze()
+    #     l.backward()
+    #     optim.step()
+    #     print('TIME', l.item())
