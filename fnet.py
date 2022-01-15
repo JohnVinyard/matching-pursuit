@@ -138,11 +138,6 @@ class Discriminator(nn.Module):
 def get_latent():
     return torch.FloatTensor(batch_size, 1, latent_dim).normal_(0, 1).to(device)
 
-def to_spectral(samples):
-    _, _, spec = stft(samples, nperseg=ws, noverlap=step, window=window)
-    spec = np.abs(spec).transpose(0, 2, 1)
-    return spec
-
 
 def real():
     coeffs = batch[0]
@@ -164,6 +159,12 @@ def fake():
 
 def fake_spec():
     return np.log(0.0001 + r[0])
+
+def to_spectral(samples):
+    _, _, spec = stft(samples, nperseg=ws, noverlap=step, window=window)
+    spec = np.abs(spec).transpose(0, 2, 1)
+    return spec
+
 
 def spec_batch_stream():
     stream = batch_stream(path, '*.wav', batch_size, n_samples)
