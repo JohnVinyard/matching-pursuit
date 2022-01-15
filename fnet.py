@@ -26,7 +26,7 @@ window = np.sqrt(hann(ws))
 n_coeffs = (ws // 2) + 1
 op = lws.lws(ws, step, mode='speech', perfectrec=True)
 
-time_dim = (n_samples // 256) + 1
+time_dim = (n_samples // step) + 1
 
 def init_weights(p):
     with torch.no_grad():
@@ -112,12 +112,23 @@ class Discriminator(nn.Module):
         super().__init__()
         self.n_channels = n_channels
         self.embed_spec = nn.Linear(n_coeffs, n_channels)
+        self.embed_pos = nn.Linear(33, n_channels)
+
         self.transformer = Transformer(self.n_channels, 8)
         self.judge = nn.Linear(self.n_channels, 1)
         self.apply(init_weights)
     
     def forward(self, x):
         x = self.embed_spec(x)
+
+        pos = pos_encode_feature(torch.linspace(-1, 1, time_dim).view(-1, 1), 1, time_dim, 16)\
+            .view(1, time_dim, 33)\
+            .repeat(batch_size, 1, 1)\
+            .view(batch_size, time_dim, 33)\
+            .to(device)
+        pos = self.embed_pos(pos)
+
+        x = pos + x
         x = self.transformer(x)
         x = x[:, -1:, :]
         x = self.judge(x)
@@ -131,24 +142,6 @@ def to_spectral(samples):
     _, _, spec = stft(samples, nperseg=ws, noverlap=step, window=window)
     spec = np.abs(spec).transpose(0, 2, 1)
     return spec
-
-
-def lws_test():
-
-    stream = batch_stream(path, '*.wav', 1, n_samples)
-    b = next(stream).squeeze()
-
-    _, _, spec = stft(b, nperseg=ws, noverlap=step, window=window)
-    orig_spec = spec = np.abs(spec)
-    print(spec.shape)
-    spec = op.run_lws(spec.T).T
-    print(spec.dtype)
-    _, recon = istft(spec, nperseg=ws, noverlap=step, window=window)
-
-    o = zounds.AudioSamples(b, samplerate).pad_with_silence()
-    r = zounds.AudioSamples(recon.squeeze(), samplerate).pad_with_silence()
-
-    return orig_spec, o, r
 
 
 def real():
@@ -222,4 +215,6 @@ if __name__ == '__main__':
             r = rec.data.cpu().numpy()
         else:
             train_disc(b)
+        
+        input('check...')
 
