@@ -15,7 +15,7 @@ n_samples = 16384
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
-path = '/hdd/musicnet/train_data'
+path = '/home/john/workspace/audio-data/musicnet/train_data'
 
 
 class Synth(nn.Module):
@@ -100,7 +100,7 @@ class PsychoacousticFeature(nn.Module):
                 a_weighting=False).to(device)
             bank_dict[key] = (fb, span, size)
         return bank_dict
-    
+
     def chroma_basis(self, size):
         fb, span, size = self.banks[size]
         band = zounds.FrequencyBand(*span)
@@ -138,8 +138,7 @@ class PsychoacousticFeature(nn.Module):
             spec = F.pad(spec, (kernel_size // 4, kernel_size // 4))
             spec = spec.unfold(-1, kernel_size, kernel_size // 2)
 
-
-            spec = torch.norm(torch.rfft(spec, signal_ndim=1), dim=-1)
+            spec = torch.abs(torch.fft.rfft(spec, dim=-1))
             bands[size] = spec
 
         return bands
@@ -158,7 +157,6 @@ class PsychoacousticFeature(nn.Module):
             x = x.view(batch_size, 1, -1)
             x = self.decompose(x)
 
-
         results = []
         specs = []
 
@@ -171,12 +169,11 @@ class PsychoacousticFeature(nn.Module):
             spec = F.pad(spec, (kernel_size // 4, kernel_size // 4))
             spec = spec.unfold(-1, kernel_size, kernel_size // 2)
 
-
             if span[0] > 99999:
                 spec = torch.norm(spec, dim=-1)
             else:
-                freq = torch.rfft(spec, signal_ndim=1)
-                spec = torch.norm(freq, dim=-1)
+                freq = torch.fft.rfft(spec, dim=-1)
+                spec = torch.abs(freq)
                 specs.append(spec.data.cpu().numpy().squeeze())
 
             results.append(spec.reshape(batch_size, -1))
@@ -186,20 +183,17 @@ class PsychoacousticFeature(nn.Module):
         return x, specs
 
 
-
-
 if __name__ == '__main__':
 
     app = zounds.ZoundsApp(locals=locals(), globals=globals())
     app.start_in_thread(9999)
 
     stream = batch_stream(path, '*.wav', 1, n_samples)
-    
 
     target = next(stream).reshape((1, 1, n_samples))
     target /= np.abs(target).max()
     envelope = np.linspace(0, 1, 10)
-    target[:, :,  :10] *= envelope
+    target[:, :, :10] *= envelope
     target[:, :, -10:] *= envelope[::-1]
 
     target_audio = zounds.AudioSamples(target.squeeze(),
@@ -207,16 +201,13 @@ if __name__ == '__main__':
     target = torch.from_numpy(target).float().to(device)
     print(target.shape)
 
-
     model = Synth().to(device)
-
 
     def listen():
         return model.synthesize()
-    
+
     def real():
         return target_audio
-
 
     def spec():
         return np.abs(zounds.spectral.stft(listen()))
@@ -229,7 +220,6 @@ if __name__ == '__main__':
         optim.zero_grad()
 
         recon = model().view(1, 1, n_samples)
-
 
         print('==============================================')
         raw_loss = ((target - recon) ** 2).mean()
@@ -244,7 +234,6 @@ if __name__ == '__main__':
         loss = F.mse_loss(t, x)
 
         loss.backward()
-        
+
         optim.step()
         print('PIF', loss.item())
-

@@ -12,7 +12,7 @@ from test_optisynth import PsychoacousticFeature
 sr = zounds.SR22050()
 n_samples = 2**14
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-path = '/hdd/musicnet/train_data'
+path = '/home/john/workspace/audio-data/musicnet/train_data'
 torch.backends.cudnn.benchmark = True
 
 

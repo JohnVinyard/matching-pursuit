@@ -22,20 +22,24 @@ def noise_bank2(x):
     # window = torch.hann_window(32).to(x.device).float()
     # noise = noise * window[None, None, :]
 
-    noise_coeffs = torch.rfft(noise, 1, normalized=False)
+    noise_coeffs = torch.fft.rfft(noise, 1, norm='ortho')
     # (batch frames, coeffs, 2)
 
     x = x.permute(0, 2, 1)#[..., None]
     # apply the filter in the frequency domain
     # filtered = noise_coeffs * x
 
-    noise_coeffs[..., :1] *= x[..., None]
-    noise_coeffs[..., 1:] *= x[..., None]
+    # noise_coeffs[..., :1] *= x[..., None]
+    # noise_coeffs[..., 1:] *= x[..., None]
+
+    noise_coeffs = noise_coeffs * x
+
     filtered = noise_coeffs
 
     # recover the filtered noise in the time domain
-    audio = torch.irfft(
-        filtered, 1, normalized=False, signal_sizes=(window_size,))
+    audio = torch.fft.irfft(
+        filtered, n=window_size, norm='ortho')
+    
     audio = overlap_add(audio[:, None, :, :], apply_window=True)
     audio = audio[..., :total_samples]
     audio = audio.view(batch, 1, -1)

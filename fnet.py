@@ -49,7 +49,6 @@ class ForwardBlock(nn.Module):
         x = F.leaky_relu(x + shortcut, 0.2)
         return x
 
-
 class FourierMixer(nn.Module):
     def __init__(self):
         super().__init__()
@@ -59,7 +58,6 @@ class FourierMixer(nn.Module):
         x = torch.fft.fft(x, dim=-2, norm='ortho')
         x = x.real
         return x
-
 
 class Transformer(nn.Module):
     def __init__(self, n_channels, n_layers):
@@ -76,7 +74,6 @@ class Transformer(nn.Module):
     def forward(self, x):
         x = self.net(x)
         return x
-
 
 class Generator(nn.Module):
     def __init__(self, n_channels):
@@ -134,10 +131,8 @@ class Discriminator(nn.Module):
         x = self.judge(x)
         return torch.sigmoid(x)
 
-
 def get_latent():
     return torch.FloatTensor(batch_size, 1, latent_dim).normal_(0, 1).to(device)
-
 
 def real():
     coeffs = batch[0]
@@ -145,7 +140,6 @@ def real():
     coeffs = coeffs.T
     _, recon = istft(coeffs, nperseg=ws, noverlap=step, window=window)
     return zounds.AudioSamples(recon, samplerate).pad_with_silence()
-
 
 def real_spec():
     return np.log(0.0001 + batch[0])
