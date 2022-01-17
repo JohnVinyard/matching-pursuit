@@ -22,7 +22,7 @@ def noise_bank2(x):
     # window = torch.hann_window(32).to(x.device).float()
     # noise = noise * window[None, None, :]
 
-    noise_coeffs = torch.fft.rfft(noise, 1, norm='ortho')
+    noise_coeffs = torch.fft.rfft(noise, norm='ortho')
     # (batch frames, coeffs, 2)
 
     x = x.permute(0, 2, 1)#[..., None]

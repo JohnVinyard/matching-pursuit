@@ -6,6 +6,8 @@ from datastore import batch_stream
 from ddsp import noise_bank2
 import zounds
 from torch.optim import Adam
+from fnet import Transformer
+from modules import pos_encode_feature
 from modules3 import LinearOutputStack
 
 from test_optisynth import PsychoacousticFeature
@@ -15,16 +17,36 @@ n_samples = 2**14
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 path = '/home/john/workspace/audio-data/musicnet/train_data'
 torch.backends.cudnn.benchmark = True
+learning_rate = 1e-3
+n_harmonics = 16
+init_value = 0.01
 
 
 feature = PsychoacousticFeature().to(device)
+
+
+def nl(x):
+    # return torch.clamp(x, 0, 1)
+    # return torch.sigmoid(x)
+    x = (torch.sin(x) + 1) / 2
+    # return (torch.tanh(x) + 1) / 2
+
+    return x ** 2
+
+class SequenceNL(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        # return torch.sin(x)
+        return F.leaky_relu(x, 0.2)
 
 
 def init_weights(p):
 
     with torch.no_grad():
         try:
-            p.weight.uniform_(-0.1, 0.1)
+            p.weight.uniform_(-init_value, init_value)
         except AttributeError:
             pass
 
@@ -64,12 +86,6 @@ def unit_norm(x, axis=-1):
     return x / (n + 1e-12)
 
 
-def nl(x):
-    return torch.clamp(x, 0, 1)
-    # return torch.sigmoid(x)
-    # return (torch.sin(x) + 1) / 2
-
-
 class Sequence(nn.Module):
     def __init__(self, atom_latent, n_frames, channels, out_channels):
         super().__init__()
@@ -87,7 +103,7 @@ class Sequence(nn.Module):
                 # nn.Conv1d(channels, channels, 3, 1, 1),
 
                 nn.ConvTranspose1d(channels, channels, 4, 2, 1),
-                nn.LeakyReLU(0.2)
+                SequenceNL()
             )
             for _ in range(layers)])
         self.final = nn.Conv1d(channels, out_channels, 3, 1, 1)
@@ -103,6 +119,7 @@ class Sequence(nn.Module):
         x = self.final(x)
         x = x.reshape(batch, atoms, self.out_channels, self.n_frames)
         x = x.permute(0, 1, 3, 2)
+
         return x  # (batch, atoms, frames, channels)
 
 
@@ -122,15 +139,19 @@ class Noise(nn.Module):
             channels, n_noise_samples, channels, self.noise_coeffs)
 
         self.amp_factor = nn.Parameter(torch.FloatTensor(1).fill_(0.01))
+
         self.apply(init_weights)
 
     def forward(self, x):
         batch, atoms, latent = x.shape
 
         env = nl(self.env(x)) * self.amp_factor
-        noise = unit_norm(self.noise(x), axis=1)
+        env = smooth(env, kernel=3)
+        n = self.noise(x)
+        noise = unit_norm(n, axis=-1)
 
         x = env * noise
+
         x = x.reshape(batch * atoms, self.n_noise_samples, self.noise_coeffs)
         x = x.permute(0, 2, 1)
         noise_params = x
@@ -170,8 +191,8 @@ class Harmonic(nn.Module):
             n_frames,
             channels,
             min_f0=20,
-            max_f0=4000,
-        n_harmonics=8,
+            max_f0=8000,
+            n_harmonics=n_harmonics,
             sr=zounds.SR22050()):
 
         super().__init__()
@@ -194,8 +215,7 @@ class Harmonic(nn.Module):
 
         self.register_buffer(
             'harmonic_factor',
-            # torch.arange(2, 2 + n_harmonics, 1
-            torch.from_numpy(np.array([2, 4, 8, 16, 32, 64, 128, 256]))
+            torch.arange(2, 2 + n_harmonics, 1)
         )
         self.apply(init_weights)
 
@@ -203,12 +223,12 @@ class Harmonic(nn.Module):
         batch, atoms, latent = x.shape
 
         # (batch, atoms, frames, channels)
-        env = (nl(self.env(x)).view(batch, atoms, -1, 1) ** 2) * self.amp_factor
+        env = nl(self.env(x)).view(batch, atoms, -1, 1) * self.amp_factor
         # encourage amplitude to change smoothly over short periods
         env = smooth(env, kernel=3)
 
         f0 = self.min_f0 + \
-            (nl(self.f0(x).view(batch, atoms, -1, 1)) * self.f0_diff)
+            (nl(self.f0(x).view(batch, atoms, -1, 1) * self.f0_diff))
         # try to ensure that frequencies change smoothly, encouraging different atoms to
         # handle different notes/events
         f0 = smooth(f0, kernel=13)
@@ -219,6 +239,8 @@ class Harmonic(nn.Module):
 
         # harmonic amps are a factor of envelope
         harm_amp = env * harm_amp
+
+        h_params = harm_amp
 
         f_params = f0
         env_params = env
@@ -235,7 +257,8 @@ class Harmonic(nn.Module):
         f = torch.sin(torch.cumsum(f * np.pi, dim=2)) * harm_amp
 
         x = f0 + torch.sum(f, dim=-1, keepdim=True)
-        return x, f_params, env_params
+
+        return x, f_params, env_params, h_params
 
 
 class Atoms(nn.Module):
@@ -244,22 +267,25 @@ class Atoms(nn.Module):
         self.n_audio_samples = n_audio_samples
 
         self.transform_latent = LinearOutputStack(
-            channels, 3, in_channels=atom_latent)
-        # self.mix = LinearOutputStack(channels, 3, out_channels=1)
+            channels, 3, in_channels=atom_latent, shortcut=False)
+
+        self.mix = LinearOutputStack(channels, 3, out_channels=1)
 
         self.harmonic = Harmonic(atom_latent, n_audio_samples, 32, channels)
-        self.noise = Noise(atom_latent, n_audio_samples, 512, channels)
+        self.noise = Noise(atom_latent, n_audio_samples, 1024, channels)
         self.apply(init_weights)
 
     def forward(self, x):
         batch, atoms, latent = x.shape
 
         x = self.transform_latent(x)
-        # harm_amp = torch.clamp(self.mix(x), 0, 1)
+
+        # harm_amp = torch.sigmoid(self.mix(x))
         # noise_amp = 1 - harm_amp
 
-        h, fp, ap = self.harmonic(x)
+        h, fp, ap, hp = self.harmonic(x)
         h = h.view(batch, atoms, self.n_audio_samples)
+
         n, noise_params = self.noise(x)
         n = n.view(batch, atoms, self.n_audio_samples)
 
@@ -268,7 +294,7 @@ class Atoms(nn.Module):
 
         # combine all atoms
         x = (h + n).sum(dim=1)
-        return x, fp, ap, noise_params
+        return x, fp, ap, noise_params, hp
 
 
 class Model(nn.Module):
@@ -279,18 +305,18 @@ class Model(nn.Module):
         n_atoms = 16
         channels = 64
 
-        self.params = nn.Parameter(torch.FloatTensor(
-            1, n_atoms, latent).normal_(0, 1))
         self.atoms = Atoms(latent, n_samples, channels)
         self.apply(init_weights)
+        self.params = nn.Parameter(torch.FloatTensor(
+            1, n_atoms, latent).normal_(0, 1))
 
     def forward(self, x):
-        x, fp, ap, noise_params = self.atoms(self.params)
-        return x, fp, ap, noise_params
+        x, fp, ap, noise_params, hp = self.atoms(self.params)
+        return x, fp, ap, noise_params, hp
 
 
 model = Model().to(device)
-optim = Adam(model.parameters(), lr=1e-4, betas=(0, 0.9))
+optim = Adam(model.parameters(), lr=learning_rate, betas=(0, 0.9))
 
 
 def fake_spec():
@@ -314,11 +340,13 @@ if __name__ == '__main__':
 
     while True:
         optim.zero_grad()
-        recon, freq_params, amp_params, noise_params = model.forward(None)
+        recon, freq_params, amp_params, noise_params, harm_params = model.forward(
+            None)
 
         freq = freq_params.data.cpu().numpy().squeeze().T
         amp = amp_params.data.cpu().numpy().squeeze().T
         noise = noise_params.data.cpu().numpy().squeeze().sum(axis=0).T
+        harm = harm_params.data.cpu().numpy().squeeze()
 
         l = loss(recon, orig)
         l.backward()
