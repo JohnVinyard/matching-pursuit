@@ -13,13 +13,14 @@ from itertools import cycle
 
 
 samplerate = zounds.SR22050()
-path = '/home/john/workspace/audio-data/musicnet/train_data'
+path = '/hdd/musicnet/train_data'
 n_samples = 2**15
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+torch.backends.cudnn.benchmark = True
 latent_dim = 128
-n_channels = 64
-init_value = 0.02
-batch_size = 16
+n_channels = 256
+init_value = 0.1
+batch_size = 8
 ws = 512
 step = 256
 window = np.sqrt(hann(ws))
@@ -102,7 +103,7 @@ class Generator(nn.Module):
         x = pos * x
         x = self.transformer(x)
         x = self.to_spec(x)
-        return torch.sigmoid(x)
+        return x ** 2
 
 class Discriminator(nn.Module):
     def __init__(self, n_channels):
@@ -211,5 +212,4 @@ if __name__ == '__main__':
         else:
             train_disc(b)
         
-        input('check...')
 
