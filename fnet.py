@@ -7,6 +7,7 @@ from datastore import batch_stream
 from torch.optim import Adam
 import torch
 from scipy.signal import stft, istft, hann
+from dct_idea import least_squares_disc_loss, least_squares_generator_loss
 from modules import pos_encode_feature
 import lws
 from itertools import cycle
@@ -21,7 +22,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 torch.backends.cudnn.benchmark = True
 latent_dim = 128
 n_channels = 256
-init_value = 0.1
+init_value = 0.01
 batch_size = 8
 ws = 512
 step = 256
@@ -35,6 +36,11 @@ def init_weights(p):
     with torch.no_grad():
         try:
             p.weight.uniform_(-init_value, init_value)
+        except AttributeError:
+            pass
+
+        try:
+            p.bias.fill_(0)
         except AttributeError:
             pass
 
@@ -64,10 +70,10 @@ class Generator(nn.Module):
         pos = self.embed_pos(pos)
         x = self.embed_latent(x).repeat(1, time_dim, 1)
 
-        x = pos * x
+        x = pos + x
         x = self.transformer(x)
         x = self.to_spec(x)
-        return x ** 2
+        return torch.abs(x)
 
 class Discriminator(nn.Module):
     def __init__(self, n_channels):
@@ -120,6 +126,8 @@ def fake_spec():
     return np.log(0.0001 + r[0])
 
 def to_spectral(samples):
+    max = samples.max(axis=-1, keepdims=True)
+    samples /= (max + 1e-12)
     _, _, spec = stft(samples, nperseg=ws, noverlap=step, window=window)
     spec = np.abs(spec).transpose(0, 2, 1)
     return spec
@@ -143,7 +151,8 @@ def train_gen(batch):
     latent = get_latent()
     recon = gen.forward(latent)
     j = disc.forward(recon)
-    loss = torch.abs(1 - j).mean()
+    # loss = torch.abs(1 - j).mean()
+    loss = least_squares_generator_loss(j)
     loss.backward()
     gen_optim.step()
     print('G', loss.item())
@@ -156,6 +165,7 @@ def train_disc(batch):
     fj = disc.forward(recon)
     rj = disc.forward(batch)
     loss = torch.abs(0 - fj).mean() + torch.abs(1 - rj).mean()
+    loss = least_squares_disc_loss(rj, fj)
     loss.backward()
     disc_optim.step()
     print('D', loss.item())
@@ -172,7 +182,7 @@ if __name__ == '__main__':
         b = torch.from_numpy(batch).float().to(device)
         if current_step == 'gen':
             rec = train_gen(b)
-            r = rec.data.cpu().numpy()
+            r = np.abs(rec.data.cpu().numpy())
         else:
             train_disc(b)
         

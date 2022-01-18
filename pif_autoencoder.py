@@ -21,7 +21,7 @@ torch.backends.cudnn.benchmark = True
 
 sr = zounds.SR22050()
 overfit = False
-batch_size = 1 if overfit else 4
+batch_size = 1 if overfit else 2
 min_band_size = 512
 n_samples = 2**14
 network_channels = 64
@@ -31,7 +31,7 @@ use_fft_upsampling = False
 learning_rate = 1e-4
 
 
-make_long_sequence = True
+make_long_sequence = False
 
 
 # decoder options
@@ -69,10 +69,10 @@ class FFTUpsample(nn.Module):
     def forward(self, x):
         batch, channels, time = x.shape
         new_time = time * 2
-        coeffs = torch.rfft(x, 1, normalized=True)
+        coeffs = torch.fft.rfft(x, norm='ortho')
         new_coeffs = torch.zeros(batch, channels, new_time // 2 + 1, 2).to(device)
         new_coeffs[:, :, :(time // 2 + 1), :] = coeffs
-        x = torch.irfft(new_coeffs, 1, signal_sizes=(new_time,), normalized=True)
+        x = torch.fft.irfft(new_coeffs, n=new_time, norm='ortho')
         return x
         
 
@@ -239,8 +239,8 @@ class MFCC(nn.Module):
         x = x.view(batch_size, 64, 32, -1)
         x = torch.norm(x, dim=-1)
         x = x.permute(0, 2, 1) # (batch, 32, 64)
-        x = torch.rfft(x, signal_ndim=1, normalized=True) # (batch, 32, 33, 2)
-        x = torch.norm(x, dim=-1) # (bach, 32, 33)
+        x = torch.fft.rfft(x, norm='ortho') # (batch, 32, 33)
+        x = torch.abs(x) # (bach, 32, 33)
         x = x.permute(0, 2, 1) # (batch, 33, 32)
         x = x[:, 1:self.n_coeffs + 1, :]
         norms = torch.norm(x, dim=1, keepdim=True)
@@ -1030,13 +1030,12 @@ def train_gen(feat):
     else:
         latent_loss = 0
     
-    loss = 0
-    for k, v in feat.items():
-        loss = loss + F.mse_loss(fake_feat[k], v)
+    # loss = 0
+    # for k, v in feat.items():
+    #     loss = loss + F.mse_loss(fake_feat[k], v)
 
     adv_loss = torch.abs(1 - j).mean()
-    print(adv_loss.item(), loss.item(), latent_loss.item())
-    loss = loss + latent_loss + adv_loss
+    loss = latent_loss + adv_loss
     loss.backward()
     gen_optim.step()
     print('G', loss.item())

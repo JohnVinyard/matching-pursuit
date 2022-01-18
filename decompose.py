@@ -41,23 +41,22 @@ def fft_frequency_decompose(x, min_size):
 
 def fft_resample(x, desired_size, is_lowest_band):
     batch, channels, time = x.shape
-    coeffs = torch.rfft(input=x, signal_ndim=1, normalized=True)
+    coeffs = torch.fft.rfft(x, norm='ortho')
     # (batch, channels, coeffs, 2)
     n_coeffs = coeffs.shape[2]
 
     new_coeffs_size = desired_size // 2 + 1
-    new_coeffs = torch.zeros(batch, channels, new_coeffs_size, 2).to(x.device)
+    new_coeffs = torch.zeros(batch, channels, new_coeffs_size, dtype=torch.complex64).to(x.device)
     if is_lowest_band:
-        new_coeffs[:, :, :n_coeffs, :] = coeffs
+        new_coeffs[:, :, :n_coeffs] = coeffs
     else:
-        new_coeffs[:, :, n_coeffs // 2:n_coeffs, :] = coeffs[:, :, n_coeffs // 2:, :]
+        new_coeffs[:, :, n_coeffs // 2:n_coeffs] = coeffs[:, :, n_coeffs // 2:]
 
 
-    samples = torch.irfft(
-        input=new_coeffs,
-        signal_ndim=1,
-        normalized=True,
-        signal_sizes=(desired_size,))
+    samples = torch.fft.irfft(
+        new_coeffs,
+        n=desired_size,
+        norm='ortho')
     return samples
 
 
