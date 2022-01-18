@@ -11,6 +11,8 @@ from modules import pos_encode_feature
 import lws
 from itertools import cycle
 
+from modules.transformer import Transformer
+
 
 samplerate = zounds.SR22050()
 path = '/hdd/musicnet/train_data'
@@ -37,44 +39,6 @@ def init_weights(p):
             pass
 
 
-class ForwardBlock(nn.Module):
-    def __init__(self, n_channels):
-        super().__init__()
-        self.n_channels = n_channels
-        self.ln = nn.Linear(self.n_channels, self.n_channels)
-        self.apply(init_weights)
-
-    def forward(self, x):
-        shortcut = x
-        x = self.ln(x)
-        x = F.leaky_relu(x + shortcut, 0.2)
-        return x
-
-class FourierMixer(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, x):
-        x = torch.fft.fft(x, dim=-1, norm='ortho')
-        x = torch.fft.fft(x, dim=-2, norm='ortho')
-        x = x.real
-        return x
-
-class Transformer(nn.Module):
-    def __init__(self, n_channels, n_layers):
-        super().__init__()
-        self.n_channels = n_channels
-        self.n_layers = n_layers
-        self.net = nn.Sequential(*[
-            nn.Sequential(
-                ForwardBlock(self.n_channels),
-                FourierMixer()
-            )
-            for _ in range(self.n_layers)])
-
-    def forward(self, x):
-        x = self.net(x)
-        return x
 
 class Generator(nn.Module):
     def __init__(self, n_channels):
