@@ -80,6 +80,10 @@ class PsychoacousticFeature(nn.Module):
         basis = chr._basis(fb.scale, zounds.OggVorbisWindowingFunc())
         x = np.array(basis)
         return x
+    
+    @property
+    def n_bands(self):
+        return len(self.band_sizes)
 
     @property
     def band_sizes(self):

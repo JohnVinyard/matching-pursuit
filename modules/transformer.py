@@ -1,8 +1,9 @@
 from torch import nn
 
-from weight_init import make_initializer
 import torch
 from torch.nn import functional as F
+
+from util import make_initializer
 
 init_weights = make_initializer(0.1)
 

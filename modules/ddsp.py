@@ -1,5 +1,9 @@
 import torch
 from torch.nn import functional as F
+from torch import nn
+import numpy as np
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def noise_bank2(x):
     # TODO: Understand and apply stuff about periodic, zero-phase, causal
@@ -68,3 +72,52 @@ def overlap_add(x, apply_window=True):
     return output
 
 
+
+class DDSP(nn.Module):
+    def __init__(self, channels, band_size, constrain):
+        super().__init__()
+        self.channels = channels
+        self.band_size = band_size
+        noise_samples = 64
+        self.noise_frames = band_size // noise_samples
+        self.noise_coeffs = (self.noise_frames // 2) + 1
+        self.constrain = constrain
+        
+        self.amp = nn.Conv1d(64, 64, 1, 1, 0)
+        self.freq = nn.Conv1d(64, 64, 1, 1, 0)
+
+        bands = np.geomspace(0.01, 1, 64) * np.pi
+        bp = np.concatenate([[0], bands])
+        spans = np.diff(bp)
+
+        self.bands = torch.from_numpy(bands).float().to(device)
+        self.spans = torch.from_numpy(spans).float().to(device)
+        
+        
+        self.noise = nn.Conv1d(64, self.noise_coeffs, 1, 1, 0)
+        self.noise_factor = nn.Parameter(torch.FloatTensor(1).fill_(1e-5))
+    
+    def forward(self, x):
+        # noise = torch.sigmoid(self.noise(x))
+        
+        noise = torch.clamp(self.noise(x), 0, 1)
+        noise_step = self.noise_frames // 2
+        noise = F.avg_pool1d(noise, noise_step, noise_step) ** 2
+        noise = noise_bank2(noise) * self.noise_factor
+
+        # amp = torch.sigmoid(self.amp(x))
+        # freq = torch.sigmoid(self.freq(x))
+
+        amp = torch.clamp(self.amp(x), 0, 1)
+        freq = torch.clamp(self.freq(x), 0, 1)
+
+        amp = F.avg_pool1d(amp, 64, 1, 32)[..., :-1] ** 2
+        freq = F.avg_pool1d(freq, 64, 1, 32)[..., :-1]
+
+        if self.constrain:
+            freq = self.bands[None, :, None] + (freq * self.spans[None, :, None])
+
+        freq = torch.sin(torch.cumsum(freq, dim=-1)) * amp
+        x = torch.mean(x, dim=1, keepdim=True)
+        
+        return x + noise
