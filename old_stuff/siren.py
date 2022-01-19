@@ -5,7 +5,7 @@ from torch.optim.adam import Adam
 import zounds
 from torch import nn
 
-from datastore import batch_stream
+from data.datastore import batch_stream
 from modules import pos_encode_feature
 from modules3 import LinearOutputStack
 from torch.nn import functional as F

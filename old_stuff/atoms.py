@@ -2,7 +2,7 @@ from torch import nn
 import numpy as np
 import torch
 from torch.nn import functional as F
-from datastore import batch_stream
+from data.datastore import batch_stream
 from ddsp import noise_bank2
 import zounds
 from torch.optim import Adam

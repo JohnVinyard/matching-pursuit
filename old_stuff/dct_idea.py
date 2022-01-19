@@ -5,7 +5,7 @@ import zounds
 from scipy.fftpack import dct, idct
 from torch import nn
 
-from datastore import batch_stream
+from data.datastore import batch_stream
 from modules import PositionalEncoding
 from modules3 import LinearOutputStack
 from enum import Enum

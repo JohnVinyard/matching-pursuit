@@ -3,7 +3,7 @@ from torch import nn
 from torch.optim.adam import Adam
 import zounds
 from all_in_one import covariance
-from datastore import batch_stream
+from data.datastore import batch_stream
 from ddsp import noise_bank2
 from decompose import fft_frequency_decompose, fft_frequency_recompose
 from modules import pos_encode_feature

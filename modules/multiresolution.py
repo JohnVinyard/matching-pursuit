@@ -171,5 +171,5 @@ class DecoderShell(nn.Module):
     def forward(self, x):
         batch_size = x.shape[0]
         x = self.expander(x)
-        x = x.permute(0, 2, 1).view(batch_size, 32, self.channels)
+        x = x.permute(0, 2, 1).reshape(batch_size, 32, self.channels)
         return {int(k): decoder(x) for k, decoder in self.bands.items()}

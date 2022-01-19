@@ -3,7 +3,7 @@ from torch import nn
 import zounds
 import numpy as np
 from torch.nn import functional as F
-from datastore import batch_stream
+from data.datastore import batch_stream
 from torch.optim import Adam
 import torch
 from scipy.signal import stft, istft, hann

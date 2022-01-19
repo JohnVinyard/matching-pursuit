@@ -3,7 +3,7 @@ from torch.optim.adam import Adam
 import zounds
 from torch import nn
 
-from datastore import batch_stream
+from data.datastore import batch_stream
 from torch.nn import functional as F
 import numpy as np
 

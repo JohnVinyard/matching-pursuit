@@ -4,7 +4,7 @@ from dict_learning_step import dict_learning_step, unit_norm
 from os import PathLike
 from typing import Union
 from sparse2 import freq_decompose, freq_recompose, resample, initialize_dictionary, sparse_decode, sparse_encode
-from datastore import batch_stream
+from data.datastore import batch_stream
 import numpy as np
 import soundfile
 from matplotlib import pyplot as plt

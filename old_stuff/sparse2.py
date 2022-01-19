@@ -5,7 +5,7 @@ import numpy as np
 from collections import defaultdict, Counter
 from matplotlib import pyplot as plt
 import soundfile
-from datastore import batch_stream
+from data.datastore import batch_stream
 from scipy.fft import rfft, irfft
 
 

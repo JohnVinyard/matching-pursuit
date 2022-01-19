@@ -4,7 +4,7 @@ import numpy as np
 from torch import nn
 from torch.nn import functional as F
 
-from decompose import fft_frequency_decompose
+from .decompose import fft_frequency_decompose
 
 samplerate = zounds.SR22050()
 n_samples = 16384
@@ -57,10 +57,8 @@ class PsychoacousticFeature(nn.Module):
             self.kernel_sizes[key] = size // 2 + 1
 
             band = zounds.FrequencyBand(*span)
-            print(band)
             scale = zounds.MelScale(band, 64)
             samples_per_second = span[1] * 2
-            print(samples_per_second)
             freq = zounds.Picoseconds(1e12) / samples_per_second
             sr = zounds.SampleRate(freq, freq)
             fb = zounds.learn.FilterBank(

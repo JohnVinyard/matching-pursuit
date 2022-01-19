@@ -1,7 +1,7 @@
 import os
-from datastore import audio, iter_chunks
+from data.datastore import audio, iter_chunks
 from multilevel_sparse import encode, learn_multilevel_dict
-from conjure import cache, LmdbCollection, clear_cache, dump_pickle, hash_args, hash_function, load_pickle
+from data.conjure import cache, LmdbCollection, clear_cache, dump_pickle, hash_args, hash_function, load_pickle
 import numpy as np
 from multiprocessing.pool import ThreadPool
 from random import choice

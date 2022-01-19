@@ -1,4 +1,4 @@
-from datastore import batch_stream
+from data.datastore import batch_stream
 from dict_learning_step import unit_norm
 from get_encoded import iter_training_examples, learn_dict
 from sparse2 import freq_decompose

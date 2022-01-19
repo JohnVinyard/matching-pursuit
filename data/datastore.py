@@ -1,17 +1,17 @@
-from numpy.lib.utils import source
-from soundfile import SoundFile
-import soundfile
-from conjure import cache, LmdbCollection
-from librosa import load, to_mono, resample
+
+from librosa import load, to_mono
 from fnmatch import fnmatch
 import os
 import numpy as np
 from random import choice
 
+from data.conjure import LmdbCollection, cache
+
 collection = LmdbCollection('audio')
 
 
 def iter_files(base_path, pattern):
+
     for dirpath, _, filenames in os.walk(base_path):
         audio_files = filter(
             lambda x: fnmatch(x, pattern),
@@ -40,8 +40,11 @@ def iter_chunks(path, pattern, chunksize):
             yield fp, start, stop
 
 
-def batch_stream(path, pattern, batch_size, n_samples):
+def batch_stream(path, pattern, batch_size, n_samples, overfit=False):
     paths = list(iter_files(path, pattern))
+
+    batch_size = 1 if overfit else batch_size
+
     while True:
         batch = np.zeros((batch_size, n_samples), dtype=np.float32)
         for i in range(batch_size):
@@ -51,8 +54,6 @@ def batch_stream(path, pattern, batch_size, n_samples):
             batch[i, :] = data[start: start + n_samples]
         yield batch
 
-
-if __name__ == '__main__':
-    path = '/home/john/workspace/audio-data/musicnet/train_data'
-    for batch in batch_stream(path, '*.wav', 16, 2048):
-        print(batch.shape)
+        if overfit:
+            while True:
+                yield batch
