@@ -1,1 +1,1 @@
-from .dotenv import config_values
+from .dotenv import config_values, Config

@@ -10,3 +10,10 @@ with open('.env', 'r') as f:
 
 
 
+class Config(object):
+    def __init__():
+        super().__init__()
+    
+    @staticmethod
+    def audio_path():
+        return os.environ['AUDIO_PATH']
