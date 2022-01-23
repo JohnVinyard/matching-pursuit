@@ -74,15 +74,22 @@ def overlap_add(x, apply_window=True):
 
 
 class DDSP(nn.Module):
-    def __init__(self, channels, band_size, constrain):
+    def __init__(self, channels, band_size, constrain, noise_frames=None):
         super().__init__()
         self.channels = channels
         self.band_size = band_size
-        noise_samples = 64
-        self.noise_frames = band_size // noise_samples
-        self.noise_coeffs = (self.noise_frames // 2) + 1
-        self.constrain = constrain
+
+        if noise_frames is not None:
+            self.noise_frames = noise_frames
+            self.noise_samples = self.band_size // self.noise_frames
+            # note: window size is twice noise_samples
+            self.noise_coeffs = self.noise_samples + 1
+        else:
+            self.noise_samples = 64
+            self.noise_frames = band_size // self.noise_samples
+            self.noise_coeffs = (self.noise_frames // 2) + 1
         
+        self.constrain = constrain
         self.amp = nn.Conv1d(64, 64, 1, 1, 0)
         self.freq = nn.Conv1d(64, 64, 1, 1, 0)
 
@@ -93,31 +100,36 @@ class DDSP(nn.Module):
         self.bands = torch.from_numpy(bands).float().to(device)
         self.spans = torch.from_numpy(spans).float().to(device)
         
-        
         self.noise = nn.Conv1d(64, self.noise_coeffs, 1, 1, 0)
-        self.noise_factor = nn.Parameter(torch.FloatTensor(1).fill_(1e-5))
+        self.noise_factor = nn.Parameter(torch.FloatTensor(1).fill_(1))
     
     def forward(self, x):
-        # noise = torch.sigmoid(self.noise(x))
-        
+        batch, channels, time = x.shape
+        batch, channels, time = x.shape
+
         noise = torch.clamp(self.noise(x), 0, 1)
-        noise_step = self.noise_frames // 2
-        noise = F.avg_pool1d(noise, noise_step, noise_step) ** 2
+
+        if time == self.band_size:
+            noise = F.avg_pool1d(noise, self.noise_samples, self.noise_samples)
+        
         noise = noise_bank2(noise) * self.noise_factor
 
-        # amp = torch.sigmoid(self.amp(x))
-        # freq = torch.sigmoid(self.freq(x))
 
         amp = torch.clamp(self.amp(x), 0, 1)
         freq = torch.clamp(self.freq(x), 0, 1)
 
-        amp = F.avg_pool1d(amp, 64, 1, 32)[..., :-1] ** 2
-        freq = F.avg_pool1d(freq, 64, 1, 32)[..., :-1]
+        if time == self.band_size:
+            amp = F.avg_pool1d(amp, 64, 1, 32)[..., :-1]
+            freq = F.avg_pool1d(freq, 64, 1, 32)[..., :-1]
+        else:
+            amp = F.upsample(amp, size=self.band_size, mode='linear')
+            freq = F.upsample(freq, size=self.band_size, mode='linear')
 
         if self.constrain:
             freq = self.bands[None, :, None] + (freq * self.spans[None, :, None])
 
         freq = torch.sin(torch.cumsum(freq, dim=-1)) * amp
-        x = torch.mean(x, dim=1, keepdim=True)
+        freq = torch.mean(freq, dim=1, keepdim=True)
+
         
-        return x + noise
+        return freq + noise

@@ -1,6 +1,6 @@
 from config import config_values
 import json
-from experiments import NoiseGuided
+from experiments import MultiresolutionAutoencoder
 import os
 import zounds
 import argparse
@@ -43,7 +43,7 @@ if __name__ == '__main__':
         app = zounds.ZoundsApp(locals=locals(), globals=globals())
         app.start_in_thread(os.environ['PORT'])
 
-        exp = NoiseGuided()
+        exp = MultiresolutionAutoencoder(overfit=False, batch_size=4)
 
         if exp.__doc__ is None or exp.__doc__.strip() == '':
             raise ValueError('Please write a little about your experiment')
