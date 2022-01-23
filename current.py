@@ -1,6 +1,6 @@
 from config import config_values
 import json
-from experiments import AtomsAutoencoder
+from experiments import NoiseGuided
 import os
 import zounds
 import argparse
@@ -43,9 +43,9 @@ if __name__ == '__main__':
         app = zounds.ZoundsApp(locals=locals(), globals=globals())
         app.start_in_thread(os.environ['PORT'])
 
-        exp = AtomsAutoencoder(overfit=False)
+        exp = NoiseGuided()
 
-        if exp.__doc__.strip() == '':
+        if exp.__doc__ is None or exp.__doc__.strip() == '':
             raise ValueError('Please write a little about your experiment')
 
         print('\n\nTODAY\'S EXPERIMENT ==============================\n\n')
@@ -55,3 +55,5 @@ if __name__ == '__main__':
         print('\n\n==================================================\n\n')
 
         exp.run()
+
+        input('Check it out...')
