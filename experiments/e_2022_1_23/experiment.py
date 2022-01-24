@@ -156,7 +156,7 @@ decoder = DecoderShell(
     feature).to(device)
 encoder = Encoder().to(device)
 optim = Adam(
-    chain(decoder.parameters(), encoder.parameters()), lr=1e-3, betas=(0, 0.9))
+    chain(decoder.parameters(), encoder.parameters()), lr=1e-4, betas=(0, 0.9))
 
 
 @readme
