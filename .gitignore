@@ -1,6 +1,9 @@
 *.wav
 *.png
+ae.dat
+disc.dat
 __pycache__
 audio
 sparse_coded
 .ipynb_checkpoints
+.env

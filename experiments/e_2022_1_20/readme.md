@@ -1,0 +1,1 @@
+How does the atoms work as a decoder in an autoencoder setup?
