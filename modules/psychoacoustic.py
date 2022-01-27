@@ -112,6 +112,10 @@ class PsychoacousticFeature(nn.Module):
             spec = F.pad(spec, (kernel_size // 4, kernel_size // 4))
             spec = spec.unfold(-1, kernel_size, kernel_size // 2)
 
+            import warnings
+            warnings.warn('Remember that youre doing windowing here!')
+            spec = spec * torch.hamming_window(spec.shape[-1])[None, None, None, :]
+            
             spec = torch.abs(torch.fft.rfft(spec, dim=-1))
             bands[size] = spec
 
@@ -142,6 +146,10 @@ class PsychoacousticFeature(nn.Module):
 
             spec = F.pad(spec, (kernel_size // 4, kernel_size // 4))
             spec = spec.unfold(-1, kernel_size, kernel_size // 2)
+
+            import warnings
+            warnings.warn('Remember that youre doing windowing here!')
+            spec = spec * torch.hamming_window(spec.shape[-1])[None, None, None, :]
 
             if span[0] > 99999:
                 spec = torch.norm(spec, dim=-1)

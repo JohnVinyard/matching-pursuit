@@ -5,4 +5,4 @@ from .stft import stft, log_stft
 from .fft_upsample import FFTUpsample
 from .linear import LinearOutputStack
 from .multiresolution import EncoderShell, DecoderShell, BandEncoder, ConvBandDecoder, ConvExpander
-from .ddsp import OscillatorBank, NoiseModel
+from .ddsp import OscillatorBank, NoiseModel, band_filtered_noise

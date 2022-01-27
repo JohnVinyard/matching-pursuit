@@ -4,8 +4,45 @@ from torch import nn
 import numpy as np
 from scipy.signal import hann
 
+from .normal_pdf import pdf
+
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+
+def noise_spec(n_audio_samples, ws=512, step=256):
+    """
+    Create a spectrogram of white noise with shape
+    (n_noise_frames, n_coeffs)
+    """
+
+    # create time-domain noise
+    x = torch.FloatTensor(n_audio_samples).uniform_(-1, 1).to(device)
+    x = F.pad(x, (0, ws))
+    x = x.unfold(-1, ws, step)
+
+    # take the STFT of the noise
+    window = torch.hamming_window(ws).to(device)
+    x = x * window[None, :]
+    x = torch.fft.rfft(x, norm='ortho')
+    return x
+
+
+def band_filtered_noise(n_audio_samples, ws=512, step=256, mean=0.5, std=0.1):
+    spec = noise_spec(n_audio_samples, ws, step)
+    n_coeffs = spec.shape[-1]
+
+    mean = mean * n_coeffs
+    std = std * n_coeffs
+
+    filt = pdf(torch.arange(0, n_coeffs, 1), mean, std)
+
+    # normalize frequency-domain filter to have peak at 1 
+    filt = filt / filt.max()
+    spec = spec * filt[None, :]
+
+    windowed = torch.fft.irfft(spec, dim=-1, norm='ortho')
+    samples = overlap_add(windowed[None, None, :, :])
+    return samples[..., :n_audio_samples]
 
 def noise_bank2(x):
     batch, magnitudes, samples = x.shape
@@ -141,7 +178,7 @@ class OscillatorBank(nn.Module):
             bands = np.linspace(0.01, 1, n_osc)
         else:
             bands = np.geomspace(0.01, 1, n_osc)
-        
+
         bp = np.concatenate([[0], bands])
         spans = np.diff(bp)
 
@@ -161,7 +198,7 @@ class OscillatorBank(nn.Module):
         amp = self.activation(amp)
         if self.log_amplitude:
             amp = amp ** 2
-        
+
         freq = self.activation(freq)
 
         if self.constrain:
