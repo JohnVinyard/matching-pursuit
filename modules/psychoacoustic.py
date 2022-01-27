@@ -114,7 +114,7 @@ class PsychoacousticFeature(nn.Module):
 
             import warnings
             warnings.warn('Remember that youre doing windowing here!')
-            spec = spec * torch.hamming_window(spec.shape[-1])[None, None, None, :]
+            spec = spec * torch.hamming_window(spec.shape[-1])[None, None, None, :].to(spec.device)
             
             spec = torch.abs(torch.fft.rfft(spec, dim=-1))
             bands[size] = spec
@@ -149,7 +149,7 @@ class PsychoacousticFeature(nn.Module):
 
             import warnings
             warnings.warn('Remember that youre doing windowing here!')
-            spec = spec * torch.hamming_window(spec.shape[-1])[None, None, None, :]
+            spec = spec * torch.hamming_window(spec.shape[-1])[None, None, None, :].to(spec.device)
 
             if span[0] > 99999:
                 spec = torch.norm(spec, dim=-1)

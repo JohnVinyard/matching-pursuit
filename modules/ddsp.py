@@ -36,13 +36,14 @@ def band_filtered_noise(n_audio_samples, ws=512, step=256, mean=0.5, std=0.1):
 
     filt = pdf(torch.arange(0, n_coeffs, 1), mean, std)
 
-    # normalize frequency-domain filter to have peak at 1 
+    # normalize frequency-domain filter to have peak at 1
     filt = filt / filt.max()
     spec = spec * filt[None, :]
 
     windowed = torch.fft.irfft(spec, dim=-1, norm='ortho')
     samples = overlap_add(windowed[None, None, :, :])
     return samples[..., :n_audio_samples]
+
 
 def noise_bank2(x):
     batch, magnitudes, samples = x.shape
@@ -94,10 +95,19 @@ def overlap_add(x, apply_window=True):
 
 
 class DDSP(nn.Module):
-    def __init__(self, channels, band_size, constrain, noise_frames=None):
+    def __init__(
+            self,
+            channels,
+            band_size,
+            constrain,
+            noise_frames=None,
+            separate_components=False,
+            linear_constrain=False):
+
         super().__init__()
         self.channels = channels
         self.band_size = band_size
+        self.separate_components = separate_components
 
         if noise_frames is not None:
             self.noise_frames = noise_frames
@@ -113,7 +123,10 @@ class DDSP(nn.Module):
         self.amp = nn.Conv1d(64, 64, 1, 1, 0)
         self.freq = nn.Conv1d(64, 64, 1, 1, 0)
 
-        bands = np.geomspace(0.01, 1, 64) * np.pi
+        if linear_constrain:
+            bands = np.linspace(0.01, 1, 64) * np.pi
+        else:
+            bands = np.geomspace(0.01, 1, 64) * np.pi
         bp = np.concatenate([[0], bands])
         spans = np.diff(bp)
 
@@ -136,7 +149,6 @@ class DDSP(nn.Module):
 
         amp = torch.clamp(self.amp(x), 0, 1)
         freq = torch.clamp(self.freq(x), 0, 1)
-        print(amp.shape, freq.shape)
 
         if time == self.band_size:
             amp = F.avg_pool1d(amp, 64, 1, 32)[..., :-1]
@@ -152,7 +164,10 @@ class DDSP(nn.Module):
         freq = torch.sin(torch.cumsum(freq, dim=-1)) * amp
         freq = torch.mean(freq, dim=1, keepdim=True)
 
-        return freq + noise
+        if self.separate_components:
+            return freq, noise
+        else:
+            return freq + noise
 
 
 class OscillatorBank(nn.Module):
