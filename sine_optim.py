@@ -7,6 +7,7 @@ from scipy.signal.windows import tukey
 from torch.nn import functional as F
 from modules.linear import LinearOutputStack
 from modules.psychoacoustic import PsychoacousticFeature
+from util import device
 
 from modules.stft import stft
 from util.weight_init import make_initializer
@@ -23,7 +24,7 @@ table = torch.sin(torch.linspace(0, 2 * np.pi, 2048))
 
 cs = torch.cumsum(torch.linspace(0, np.pi, n_samples), dim=-1)
 
-feature = PsychoacousticFeature()
+feature = PsychoacousticFeature().to(device)
 
 
 def time_domain_loss(inp, t):
@@ -55,18 +56,9 @@ def make_signal():
 
     spec = np.abs(zounds.spectral.stft(samples))
 
-    t = torch.from_numpy(samples).float()
+    t = torch.from_numpy(samples).float().to(device)
 
     return samples, spec, t
-
-def identity(x):
-    return x
-
-def clamp(x):
-    return torch.clamp(x, 0, 1)
-
-def squared(x):
-    return x ** 2
 
 def make_simple_signal():
     first_part = synth.synthesize(sr.frequency * n_samples, [220])
@@ -77,12 +69,24 @@ def make_simple_signal():
 
     spec = np.abs(zounds.spectral.stft(samples))
 
-    t = torch.from_numpy(samples).float()
+    t = torch.from_numpy(samples).float().to(device)
 
     return samples, spec, t
 
+
+def identity(x):
+    return x
+
+def clamp(x):
+    return torch.clamp(x, 0, 1)
+
+def squared(x):
+    return x ** 2
+
+
     # settings ########################################
 init_weights = make_initializer(0.01)
+home_freqs = False
 use_nn_approx = False
 smooth_freq = False
 smooth_amp = False
@@ -104,7 +108,7 @@ freq_nl = squared
 
 def erb(f):
     f = f * sr.nyquist
-    return 6.23 * (f**2) + (93.39 * f) + 28.52
+    return (0.108 * f) + 24.7
 
 def scaled_erb(f):
     return erb(f) / sr.nyquist
@@ -141,7 +145,8 @@ class Model(nn.Module):
             nn_approx=False,
             prebuilt_accum=False,
             wavetable=False,
-            n_osc=n_osc):
+            n_osc=n_osc,
+            home_freqs=home_freqs):
 
         super().__init__()
         init_value = 0.1
@@ -151,8 +156,12 @@ class Model(nn.Module):
         self.smooth_amp = smooth_amp
         self.wavetable = wavetable
         self.n_osc = n_osc
+        self.home_freqs = home_freqs
         self.latent = nn.Parameter(torch.FloatTensor(
             n_osc * 2, 32 if upsample else n_samples).uniform_(-init_value, init_value))
+        
+        if self.home_freqs:
+            self.base_freqs = nn.Parameter(torch.FloatTensor(n_osc).uniform_(0, 0.1))
 
         self.nn_approx = nn_approx
         self.apply(init_weights)
@@ -162,6 +171,9 @@ class Model(nn.Module):
         x = self.latent
         amp = amp_nl(x[:self.n_osc, :])
         freq = freq_nl(x[self.n_osc:, :])
+
+        if self.home_freqs:
+            freq = self.base_freqs[:, None] + (scaled_erb(self.base_freqs[:, None]) * freq)
 
         freq_params = freq
         amp_params = amp
@@ -229,14 +241,14 @@ if __name__ == '__main__':
 
     if use_nn_approx:
         # First, train the approx sine model
-        approx = ApproxSine(activation=lambda x: F.leaky_relu(x, 0.2))
+        approx = ApproxSine(activation=lambda x: F.leaky_relu(x, 0.2)).to(device)
         optim = Adam(approx.parameters(), lr=1e-4, betas=(0, 0.9))
         samples = np.linspace(0, 2 * np.pi, 1000)
 
         while True:
             optim.zero_grad()
             indices = np.random.permutation(samples.shape[0])[:128]
-            batch = torch.from_numpy(samples[indices]).float()
+            batch = torch.from_numpy(samples[indices]).float().to(device)
             target = torch.sin(batch)
 
             recon = approx(batch)
@@ -259,7 +271,8 @@ if __name__ == '__main__':
         smooth_amp=smooth_amp,
         prebuilt_accum=prebuilt_accum,
         nn_approx=use_nn_approx,
-        wavetable=wavetable)
+        wavetable=wavetable,
+        home_freqs=home_freqs).to(device)
 
     optim = Adam(model.parameters(), lr=learning_rate, betas=(0, 0.9))
 
@@ -271,22 +284,15 @@ if __name__ == '__main__':
         delta = torch.abs(torch.diff(fp, axis=-1))
         delt = delta.data.cpu().numpy()
 
-        # encourage frequencies to be at least an ERB apart
-        f_params = fp.permute(1, 0).contiguous()
-        # ERBs for current frequencies over time
-        erbs = scaled_erb(f_params) #(32, 3)
-        # Distance between each frequency pair
-        diff = torch.cdist(f_params[..., None], f_params[..., None]) # (32, 3, 3)
-        # difference between ERBs and pairwise distances
-        erb_loss = diff - erbs[:, :, None]
+        # discourage big jumps in an amp channel
+        amp_delta = torch.abs(torch.diff(ap, axis=-1))
+        amp_delt = delta.data.cpu().numpy()
 
-        chunks = []
-        for i in range(erb_loss.shape[0]):
-            e = erb_loss[i]
-            e = -torch.clamp(torch.triu(e), -np.inf, 0)
-            chunks.append(e.view(-1))
-        
-        erb_loss = torch.cat(chunks)
+        # encourage frequencies to push apart
+        f_params = fp.permute(1, 0).contiguous()
+        diff = torch.cdist(f_params[..., None], f_params[..., None]) # (32, 3, 3)
+        # discourage pushing frequencies too far apart
+        erb_loss = -torch.clamp(diff, 0, 1).mean()
 
 
         f = fp.data.cpu().numpy().squeeze()
@@ -295,7 +301,7 @@ if __name__ == '__main__':
 
         # TODO: Consider an aliasing loss as well to 
         # keep values in a reasonable range
-        loss = loss_func(result, target) + delta.mean() #+ erb_loss.mean()
+        loss = loss_func(result, target) + (delta.mean() * 0.1) + (erb_loss.mean() * 0.0)
         loss.backward()
         optim.step()
         print(loss.item())
