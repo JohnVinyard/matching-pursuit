@@ -102,12 +102,18 @@ class DDSP(nn.Module):
             constrain,
             noise_frames=None,
             separate_components=False,
-            linear_constrain=False):
+            linear_constrain=False,
+            amp_nl=lambda x: torch.clamp(x, 0, 1),
+            freq_nl=lambda x: torch.clamp(x, 0, 1),
+            noise_nl=lambda x: torch.clamp(x, 0, 1)):
 
         super().__init__()
         self.channels = channels
         self.band_size = band_size
         self.separate_components = separate_components
+        self.amp_nl = amp_nl
+        self.freq_nl = freq_nl
+        self.noise_nl = noise_nl
 
         if noise_frames is not None:
             self.noise_frames = noise_frames
@@ -140,15 +146,15 @@ class DDSP(nn.Module):
         batch, channels, time = x.shape
         batch, channels, time = x.shape
 
-        noise = torch.clamp(self.noise(x), 0, 1)
+        noise = self.noise_nl(self.noise(x))
 
         if time == self.band_size:
             noise = F.avg_pool1d(noise, self.noise_samples, self.noise_samples)
 
         noise = noise_bank2(noise) * self.noise_factor
 
-        amp = torch.clamp(self.amp(x), 0, 1)
-        freq = torch.clamp(self.freq(x), 0, 1)
+        amp = self.amp_nl(self.amp(x))
+        freq = self.freq_nl(self.freq(x))
 
         if time == self.band_size:
             amp = F.avg_pool1d(amp, 64, 1, 32)[..., :-1]
