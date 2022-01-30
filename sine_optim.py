@@ -13,6 +13,19 @@ from modules.stft import stft
 from util.weight_init import make_initializer
 
 sr = zounds.SR22050()
+
+min_frequency = 20 / sr.nyquist
+max_frequency = 1
+
+scale = zounds.MelScale(zounds.FrequencyBand(20, sr.nyquist - 100), 512)
+filter_bank = zounds.learn.FilterBank(
+    sr, 
+    512, 
+    scale, 
+    0.1, 
+    normalize_filters=True, 
+    a_weighting=True).to(device)
+
 synth = zounds.SineSynthesizer(sr)
 
 n_samples = 2**14
@@ -26,6 +39,14 @@ cs = torch.cumsum(torch.linspace(0, np.pi, n_samples), dim=-1)
 
 feature = PsychoacousticFeature().to(device)
 
+def filter_bank_loss(inp, t):
+    inp = filter_bank.forward(inp, normalize=False)
+    inp = filter_bank.temporal_pooling(inp, 512, 256)
+
+    t = filter_bank.forward(t, normalize=False)
+    t = filter_bank.temporal_pooling(t, 512, 256)
+
+    return F.mse_loss(inp, t)
 
 def time_domain_loss(inp, t):
     return F.mse_loss(inp, t)
@@ -83,8 +104,10 @@ def clamp(x):
 def squared(x):
     return x ** 2
 
+def abs(x):
+    return torch.abs(x)
 
-    # settings ########################################
+# settings ########################################
 init_weights = make_initializer(0.01)
 home_freqs = False
 use_nn_approx = False
@@ -101,8 +124,8 @@ create_signal = make_signal
 # LEARNING:  Success seems to hinge on using this as a nonlinearity and not
 # constraining the values.  
 # TODO: Check out the values.  Is this a situation where aliasing is playing a role?
-amp_nl = squared
-freq_nl = squared
+amp_nl = abs
+freq_nl = abs
 ###################################################
 
 
@@ -161,7 +184,7 @@ class Model(nn.Module):
             n_osc * 2, 32 if upsample else n_samples).uniform_(-init_value, init_value))
         
         if self.home_freqs:
-            self.base_freqs = nn.Parameter(torch.FloatTensor(n_osc).uniform_(0, 0.1))
+            self.base_freqs = nn.Parameter(torch.FloatTensor(n_osc).uniform_(0, 0.5))
 
         self.nn_approx = nn_approx
         self.apply(init_weights)
@@ -288,11 +311,15 @@ if __name__ == '__main__':
         amp_delta = torch.abs(torch.diff(ap, axis=-1))
         amp_delt = delta.data.cpu().numpy()
 
-        # encourage frequencies to push apart
+        # encourage frequencies to be at least an ERB apart
         f_params = fp.permute(1, 0).contiguous()
+        erbs = scaled_erb(f_params)
         diff = torch.cdist(f_params[..., None], f_params[..., None]) # (32, 3, 3)
-        # discourage pushing frequencies too far apart
-        erb_loss = -torch.clamp(diff, 0, 1).mean()
+        diff = diff - erbs[:, :, None]
+        diff = torch.clamp(diff, -np.inf, 0)
+        erb_loss = -diff.mean()
+
+        # encourage frequencies to be within the correct range
 
 
         f = fp.data.cpu().numpy().squeeze()
@@ -301,7 +328,7 @@ if __name__ == '__main__':
 
         # TODO: Consider an aliasing loss as well to 
         # keep values in a reasonable range
-        loss = loss_func(result, target) + (delta.mean() * 0.1) + (erb_loss.mean() * 0.0)
+        loss = loss_func(result, target) + (delta.mean() * 1.0) + (erb_loss.mean() * 0.5)
         loss.backward()
         optim.step()
         print(loss.item())
