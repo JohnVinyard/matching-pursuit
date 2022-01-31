@@ -7,3 +7,5 @@ from .e_2022_1_24 import MultiresolutionAutoencoder2
 from .e_2022_1_25 import MultiresolutionFilterBankAutoencoder
 from .e_2022_1_27 import MultiresolutionAutoencoder3
 from .e_2022_1_29 import MultiresolutionAutoencoder4
+from .e_2022_1_30 import SineAndNoiseDecoder
+from .e_2022_1_31 import SineAndNoiseDecoder2

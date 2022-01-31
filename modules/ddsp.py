@@ -185,7 +185,8 @@ class OscillatorBank(nn.Module):
             constrain=False,
             log_frequency=False,
             log_amplitude=False,
-            activation=torch.sigmoid):
+            activation=torch.sigmoid,
+            return_params=False):
 
         super().__init__()
         self.n_osc = n_osc
@@ -194,6 +195,7 @@ class OscillatorBank(nn.Module):
         self.constrain = constrain
         self.log_amplitude = log_amplitude
         self.activation = activation
+        self.return_params = return_params
 
         if log_frequency:
             bands = np.linspace(0.01, 1, n_osc)
@@ -221,17 +223,23 @@ class OscillatorBank(nn.Module):
             amp = amp ** 2
 
         freq = self.activation(freq)
+        
 
         if self.constrain:
             freq = self.bands[None, :, None] + \
                 (freq * self.spans[None, :, None])
+        
+        freq_params = freq
 
         amp = F.upsample(amp, size=self.n_audio_samples, mode='linear')
         freq = F.upsample(freq, size=self.n_audio_samples, mode='linear')
 
         x = torch.sin(torch.cumsum(freq * torch.pi, dim=-1)) * amp
         x = torch.mean(x, dim=1, keepdim=True)
-        return x
+        if self.return_params:
+            return x, freq_params
+        else:
+            return x
 
 
 class NoiseModel(nn.Module):

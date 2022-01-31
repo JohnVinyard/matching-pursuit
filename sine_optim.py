@@ -264,7 +264,7 @@ if __name__ == '__main__':
 
     if use_nn_approx:
         # First, train the approx sine model
-        approx = ApproxSine(activation=lambda x: F.leaky_relu(x, 0.2)).to(device)
+        approx = ApproxSine(activation=torch.sin).to(device)
         optim = Adam(approx.parameters(), lr=1e-4, betas=(0, 0.9))
         samples = np.linspace(0, 2 * np.pi, 1000)
 
