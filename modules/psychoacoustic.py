@@ -13,8 +13,10 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 class PsychoacousticFeature(nn.Module):
-    def __init__(self):
+    def __init__(self, kernel_sizes=[32, 64, 128, 256, 512, 1024]):
+
         super().__init__()
+        self._kernel_sizes = kernel_sizes
         self.banks = self._build_filter_banks()
         self.weights = {
             512: 1,
@@ -34,15 +36,14 @@ class PsychoacousticFeature(nn.Module):
             (2756, 5512),
             (5512, 11025)
         ]
-        kernel_sizes = [
-            32,
-            64,
-            128,
-            256,
-            512,
-            1024
-        ]
-        self.kernel_sizes = kernel_sizes
+        # kernel_sizes = [
+        #     32,
+        #     64,
+        #     128,
+        #     256,
+        #     512,
+        #     1024
+        # ]
         keys = [
             512,
             1024,
@@ -53,7 +54,7 @@ class PsychoacousticFeature(nn.Module):
         ]
         bank_dict = {}
         self.kernel_sizes = {}
-        for span, size, key in zip(spans, kernel_sizes, keys):
+        for span, size, key in zip(spans, self._kernel_sizes, keys):
             self.kernel_sizes[key] = size // 2 + 1
 
             band = zounds.FrequencyBand(*span)

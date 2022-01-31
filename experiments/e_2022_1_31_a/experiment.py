@@ -28,7 +28,8 @@ max_frequency = 1
 
 init_weights = make_initializer(0.1)
 
-feature = PsychoacousticFeature().to(device)
+kernel_sizes = [32, 64, 128, 256, 512, 1024]
+feature = PsychoacousticFeature(kernel_sizes=kernel_sizes).to(device)
 
 
 def frequency_transform(signal):
@@ -80,7 +81,7 @@ class Encoder(nn.Module):
     def forward(self, x):
         batch_size = x.shape[0]
         x = x.view(batch_size, 1, -1)
-        x = frequency_transform(x)
+        x = frequency_transform(x) * 5
         x = x.view(batch_size, 64, 257)
         x = x.permute(0, 2, 1)
         x = self.initial(x)
@@ -158,17 +159,13 @@ class SineAndNoiseDecoder2(object):
         return zounds.AudioSamples(self.batch[0].data.cpu().numpy().squeeze(), sr).pad_with_silence()
     
     def real_spec(self):
-        b = self.batch[:1, ...]
-        ft = frequency_transform(b)
-        return ft.data.cpu().numpy().squeeze()
+        return np.log(0.01 + np.abs(zounds.spectral.stft(self.real())))
     
     def fake(self):
         return zounds.AudioSamples(self.decoded[0].data.cpu().numpy().squeeze(), sr).pad_with_silence()
     
     def fake_spec(self):
-        b = self.decoded[:1, ...]
-        ft = frequency_transform(b)
-        return ft.data.cpu().numpy().squeeze()
+        return np.log(0.01 + np.abs(zounds.spectral.stft(self.fake())))
     
     def latent(self):
         return self.encoded.data.cpu().numpy().squeeze()

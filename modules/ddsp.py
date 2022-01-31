@@ -274,6 +274,6 @@ class NoiseModel(nn.Module):
         x = self.initial(x)
         x = self.upscale(x)
         x = self.final(x)
-        x = torch.clamp(x, -1, 1)
+        x = torch.clamp(x, -1, 1) ** 2
         x = noise_bank2(x)
         return x
