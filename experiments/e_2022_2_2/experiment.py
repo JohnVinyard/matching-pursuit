@@ -33,7 +33,10 @@ class EncoderBranch(nn.Module):
         self.periodicity_feature_size = periodicity_feature_size
         self.band_size = band_size
 
+        self.factor = nn.Parameter(torch.FloatTensor(1).fill_(1))
+
     def forward(self, x):
+        x = x * self.factor
         x = x.view(-1, 64, 32, self.periodicity_feature_size)
         x = self.encoder(x)
         x = x.permute(0, 2, 1)
@@ -70,9 +73,11 @@ class Summarizer(nn.Module):
         )
 
     def forward(self, x):
+        # print('DISC STD', x.std().item())
         x = self.reducer(x)
         x = x.permute(0, 2, 1)
         x = self.summary(x)
+        # x = self.transformer(x)
         return x
 
 
@@ -93,8 +98,8 @@ class Encoder(nn.Module):
             feat = x
 
         x = self.shell(feat)
-        x = x.view(-1, network_channels)
-        x = torch.sigmoid(self.judge(x))
+        x = x.reshape(-1, network_channels)
+        x = self.judge(x)
         return x
 
 # Generator ============================================================================
@@ -121,6 +126,7 @@ class Expander(nn.Module):
         x = x.view(-1, network_channels)
         x = self.initial(x).view(-1, network_channels, 4)
         x = self.net(x)
+        # print('GEN STD', x.std().item())
         return x
 
 
@@ -159,14 +165,19 @@ class BandUpsample(nn.Module):
             n_noise_frames=self.band_size // 4,
             n_audio_samples=self.band_size,
             channels=self.channels)
+        
+        self.factor = nn.Parameter(torch.FloatTensor(1).fill_(1))
+        self.harm_factor = nn.Parameter(torch.FloatTensor(1).fill_(1))
+        self.noise_factor = nn.Parameter(torch.FloatTensor(1).fill_(1))
 
     def forward(self, x):
         x = x.permute(0, 2, 1)
         x = self.net(x)
         x = self.final(x)
-        harm = self.osc(x)
-        noise = self.noise(x)
-        return harm + noise
+        # print('BAND', x.std().item())
+        harm = self.osc(x) * self.harm_factor
+        noise = self.noise(x) * self.noise_factor
+        return (harm + noise) * self.factor
 
 
 def make_decoder(band_size):

@@ -7,7 +7,9 @@ import torch
 import numpy as np
 from torch.nn import functional as F
 
-init_weights = make_initializer(0.1)
+
+gen_init_weights = make_initializer(0.175)
+disc_init_weights = make_initializer(0.1)
 
 
 class BandEncoder(nn.Module):
@@ -63,7 +65,7 @@ class EncoderShell(nn.Module):
 
         self.summarizer = make_summarizer()
 
-        self.apply(init_weights)
+        self.apply(disc_init_weights)
 
     def forward(self, x):
         encodings = [self.bands[str(k)](v) for k, v in x.items()]
@@ -165,7 +167,7 @@ class DecoderShell(nn.Module):
                  for k, v in zip(feature.band_sizes, feature.kernel_sizes)}
 
         self.bands = nn.ModuleDict(bands)
-        self.apply(init_weights)
+        self.apply(gen_init_weights)
 
 
     def forward(self, x):
