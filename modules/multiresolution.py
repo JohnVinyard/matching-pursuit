@@ -7,7 +7,7 @@ import torch
 import numpy as np
 from torch.nn import functional as F
 
-init_weights = make_initializer(0.08)
+init_weights = make_initializer(0.1)
 
 
 class BandEncoder(nn.Module):

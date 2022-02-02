@@ -63,10 +63,12 @@ def filter_bank(support, n_filters):
 def image(timestep):
     chunks = []
     for k, v in f.items():
-        chunks.append(v[:, timestep, :])
+        current = np.log(1e-4 + v[:, timestep, :])
+        norm = np.linalg.norm(current, axis=-1, keepdims=True)
+        chunks.append(current / (norm + 1e-8))
 
     full = np.concatenate(chunks, axis=-1)
-    return np.log(0.01 + full)
+    return full
 
 
 def make_spec():
@@ -121,9 +123,9 @@ if __name__ == '__main__':
     orig = zounds.AudioSamples(samples.squeeze(), sr).pad_with_silence()
     orig.save('sound.wav')
 
-    samples = torch.from_numpy(samples).view(1, 1, 2**15)
+    samples = torch.from_numpy(samples).view(1, 1, 2**15).to(device)
 
-    feature = PsychoacousticFeature()
+    feature = PsychoacousticFeature().to(device)
     feat = feature.compute_feature_dict(samples)
 
     f = {k: v.data.cpu().numpy().squeeze() for k, v in feat.items()}

@@ -223,12 +223,11 @@ class OscillatorBank(nn.Module):
             amp = amp ** 2
 
         freq = self.activation(freq)
-        
 
         if self.constrain:
             freq = self.bands[None, :, None] + \
                 (freq * self.spans[None, :, None])
-        
+
         freq_params = freq
 
         amp = F.upsample(amp, size=self.n_audio_samples, mode='linear')
@@ -243,13 +242,22 @@ class OscillatorBank(nn.Module):
 
 
 class NoiseModel(nn.Module):
-    def __init__(self, input_channels, input_size, n_noise_frames, n_audio_samples, channels):
+    def __init__(
+            self,
+            input_channels,
+            input_size,
+            n_noise_frames,
+            n_audio_samples,
+            channels,
+            squared=False):
+
         super().__init__()
         self.input_channels = input_channels
         self.n_noise_frames = n_noise_frames
         self.n_audio_samples = n_audio_samples
         self.input_size = input_size
         self.channels = channels
+        self.squared = squared
 
         noise_step = n_audio_samples // n_noise_frames
         noise_window = noise_step * 2
@@ -274,6 +282,8 @@ class NoiseModel(nn.Module):
         x = self.initial(x)
         x = self.upscale(x)
         x = self.final(x)
-        x = torch.clamp(x, -1, 1) ** 2
+        x = torch.clamp(x, -1, 1)
+        if self.squared:
+            x = x ** 2
         x = noise_bank2(x)
         return x
