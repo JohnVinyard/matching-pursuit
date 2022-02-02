@@ -15,11 +15,10 @@ def train_gen(batch, gen, disc, gen_optim, get_latent, loss=least_squares_genera
     latent = get_latent()
     recon = gen.forward(latent)
     j = disc.forward(recon)
-    # loss = torch.abs(1 - j).mean()
-    loss = least_squares_generator_loss(j)
-    loss.backward()
+    l = loss(j)
+    l.backward()
     gen_optim.step()
-    print('G', loss.item())
+    print('G', l.item())
     return recon
 
 def train_disc(batch, disc, gen, disc_optim, get_latent, loss=least_squares_disc_loss):
@@ -28,8 +27,7 @@ def train_disc(batch, disc, gen, disc_optim, get_latent, loss=least_squares_disc
     recon = gen.forward(latent)
     fj = disc.forward(recon)
     rj = disc.forward(batch)
-    loss = torch.abs(0 - fj).mean() + torch.abs(1 - rj).mean()
-    loss = least_squares_disc_loss(rj, fj)
-    loss.backward()
+    l = loss(rj, fj)
+    l.backward()
     disc_optim.step()
-    print('D', loss.item())
+    print('D', l.item())
