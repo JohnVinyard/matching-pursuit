@@ -1,3 +1,4 @@
+from time import time
 import matplotlib
 from matplotlib.animation import FuncAnimation
 import matplotlib.pyplot as plt
@@ -63,9 +64,10 @@ def filter_bank(support, n_filters):
 def image(timestep):
     chunks = []
     for k, v in f.items():
-        current = np.log(1e-4 + v[:, timestep, :])
-        norm = np.linalg.norm(current, axis=-1, keepdims=True)
-        chunks.append(current / (norm + 1e-8))
+        # current = np.log(1e-4 + v[:, timestep, :])
+        # norm = np.linalg.norm(current, axis=-1, keepdims=True)
+        # chunks.append(current / (norm + 1e-8))
+        chunks.append(v[:, timestep, :])
 
     full = np.concatenate(chunks, axis=-1)
     return full
@@ -126,7 +128,8 @@ if __name__ == '__main__':
     samples = torch.from_numpy(samples).view(1, 1, 2**15).to(device)
 
     feature = PsychoacousticFeature().to(device)
-    feat = feature.compute_feature_dict(samples)
+    feat = feature.compute_feature_dict(
+        samples, constant_window_size=128, time_steps=32)
 
     f = {k: v.data.cpu().numpy().squeeze() for k, v in feat.items()}
 

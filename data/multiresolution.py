@@ -14,8 +14,10 @@ feature = PsychoacousticFeature().to(device)
 
 path = os.environ['AUDIO_PATH']
 
-def process_batch(s):
+def process_batch(s, normalize=False):
     s = s.reshape(-1, 1, n_samples)
+    if normalize:
+        s /= (s.max(axis=-1, keepdims=True) + 1e-12)
     s = torch.from_numpy(s).to(device).float()
     bands = fft_frequency_decompose(s, min_band_size)
     return bands
@@ -44,9 +46,9 @@ def build_compute_feature_dict():
 compute_feature_dict = build_compute_feature_dict()
 
 
-def sample_stream(batch_size, overfit=False):
+def sample_stream(batch_size, overfit=False, normalize=False):
     stream = batch_stream(path, '*.wav', batch_size, n_samples, overfit=overfit)
     for s in stream:
-        bands = process_batch(s)
+        bands = process_batch(s, normalize=normalize)
         feat = compute_feature_dict(bands)
         yield bands, feat

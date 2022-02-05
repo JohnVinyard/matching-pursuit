@@ -1,20 +1,41 @@
+from config.dotenv import Config
+from itertools import chain
 import torch
 import numpy as np
-from data import feature, sample_stream, compute_feature_dict
+from data import feature
+from data.datastore import batch_stream
+from loss.least_squares import least_squares_disc_loss, least_squares_generator_loss
 from modules.ddsp import NoiseModel, OscillatorBank
 import zounds
 from torch import nn
 from torch.optim import Adam
-from modules.decompose import fft_frequency_recompose
+from modules.decompose import fft_frequency_decompose, fft_frequency_recompose
 from util import device
 from torch.nn import functional as F
 
 from modules.multiresolution import BandEncoder, DecoderShell, EncoderShell
-from modules.transformer import Transformer
-from train import train_disc, train_gen, get_latent, gan_cycle
+from train import gan_cycle
 from util.readmedocs import readme
 
 network_channels = 64
+n_samples = 2**14
+
+
+def compute_feature_dict(x):
+    x = {k: v.contiguous() for k, v in x.items()}
+    return feature.compute_feature_dict(x, constant_window_size=128)
+
+
+def sample_stream(batch_size, overfit=False, normalize=False):
+    stream = batch_stream(Config.audio_path(), '*.wav',
+                          batch_size, n_samples, overfit=overfit)
+    for batch in stream:
+        batch /= (batch.max(axis=-1, keepdims=True) + 1e-12)
+        batch = torch.from_numpy(batch).to(
+            device).view(batch_size, 1, n_samples)
+        bands = fft_frequency_decompose(batch, 512)
+        feat = compute_feature_dict(bands)
+        yield bands, feat
 
 
 # Discriminator ===================================================================
@@ -26,6 +47,11 @@ class EncoderBranch(nn.Module):
 
     def __init__(self, band_size, periodicity_feature_size):
         super().__init__()
+
+        # KLUDGE: For this experiment, periodicity feature size will be
+        # held constant.  It's time to refactor psychoacoustic feature
+        periodicity_feature_size = 65
+
         self.encoder = BandEncoder(
             network_channels, periodicity_feature_size, band_size)
         self.linear = nn.Linear(512, network_channels)
@@ -57,8 +83,6 @@ class Summarizer(nn.Module):
         super().__init__()
         self.reducer = nn.Linear(
             feature.n_bands * network_channels, network_channels)
-        
-        self.transformer = Transformer(network_channels, 4)
 
         self.summary = nn.Sequential(
             nn.Conv1d(network_channels, network_channels, 3, 2, 1),
@@ -74,35 +98,25 @@ class Summarizer(nn.Module):
             nn.Conv1d(network_channels, network_channels, 1, 1, 0)
         )
 
-        # self.summary = nn.Sequential(
-        #     nn.Conv1d(network_channels, network_channels, 3, 1, 1),
-        #     nn.LeakyReLU(0.2),
-        #     nn.Conv1d(network_channels, network_channels, 3, 1, 1),
-        #     nn.LeakyReLU(0.2),
-        #     nn.Conv1d(network_channels, network_channels, 3, 1, 1),
-        #     nn.LeakyReLU(0.2),
-        #     nn.Conv1d(network_channels, network_channels, 3, 1, 1),
-        # )
-
     def forward(self, x):
-        # print('DISC STD', x.std().item())
         x = self.reducer(x)
 
-        # x = x.permute(0, 2, 1)
-        # x = self.summary(x)
-        # x = x.permute(0, 2, 1)
-        
-        x = self.transformer(x)
+        x = x.permute(0, 2, 1)
+        x = self.summary(x)
+        x = x.permute(0, 2, 1)
+
         return x
 
 
 class Encoder(nn.Module):
-    def __init__(self):
+    def __init__(self, is_disc=False):
         super().__init__()
         self.shell = EncoderShell(
             network_channels, make_band_encoder, Summarizer, feature)
 
-        self.judge = nn.Linear(network_channels, 1)
+        self.is_disc = is_disc
+        if is_disc:
+            self.judge = nn.Linear(network_channels, 1)
 
     def forward(self, x):
         sizes = set([len(v.shape) for v in x.values()])
@@ -114,41 +128,20 @@ class Encoder(nn.Module):
 
         x = self.shell(feat)
         x = x.reshape(x.shape[0], -1, network_channels)
-        x = self.judge(x)
+
+        if self.is_disc:
+            x = self.judge(x)
+
         return x
 
 # Generator ============================================================================
 
 
-class TwoDExpander(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.initial = nn.Linear(network_channels, network_channels * 4)
-        self.channels = network_channels
-        self.net = nn.Sequential(
-            nn.ConvTranspose2d(self.channels, 32, (4, 4), (2, 2), (1, 1)),
-            nn.LeakyReLU(0.2),
-            nn.ConvTranspose2d(32, 16, (4, 4), (2, 2), (1, 1)),
-            nn.LeakyReLU(0.2),
-            nn.ConvTranspose2d(16, 8, (4, 4), (2, 2), (1, 1)),
-            nn.LeakyReLU(0.2),
-            nn.ConvTranspose2d(8, 4, (4, 4), (2, 2), (1, 1)),
-            nn.LeakyReLU(0.2),
-            nn.ConvTranspose2d(4, 1, (4, 1), (2, 1), (1, 0)),
-        )
-        
-    
-    def forward(self, x):
-        x = x.view(-1, network_channels)
-        x = self.initial(x).view(-1, network_channels, 2, 2)
-        x = self.net(x)
-        x = x.view(-1, 32, 64)
-        return x
-
 class Expander(nn.Module):
     """
     Expand a representation of all bands together
     """
+
     def __init__(self):
         super().__init__()
         self.initial = nn.Linear(network_channels, network_channels * 4)
@@ -174,10 +167,10 @@ class BandUpsample(nn.Module):
     """
     Expand and finalize an individual frequency band
     """
+
     def __init__(self, band_size):
         super().__init__()
         self.band_size = band_size
-        # n_layers = int(np.log2(band_size) - np.log2(32))
         n_layers = 4
         self.channels = network_channels
 
@@ -205,14 +198,13 @@ class BandUpsample(nn.Module):
             n_noise_frames=self.band_size // 4,
             n_audio_samples=self.band_size,
             channels=self.channels)
-        
+
         self.factor = nn.Parameter(torch.FloatTensor(1).fill_(0.5))
 
     def forward(self, x):
         x = x.permute(0, 2, 1)
         x = self.net(x)
         x = self.final(x)
-        # print('BAND', x.std().item())
         harm = self.osc(x)
         noise = self.noise(x)
         return (harm + noise) * torch.clamp(self.factor, 0, 1)
@@ -235,15 +227,60 @@ decoder = DecoderShell(
     make_decoder,
     Expander,
     feature).to(device)
-gen_optim = Adam(decoder.parameters(), lr=1e-4, betas=(0, 0.9))
-
 encoder = Encoder().to(device)
-disc_optim = Adam(
-    encoder.parameters(), lr=1e-4, betas=(0, 0.9))
+ae_optim = Adam(chain(decoder.parameters(), encoder.parameters()),
+                lr=1e-4, betas=(0, 0.9))
+
+
+disc = Encoder(is_disc=True).to(device)
+disc_optim = Adam(disc.parameters(), lr=1e-4, betas=(0, 0.9))
+
+
+def loss_func(fake_feat, real_feat):
+    loss = 0
+    for k, v in real_feat.items():
+        loss = loss + F.mse_loss(fake_feat[k], v)
+    return loss
+
+
+def train_gen(batch):
+    ae_optim.zero_grad()
+
+    encoded = encoder(batch)
+    decoded = decoder(encoded)
+
+    fake_feat = compute_feature_dict(decoded)
+
+    recon_loss = loss_func(fake_feat, batch)
+
+    j = disc(fake_feat)
+    adv_loss = least_squares_generator_loss(j)
+
+    total = (recon_loss * 0.01) + (adv_loss * 1)
+    total.backward()
+    ae_optim.step()
+    print('G', total.item())
+    return decoded, encoded
+
+
+def train_disc(batch):
+    disc_optim.zero_grad()
+
+    encoded = encoder(batch)
+    decoded = decoder(encoded)
+    fake_feat = compute_feature_dict(decoded)
+
+    rj = disc(batch)
+    fj = disc(fake_feat)
+
+    loss = least_squares_disc_loss(rj, fj)
+    loss.backward()
+    disc_optim.step()
+    print('D', loss.item())
 
 
 @readme
-class MultiresolutionGan(object):
+class MultiresolutionAdversarialAutoencoder(object):
     def __init__(self, batch_size=2, overfit=False):
         super().__init__()
         self.feature = feature
@@ -276,21 +313,21 @@ class MultiresolutionGan(object):
 
     def fake_spec(self):
         return np.log(0.01 + np.abs(zounds.spectral.stft(self.fake())))
+    
+    def latent(self):
+        return self.encoded.data.cpu().numpy().squeeze()
 
     def run(self):
         stream = sample_stream(
             self.batch_size, overfit=self.overfit, normalize=True)
-
-        def make_latent():
-            return get_latent(self.batch_size, network_channels)
 
         for bands, feat in stream:
             step = next(gan_cycle)
             self.bands = bands
 
             if step == 'gen':
-                decoded = train_gen(
-                    feat, decoder, encoder, gen_optim, make_latent)
+                decoded, encoded = train_gen(feat)
                 self.decoded = decoded
+                self.encoded = encoded
             else:
-                train_disc(feat, encoder, decoder, disc_optim, make_latent)
+                train_disc(feat)

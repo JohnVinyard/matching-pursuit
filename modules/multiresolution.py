@@ -8,7 +8,7 @@ import numpy as np
 from torch.nn import functional as F
 
 
-gen_init_weights = make_initializer(0.175)
+gen_init_weights = make_initializer(0.17)
 disc_init_weights = make_initializer(0.1)
 
 

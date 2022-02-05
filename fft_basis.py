@@ -1,8 +1,11 @@
+from torch import hann_window
 from config import Config
 import numpy as np
 import zounds
 from data.datastore import batch_stream
-from scipy.signal import morlet
+from scipy.signal import morlet, hann
+
+from modules.ddsp import overlap_add
 
 def dft(x):
     x = np.asarray(x, dtype=float)
@@ -44,10 +47,14 @@ def morlet_filter_bank(
 
     return basis
 
-def fft_basis(fft_size):
+def fft_basis(fft_size, normalize=True):
     n = np.arange(fft_size)
     k = n.reshape((fft_size, 1))
     basis = np.exp(-2j * np.pi * k * n / fft_size)
+
+    if normalize:
+        basis /= np.linalg.norm(basis, axis=-1, keepdims=True) + 1e-8
+    
     return basis
 
 def geom_basis(fft_size):
@@ -61,18 +68,30 @@ def geom_basis(fft_size):
         sr, 
         fft_size, 
         zounds.MelScale(zounds.FrequencyBand(20, sr.nyquist), fft_size), 
-        np.linspace(0.05, 0.99, fft_size))
+        0.9)
 
 
 def short_time_transform(x, ws=512, ss=256, basis_func=None):
     basis = basis_func(ws)
 
     windowed = zounds.nputil.sliding_window(x, ws, ss)
-    windowed *= np.hamming(ws)[None, :]
+    windowed *= hann(ws)[None, :]
     freq_domain = np.dot(windowed, basis.T)
 
     return freq_domain
 
+
+# def flip_inverted(x):
+    
+#     batch, channels, frames, samples = x.shape
+#     step_size = samples // 2
+
+#     x = x.reshape(batch, channels, frames, step_size, 2)
+#     x[:, :, :, :, 0] = x[:, :, :, ::-1, 0]
+#     # x[:, :, :, :, 1] = x[:, :, :, ::-1, 1]
+
+#     x = x.reshape(batch, channels, frames, samples)
+#     return x
 
 
 if __name__ == '__main__':
@@ -84,16 +103,29 @@ if __name__ == '__main__':
     stream = batch_stream(Config.audio_path(), '*.wav', 1, n_samples)
     samples = next(stream).reshape((n_samples,))
 
+    orig = zounds.AudioSamples(samples, sr).pad_with_silence()
+
     linear_basis = fft_basis(512)
     g_basis = geom_basis(512)
 
     linear_transform = short_time_transform(samples, basis_func=fft_basis)
-    geom_transform = short_time_transform(samples, basis_func=geom_basis)
+    # geom_transform = short_time_transform(samples, basis_func=geom_basis)
+
+
+    linear_inverted = np.abs(np.dot(linear_transform, linear_basis.T.conjugate())[None, None, ...])
+    # linear_inverted = flip_inverted(linear_inverted)
+
+    # geom_inverted = np.abs(np.dot(geom_transform, g_basis.T.conjugate())[None, None, ...])
+    # geom_inverted = flip_inverted(geom_inverted)
+    
+
+    linear_final = zounds.AudioSamples(overlap_add(linear_inverted, flip=False).squeeze(), sr).pad_with_silence()
+    # geom_final = zounds.AudioSamples(overlap_add((geom_inverted)).squeeze(), sr).pad_with_silence()
 
     baseline = np.abs(zounds.spectral.stft(zounds.AudioSamples(samples, sr)))
 
     linear_spec = np.abs(linear_transform)[:, :257]
-    geom_spec = np.abs(geom_transform)[:, :257]
+    # geom_spec = np.abs(geom_transform)[:, :257]
 
 
     input('waiting...')

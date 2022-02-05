@@ -91,7 +91,7 @@ class PsychoacousticFeature(nn.Module):
     def decompose(self, x):
         return fft_frequency_decompose(x, 512)
 
-    def compute_feature_dict(self, x):
+    def compute_feature_dict(self, x, constant_window_size=None, time_steps=32):
 
         # TODO: Don't perform the decomposition if x is already
         # a dictionary
@@ -110,14 +110,29 @@ class PsychoacousticFeature(nn.Module):
 
             spec = fb.forward(band, normalize=False)
 
-            spec = F.pad(spec, (kernel_size // 4, kernel_size // 4))
-            spec = spec.unfold(-1, kernel_size, kernel_size // 2)
+            if constant_window_size is None:
+                # variable-sized windows
+                padding = kernel_size // 4
+                window_size = kernel_size
+                step = kernel_size // 2
+                time_steps = 32
+            else:
+                # constant-size windows
+                window_size = constant_window_size
+                padding = window_size // 2
+                step = spec.shape[-1] // time_steps
+
+            spec = F.pad(spec, (padding, padding))
+            spec = spec.unfold(-1, window_size, step)
 
             import warnings
             warnings.warn('Remember that youre doing windowing here!')
             spec = spec * torch.hamming_window(spec.shape[-1])[None, None, None, :].to(spec.device)
             
             spec = torch.abs(torch.fft.rfft(spec, dim=-1))
+
+            # limit to size time_steps
+            spec = spec[:, :, :time_steps, :]
             bands[size] = spec
 
         return bands
