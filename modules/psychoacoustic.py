@@ -131,6 +131,7 @@ class PsychoacousticFeature(nn.Module):
             
             spec = torch.abs(torch.fft.rfft(spec, dim=-1))
 
+
             # limit to size time_steps
             spec = spec[:, :, :time_steps, :]
             bands[size] = spec

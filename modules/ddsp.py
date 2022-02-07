@@ -235,6 +235,7 @@ class OscillatorBank(nn.Module):
             log_frequency=False,
             log_amplitude=False,
             activation=torch.sigmoid,
+            amp_activation=None,
             return_params=False):
 
         super().__init__()
@@ -245,6 +246,7 @@ class OscillatorBank(nn.Module):
         self.log_amplitude = log_amplitude
         self.activation = activation
         self.return_params = return_params
+        self.amp_activation = amp_activation or self.activation
 
         if log_frequency:
             bands = np.linspace(0.01, 1, n_osc)
@@ -267,7 +269,7 @@ class OscillatorBank(nn.Module):
         amp = self.amp(x)
         freq = self.freq(x)
 
-        amp = self.activation(amp)
+        amp = self.amp_activation(amp)
         if self.log_amplitude:
             amp = amp ** 2
 
@@ -298,6 +300,7 @@ class NoiseModel(nn.Module):
             n_noise_frames,
             n_audio_samples,
             channels,
+            activation=lambda x: torch.clamp(x, -1, 1),
             squared=False):
 
         super().__init__()
@@ -306,6 +309,7 @@ class NoiseModel(nn.Module):
         self.n_audio_samples = n_audio_samples
         self.input_size = input_size
         self.channels = channels
+        self.activation = activation
         self.squared = squared
 
         noise_step = n_audio_samples // n_noise_frames
@@ -331,7 +335,7 @@ class NoiseModel(nn.Module):
         x = self.initial(x)
         x = self.upscale(x)
         x = self.final(x)
-        x = torch.clamp(x, -1, 1)
+        x = self.activation(x)
         if self.squared:
             x = x ** 2
         x = noise_bank2(x)
