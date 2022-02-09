@@ -14,3 +14,4 @@ from .e_2022_2_1 import MultiresolutionAutoencoder6
 from .e_2022_2_2 import MultiresolutionGan
 from .e_2022_2_4 import PatchAudioTransformer
 from .e_2022_2_5 import MultiresolutionAdversarialAutoencoder
+from .e_2022_2_8 import MultiresolutionAutoencoderWithActivationRefinements
