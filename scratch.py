@@ -17,8 +17,6 @@ from modules.psychoacoustic import PsychoacousticFeature
 from modules.stft import stft_relative_phase
 from util import device
 
-# w = band.center_frequency / (scaling * 2 * sr / kernel_size)
-
 
 def filter(support, frequency, scaling):
     if frequency <= 0 or frequency > 1:
@@ -41,39 +39,21 @@ def filter_bank(support, n_filters):
     return bank
 
 
-# stft
-# windowed = zounds.nputil.sliding_window(samples, 512, 256)
-# windowed = windowed * np.hamming(512)[None, ...]
-# spec = np.fft.fft(windowed, axis=-1)
-
-# # FFT of complex filter bank
-# bank = filter_bank(512, 512)
-# spec_bank = np.fft.fft(bank, axis=-1)
-
-# # convolve in frequency domain
-# conv = np.matmul(spec_bank, spec.T)
-
-# # return result to (complex) time domain
-# spectrogram = np.fft.ifft(conv, axis=-1)
-# print(spectrogram.shape, spectrogram.dtype)
-
-# w = np.log(0.01 + np.abs(spectrogram))
-# stft = np.log(0.01 + np.abs(spec))[: ,:256]
-
 
 def image(timestep):
     chunks = []
     for k, v in f.items():
+        current = v[:, timestep, :]
         # current = np.log(1e-4 + v[:, timestep, :])
         # norm = np.linalg.norm(current, axis=-1, keepdims=True)
-        # chunks.append(current / (norm + 1e-8))
+        chunks.append(current)
 
-        chunk = v[:, timestep, :]
-        orig_shape = chunk.shape
-        chunk = chunk.reshape((-1,))
-        chunk /= np.linalg.norm(chunk)
-        chunk = chunk.reshape(*orig_shape)
-        chunks.append(chunk)
+        # chunk = v[:, timestep, :]
+        # orig_shape = chunk.shape
+        # chunk = chunk.reshape((-1,))
+        # chunk /= np.linalg.norm(chunk)
+        # chunk = chunk.reshape(*orig_shape)
+        # chunks.append(chunk)
 
     full = np.concatenate(chunks, axis=-1)
     return full
@@ -138,6 +118,7 @@ if __name__ == '__main__':
         samples, constant_window_size=128, time_steps=32)
 
     f = {k: v.data.cpu().numpy().squeeze() for k, v in feat.items()}
+
 
     # TODO: helper function for making a movie
     matplotlib.use('tkagg', force=True)
