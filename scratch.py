@@ -64,10 +64,16 @@ def filter_bank(support, n_filters):
 def image(timestep):
     chunks = []
     for k, v in f.items():
-        current = np.log(1e-4 + v[:, timestep, :])
-        norm = np.linalg.norm(current, axis=-1, keepdims=True)
-        chunks.append(current / (norm + 1e-8))
-        # chunks.append(v[:, timestep, :])
+        # current = np.log(1e-4 + v[:, timestep, :])
+        # norm = np.linalg.norm(current, axis=-1, keepdims=True)
+        # chunks.append(current / (norm + 1e-8))
+
+        chunk = v[:, timestep, :]
+        orig_shape = chunk.shape
+        chunk = chunk.reshape((-1,))
+        chunk /= np.linalg.norm(chunk)
+        chunk = chunk.reshape(*orig_shape)
+        chunks.append(chunk)
 
     full = np.concatenate(chunks, axis=-1)
     return full
