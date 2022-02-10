@@ -128,7 +128,6 @@ class PsychoacousticFeature(nn.Module):
             import warnings
             warnings.warn('Remember that youre doing windowing here!')
             spec = spec * torch.hamming_window(spec.shape[-1])[None, None, None, :].to(spec.device)
-            
             spec = torch.abs(torch.fft.rfft(spec, dim=-1))
 
 
