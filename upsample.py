@@ -275,8 +275,8 @@ class Experiment(object):
         self.name = name
 
     def run(self):
-        encoder = SimpleEncoder(1, 32, self.size, 16)
-        decoder = self.make_decoder()
+        encoder = SimpleEncoder(1, 32, self.size, 16).to(device)
+        decoder = self.make_decoder().to(device)
         optim = Adam(
             chain(encoder.parameters(), decoder.parameters()),
             lr=1e-4,

@@ -1,6 +1,6 @@
 from config import config_values
 import json
-from experiments import MultiresolutionAutoencoderWithActivationRefinements
+from experiments import MultiresolutionAutoencoderWithActivationRefinements2
 import os
 import zounds
 import argparse
@@ -43,7 +43,7 @@ if __name__ == '__main__':
         app = zounds.ZoundsApp(locals=locals(), globals=globals())
         app.start_in_thread(os.environ['PORT'])
 
-        exp = MultiresolutionAutoencoderWithActivationRefinements(
+        exp = MultiresolutionAutoencoderWithActivationRefinements2(
             overfit=False, batch_size=8)
 
         if exp.__doc__ is None or exp.__doc__.strip() == '':
