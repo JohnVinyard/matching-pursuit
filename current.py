@@ -1,6 +1,6 @@
 from config import config_values
 import json
-from experiments import MultiresolutionAutoencoderWithActivationRefinements2
+from experiments import MultiresolutionAutoencoderWithActivationRefinements7
 import os
 import zounds
 import argparse
@@ -35,6 +35,7 @@ def new_experiment():
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--new', action='store_true')
+    parser.add_argument('--overfit', action='store_true')
     args = parser.parse_args()
 
     if args.new:
@@ -43,8 +44,8 @@ if __name__ == '__main__':
         app = zounds.ZoundsApp(locals=locals(), globals=globals())
         app.start_in_thread(os.environ['PORT'])
 
-        exp = MultiresolutionAutoencoderWithActivationRefinements2(
-            overfit=False, batch_size=8)
+        exp = MultiresolutionAutoencoderWithActivationRefinements7(
+            overfit=args.overfit, batch_size=8)
 
         if exp.__doc__ is None or exp.__doc__.strip() == '':
             raise ValueError('Please write a little about your experiment')

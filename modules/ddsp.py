@@ -3,6 +3,7 @@ from torch.nn import functional as F
 from torch import nn
 import numpy as np
 from scipy.signal import hann
+from torchvision.transforms.functional import adjust_sharpness
 
 from .normal_pdf import pdf
 
@@ -57,6 +58,8 @@ def noise_bank2(x):
     # window the noise
     noise = F.pad(noise, (0, hop_size))
     noise = noise.unfold(-1, window_size, hop_size)
+    window = torch.hann_window(window_size).to(x.device)
+    noise = noise * window[None, None, :]
 
     noise_coeffs = torch.fft.rfft(noise, norm='ortho')
 
@@ -236,7 +239,10 @@ class OscillatorBank(nn.Module):
             log_amplitude=False,
             activation=torch.sigmoid,
             amp_activation=None,
-            return_params=False):
+            return_params=False,
+            lowest_freq=0.01,
+            sharpen=False,
+            compete=False):
 
         super().__init__()
         self.n_osc = n_osc
@@ -247,11 +253,15 @@ class OscillatorBank(nn.Module):
         self.activation = activation
         self.return_params = return_params
         self.amp_activation = amp_activation or self.activation
+        self.lowest_freq = lowest_freq
+        self.sharpen = sharpen
+        self.compete = compete
 
         if log_frequency:
-            bands = np.linspace(0.01, 1, n_osc)
+            bands = np.geomspace(lowest_freq, 1, n_osc)
         else:
-            bands = np.geomspace(0.01, 1, n_osc)
+            bands = np.linspace(lowest_freq, 1, n_osc)
+
 
         bp = np.concatenate([[0], bands])
         spans = np.diff(bp)
@@ -262,6 +272,9 @@ class OscillatorBank(nn.Module):
         self.amp = nn.Conv1d(input_channels, self.n_osc, 1, 1, 0)
         self.freq = nn.Conv1d(input_channels, self.n_osc, 1, 1, 0)
 
+        if self.compete:
+            self.dist = nn.Conv1d(input_channels, self.n_osc, 1, 1, 0)
+
     def forward(self, x):
         batch_size = x.shape[0]
         x = x.view(batch_size, self.input_channels, -1)
@@ -269,9 +282,18 @@ class OscillatorBank(nn.Module):
         amp = self.amp(x)
         freq = self.freq(x)
 
+
         amp = self.amp_activation(amp)
         if self.log_amplitude:
             amp = amp ** 2
+        
+        if self.sharpen:
+            amp = amp.view(batch_size, 1, self.n_osc, -1)
+            adjust_sharpness(amp, sharpness_factor=self.sharpen)
+            amp = amp.view(batch_size, self.n_osc, -1)
+        elif self.compete:
+            d = torch.softmax(self.dist(x), dim=1)
+            amp = amp * d
 
         freq = self.activation(freq)
 
@@ -301,7 +323,8 @@ class NoiseModel(nn.Module):
             n_audio_samples,
             channels,
             activation=lambda x: torch.clamp(x, -1, 1),
-            squared=False):
+            squared=False,
+            mask_after=None):
 
         super().__init__()
         self.input_channels = input_channels
@@ -311,6 +334,7 @@ class NoiseModel(nn.Module):
         self.channels = channels
         self.activation = activation
         self.squared = squared
+        self.mask_after = mask_after
 
         noise_step = n_audio_samples // n_noise_frames
         noise_window = noise_step * 2
@@ -338,5 +362,9 @@ class NoiseModel(nn.Module):
         x = self.activation(x)
         if self.squared:
             x = x ** 2
+        
+        if self.mask_after is not None:
+            x[:, :self.mask_after, :] = 1
+        
         x = noise_bank2(x)
         return x
