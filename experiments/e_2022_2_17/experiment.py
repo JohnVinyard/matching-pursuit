@@ -3,15 +3,18 @@ from itertools import chain
 import torch
 import numpy as np
 from data.datastore import batch_stream
+from loss.least_squares import least_squares_disc_loss, squared_gan_loss
 from modules.ddsp import NoiseModel, OscillatorBank
 import zounds
 from torch import nn
 from torch.optim import Adam
 from modules.decompose import fft_frequency_decompose, fft_frequency_recompose
+from modules.linear import LinearOutputStack
 from modules.psychoacoustic import PsychoacousticFeature
 from upsample import FFTUpsampleBlock
 from util import device
 from torch.nn import functional as F
+from train import gan_cycle
 
 from modules.multiresolution import BandEncoder, DecoderShell, EncoderShell
 from util.readmedocs import readme
@@ -60,7 +63,7 @@ class EncoderBranch(nn.Module):
     Encode individual frequency band
     """
 
-    def __init__(self, band_size, periodicity_feature_size):
+    def __init__(self, band_size, periodicity_feature_size, is_disc=False):
         super().__init__()
 
         self.encoder = BandEncoder(
@@ -69,12 +72,31 @@ class EncoderBranch(nn.Module):
         self.context = nn.Conv1d(network_channels, network_channels, 3, 1, 1)
         self.periodicity_feature_size = periodicity_feature_size
         self.band_size = band_size
+        self.is_disc = is_disc
 
-    def forward(self, x):
+        if is_disc:
+            self.disc_context = nn.Conv1d(
+                network_channels, network_channels, 3, 1, 1)
+
+    def forward(self, x, conditioning=None):
+        
         x = x.view(-1, 64, 32, self.periodicity_feature_size)
+
+        if self.is_disc:
+            spec = torch.norm(conditioning, dim=-1)
+            spec = self.disc_context(spec)
+            spec_context = spec.permute(0, 2, 1)
+        else:
+            spec_context = 0
+
         x = self.encoder(x)
         x = x.permute(0, 2, 1)
         x = self.linear(x)
+
+        # if self.is_disc:
+        #     print('COMPARE', x.std().item(), spec_context.std())
+        
+        x = x + spec_context
         x = x.permute(0, 2, 1)
         x = self.context(x)
         x = F.leaky_relu(x, 0.2)
@@ -129,13 +151,20 @@ class Encoder(nn.Module):
     def __init__(self, is_disc=False):
         super().__init__()
         self.shell = EncoderShell(
-            network_channels, make_band_encoder, Summarizer, feature)
+            network_channels,
+            make_make_band_encoder(is_disc),
+            Summarizer,
+            feature,
+            is_disc=is_disc,
+            return_features=False)
 
         self.is_disc = is_disc
         if is_disc:
-            self.judge = nn.Linear(network_channels, 1)
+            self.judge = LinearOutputStack(network_channels, 3, out_channels=1)
+            self.matched = LinearOutputStack(
+                network_channels, 3, out_channels=1)
 
-    def forward(self, x):
+    def forward(self, x, conditioning=None):
         sizes = set([len(v.shape) for v in x.values()])
 
         if 3 in sizes:
@@ -143,12 +172,17 @@ class Encoder(nn.Module):
         else:
             feat = x
 
-        x, features = self.shell(feat)
+        if self.is_disc:
+            x, features = self.shell(feat, conditioning)
+        else:
+            x, features = self.shell(feat)
+
         x = x.reshape(x.shape[0], -1, network_channels)
 
         if self.is_disc:
-            x = self.judge(x)
-            return x, features
+            r = self.judge(x)
+            m = self.matched(x)
+            return r, m, features
 
         return x
 
@@ -160,7 +194,7 @@ class Expander(nn.Module):
     Expand a representation of all bands together
     """
 
-    def __init__(self, twod=True):
+    def __init__(self, twod=False):
         super().__init__()
         self.initial = nn.Linear(network_channels, network_channels * 4)
         self.twod = twod
@@ -261,6 +295,8 @@ class BandUpsample(nn.Module):
             16384: 64
         }
 
+        linear_freqs = set([512, 1024])
+
         self.osc = OscillatorBank(
             self.channels,
             density[band_size],
@@ -271,7 +307,7 @@ class BandUpsample(nn.Module):
             return_params=False,
             constrain=True,
             # linear frequency seems to be integral
-            log_frequency=True,
+            log_frequency=False,
             lowest_freq=0.05 if band_size == 512 else 0.01,
             sharpen=False,
             compete=False)
@@ -282,7 +318,7 @@ class BandUpsample(nn.Module):
             # don't give noise sufficient frequency resolution to
             # approximate oscillators, but give it enough to potentially
             # guide oscillators (if that's a thing?)
-            n_noise_frames=noise_frames[band_size],
+            n_noise_frames=band_size // 8,
             n_audio_samples=self.band_size,
             channels=self.channels,
             activation=lambda x: x,
@@ -303,8 +339,12 @@ def make_decoder(band_size):
     return BandUpsample(band_size)
 
 
-def make_band_encoder(periodicity, band_size):
-    return EncoderBranch(band_size, periodicity)
+def make_make_band_encoder(is_disc=False):
+
+    def make_band_encoder(periodicity, band_size):
+        return EncoderBranch(band_size, periodicity, is_disc)
+    
+    return make_band_encoder
 
 
 decoder = DecoderShell(
@@ -315,11 +355,19 @@ decoder = DecoderShell(
 encoder = Encoder().to(device)
 ae_optim = Adam(
     chain(decoder.parameters(), encoder.parameters()),
-    lr=1e-3,
+    lr=1e-4,
     betas=(0, 0.9))
 
 
+disc = Encoder(is_disc=True).to(device)
+disc_optim = Adam(disc.parameters(), lr=1e-4, betas=(0, 0.9))
+
+
 def train_gen(batch):
+    full_size = batch[512].shape[0]
+
+    batch = {k: v[: full_size // 2] for k, v in batch.items()}
+
     ae_optim.zero_grad()
 
     encoded = encoder(batch)
@@ -329,20 +377,81 @@ def train_gen(batch):
     decoded_sum = {k: sum(v) for k, v in decoded.items()}
     fake_feat = compute_feature_dict(decoded_sum)
 
-    recon_loss = 0
-    for k, v in batch.items():
-        recon_loss = recon_loss + torch.abs(fake_feat[k] - v).sum()
+    # get disc loss
+    # rj, rmj,  r_features = disc(batch, batch)
 
-    total = recon_loss * 1e-6
+    fj, fmj, f_features = disc(fake_feat, batch)
 
-    total.backward()
+    # minimize distance in feature space from real, matched samples
+    # loss = 0
+    # for i in range(len(r_features)):
+    #     loss = loss + torch.abs(r_features[i] - f_features[i]).sum()
+
+    # the generator should push toward "real" and "matched"
+    real = squared_gan_loss(fj, 1)
+    matched = squared_gan_loss(fmj, 1)
+    
+    loss = real + matched
+    loss.backward()
     ae_optim.step()
-    print('G', total.item())
+
+    print('G ----------------------------------------')
+    print('REALNESS', fj.mean().item())
+    print('MATCHEDNESS', fmj.mean().item())
+
     return decoded, encoded
 
 
+def train_disc(batch):
+    disc_optim.zero_grad()
+
+    full_size = batch[512].shape[0]
+
+    matched = {k: v[full_size // 2:] for k, v in batch.items()}
+    batch = {k: v[: full_size // 2] for k, v in batch.items()}
+
+    encoded = encoder(batch)
+    decoded = decoder(encoded)
+
+    # add together harmonics and noise
+    decoded_sum = {k: sum(v) for k, v in decoded.items()}
+    fake_feat = compute_feature_dict(decoded_sum)
+
+    # get disc loss
+    rj, rmj, r_features = disc(batch, batch)
+    fj, fmj, f_features = disc(fake_feat, batch)
+
+    unmatched_realness, unmatched_matchedness, _ = disc(matched, batch)
+
+
+    real_real = squared_gan_loss(rj, 1)
+    real_matched = squared_gan_loss(rmj, 1)
+
+    fake_real = squared_gan_loss(fj, 0)
+    # don't add a fake matched loss as the answer to this one
+    # is ambiguous
+    fake_matched = squared_gan_loss(fmj, 0)
+
+    unmatched_real = squared_gan_loss(unmatched_realness, 1)
+    unmatched_matched = squared_gan_loss(unmatched_matchedness, 0)
+
+    print('D-----------------------------------------------')
+    print('REAL REAL', rj.mean().item())
+    print('REAL MATCHED', rmj.mean().item())
+    print('FAKE REAL', fj.mean().item())
+    print('FAKE MATCHED', fmj.mean().item())
+    print('UNMATCHED REAL', unmatched_realness.mean().item())
+    print('UNMATCHED MATCHED', unmatched_matchedness.mean().item())
+
+    # scale so that real or matched doesn't dominate
+    loss = real_real + fake_real + fake_matched + unmatched_real + real_matched + unmatched_matched
+
+    loss.backward()
+    disc_optim.step()
+
+
 @readme
-class MultiresolutionAutoencoderWithActivationRefinements7(object):
+class MultiresolutionAutoencoderWithActivationRefinements9(object):
     def __init__(self, batch_size=2, overfit=False):
         super().__init__()
         self.feature = feature
@@ -400,10 +509,16 @@ class MultiresolutionAutoencoderWithActivationRefinements7(object):
     def run(self):
 
         stream = sample_stream(
-            self.batch_size, overfit=self.overfit, normalize=True)
+            self.batch_size * 2, overfit=self.overfit, normalize=True)
 
         for bands, feat in stream:
-            self.bands = bands
-            decoded, encoded = train_gen(feat)
-            self.decoded = decoded
-            self.encoded = encoded
+
+            step = next(gan_cycle)
+
+            if step == 'gen':
+                self.bands = bands
+                decoded, encoded = train_gen(feat)
+                self.decoded = decoded
+                self.encoded = encoded
+            else:
+                train_disc(feat)

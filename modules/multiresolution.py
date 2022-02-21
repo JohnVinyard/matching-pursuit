@@ -8,7 +8,7 @@ import numpy as np
 from torch.nn import functional as F
 
 
-gen_init_weights = make_initializer(0.17)
+gen_init_weights = make_initializer(0.1)
 disc_init_weights = make_initializer(0.1)
 
 
@@ -52,12 +52,16 @@ class EncoderShell(nn.Module):
             make_summarizer,
             feature,
             compact=True,
-            use_pos_encoding=False):
+            use_pos_encoding=False,
+            is_disc=False,
+            return_features=False):
 
         super().__init__()
         self.channels = channels
         self.compact = compact
         self.use_pos_encoding = use_pos_encoding
+        self.is_disc = is_disc
+        self.return_features = return_features
 
         bands = {str(k): make_band_encoder(v, k)
                  for k, v in feature.kernel_sizes.items()}
@@ -67,11 +71,19 @@ class EncoderShell(nn.Module):
 
         self.apply(disc_init_weights)
 
-    def forward(self, x):
-        encodings = [self.bands[str(k)](v) for k, v in x.items()]
+    def forward(self, x, conditioning=None):
+        if self.is_disc:
+            encodings = [self.bands[str(k)](v, conditioning[k]) for k, v in x.items()]
+            encodings, judgements = zip(*encodings)
+        else:
+            encodings = [self.bands[str(k)](v) for k, v in x.items()]
+        
         encodings = torch.cat(encodings, dim=-1)
         x = self.summarizer(encodings)
-        return x
+        if self.is_disc:
+            return encodings, x, judgements
+        else:
+            return x
 
 
 class ConvBandDecoder(nn.Module):

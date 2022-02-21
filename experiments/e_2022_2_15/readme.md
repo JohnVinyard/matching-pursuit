@@ -9,3 +9,10 @@ Things I'll try:
 - constant and low noise rate to avoid beating approaching 10-20hz
 - only allow positive noise coefficients?
 - try a noise model that doesn't use FFT
+
+
+seems to be caused by crowding in higher bands where spacing becomes more logarithmic
+
+- linear in first two bands and log thereafter
+
+or, as linear seems to help with learning: linear bands with adversarial loss?

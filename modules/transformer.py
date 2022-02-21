@@ -34,7 +34,7 @@ class FourierMixer(nn.Module):
 
 
 class Transformer(nn.Module):
-    def __init__(self, n_channels, n_layers):
+    def __init__(self, n_channels, n_layers, return_features=False):
         super().__init__()
         self.n_channels = n_channels
         self.n_layers = n_layers
@@ -44,7 +44,16 @@ class Transformer(nn.Module):
                 FourierMixer()
             )
             for _ in range(self.n_layers)])
+        self.return_features = return_features
 
     def forward(self, x):
-        x = self.net(x)
-        return x
+
+        if self.return_features:
+            features = []
+            for layer in self.net:
+                x = layer(x)
+                features.append(x)
+            return x, features
+        else:
+            x = self.net(x)
+            return x
