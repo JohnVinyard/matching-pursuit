@@ -45,7 +45,7 @@ if __name__ == '__main__':
         app.start_in_thread(os.environ['PORT'])
 
         exp = MultiresolutionAutoencoderWithActivationRefinements12(
-            overfit=args.overfit, batch_size=4)
+            overfit=args.overfit, batch_size=2)
 
         if exp.__doc__ is None or exp.__doc__.strip() == '':
             raise ValueError('Please write a little about your experiment')

@@ -86,7 +86,7 @@ class PsychoacousticFeature(nn.Module):
 
     @property
     def band_sizes(self):
-        return list(self.banks.keys())
+        return sorted(list(self.banks.keys()))
 
     def decompose(self, x):
         return fft_frequency_decompose(x, 512)

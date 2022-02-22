@@ -17,20 +17,16 @@ class BandEncoder(nn.Module):
             self,
             channels,
             periodicity_feature_size,
-            band_size,
-            periodicity_channels=8,
-            return_features=False):
+            periodicity_channels=8):
 
         super().__init__()
         self.channels = channels
-        self.band_size = band_size
         self.periodicity_feature_size = periodicity_feature_size
         self.period = LinearOutputStack(
             channels,
             layers=3,
             in_channels=periodicity_feature_size,
             out_channels=periodicity_channels)
-        self.return_features = return_features
 
     def forward(self, x):
         batch_size = x.shape[0]
