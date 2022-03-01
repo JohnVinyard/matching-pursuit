@@ -1,11 +1,12 @@
 from config import config_values
 import json
-from experiments import MultiresolutionAutoencoderWithActivationRefinements12
+from experiments import MultiresolutionAutoencoderWithActivationRefinements17
 import os
 import zounds
 import argparse
 from datetime import datetime
 import os
+
 
 def new_experiment():
     dt = datetime.now()
@@ -16,9 +17,10 @@ def new_experiment():
     exp_path = os.path.join(path, 'experiments', dirname)
 
     if os.path.exists(exp_path):
-        print(f'Experiment {exp_path} already exists.  Remove it if you want to create a new one.')
+        print(
+            f'Experiment {exp_path} already exists.  Remove it if you want to create a new one.')
         return
-    
+
     os.mkdir(exp_path)
 
     with open(os.path.join(exp_path, '__init__.py'), 'w'):
@@ -29,7 +31,6 @@ def new_experiment():
 
     with open(os.path.join(exp_path, 'readme.md'), 'w'):
         pass
-    
 
 
 if __name__ == '__main__':
@@ -44,8 +45,8 @@ if __name__ == '__main__':
         app = zounds.ZoundsApp(locals=locals(), globals=globals())
         app.start_in_thread(os.environ['PORT'])
 
-        exp = MultiresolutionAutoencoderWithActivationRefinements12(
-            overfit=args.overfit, batch_size=2)
+        exp = MultiresolutionAutoencoderWithActivationRefinements17(
+            overfit=args.overfit, batch_size=4)
 
         if exp.__doc__ is None or exp.__doc__.strip() == '':
             raise ValueError('Please write a little about your experiment')

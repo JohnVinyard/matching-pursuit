@@ -44,43 +44,6 @@ class Conv(nn.Module):
         return x
 
 
-class MixerBlock(nn.Module):
-    def __init__(self, channels):
-        super().__init__()
-        self.a = ResidualBlock(channels)
-        self.b = ResidualBlock(channels)
-    
-    def forward(self, x):
-        orig = x
-        x = self.a(x)
-        x = x.permute(0, 2, 1)
-        x = self.b(x)
-        x = x.permute(0, 2, 1)
-        x = x + orig
-        return x
-
-class Mixer(nn.Module):
-    def __init__(self, channels, layers):
-        super().__init__()
-        self.net = nn.Sequential(
-            # Conv(channels), 
-            *[
-                nn.Sequential(
-                    
-                    # ResidualBlock(channels),
-                    MixerBlock(channels)
-                )
-                for _ in range(layers)
-        ])
-    
-    def forward(self, x):
-        for layer in self.net:
-            x = layer(x)
-            # Pixel Norm
-            # x = x / torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + 1e-8)
-            x = x.permute(0, 2, 1)
-        return x
-
 
 
 class MultiHeadAttention(nn.Module):
