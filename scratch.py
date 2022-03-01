@@ -14,7 +14,6 @@ from torch.nn import functional as F
 from data.datastore import batch_stream
 from modules.ddsp import band_filtered_noise
 from modules.psychoacoustic import PsychoacousticFeature
-from modules.stft import stft_relative_phase
 from util import device
 
 
@@ -44,16 +43,11 @@ def image(timestep):
     chunks = []
     for k, v in f.items():
         current = v[:, timestep, :]
-        # current = np.log(1e-4 + v[:, timestep, :])
+        current = np.log(1e-4 + v[:, timestep, :])
         # norm = np.linalg.norm(current, axis=-1, keepdims=True)
         chunks.append(current)
 
-        # chunk = v[:, timestep, :]
-        # orig_shape = chunk.shape
-        # chunk = chunk.reshape((-1,))
-        # chunk /= np.linalg.norm(chunk)
-        # chunk = chunk.reshape(*orig_shape)
-        # chunks.append(chunk)
+        
 
     full = np.concatenate(chunks, axis=-1)
     return full
@@ -94,10 +88,6 @@ if __name__ == '__main__':
     stream = batch_stream(Config.audio_path(), '*.wav', 1, 2**15)
 
     samples = next(stream)
-    # ns, n, ss, s = spectrograms()
-    # input('----')
-    # exit()
-
 
     # loc = 880 / sr.nyquist
     # samples = band_filtered_noise(
@@ -109,15 +99,15 @@ if __name__ == '__main__':
     # print('sine', samples.shape)
 
     orig = zounds.AudioSamples(samples.squeeze(), sr).pad_with_silence()
-    orig.save('sound.wav')
 
     samples = torch.from_numpy(samples).view(1, 1, 2**15).to(device)
 
     feature = PsychoacousticFeature(kernel_sizes=[128] * 6).to(device)
     feat = feature.compute_feature_dict(
-        samples, constant_window_size=128, time_steps=32)
+        samples, constant_window_size=256, time_steps=64)
 
     f = {k: v.data.cpu().numpy().squeeze() for k, v in feat.items()}
+
 
 
     # TODO: helper function for making a movie
