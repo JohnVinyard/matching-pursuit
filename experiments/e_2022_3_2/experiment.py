@@ -9,9 +9,10 @@ import zounds
 from torch import nn
 from torch.optim import Adam
 from modules.decompose import fft_frequency_decompose, fft_frequency_recompose
-from modules.latent_loss import latent_loss
 from modules.linear import LinearOutputStack
 from modules.psychoacoustic import PsychoacousticFeature
+from train import gan_cycle
+from train.gan import get_latent, least_squares_disc_loss, least_squares_generator_loss
 from upsample import ConvUpsample
 from util import device
 from random import choice
@@ -129,6 +130,9 @@ class Encoder(nn.Module):
             nn.Conv1d(network_channels, network_channels, 3, 1, 1),
             nn.AvgPool1d(3, 2, 1),
         )
+
+        self.final = nn.Linear(network_channels, 1)
+
         self.apply(init_func)
 
     def forward(self, x):
@@ -136,14 +140,9 @@ class Encoder(nn.Module):
         x = torch.cat(list(d.values()), dim=-1)
         x = self.r(x)
         batch_size = x.shape[0]
-        # x = self.t(x)
-        # x = self.e(x)
-        # x = x[:, -1, :]
-
         x = x.permute(0, 2, 1)
         x = self.reduce(x).view(batch_size, network_channels)
-        x = unit_norm(x)
-
+        x = self.final(x)
         return x
 
 
@@ -218,8 +217,8 @@ class BandUpsample(nn.Module):
         noise = self.noise(x)
         return harm, noise
 
-embedder = Encoder().to(device)
-embedder_optim = Adam(embedder.parameters(), lr=1e-4, betas=(0, 0.9))
+disc = Encoder().to(device)
+disc_optim = Adam(disc.parameters(), lr=1e-4, betas=(0, 0.9))
 
 generator = Decoder().to(device)
 generator_optim = Adam(generator.parameters(), lr=1e-4, betas=(0, 0.9))
@@ -228,49 +227,36 @@ generator_optim = Adam(generator.parameters(), lr=1e-4, betas=(0, 0.9))
 
 def train_gen(batch):
     generator_optim.zero_grad()
-
-    with torch.no_grad():
-        embedded = embedder(batch)
-
-    decoded = generator(embedded)
+    z = get_latent(batch[512].shape[0], network_channels)
+    decoded = generator(z)
     # add together harmonics and noise
     decoded_sum = {k: sum(v) for k, v in decoded.items()}
     fake_feat = compute_feature_dict(decoded_sum)
-    re_embedded = embedder(fake_feat)
-
-    loss = -F.cosine_similarity(re_embedded, embedded).mean()
-
+    j = disc(fake_feat)
+    loss = least_squares_generator_loss(j)
     print('G', loss.item())
     loss.backward()
     generator_optim.step()
-    return decoded, re_embedded
+    return decoded, z
 
 
-def train_disc(a, b):
-    embedder_optim.zero_grad()
-    a = embedder(a)
-    b = embedder(b)
-
-    # embeddings from adjacent segments should be near one another
-    embedding_loss = -F.cosine_similarity(a, b).mean()
-
-    z = choice([a, b])
-
-    # other embeddings in the batch should be uncorrelated
-    z = z @ z.T
-    indices = torch.triu_indices(z.shape[0], z.shape[1], offset=1)
-    z = z[indices].mean()
-    ll = torch.abs(0 - z)
-
-    loss = embedding_loss + ll
+def train_disc(batch):
+    disc.zero_grad()
+    z = get_latent(batch[512].shape[0], network_channels)
+    decoded = generator(z)
+    # add together harmonics and noise
+    decoded_sum = {k: sum(v) for k, v in decoded.items()}
+    fake_feat = compute_feature_dict(decoded_sum)
+    fj = disc(fake_feat)
+    rj = disc(batch)
+    loss = least_squares_disc_loss(rj, fj)
     loss.backward()
-    embedder_optim.step()
+    disc_optim.step()
     print('D', loss.item())
-    return a
 
 
 @readme
-class MultiresolutionAutoencoderWithActivationRefinements17(object):
+class MultiresolutionAutoencoderWithActivationRefinements18(object):
     def __init__(self, batch_size=2, overfit=False):
         super().__init__()
         self.feature = feature
@@ -330,14 +316,14 @@ class MultiresolutionAutoencoderWithActivationRefinements17(object):
         stream = sample_stream(
             self.batch_size, overfit=self.overfit, normalize=True)
         
-        long_stream = long_sample_stream(
-            self.batch_size, overfit=self.overfit, normalize=True)
         
         while True:
+            step = next(gan_cycle)
             bands, feat = next(stream)
             self.bands = bands
-            decoded, _ = train_gen(feat)
-            self.decoded = decoded
 
-            _, a_feat, _, b_feat = next(long_stream)
-            self.encoded = train_disc(a_feat, b_feat)
+            if step == 'gen':
+                decoded, encoded = train_gen(feat)
+                self.decoded = decoded
+            else:
+                train_disc(feat)

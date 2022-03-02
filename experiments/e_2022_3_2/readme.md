@@ -1,0 +1,1 @@
+Try a vanilla GAN again, this time with convolutional disc and gen

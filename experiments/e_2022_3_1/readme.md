@@ -10,3 +10,5 @@ Steps:
 Next Up:
 - use angle and don't enforce std=1
 - remove MLP mixer from encoder; use conv and pooling instead
+
+It seems to be very difficult to get the embedding to have the properties I want.
