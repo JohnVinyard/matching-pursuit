@@ -35,6 +35,18 @@ def pos_encoded(batch_size, time_dim, n_freqs, device=None):
     return pos
 
 
+class LearnedPosEncodings(nn.Module):
+    def __init__(self, n_freqs, out_channels):
+        super().__init__()
+        self.n_freqs = n_freqs
+        self.out = nn.Linear(n_features_for_freq(n_freqs), out_channels)
+    
+    def forward(self, x):
+        pos = pos_encoded(x.shape[0], x.shape[1], self.n_freqs, x.device)
+        learned = self.out(pos)
+        return x + learned
+
+
 class ExpandUsingPosEncodings(nn.Module):
     def __init__(
             self,

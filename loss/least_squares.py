@@ -2,7 +2,7 @@ real_target = 1
 fake_target = 0
 
 
-def least_squares_generator_loss(j):
+def least_squares_generator_loss(j, real_target=real_target):
     return 0.5 * ((j - real_target) ** 2).mean()
 
 

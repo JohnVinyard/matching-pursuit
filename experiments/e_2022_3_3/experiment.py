@@ -11,7 +11,9 @@ from torch import nn
 from torch.optim import Adam
 from modules.decompose import fft_frequency_decompose, fft_frequency_recompose
 from modules.linear import LinearOutputStack
+from modules.pos_encode import LearnedPosEncodings
 from modules.psychoacoustic import PsychoacousticFeature
+from modules.transformer import Transformer
 from train import gan_cycle
 from train.gan import get_latent, least_squares_disc_loss, least_squares_generator_loss
 from upsample import ConvUpsample
@@ -21,6 +23,7 @@ from random import choice
 from modules.multiresolution import BandEncoder
 from util.readmedocs import readme
 from util.weight_init import make_initializer
+from torch.nn.utils.clip_grad import clip_grad_norm_, clip_grad_value_
 
 network_channels = 64
 n_samples = 2**14
@@ -31,6 +34,14 @@ feature = PsychoacousticFeature(
 
 init_func = make_initializer(0.1)
 
+adjust = {
+    512: 0.05,
+    1024: 0.03,
+    2048: 0.05,
+    4096: 0.25,
+    8192: 1,
+    16384: 20
+}
 
 def compute_feature_dict(x):
     x = {k: v.contiguous() for k, v in x.items()}
@@ -87,8 +98,9 @@ def sample_stream(batch_size, overfit=False, normalize=False):
 
 
 class BranchEncoder(nn.Module):
-    def __init__(self, periodicity):
+    def __init__(self, periodicity, band_size):
         super().__init__()
+        self.band_size = band_size
         self.periodicity = periodicity
         self.p = BandEncoder(network_channels, periodicity)
         self.r = LinearOutputStack(network_channels, 2, in_channels=512)
@@ -96,6 +108,9 @@ class BranchEncoder(nn.Module):
 
     def forward(self, x):
         x = x.view(-1, network_channels, 32, self.periodicity)
+        x = x * adjust[self.band_size]
+        # noise = torch.zeros_like(x).normal_(0, 0.1)
+        # x = x + noise
         x = self.p(x).permute(0, 2, 1)  # (-1, 32, 512)
         x = self.r(x)
         # x = self.t(x)
@@ -106,30 +121,35 @@ class Encoder(nn.Module):
     def __init__(self):
         super().__init__()
         self.encoders = nn.ModuleDict(
-            {str(k): BranchEncoder(65) for k in feature.band_sizes})
+            {str(k): BranchEncoder(65, k) for k in feature.band_sizes})
         self.r = LinearOutputStack(network_channels, 2, in_channels=384)
         # self.t = Mixer(network_channels, 32, 3)
         # self.e = LinearOutputStack(network_channels, 2)
 
+        self.t = Transformer(network_channels, 3)
+        self.pos = LearnedPosEncodings(16, network_channels)
+
+        stride = 1
+
         self.reduce = nn.Sequential(
-            nn.Conv1d(network_channels, network_channels, 3, 1, 1),
-            nn.AvgPool1d(3, 2, 1),
+            nn.Conv1d(network_channels, network_channels, 3, stride, 1),
+            # nn.AvgPool1d(3, 2, 1),
             nn.LeakyReLU(0.2),
 
-            nn.Conv1d(network_channels, network_channels, 3, 1, 1),
-            nn.AvgPool1d(3, 2, 1),
+            nn.Conv1d(network_channels, network_channels, 3, stride, 1),
+            # nn.AvgPool1d(3, 2, 1),
             nn.LeakyReLU(0.2),
 
-            nn.Conv1d(network_channels, network_channels, 3, 1, 1),
-            nn.AvgPool1d(3, 2, 1),
+            nn.Conv1d(network_channels, network_channels, 3, stride, 1),
+            # nn.AvgPool1d(3, 2, 1),
             nn.LeakyReLU(0.2),
 
-            nn.Conv1d(network_channels, network_channels, 3, 1, 1),
-            nn.AvgPool1d(3, 2, 1),
+            nn.Conv1d(network_channels, network_channels, 3, stride, 1),
+            # nn.AvgPool1d(3, 2, 1),
             nn.LeakyReLU(0.2),
 
-            nn.Conv1d(network_channels, network_channels, 3, 1, 1),
-            nn.AvgPool1d(3, 2, 1),
+            nn.Conv1d(network_channels, network_channels, 3, stride, 1),
+            # nn.AvgPool1d(3, 2, 1),
         )
 
 
@@ -139,26 +159,15 @@ class Encoder(nn.Module):
         d = {k: self.encoders[str(k)](x[k]) for k in x.keys()}
         x = torch.cat(list(d.values()), dim=-1)
         x = self.r(x)
-        batch_size = x.shape[0]
-        x = x.permute(0, 2, 1)
-        x = self.reduce(x).view(batch_size, network_channels)
+        x = self.pos(x)
+
+        # batch_size = x.shape[0]
+        # x = x.permute(0, 2, 1)
+        # x = self.reduce(x).view(batch_size, -1, network_channels)
+
+        x = self.t(x)
+        x = x[:, -1, :]
         return x
-
-
-class Decoder(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.decoders = nn.ModuleDict(
-            {str(k): BandUpsample(k) for k in feature.band_sizes})
-        self.up = ConvUpsample(
-            network_channels, network_channels, 4, 32, 'learned', network_channels)
-        self.apply(init_func)
-
-    def forward(self, x):
-        x = self.up(x)
-        x = x.permute(0, 2, 1)
-        return {int(k): self.decoders[str(k)](x) for k in self.decoders.keys()}
-
 
 
 class Discriminator(nn.Module):
@@ -168,6 +177,21 @@ class Discriminator(nn.Module):
     
     def forward(self, x):
         return self.disc(x)
+
+class Decoder(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.decoders = nn.ModuleDict(
+            {str(k): BandUpsample(k) for k in feature.band_sizes})
+        self.up = ConvUpsample(
+            network_channels, network_channels, 4, 32, 'fft_learned', network_channels)
+        self.apply(init_func)
+
+    def forward(self, x):
+        x = self.up(x)
+        x = x.permute(0, 2, 1)
+        return {int(k): self.decoders[str(k)](x) for k in self.decoders.keys()}
+
 
 class BandUpsample(nn.Module):
     """
@@ -179,15 +203,15 @@ class BandUpsample(nn.Module):
         self.band_size = band_size
         self.channels = network_channels
 
+        self.pos = LearnedPosEncodings(16, network_channels)
         self.t = nn.Sequential(
-            nn.Conv1d(network_channels, network_channels, 3, 1, 1),
-            nn.LeakyReLU(0.2),
-            nn.Conv1d(network_channels, network_channels, 3, 1, 1),
-            nn.LeakyReLU(0.2),
-            nn.Conv1d(network_channels, network_channels, 3, 1, 1),
-            nn.LeakyReLU(0.2),
-            nn.Conv1d(network_channels, network_channels, 3, 1, 1),
+            nn.Conv1d(network_channels, network_channels, 1, 1, 0),
+            nn.Conv1d(network_channels, network_channels, 1, 1, 0),
+            nn.Conv1d(network_channels, network_channels, 1, 1, 0),
+            nn.Conv1d(network_channels, network_channels, 1, 1, 0),
         )
+
+        self.final = nn.Conv1d(network_channels, network_channels, 1, 1, 0)
 
         self.osc = OscillatorBank(
             self.channels,
@@ -219,26 +243,43 @@ class BandUpsample(nn.Module):
             mask_after=1 if band_size == 512 else None)
 
     def forward(self, x):
+
+        # x = self.pos(x)
+
         x = x.permute(0, 2, 1)
-        x = self.t(x)
-        harm = self.osc(x)
-        noise = self.noise(x)
+        
+        for layer in self.t:
+            orig = x
+            x = layer(x)
+            x = F.leaky_relu(x + orig, 0.2)
+        
+        x = self.final(x)
+        harm = self.osc(x) / adjust[self.band_size]
+        noise = self.noise(x) / adjust[self.band_size]
         return harm, noise
 
 
-gen_encoder = Encoder().to(device)
 decoder = Decoder().to(device)
-gen_optim = Adam(chain(gen_encoder.parameters(), decoder.parameters()), lr=1e-4, betas=(0, 0.9))
+gen_optim = Adam(decoder.parameters(), lr=1e-4, betas=(0, 0.9))
 
 disc_encoder = Encoder().to(device)
 disc = Discriminator().to(device)
 disc_optim = Adam(chain(disc.parameters(), disc_encoder.parameters()), lr=1e-4, betas=(0, 0.9))
 
-def train_gen(batch):
+
+def latent_stream(batch_size, overfit=False):
+    current = get_latent(batch_size, network_channels)
+
+    while True:
+        yield current
+        if not overfit:
+            current = get_latent(batch_size, network_channels)
+
+def train_gen(batch, z):
     gen_optim.zero_grad()
 
     # sample from prior
-    z = get_latent(batch[512].shape[0], network_channels)
+    # z = get_latent(batch[512].shape[0], network_channels)
     # generate
     decoded = decoder(z)
     
@@ -246,27 +287,26 @@ def train_gen(batch):
     decoded_sum = {k: sum(v) for k, v in decoded.items()}
     fake_feat = compute_feature_dict(decoded_sum)
 
-    # encode
-    zpred = gen_encoder(fake_feat)
-
-    # did encoder guess original vector?
-    ll = F.mse_loss(zpred, z)
+    std_loss = 0
+    for k, v in fake_feat.items():
+        std_loss = std_loss + torch.abs(v.std() - batch[k].std()).mean()
 
     # Does the encoding look real?
     j = disc(disc_encoder(fake_feat))
 
     adv_loss = least_squares_generator_loss(j)
 
-    loss = adv_loss + ll
-    print('G', 'ADV', adv_loss.item(), 'Z', ll.item())
+    loss = adv_loss + (std_loss * 0.01)
     loss.backward()
+    # clip_grad_norm_(decoder.parameters(), 1)
     gen_optim.step()
-    return decoded, zpred
+    print('G', loss.item())
+    return decoded, z
 
 
-def train_disc(batch):
+def train_disc(batch, z):
     disc_optim.zero_grad()
-    z = get_latent(batch[512].shape[0], network_channels)
+    # z = get_latent(batch[512].shape[0], network_channels)
     decoded = decoder(z)
 
     # add together harmonics and noise
@@ -279,12 +319,16 @@ def train_disc(batch):
 
     loss = least_squares_disc_loss(rj, fj)
     loss.backward()
+
+    # clip_grad_norm_(disc_encoder.parameters(), 1)
+    # clip_grad_norm_(disc.parameters(), 1)
+
     disc_optim.step()
     print('D', loss.item())
 
 
 @readme
-class MultiresolutionAutoencoderWithActivationRefinements18(object):
+class MultiresolutionAutoencoderWithActivationRefinements19(object):
     def __init__(self, batch_size=2, overfit=False):
         super().__init__()
         self.feature = feature
@@ -344,15 +388,18 @@ class MultiresolutionAutoencoderWithActivationRefinements18(object):
         stream = sample_stream(
             self.batch_size, overfit=self.overfit, normalize=True)
         
+        z_stream = latent_stream(self.batch_size, self.overfit)
         
         while True:
             step = next(gan_cycle)
+            z = next(z_stream)
             bands, feat = next(stream)
+
             self.bands = bands
 
             if step == 'gen':
-                decoded, encoded = train_gen(feat)
+                decoded, encoded = train_gen(feat, z)
                 self.decoded = decoded
                 self.encoded = encoded
             else:
-                train_disc(feat)
+                train_disc(feat, z)
