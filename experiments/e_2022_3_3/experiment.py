@@ -183,12 +183,28 @@ class Decoder(nn.Module):
         super().__init__()
         self.decoders = nn.ModuleDict(
             {str(k): BandUpsample(k) for k in feature.band_sizes})
+        
         self.up = ConvUpsample(
             network_channels, network_channels, 4, 32, 'fft_learned', network_channels)
+
+        # self.ln = nn.Linear(network_channels, network_channels * 4)
+        # self.up = nn.Sequential(
+        #     nn.ConvTranspose2d(network_channels, 32, (4, 4), (2, 2), (1, 1)),
+        #     nn.LeakyReLU(0.2),
+        #     nn.ConvTranspose2d(32, 16, (4, 4), (2, 2), (1, 1)),
+        #     nn.LeakyReLU(0.2),
+        #     nn.ConvTranspose2d(16, 8, (4, 4), (2, 2), (1, 1)),
+        #     nn.LeakyReLU(0.2),
+        #     nn.ConvTranspose2d(8, 4, (4, 4), (2, 2), (1, 1)),
+        #     nn.LeakyReLU(0.2),
+        #     nn.ConvTranspose2d(4, 1, (4, 1), (2, 1), (1, 0)),
+        # )
+
         self.apply(init_func)
 
     def forward(self, x):
         x = self.up(x)
+
         x = x.permute(0, 2, 1)
         return {int(k): self.decoders[str(k)](x) for k in self.decoders.keys()}
 
@@ -260,11 +276,11 @@ class BandUpsample(nn.Module):
 
 
 decoder = Decoder().to(device)
-gen_optim = Adam(decoder.parameters(), lr=1e-4, betas=(0, 0.9))
+gen_optim = Adam(decoder.parameters(), lr=1e-3, betas=(0, 0.9))
 
 disc_encoder = Encoder().to(device)
 disc = Discriminator().to(device)
-disc_optim = Adam(chain(disc.parameters(), disc_encoder.parameters()), lr=1e-4, betas=(0, 0.9))
+disc_optim = Adam(chain(disc.parameters(), disc_encoder.parameters()), lr=1e-3, betas=(0, 0.9))
 
 
 def latent_stream(batch_size, overfit=False):
