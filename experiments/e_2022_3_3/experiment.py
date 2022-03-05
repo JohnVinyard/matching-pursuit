@@ -11,7 +11,7 @@ from torch import nn
 from torch.optim import Adam
 from modules.decompose import fft_frequency_decompose, fft_frequency_recompose
 from modules.linear import LinearOutputStack
-from modules.pos_encode import LearnedPosEncodings
+from modules.pos_encode import ExpandUsingPosEncodings, LearnedPosEncodings
 from modules.psychoacoustic import PsychoacousticFeature
 from modules.transformer import Transformer
 from train import gan_cycle
@@ -106,13 +106,30 @@ class BranchEncoder(nn.Module):
         self.r = LinearOutputStack(network_channels, 2, in_channels=512)
         # self.t = Mixer(network_channels, 32, 3)
 
+        self.down = nn.Sequential(
+            nn.Conv3d(1, 8, (2, 2, 2), (2, 2, 2), (0, 0, 0)), # (32, 16, 32)
+            nn.LeakyReLU(0.2),
+            nn.Conv3d(8, 16, (2, 2, 2), (2, 2, 2), (0, 0, 0)), # (16, 8, 16)
+            nn.LeakyReLU(0.2),
+            nn.Conv3d(16, 32, (2, 2, 2), (2, 2, 2), (0, 0, 0)), # (8, 4, 8)
+            nn.LeakyReLU(0.2),
+            nn.Conv3d(32, network_channels, (2, 2, 2), (2, 2, 2), (0, 0, 0)), # (4, 2, 4)
+            nn.LeakyReLU(0.2),
+            nn.Conv3d(network_channels, network_channels, (2, 2, 2), (2, 2, 2), (0, 0, 0)), # (2, 1, 2)
+            nn.LeakyReLU(0.2),
+            nn.Conv3d(network_channels, network_channels, (2, 1, 2), (2, 1, 2), (0, 0, 0)), # (2, 1, 2)
+        )
+
     def forward(self, x):
-        x = x.view(-1, network_channels, 32, self.periodicity)
-        x = x * adjust[self.band_size]
+        # x = x * adjust[self.band_size]
+
+        x = x.view(-1, 1, network_channels, 32, self.periodicity)
+        x = self.down(x).reshape(-1, network_channels)
+
         # noise = torch.zeros_like(x).normal_(0, 0.1)
         # x = x + noise
-        x = self.p(x).permute(0, 2, 1)  # (-1, 32, 512)
-        x = self.r(x)
+        # x = self.p(x).permute(0, 2, 1)  # (-1, 32, 512)
+        # x = self.r(x)
         # x = self.t(x)
         return x
 
@@ -152,22 +169,27 @@ class Encoder(nn.Module):
             # nn.AvgPool1d(3, 2, 1),
         )
 
+        self.final = nn.Linear(384, network_channels)
+
 
         self.apply(init_func)
 
     def forward(self, x):
         d = {k: self.encoders[str(k)](x[k]) for k in x.keys()}
         x = torch.cat(list(d.values()), dim=-1)
-        x = self.r(x)
-        x = self.pos(x)
-
-        # batch_size = x.shape[0]
-        # x = x.permute(0, 2, 1)
-        # x = self.reduce(x).view(batch_size, -1, network_channels)
-
-        x = self.t(x)
-        x = x[:, -1, :]
+        x = self.final(x)
         return x
+        # x = torch.cat(list(d.values()), dim=-1)
+        # x = self.r(x)
+        # x = self.pos(x)
+
+        # # batch_size = x.shape[0]
+        # # x = x.permute(0, 2, 1)
+        # # x = self.reduce(x).view(batch_size, -1, network_channels)
+
+        # x = self.t(x)
+        # x = x[:, -1, :]
+        # return x
 
 
 class Discriminator(nn.Module):
@@ -185,7 +207,7 @@ class Decoder(nn.Module):
             {str(k): BandUpsample(k) for k in feature.band_sizes})
         
         self.up = ConvUpsample(
-            network_channels, network_channels, 4, 32, 'fft_learned', network_channels)
+            network_channels, network_channels, 4, 32, 'fft', network_channels)
 
         # self.ln = nn.Linear(network_channels, network_channels * 4)
         # self.up = nn.Sequential(
@@ -204,6 +226,9 @@ class Decoder(nn.Module):
 
     def forward(self, x):
         x = self.up(x)
+
+        # x = self.ln(x).reshape(-1, network_channels, 2, 2)
+        # x = self.up(x).reshape(-1, network_channels, 32)
 
         x = x.permute(0, 2, 1)
         return {int(k): self.decoders[str(k)](x) for k in self.decoders.keys()}
@@ -227,7 +252,14 @@ class BandUpsample(nn.Module):
             nn.Conv1d(network_channels, network_channels, 1, 1, 0),
         )
 
+        self.initial = LinearOutputStack(network_channels, 3)
+
         self.final = nn.Conv1d(network_channels, network_channels, 1, 1, 0)
+
+        self.expand = ExpandUsingPosEncodings(
+            network_channels, 32, 16, network_channels, multiply=True, learnable_encodings=True)
+
+        # self.t = Transformer(network_channels, 2)
 
         self.osc = OscillatorBank(
             self.channels,
@@ -261,17 +293,20 @@ class BandUpsample(nn.Module):
     def forward(self, x):
 
         # x = self.pos(x)
+        # x = self.initial(x)
+        # x = self.expand(x.reshape(-1, 1, network_channels))
+        # x = self.t(x)
 
         x = x.permute(0, 2, 1)
         
         for layer in self.t:
             orig = x
             x = layer(x)
-            x = F.leaky_relu(x + orig, 0.2)
+            x = F.leaky_relu(x, 0.2)
         
         x = self.final(x)
-        harm = self.osc(x) / adjust[self.band_size]
-        noise = self.noise(x) / adjust[self.band_size]
+        harm = self.osc(x) #/ adjust[self.band_size]
+        noise = self.noise(x) #/ adjust[self.band_size]
         return harm, noise
 
 
@@ -312,7 +347,7 @@ def train_gen(batch, z):
 
     adv_loss = least_squares_generator_loss(j)
 
-    loss = adv_loss + (std_loss * 0.01)
+    loss = adv_loss + (std_loss * 0.00)
     loss.backward()
     # clip_grad_norm_(decoder.parameters(), 1)
     gen_optim.step()
