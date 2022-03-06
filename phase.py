@@ -4,6 +4,7 @@ from torch.nn import functional as F
 import zounds
 from config.dotenv import Config
 from data.datastore import batch_stream
+import librosa
 
 from modules.ddsp import overlap_add
 
@@ -31,6 +32,26 @@ def rfft_freqs(window_size):
     return freq_ratios
 
 
+class STFT(object):
+
+    def __init__(self):
+        super().__init__()
+        self.window_size = 512
+        self.step_size = 256
+        self.samplerate = zounds.SR22050()
+
+    def to_frequency_domain(self, audio_batch):
+        return stft(
+            audio_batch, self.window_size, self.step_size, int(self.samplerate))
+
+    def to_time_domain(self, spec):
+        return istft(spec)
+
+    @property
+    def center_frequencies(self):
+        return rfft_freqs(self.window_size)
+
+
 def mag_phase_decomposition(spec, freqs):
     batch_size = spec.shape[0]
     mag = torch.abs(spec)
@@ -55,26 +76,73 @@ def mag_phase_recomposition(spec, freqs):
     return spec
 
 
-def to_spectrogram(
-        audio_batch,
-        window_size,
-        step_size,
-        samplerate,
-        get_center_freqs):
-    spec = stft(audio_batch, window_size, step_size, samplerate)
-    decomp = mag_phase_decomposition(spec, get_center_freqs(window_size))
-    return decomp
+class CQT(object):
+    def __init__(self):
+        super().__init__()
+        self.n_bins = 256
+        self.samplerate = zounds.SR22050()
+        self.hop_length = 512
+        self.bins_per_octave = 48
+
+    def to_frequency_domain(self, audio_batch):
+        specs = []
+        ab = audio_batch.data.cpu().numpy()
+        for item in ab:
+            spec = librosa.cqt(
+                item.squeeze(),
+                n_bins=self.n_bins, 
+                sparsity=0, 
+                hop_length=self.hop_length,
+                bins_per_octave=self.bins_per_octave,
+                scale=True).T[None, ...]
+            print(spec.shape)
+            specs.append(torch.from_numpy(spec).to(audio_batch.device))
+        return torch.cat(specs, dim=0)
+
+    def to_time_domain(self, spec):
+        samples = []
+        device = spec.device
+        spec = spec.data.cpu().numpy()
+        for item in spec:
+            print(item.shape)
+            samp = librosa.icqt(
+                item.T, 
+                sparsity=0, 
+                hop_length=self.hop_length,
+                bins_per_octave=self.bins_per_octave,
+                scale=True)[None, ...]
+            print(samp.shape)
+            samp = torch.from_numpy(samp).to(device)
+            samples.append(samp)
+        return torch.cat(samples, dim=0)
+
+    @property
+    def center_frequencies(self):
+        print('===================================')
+        freqs = librosa.cqt_frequencies(
+            self.n_bins, 
+            fmin=librosa.note_to_hz('C1'), 
+            bins_per_octave=self.bins_per_octave)
+        print(freqs)
+        freqs /= int(self.samplerate)
+        print(freqs)
+        return freqs
 
 
-def from_spectrogram(
-        spec,
-        window_size,
-        step_size,
-        samplerate,
-        get_center_freqs):
+class AudioCodec(object):
+    def __init__(self, short_time_transform):
+        super().__init__()
+        self.short_time_transform = short_time_transform
 
-    spec = mag_phase_recomposition(spec, get_center_freqs(window_size))
-    return istft(spec)
+    def to_frequency_domain(self, audio_batch):
+        spec = self.short_time_transform.to_frequency_domain(audio_batch)
+        return mag_phase_decomposition(
+            spec, self.short_time_transform.center_frequencies)
+
+    def to_time_domain(self, spec):
+        spec = mag_phase_recomposition(
+            spec, self.short_time_transform.center_frequencies)
+        return self.short_time_transform.to_time_domain(spec)
 
 
 if __name__ == '__main__':
@@ -88,21 +156,22 @@ if __name__ == '__main__':
 
     stream = batch_stream(Config.audio_path(), '*.wav', 1, n_samples)
 
+    transformer = AudioCodec(CQT())
+
     while True:
         batch = next(stream)
-        o = zounds.AudioSamples(batch.squeeze(), samplerate).pad_with_silence()
+        o = zounds.AudioSamples(
+            batch.squeeze(), samplerate).pad_with_silence()
         batch = torch.from_numpy(batch).float()
+        print(batch.shape)
+        spec = transformer.to_frequency_domain(batch)
 
-        spec = to_spectrogram(batch, window_size, step_size,
-                              int(samplerate), rfft_freqs)
         mag = spec[..., 0].data.cpu().numpy().squeeze()
         phase = spec[..., 1].data.cpu().numpy().squeeze()
 
-        recon = from_spectrogram(
-            spec, window_size, step_size, int(samplerate), rfft_freqs)
-
-        r = zounds.AudioSamples(recon.data.cpu().numpy(
-        ).squeeze(), samplerate).pad_with_silence()
+        recon = transformer.to_time_domain(spec)
+        r = zounds.AudioSamples(recon.data.cpu()\
+            .numpy().squeeze(), samplerate).pad_with_silence()
         input('Next...')
 
     # freq_ratios = torch.fft.rfftfreq(512)
