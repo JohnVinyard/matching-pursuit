@@ -21,86 +21,7 @@ from train import gan_cycle
 from util.weight_init import make_initializer
 
 
-init_weights = make_initializer(0.1)
-
-# class Encoder(nn.Module):
-#     def __init__(self):
-#         super().__init__()
-
-#         self.mag = nn.Conv2d(1, 8, (3, 3), (1, 1), (1, 1))
-#         self.phase = nn.Conv2d(1, 8, (3, 3), (1, 1), (1, 1))
-
-#         self.down = nn.Sequential(
-#             nn.Conv2d(16, 16, (3, 3), (2, 2), (1, 1)), # (32, 128)
-#             nn.LeakyReLU(0.2),
-#             nn.Conv2d(16, 32, (3, 3), (2, 2), (1, 1)), # (16, 64)
-#             nn.LeakyReLU(0.2),
-
-#             nn.Conv2d(32, 64, (3, 3), (2, 2), (1, 1)), # (8, 32)
-#             nn.LeakyReLU(0.2),
-
-#             nn.Conv2d(64, 128, (3, 3), (2, 2), (1, 1)), # (4, 16)
-#             nn.LeakyReLU(0.2),
-
-#             nn.Conv2d(128, 256, (3, 3), (2, 2), (1, 1)), # (2, 8)
-#             nn.LeakyReLU(0.2),
-
-#             nn.Conv2d(256, 512, (2, 3), (2, 2), (0, 1)), # (1, 4)
-#             nn.LeakyReLU(0.2),
-#             nn.Conv2d(512, 128, (1, 4), (1, 4), (0, 0)), # (1, 1)
-#         )
-
-#         self.apply(init_weights)
-    
-#     def forward(self, x):
-#         mag = x[:, :1, :, :]
-#         phase = x[:, 1:, :, :]
-#         mag = self.mag(mag)
-#         phase = self.phase(phase)
-#         x = torch.cat([mag, phase], dim=1)
-#         x = self.down(x)
-#         x = x.view(-1, 128)
-#         return x
-
-
-# class Decoder(nn.Module):
-#     def __init__(self):
-#         super().__init__()
-
-#         self.initial = nn.Linear(128, 1024)
-#         self.up = nn.Sequential(
-
-#             nn.ConvTranspose2d(256, 128, (4, 4), (2, 2), (1, 1)), # (4, 4)
-#             nn.LeakyReLU(0.2),
-
-#             nn.ConvTranspose2d(128, 64, (4, 4), (2, 2), (1, 1)), # (8, 8)
-#             nn.LeakyReLU(0.2),
-
-#             nn.ConvTranspose2d(64, 32, (4, 4), (2, 2), (1, 1)), # (16, 16)
-#             nn.LeakyReLU(0.2),
-
-#             nn.ConvTranspose2d(32, 16, (4, 4), (2, 2), (1, 1)), # (32, 32)
-#             nn.LeakyReLU(0.2),
-
-#             nn.ConvTranspose2d(16, 8, (4, 4), (2, 2), (1, 1)), # (64, 64)
-#             nn.LeakyReLU(0.2),
-
-#             nn.ConvTranspose2d(8, 4, (3, 4), (1, 2), (1, 1)), # (64, 128)
-#             nn.LeakyReLU(0.2),
-
-#             nn.ConvTranspose2d(4, 2, (3, 4), (1, 2), (1, 1)), # (64, 256)
-#         )
-
-#         self.apply(init_weights)
-    
-#     def forward(self, x):
-#         x = self.initial(x).reshape(-1, 256, 2, 2)
-#         x = self.up(x)
-#         mag = x[:, :1, :, :] ** 2
-#         phase = torch.sin(x[:, 1:, :, :]) * (np.pi * 2)
-#         x = torch.cat([mag, phase], dim=1)
-#         x = F.pad(x, (0, 1))
-#         return x
+init_weights = make_initializer(0.02)
 
 
 class Encoder(nn.Module):
@@ -109,6 +30,7 @@ class Encoder(nn.Module):
         self.embed_mag = LinearOutputStack(128, 2, out_channels=64, in_channels=256)
         self.embed_phase = LinearOutputStack(128, 2, out_channels=64, in_channels=256)
         self.t = Transformer(128, 4)
+        self.apply(init_weights)
     
     def forward(self, x):
         batch, _, time, channels = x.shape
@@ -125,17 +47,18 @@ class Encoder(nn.Module):
 class Decoder(nn.Module):
     def __init__(self):
         super().__init__()
-        self.up = ConvUpsample(128, 128, 4, 64, mode='fft_learned', out_channels=128)
-        self.t = Transformer(128, 3)
+        self.up = ConvUpsample(128, 128, 4, 64, mode='nearest', out_channels=128)
+        # self.t = Transformer(128, 3)
         self.mag = LinearOutputStack(128, 2, out_channels=256)
         self.phase = LinearOutputStack(128, 2, out_channels=256)
+        self.apply(init_weights)
     
     def forward(self, x):
         x = self.up(x)
         x = x.permute(0, 2, 1)
-        x = self.t(x)
+        # x = self.t(x)
         mag = self.mag(x) ** 2
-        phase = torch.sin(self.phase(x)) * (np.pi * 2)
+        phase = self.phase(x)
         x = torch.cat([mag[..., None], phase[..., None]], dim=-1) # (batch, time, channels, 2)
         x = x.permute(0, 3, 1, 2)
         return x
@@ -197,44 +120,6 @@ def to_spectrogram(audio_batch, window_size, step_Size, samplerate):
 
 def from_spectrogram(spec, window_size, step_size, samplerate):
     return codec.to_time_domain(spec)
-
-# def to_spectrogram(audio_batch, window_size, step_size, samplerate):
-#     batch_size = audio_batch.shape[0]
-
-#     audio_batch = F.pad(audio_batch, (0, step_size))
-#     windowed = audio_batch.unfold(-1, window_size, step_size)
-#     window = torch.hann_window(window_size).to(audio_batch.device)
-#     spec = torch.fft.rfft(windowed * window, dim=-1, norm='ortho')
-#     n_coeffs = (window_size // 2) + 1
-#     spec = spec.reshape(batch_size, -1, n_coeffs)
-
-#     mag = torch.abs(spec) + 1e-12
-#     phase = torch.angle(spec)
-#     phase = torch.diff(
-#         phase, 
-#         dim=1, 
-#         prepend=torch.zeros(batch_size, 1, n_coeffs).to(audio_batch.device))
-    
-#     return torch.cat([mag[..., None], phase[..., None]], dim=-1)
-
-
-# def from_spectrogram(spec, window_size, step_size, samplerate):
-#     print(spec.shape)
-#     batch_size, time, n_coeffs, _ = spec.shape
-#     mag = spec[..., 0]
-#     phase = spec[..., 1]
-
-#     real = mag
-#     imag = torch.cumsum(phase, dim=1)
-#     imag = (imag + np.pi) % (2 * np.pi) - np.pi
-
-#     # spec = torch.complex(real, imag)
-#     spec = real * torch.exp(1j * imag)
-#     windowed = torch.fft.irfft(spec, dim=-1, norm='ortho')
-#     signal = overlap_add(windowed[:, None, :, :], apply_window=False)
-#     return signal
-
-
 
 
 def fake_stream():
