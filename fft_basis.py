@@ -68,7 +68,7 @@ def geom_basis(fft_size):
         sr, 
         fft_size, 
         zounds.MelScale(zounds.FrequencyBand(20, sr.nyquist), fft_size), 
-        0.9)
+        0.1)
 
 
 def short_time_transform(x, ws=512, ss=256, basis_func=None):
@@ -108,25 +108,20 @@ if __name__ == '__main__':
     g_basis = geom_basis(512)
 
     windowed, linear_transform = short_time_transform(samples, basis_func=fft_basis)
-    print(linear_transform.dtype)
-    # geom_transform = short_time_transform(samples, basis_func=geom_basis)
+    gw, geom_transform = short_time_transform(samples, basis_func=geom_basis)
 
 
     linear_inverted = np.dot(linear_transform, linear_basis).real[None, None, ...][..., ::-1]
-    print(linear_inverted.dtype)
-    # linear_inverted = flip_inverted(linear_inverted)
-
-    # geom_inverted = np.abs(np.dot(geom_transform, g_basis.T.conjugate())[None, None, ...])
-    # geom_inverted = flip_inverted(geom_inverted)
+    geom_inverted = np.dot(geom_transform, g_basis).real[None, None, ...][..., ::-1]
     
 
     linear_final = zounds.AudioSamples(overlap_add(linear_inverted, apply_window=False).squeeze(), sr).pad_with_silence()
-    # geom_final = zounds.AudioSamples(overlap_add((geom_inverted)).squeeze(), sr).pad_with_silence()
+    geom_final = zounds.AudioSamples(overlap_add(geom_inverted, apply_window=False).squeeze(), sr).pad_with_silence()
 
     baseline = np.abs(zounds.spectral.stft(zounds.AudioSamples(samples, sr)))
 
     linear_spec = np.abs(linear_transform)[:, :257]
-    # geom_spec = np.abs(geom_transform)[:, :257]
+    geom_spec = np.abs(geom_transform)[:, :257]
 
 
     input('waiting...')
