@@ -5,11 +5,20 @@ import zounds
 from config.dotenv import Config
 from data.datastore import batch_stream
 import librosa
+from scipy.signal import morlet, hann
 
 from modules.ddsp import overlap_add
 
 
+def windowed_audio(audio_batch, window_size, step_size):
+    audio_batch = F.pad(audio_batch, (0, step_size))
+    windowed = audio_batch.unfold(-1, window_size, step_size)
+    window = torch.hann_window(window_size).to(audio_batch.device)
+    return windowed * window
+
+
 def stft(audio_batch, window_size, step_size, samplerate):
+    # TODO: Use windowed_audio utility method from above
     batch_size = audio_batch.shape[0]
     audio_batch = F.pad(audio_batch, (0, step_size))
     windowed = audio_batch.unfold(-1, window_size, step_size)
@@ -30,26 +39,6 @@ def rfft_freqs(window_size):
     freq_ratios = torch.fft.rfftfreq(window_size)
     freq_ratios[0] = 1e-12
     return freq_ratios
-
-
-class STFT(object):
-
-    def __init__(self):
-        super().__init__()
-        self.window_size = 512
-        self.step_size = 256
-        self.samplerate = zounds.SR22050()
-
-    def to_frequency_domain(self, audio_batch):
-        return stft(
-            audio_batch, self.window_size, self.step_size, int(self.samplerate))
-
-    def to_time_domain(self, spec):
-        return istft(spec)
-
-    @property
-    def center_frequencies(self):
-        return rfft_freqs(self.window_size)
 
 
 def mag_phase_decomposition(spec, freqs):
@@ -76,6 +65,73 @@ def mag_phase_recomposition(spec, freqs):
     return spec
 
 
+def morlet_filter_bank(
+        samplerate,
+        kernel_size,
+        scale,
+        scaling_factor,
+        normalize=True):
+    
+    basis_size = len(scale)
+    basis = np.zeros((basis_size, kernel_size), dtype=np.complex128)
+
+    try:
+        if len(scaling_factor) != len(scale):
+            raise ValueError('scaling factor must have same length as scale')
+    except TypeError:
+        scaling_factor = np.repeat(float(scaling_factor), len(scale))
+
+    sr = int(samplerate)
+
+    for i, band in enumerate(scale):
+        scaling = scaling_factor[i]
+        w = band.center_frequency / (scaling * 2 * sr / kernel_size)
+        basis[i] = morlet(
+            M=kernel_size,
+            w=w,
+            s=scaling)
+
+    if normalize:
+        basis /= np.linalg.norm(basis, axis=-1, keepdims=True) + 1e-8
+
+    return basis.astype(np.complex64)
+
+# def geom_basis(fft_size):
+#     sr = zounds.SR22050()
+#     return morlet_filter_bank(
+#         sr, 
+#         fft_size, 
+#         zounds.MelScale(zounds.FrequencyBand(20, sr.nyquist), fft_size), 
+#         0.1)
+
+def short_time_transform(x, ws=512, ss=256, basis_func=None):
+    basis = basis_func(ws)
+    windowed = zounds.nputil.sliding_window(x, ws, ss)
+    windowed = windowed * hann(ws)[None, :]
+    freq_domain = np.dot(windowed, basis.T)
+    return windowed, freq_domain
+
+
+class STFT(object):
+
+    def __init__(self):
+        super().__init__()
+        self.window_size = 512
+        self.step_size = 256
+        self.samplerate = zounds.SR22050()
+
+    def to_frequency_domain(self, audio_batch):
+        return stft(
+            audio_batch, self.window_size, self.step_size, int(self.samplerate))
+
+    def to_time_domain(self, spec):
+        return istft(spec)
+
+    @property
+    def center_frequencies(self):
+        return rfft_freqs(self.window_size)
+
+
 class CQT(object):
     def __init__(self):
         super().__init__()
@@ -90,8 +146,8 @@ class CQT(object):
         for item in ab:
             spec = librosa.cqt(
                 item.squeeze(),
-                n_bins=self.n_bins, 
-                sparsity=0, 
+                n_bins=self.n_bins,
+                sparsity=0,
                 hop_length=self.hop_length,
                 bins_per_octave=self.bins_per_octave,
                 scale=True).T[None, ...]
@@ -106,8 +162,8 @@ class CQT(object):
         for item in spec:
             print(item.shape)
             samp = librosa.icqt(
-                item.T, 
-                sparsity=0, 
+                item.T,
+                sparsity=0,
                 hop_length=self.hop_length,
                 bins_per_octave=self.bins_per_octave,
                 scale=True)[None, ...]
@@ -118,15 +174,45 @@ class CQT(object):
 
     @property
     def center_frequencies(self):
-        print('===================================')
         freqs = librosa.cqt_frequencies(
-            self.n_bins, 
-            fmin=librosa.note_to_hz('C1'), 
+            self.n_bins,
+            fmin=librosa.note_to_hz('C1'),
             bins_per_octave=self.bins_per_octave)
-        print(freqs)
         freqs /= int(self.samplerate)
-        print(freqs)
         return freqs
+
+# TODO: Real-only transform
+class MelScale(object):
+    def __init__(self):
+        super().__init__()
+        self.samplerate = zounds.SR22050()
+        self.fft_size = 512
+        self.freq_band = zounds.FrequencyBand(20, self.samplerate.nyquist)
+        self.scale = zounds.MelScale(self.freq_band, self.fft_size // 2)
+        self.basis = morlet_filter_bank(
+            self.samplerate, self.fft_size, self.scale, 0.1)
+    
+    def to_time_domain(self, spec):
+        spec = spec.data.cpu().numpy()
+        windowed = (spec @ self.basis).real[..., ::-1]
+        windowed = torch.from_numpy(windowed.copy())
+        td = overlap_add(windowed[:, None, :, :], apply_window=False)
+        return td
+
+    def to_frequency_domain(self, audio_batch):
+        print(audio_batch.shape)
+        windowed = windowed_audio(
+            audio_batch, self.fft_size, self.fft_size // 2)
+        windowed = windowed.data.cpu().numpy()
+        print(windowed.shape)
+        freq_domain = windowed @ self.basis.T
+        freq_domain = torch.from_numpy(freq_domain)
+        print(freq_domain.shape)
+        return freq_domain
+
+    @property
+    def center_frequencies(self):
+        return np.array(list(self.scale.center_frequencies))
 
 
 class AudioCodec(object):
@@ -156,7 +242,7 @@ if __name__ == '__main__':
 
     stream = batch_stream(Config.audio_path(), '*.wav', 1, n_samples)
 
-    transformer = AudioCodec(CQT())
+    transformer = AudioCodec(MelScale())
 
     while True:
         batch = next(stream)
@@ -170,8 +256,8 @@ if __name__ == '__main__':
         phase = spec[..., 1].data.cpu().numpy().squeeze()
 
         recon = transformer.to_time_domain(spec)
-        r = zounds.AudioSamples(recon.data.cpu()\
-            .numpy().squeeze(), samplerate).pad_with_silence()
+        r = zounds.AudioSamples(recon.data.cpu()
+                                .numpy().squeeze(), samplerate).pad_with_silence()
         input('Next...')
 
     # freq_ratios = torch.fft.rfftfreq(512)
