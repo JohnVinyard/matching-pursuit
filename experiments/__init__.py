@@ -35,3 +35,4 @@ from .e_2022_3_2 import MultiresolutionAutoencoderWithActivationRefinements18
 from .e_2022_3_3 import MultiresolutionAutoencoderWithActivationRefinements19
 from .e_2022_3_5 import MultiresolutionAutoencoderWithActivationRefinements20
 from .e_2022_3_6 import InstaneousFreqExperiment
+from .e_2022_3_7 import InstaneousFreqExperiment2

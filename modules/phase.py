@@ -45,21 +45,34 @@ def mag_phase_decomposition(spec, freqs):
     batch_size = spec.shape[0]
     mag = torch.abs(spec)
     phase = torch.angle(spec)
+
+    # unwrap
     phase = phase.data.cpu().numpy()
     phase = np.unwrap(phase, axis=1)
     phase = torch.from_numpy(phase).to(spec.device)
+
     phase = torch.diff(
         phase,
         dim=1,
         prepend=torch.zeros(batch_size, 1, spec.shape[-1]).to(spec.device))
-    phase = phase * freqs[None, None, :]
+
+    freqs = freqs * 2 * np.pi
+    # subtract the expected value
+    phase = phase - freqs[None, None, :]
+
     return torch.cat([mag[..., None], phase[..., None]], dim=-1)
 
 
 def mag_phase_recomposition(spec, freqs):
     real = spec[..., 0]
     phase = spec[..., 1]
-    imag = torch.cumsum(phase / freqs[None, None, :], dim=1)
+
+    freqs = freqs * 2 * np.pi
+    # add expected value
+    phase = phase + freqs[None, None, :]
+
+    imag = torch.cumsum(phase, dim=1)
+    
     imag = (imag + np.pi) % (2 * np.pi) - np.pi
     spec = real * torch.exp(1j * imag)
     return spec
@@ -151,7 +164,7 @@ class CQT(object):
                 hop_length=self.hop_length,
                 bins_per_octave=self.bins_per_octave,
                 scale=True).T[None, ...]
-            print(spec.shape)
+            (spec.shape)
             specs.append(torch.from_numpy(spec).to(audio_batch.device))
         return torch.cat(specs, dim=0)
 
@@ -160,14 +173,12 @@ class CQT(object):
         device = spec.device
         spec = spec.data.cpu().numpy()
         for item in spec:
-            print(item.shape)
             samp = librosa.icqt(
                 item.T,
                 sparsity=0,
                 hop_length=self.hop_length,
                 bins_per_octave=self.bins_per_octave,
                 scale=True)[None, ...]
-            print(samp.shape)
             samp = torch.from_numpy(samp).to(device)
             samples.append(samp)
         return torch.cat(samples, dim=0)
@@ -181,7 +192,6 @@ class CQT(object):
         freqs /= int(self.samplerate)
         return freqs
 
-# TODO: Real-only transform
 class MelScale(object):
     def __init__(self):
         super().__init__()
@@ -200,19 +210,16 @@ class MelScale(object):
         return td
 
     def to_frequency_domain(self, audio_batch):
-        print(audio_batch.shape)
         windowed = windowed_audio(
             audio_batch, self.fft_size, self.fft_size // 2)
         windowed = windowed.data.cpu().numpy()
-        print(windowed.shape)
         freq_domain = windowed @ self.basis.T
         freq_domain = torch.from_numpy(freq_domain)
-        print(freq_domain.shape)
         return freq_domain
 
     @property
     def center_frequencies(self):
-        return np.array(list(self.scale.center_frequencies))
+        return np.array(list(self.scale.center_frequencies)) / int(self.samplerate)
 
 
 class AudioCodec(object):
@@ -233,7 +240,7 @@ class AudioCodec(object):
 
 if __name__ == '__main__':
     app = zounds.ZoundsApp(globals=globals(), locals=locals())
-    app.start_in_thread(8888)
+    app.start_in_thread(9999)
 
     n_samples = 2 ** 15
     samplerate = zounds.SR22050()
@@ -242,14 +249,14 @@ if __name__ == '__main__':
 
     stream = batch_stream(Config.audio_path(), '*.wav', 1, n_samples)
 
-    transformer = AudioCodec(MelScale())
+    basis = MelScale()
+    transformer = AudioCodec(basis)
 
     while True:
         batch = next(stream)
         o = zounds.AudioSamples(
             batch.squeeze(), samplerate).pad_with_silence()
         batch = torch.from_numpy(batch).float()
-        print(batch.shape)
         spec = transformer.to_frequency_domain(batch)
 
         mag = spec[..., 0].data.cpu().numpy().squeeze()
@@ -260,23 +267,26 @@ if __name__ == '__main__':
                                 .numpy().squeeze(), samplerate).pad_with_silence()
         input('Next...')
 
-    # freq_ratios = torch.fft.rfftfreq(512)
-    # frequencies =  freq_ratios * int(samplerate)
 
-    # osc_freqs = list([int(x) for x in frequencies[[1, 10, 50, 100]]])
+    # Synthetic Test
+    # frequencies = basis.center_frequencies
+    # hz = frequencies * samplerate.nyquist
+    # indices = [10, 100, 150, 200]
 
     # synth = zounds.SineSynthesizer(samplerate)
-    # audio = synth.synthesize(zounds.Seconds(5), osc_freqs)
+    # audio = synth.synthesize(zounds.Seconds(5), hz[indices])
+    # ta = torch.from_numpy(audio).reshape(1, -1)
+    # print(ta.shape)
 
-    # ta = torch.from_numpy(audio).reshape(1, 1, -1)
-    # spec = to_spectrogram(ta, window_size, step_size, int(samplerate))
+    # spec = transformer.to_frequency_domain(ta)
 
     # mag = spec[..., 0].data.cpu().numpy()
-    # phase = spec[..., 1].data.cpu().numpy() * (freq_ratios.data.cpu().numpy()[None, None, :])
+    # phase = spec[..., 1].data.cpu().numpy()
 
-    # pa = phase[:, :, 1].squeeze()
-    # pb = phase[:, :, 10].squeeze()
-    # pc = phase[:, :, 50].squeeze()
-    # pd = phase[:, :, 100].squeeze()
+    # phases = phase[:, :, indices].squeeze()
 
+    # mean_phases = phases[1:-1].mean(axis=0)
+
+
+    
     input()

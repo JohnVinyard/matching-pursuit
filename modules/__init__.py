@@ -7,3 +7,4 @@ from .psychoacoustic import PsychoacousticFeature
 from .pos_encode import pos_encoded, ExpandUsingPosEncodings, LearnedPosEncodings
 from .transformer import ForwardBlock, FourierMixer, Transformer
 from .reverb import NeuralReverb
+from .phase import AudioCodec, MelScale
