@@ -143,6 +143,8 @@ class InstaneousFreqExperiment2(object):
         self.orig = None
         self.decoded = None
         self.spec = None
+
+        self.phase_variance = None
     
     def real(self):
         return zounds.AudioSamples(self.orig[0].squeeze(), self.samplerate).pad_with_silence()
@@ -183,12 +185,16 @@ class InstaneousFreqExperiment2(object):
             batch = torch.from_numpy(batch).to(device)
             with torch.no_grad():
                 encoded = to_spectrogram(batch, self.window_size, self.step_size, int(self.samplerate)).to(device).float()
+
+                e = encoded.data.cpu().numpy()[..., 1]
+                print(e.shape)
+                self.phase_variance = e.std(axis=(0, 1))
                 self.spec = encoded
 
-            step = next(gan_cycle)
+            # step = next(gan_cycle)
 
-            if step == 'gen':
-                self.encoded = train_gen(encoded)
-            else:
-                train_disc(encoded)
+            # if step == 'gen':
+            #     self.encoded = train_gen(encoded)
+            # else:
+            #     train_disc(encoded)
 

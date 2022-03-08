@@ -33,7 +33,7 @@ class FourierMixer(nn.Module):
         return x
 
 
-class Transformer(nn.Module):
+class   Transformer(nn.Module):
     def __init__(self, n_channels, n_layers, return_features=False):
         super().__init__()
         self.n_channels = n_channels

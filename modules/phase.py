@@ -236,6 +236,13 @@ class AudioCodec(object):
         spec = mag_phase_recomposition(
             spec, self.short_time_transform.center_frequencies)
         return self.short_time_transform.to_time_domain(spec)
+    
+
+    def listen(self, spec):
+        with torch.no_grad():
+            audio = self.to_time_domain(spec)
+            return zounds.AudioSamples(
+                audio[0].data.cpu().numpy().reshape(-1), zounds.SR22050()).pad_with_silence()
 
 
 if __name__ == '__main__':
