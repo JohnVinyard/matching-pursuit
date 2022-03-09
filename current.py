@@ -46,7 +46,7 @@ if __name__ == '__main__':
         app.start_in_thread(os.environ['PORT'])
 
         exp = InstaneousFreqExperiment2(
-            overfit=args.overfit, batch_size=64)
+            overfit=args.overfit, batch_size=8)
 
         if exp.__doc__ is None or exp.__doc__.strip() == '':
             raise ValueError('Please write a little about your experiment')

@@ -7,21 +7,19 @@ from loss.least_squares import least_squares_disc_loss, least_squares_generator_
 from modules.linear import LinearOutputStack
 from modules.transformer import Transformer
 from train.gan import get_latent
-from upsample import ConvUpsample, Linear
+from upsample import ConvUpsample
 from util import device
 
-from modules.ddsp import overlap_add
 from modules import AudioCodec, MelScale
 from util.readmedocs import readme
 from torch import nn
-from torch.nn import functional as F
 from torch.optim import Adam
 from itertools import chain
 from train import gan_cycle
 from util.weight_init import make_initializer
 
 
-init_weights = make_initializer(0.02)
+init_weights = make_initializer(0.1)
 
 
 class Encoder(nn.Module):
@@ -29,7 +27,20 @@ class Encoder(nn.Module):
         super().__init__()
         self.embed_mag = LinearOutputStack(128, 2, out_channels=64, in_channels=256)
         self.embed_phase = LinearOutputStack(128, 2, out_channels=64, in_channels=256)
-        self.t = Transformer(128, 4)
+        # self.t = Transformer(128, 4)
+        self.net = nn.Sequential(
+            nn.Conv1d(128, 128, 3, 2, 1),
+            nn.LeakyReLU(0.2,),
+            nn.Conv1d(128, 128, 3, 2, 1),
+            nn.LeakyReLU(0.2,),
+            nn.Conv1d(128, 128, 3, 2, 1),
+            nn.LeakyReLU(0.2,),
+            nn.Conv1d(128, 128, 3, 2, 1),
+            nn.LeakyReLU(0.2,),
+            nn.Conv1d(128, 128, 3, 2, 1),
+            nn.LeakyReLU(0.2,),
+            nn.Conv1d(128, 128, 2, 2, 0),
+        )
         self.apply(init_weights)
     
     def forward(self, x):
@@ -39,25 +50,26 @@ class Encoder(nn.Module):
         mag = self.embed_mag(mag)
         phase = self.embed_phase(phase)
         x = torch.cat([mag, phase], dim=-1)
-        x = self.t(x)
-        x = x[:, -1, :]
+
+        x = x.permute(0, 2, 1)
+        x = self.net(x)
+        x = x.reshape(batch, -1)
+        # x = self.t(x)
         return x
 
 
 class Decoder(nn.Module):
     def __init__(self):
         super().__init__()
-        self.up = ConvUpsample(128, 128, 4, 64, mode='nearest', out_channels=128)
-        # self.t = Transformer(128, 3)
-        self.mag = LinearOutputStack(128, 2, out_channels=256)
-        self.phase = LinearOutputStack(128, 2, out_channels=256)
+        self.up = ConvUpsample(128, 128, 4, 64, mode='learned', out_channels=128)
+        self.mag = LinearOutputStack(128, 4, out_channels=256)
+        self.phase = LinearOutputStack(128, 4, out_channels=256)
         self.apply(init_weights)
     
     def forward(self, x):
         x = self.up(x)
         x = x.permute(0, 2, 1)
-        # x = self.t(x)
-        mag = self.mag(x) ** 2
+        mag = torch.abs(self.mag(x))
         phase = self.phase(x)
         x = torch.cat([mag[..., None], phase[..., None]], dim=-1) # (batch, time, channels, 2)
         x = x.permute(0, 3, 1, 2)
@@ -121,12 +133,6 @@ def to_spectrogram(audio_batch, window_size, step_Size, samplerate):
 def from_spectrogram(spec, window_size, step_size, samplerate):
     return codec.to_time_domain(spec)
 
-
-def fake_stream():
-    synth = zounds.SineSynthesizer(zounds.SR22050())
-    samples = synth.synthesize(zounds.SR22050().frequency  * (2**14), [220, 440, 880])
-    yield np.array(samples).reshape((1, 1, -1))
-    input()
 
 @readme
 class InstaneousFreqExperiment2(object):
