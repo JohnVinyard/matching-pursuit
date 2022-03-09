@@ -121,8 +121,8 @@ class OneDNerf(nn.Module):
             pos = conditioning + pos
         
         x = self.net(pos)
-        mag = self.mag(x)
-        phase = self.phase(x)
+        mag = self.mag(x) ** 2
+        phase = torch.sin(self.phase(x)) * (np.pi * 2)
         x = torch.cat([mag[..., None], phase[..., None]], dim=-1)
         return x
 
