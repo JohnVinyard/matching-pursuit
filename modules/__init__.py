@@ -8,3 +8,4 @@ from .pos_encode import pos_encoded, ExpandUsingPosEncodings, LearnedPosEncoding
 from .transformer import ForwardBlock, FourierMixer, Transformer
 from .reverb import NeuralReverb
 from .phase import AudioCodec, MelScale
+from .pif import AuditoryImage

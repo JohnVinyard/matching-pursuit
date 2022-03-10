@@ -1,6 +1,6 @@
 from config import config_values
 import json
-from experiments import InstaneousFreqExperiment2
+from experiments import InstaneousFreqExperiment3
 import os
 import zounds
 import argparse
@@ -45,7 +45,7 @@ if __name__ == '__main__':
         app = zounds.ZoundsApp(locals=locals(), globals=globals())
         app.start_in_thread(os.environ['PORT'])
 
-        exp = InstaneousFreqExperiment2(
+        exp = InstaneousFreqExperiment3(
             overfit=args.overfit, batch_size=8)
 
         if exp.__doc__ is None or exp.__doc__.strip() == '':

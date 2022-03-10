@@ -1,0 +1,1 @@
+Taking it easy today.  Try an autoencoder with the new representation

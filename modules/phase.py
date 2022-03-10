@@ -109,13 +109,6 @@ def morlet_filter_bank(
 
     return basis.astype(np.complex64)
 
-# def geom_basis(fft_size):
-#     sr = zounds.SR22050()
-#     return morlet_filter_bank(
-#         sr, 
-#         fft_size, 
-#         zounds.MelScale(zounds.FrequencyBand(20, sr.nyquist), fft_size), 
-#         0.1)
 
 def short_time_transform(x, ws=512, ss=256, basis_func=None):
     basis = basis_func(ws)
