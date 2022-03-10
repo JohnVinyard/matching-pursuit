@@ -306,7 +306,7 @@ class OscillatorBank(nn.Module):
         amp = F.upsample(amp, size=self.n_audio_samples, mode='linear')
         freq = F.upsample(freq, size=self.n_audio_samples, mode='linear')
 
-        x = torch.sin(torch.cumsum(freq * torch.pi, dim=-1)) * amp
+        x = torch.sin(torch.cumsum(freq * np.pi, dim=-1)) * amp
         x = torch.mean(x, dim=1, keepdim=True)
         if self.return_params:
             return x, freq_params

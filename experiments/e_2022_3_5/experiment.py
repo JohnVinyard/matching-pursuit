@@ -188,7 +188,7 @@ class BandUpsample(nn.Module):
             activation=torch.sigmoid,
             # encourage sparser activations while remaining linear
             amp_activation=torch.abs,
-            return_params=False,
+            return_params=False,    
             constrain=True,
             # linear frequency seems to be integral
             log_frequency=False,

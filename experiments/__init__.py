@@ -37,3 +37,4 @@ from .e_2022_3_5 import MultiresolutionAutoencoderWithActivationRefinements20
 from .e_2022_3_6 import InstaneousFreqExperiment
 from .e_2022_3_7 import InstaneousFreqExperiment2
 from .e_2022_3_9 import InstaneousFreqExperiment3
+from .e_2022_3_10 import SingleResolutionPif

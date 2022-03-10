@@ -40,7 +40,7 @@ def iter_chunks(path, pattern, chunksize):
             yield fp, start, stop
 
 
-def batch_stream(path, pattern, batch_size, n_samples, overfit=False):
+def batch_stream(path, pattern, batch_size, n_samples, overfit=False, normalize=False):
     paths = list(iter_files(path, pattern))
 
     batch_size = 1 if overfit else batch_size
@@ -52,6 +52,9 @@ def batch_stream(path, pattern, batch_size, n_samples, overfit=False):
             data = audio(path)
             start = np.random.randint(0, data.shape[0] - n_samples)
             batch[i, :] = data[start: start + n_samples]
+        
+        if normalize:
+            batch = batch / (np.abs(batch.max(axis=-1, keepdims=True)) + 1e-12)
         yield batch
 
         if overfit:
