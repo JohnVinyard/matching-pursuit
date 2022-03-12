@@ -23,7 +23,7 @@ class AuditoryImage(nn.Module):
         step = time // self.time_steps
         x = x.unfold(-1, self.window_size, step)
         x = x * self.window[None, None, None, :]
-        x = torch.abs(torch.fft.rfft(x, dim=-1))
+        x = torch.abs(torch.fft.rfft(x, dim=-1, norm='ortho'))
         return x
 
 

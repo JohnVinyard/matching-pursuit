@@ -11,3 +11,9 @@ artifacts.
 
 This experiment seeks to find out whether a simpler, single-resolution approach
 is just as effective.
+
+Observations
+============================
+- not normalizing audio to [-1, 1] seems to solve the "Exploding generator" issue
+- 1e-3 is too high a learning rate
+- can't seem to get transposed convolutions to work, but upsampling seems to work with init ~.12
