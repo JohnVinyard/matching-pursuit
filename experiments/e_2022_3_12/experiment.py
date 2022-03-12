@@ -57,7 +57,6 @@ class Generator(nn.Module):
             activation=lambda x: x,
             squared=False,
             mask_after=1)
-        
 
         self.apply(init_weights)
 
@@ -117,6 +116,7 @@ def train_gen(batch):
     print('G', loss.item())
     return fake
 
+
 def train_disc(batch):
     disc_optim.zero_grad()
 
@@ -132,6 +132,9 @@ def train_disc(batch):
     print('D', loss.item())
 
 
+codec = AudioCodec(MelScale())
+
+
 @readme
 class MetaFormerExperiment(object):
     def __init__(self, overfit, batch_size):
@@ -141,12 +144,13 @@ class MetaFormerExperiment(object):
 
         self.n_samples = n_samples
         self.decoded = None
-    
+
     def fake(self):
         return zounds.AudioSamples(self.decoded[0].data.cpu().numpy().squeeze(), samplerate).pad_with_silence()
-    
+
     def fake_spec(self):
-        return np.log(0.01 + np.abs(zounds.spectral.stft(self.fake())))
+        spec = codec.to_frequency_domain(self.decoded.reshape(-1, self.n_samples))
+        return spec[0, ..., 0].data.cpu().numpy().squeeze()
 
     def run(self):
         stream = batch_stream(
