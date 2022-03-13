@@ -55,7 +55,8 @@ class ExpandUsingPosEncodings(nn.Module):
             n_freqs,
             latent_dim,
             multiply=False,
-            learnable_encodings=False):
+            learnable_encodings=False,
+            concat=False):
 
         super().__init__()
         self.learnable_encodings = learnable_encodings
@@ -68,6 +69,11 @@ class ExpandUsingPosEncodings(nn.Module):
         self.embed_latent = nn.Linear(latent_dim, channels)
         self.multiply = multiply
         self.pos_encodings = None
+        self.concat = concat
+
+
+        if self.concat:
+            self.cat = nn.Linear(channels * 2, channels)
     
     def _get_pos_encodings(self, batch_size, device):
         if not self.learnable_encodings:
@@ -92,6 +98,9 @@ class ExpandUsingPosEncodings(nn.Module):
 
         if self.multiply:
             x = x * pos
+        elif self.concat:
+            x = torch.cat([x, pos], dim=-1)
+            x = self.cat(x)
         else:
             x = x + pos
 

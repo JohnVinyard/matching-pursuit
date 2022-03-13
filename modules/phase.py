@@ -138,52 +138,52 @@ class STFT(object):
         return rfft_freqs(self.window_size)
 
 
-class CQT(object):
-    def __init__(self):
-        super().__init__()
-        self.n_bins = 256
-        self.samplerate = zounds.SR22050()
-        self.hop_length = 512
-        self.bins_per_octave = 48
+# class CQT(object):
+#     def __init__(self):
+#         super().__init__()
+#         self.n_bins = 256
+#         self.samplerate = zounds.SR22050()
+#         self.hop_length = 512
+#         self.bins_per_octave = 48
 
-    def to_frequency_domain(self, audio_batch):
-        specs = []
-        ab = audio_batch.data.cpu().numpy()
-        for item in ab:
-            spec = librosa.cqt(
-                item.squeeze(),
-                n_bins=self.n_bins,
-                sparsity=0,
-                hop_length=self.hop_length,
-                bins_per_octave=self.bins_per_octave,
-                scale=True).T[None, ...]
-            (spec.shape)
-            specs.append(torch.from_numpy(spec).to(audio_batch.device))
-        return torch.cat(specs, dim=0)
+#     def to_frequency_domain(self, audio_batch):
+#         specs = []
+#         ab = audio_batch.data.cpu().numpy()
+#         for item in ab:
+#             spec = librosa.cqt(
+#                 item.squeeze(),
+#                 n_bins=self.n_bins,
+#                 sparsity=0,
+#                 hop_length=self.hop_length,
+#                 bins_per_octave=self.bins_per_octave,
+#                 scale=True).T[None, ...]
+#             (spec.shape)
+#             specs.append(torch.from_numpy(spec).to(audio_batch.device))
+#         return torch.cat(specs, dim=0)
 
-    def to_time_domain(self, spec):
-        samples = []
-        device = spec.device
-        spec = spec.data.cpu().numpy()
-        for item in spec:
-            samp = librosa.icqt(
-                item.T,
-                sparsity=0,
-                hop_length=self.hop_length,
-                bins_per_octave=self.bins_per_octave,
-                scale=True)[None, ...]
-            samp = torch.from_numpy(samp).to(device)
-            samples.append(samp)
-        return torch.cat(samples, dim=0)
+#     def to_time_domain(self, spec):
+#         samples = []
+#         device = spec.device
+#         spec = spec.data.cpu().numpy()
+#         for item in spec:
+#             samp = librosa.icqt(
+#                 item.T,
+#                 sparsity=0,
+#                 hop_length=self.hop_length,
+#                 bins_per_octave=self.bins_per_octave,
+#                 scale=True)[None, ...]
+#             samp = torch.from_numpy(samp).to(device)
+#             samples.append(samp)
+#         return torch.cat(samples, dim=0)
 
-    @property
-    def center_frequencies(self):
-        freqs = librosa.cqt_frequencies(
-            self.n_bins,
-            fmin=librosa.note_to_hz('C1'),
-            bins_per_octave=self.bins_per_octave)
-        freqs /= int(self.samplerate)
-        return freqs
+#     @property
+#     def center_frequencies(self):
+#         freqs = librosa.cqt_frequencies(
+#             self.n_bins,
+#             fmin=librosa.note_to_hz('C1'),
+#             bins_per_octave=self.bins_per_octave)
+#         freqs /= int(self.samplerate)
+#         return freqs
 
 class MelScale(object):
     def __init__(self):
