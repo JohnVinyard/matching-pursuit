@@ -14,6 +14,7 @@ from modules.pos_encode import ExpandUsingPosEncodings, pos_encoded
 import zounds
 from modules.transformer import Transformer
 from train.gan import get_latent
+from upsample import ConvUpsample
 from util import device
 from torch.optim import Adam
 from train import gan_cycle
@@ -32,10 +33,14 @@ init_weights = make_initializer(0.05)
 class Generator(nn.Module):
     def __init__(self, n_samples):
         super().__init__()
-        self.up = ExpandUsingPosEncodings(128, 64, 16, 128, concat=True)
-        self.t = LinearOutputStack(128, 7, activation=torch.sin)
+        # self.up = ExpandUsingPosEncodings(128, 64, 16, 128, concat=True)
+
+        # self.transform = Transformer(128, 4)
+        # self.t = LinearOutputStack(128, 4, activation=torch.sin)
         self.harm_transform = LinearOutputStack(128, 2, activation=torch.sin)
         self.noise_transform = LinearOutputStack(128, 2, activation=torch.sin)
+
+        self.up = ConvUpsample(128, 128, 4, 64, mode='nearest', out_channels=128)
 
         self.n_samples = n_samples
 
@@ -65,16 +70,12 @@ class Generator(nn.Module):
         self.apply(init_weights)
 
     def forward(self, x):
-        x = self.up(x[:, None, :])
-        
-        x = self.t(x)
-
+        x = self.up(x)
+        x = x.permute(0, 2, 1)
         h = self.harm_transform(x)
         n = self.noise_transform(x)
-
         h = h.permute(0, 2, 1)
         n = n.permute(0, 2, 1)
-
         h = self.osc(h)
         n = self.noise(n)
         return h, n
@@ -126,7 +127,7 @@ class Discriminator(nn.Module):
         self.initial = LinearOutputStack(128, 2)
         self.down = nn.Linear(256, 128)
 
-        self.t = Transformer(128, 5, return_features=True)
+        self.t = Mixer(128, 32, 4, return_features=True)
         self.final = LinearOutputStack(128, 2, out_channels=1)
 
         self.apply(init_weights)
