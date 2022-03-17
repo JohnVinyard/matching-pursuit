@@ -15,7 +15,6 @@ def pos_encode_feature(x, domain, n_samples, n_freqs):
     x = torch.cat(output, dim=-1)
     return x
 
-
 def n_features_for_freq(n_freqs):
     return n_freqs * 2 + 1
 
