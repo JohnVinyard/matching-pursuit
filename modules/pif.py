@@ -11,18 +11,21 @@ class AuditoryImage(nn.Module):
     absolute phase
     """
 
-    def __init__(self, window_size, time_steps):
+    def __init__(self, window_size, time_steps, do_windowing=True):
         super().__init__()
         self.window_size = window_size
         self.time_steps = time_steps
         self.register_buffer('window', torch.hamming_window(window_size))
+        self.do_windowing = do_windowing
     
     def forward(self, x):
         batch, channels, time = x.shape
-        padding = self.window_size
+        padding = self.window_size // 2
+        x = F.pad(x, (0, padding))
         step = time // self.time_steps
         x = x.unfold(-1, self.window_size, step)
-        x = x * self.window[None, None, None, :]
+        if self.do_windowing:
+            x = x * self.window[None, None, None, :]
         x = torch.abs(torch.fft.rfft(x, dim=-1, norm='ortho'))
         return x
 
