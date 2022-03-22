@@ -1,6 +1,7 @@
 from torch import nn
 from torch.nn import functional as F
-
+import torch
+import numpy as np
 from modules.atoms import unit_norm
 
 
@@ -15,6 +16,24 @@ class PoolMixer(nn.Module):
         x = x.permute(0, 2, 1)
         return x
 
+
+class AttnMixer(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.query = nn.Linear(channels, channels)
+        self.key = nn.Linear(channels, channels)
+        self.value = nn.Linear(channels, channels)
+    
+    def forward(self, x):
+        q = self.query(x)
+        k = self.key(x)
+        v = self.value(x)
+
+        attn = q @ k.permute(0, 2, 1)
+        attn = attn / np.sqrt(x.shape[1])
+        attn = torch.softmax(attn, dim=1)
+        x = attn @ v.permute(0, 2, 1)
+        return x
 
 class MetaFormerBlock(nn.Module):
     def __init__(self, channels, make_mixer, make_norm):

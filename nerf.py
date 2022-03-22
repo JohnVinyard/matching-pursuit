@@ -2,7 +2,7 @@ import zounds
 from config.dotenv import Config
 import numpy as np
 from modules.linear import LinearOutputStack, ResidualBlock
-from modules.metaformer import MetaFormer, PoolMixer
+from modules.metaformer import MetaFormer, PoolMixer, AttnMixer
 from modules.mixer import Mixer
 from modules.phase import AudioCodec, MelScale
 from modules.pos_encode import pos_encoded
@@ -26,7 +26,8 @@ Answered:
 - Can I learn 1d (YES) or 2d NERF representations of the new spectrogram representation
 '''
 
-init_weights = make_initializer(0.1)
+init_weights = make_initializer(0.14)
+
 
 def activation(x):
     return F.leaky_relu(x, 0.2)
@@ -38,6 +39,51 @@ def binary_pos_encoded(batch_size, time_dim, n_freqs, device):
     for i in range(n_freqs, 1, -1):
         pos[:, ::i, i - 1] = 1
     return pos
+# class ModulatedLayer(nn.Module):
+#     def __init__(self, channels, forward_layers, conditioning_layers):
+#         super().__init__()
+#         self.f = LinearOutputStack(channels, forward_layers, activation=activation)
+#         self.weight = LinearOutputStack(channels, conditioning_layers, activation=activation)
+#         self.bias = LinearOutputStack(channels, conditioning_layers, activation=activation)
+
+#     def forward(self, x, conditioning):
+#         x = self.f(x)
+#         w = self.weight(conditioning)
+#         b = self.bias(conditioning)
+
+#         return (x * torch.sigmoid(w)) + b
+
+
+# class ModulatedStack(nn.Module):
+#     def __init__(self, channels, layers, freq_bins, pos_encoder):
+#         super().__init__()
+
+#         self.pos_encoder = pos_encoder
+#         self.initial = LinearOutputStack(channels, 1, in_channels=33, activation=activation)
+#         self.net = nn.Sequential(
+#             *[ModulatedLayer(channels, 2, 2) for _ in range(layers)])
+#         self.mag = LinearOutputStack(channels, 3, out_channels=freq_bins, activation=activation)
+#         self.phase = LinearOutputStack(channels, 3, out_channels=freq_bins, activation=activation)
+
+#     def forward(self, latent):
+#         pos = self.pos_encoder(latent.shape[0], 128, 16, device)
+#         x = self.initial(pos)
+
+#         for layer in self.net:
+#             x = layer(x, latent[:, None, :])
+
+#         mag = self.mag(x)
+#         phase = self.phase(x)
+#         x = torch.cat([mag[..., None], phase[..., None]], dim=-1)
+#         return x
+
+
+# def binary_pos_encoded(batch_size, time_dim, n_freqs, device):
+#     n_freqs = (n_freqs * 2) + 1
+#     pos = torch.zeros(batch_size, time_dim, n_freqs).to(device)
+#     for i in range(n_freqs, 1, -1):
+#         pos[:, ::i, i - 1] = 1
+#     return pos
 
 
 def reduce_mean(x):
@@ -46,6 +92,13 @@ def reduce_mean(x):
 
 def reduce_select(x, index=-1):
     return x[:, index, :]
+def reduce_last(x):
+    return x[:, -1, :]
+
+
+def reduce_max(x):
+    _, i = torch.max(torch.abs(x), dim=1, keepdim=True)
+    return torch.take(x, i).squeeze()
 
 
 class Encoder(nn.Module):
@@ -56,19 +109,21 @@ class Encoder(nn.Module):
         self.reduction = reduction
 
         self.embed_pos = LinearOutputStack(
-            128, 2, in_channels=64, out_channels=64, activation=activation)
+            128, 2, in_channels=33, out_channels=64, activation=activation)
 
         self.embed_mag = LinearOutputStack(
             128, 2, in_channels=256, out_channels=64, activation=activation)
         self.embed_phase = LinearOutputStack(
             128, 2, in_channels=256, out_channels=64, activation=activation)
         self.down = nn.Linear(64 * 3, 128)
-
-        self.t = Mixer(128, 128, 5)
-
+        # self.t = Mixer(128, 128, 5)
+        self.t = MetaFormer(
+            128,
+            5,
+            lambda channels: AttnMixer(channels),
+            lambda channels: None)
         self.final = LinearOutputStack(128, 2, activation=activation)
 
-        self.attention = LinearOutputStack(128, 2, out_channels=1)
         self.apply(init_weights)
 
     def forward(self, x):
@@ -87,9 +142,7 @@ class Encoder(nn.Module):
 
         x = self.t(x)
 
-        attn = torch.relu(self.attention(x))
-
-        x = self.reduction(x * attn)
+        x = self.reduction(x)
         x = self.final(x)
         return x
 
@@ -112,11 +165,25 @@ def random_fourier_features(batch_size, seq_len, n_features, scale):
 class OneDNerf(nn.Module):
     def __init__(self, pos_encoder):
         super().__init__()
-        self.embed = nn.Linear(64, 128)
-        self.net = LinearOutputStack(128, 5, activation=activation, in_channels=128 * 2)
-        self.mag = LinearOutputStack(128, 3, out_channels=256, activation=activation)
-        self.phase = LinearOutputStack(128, 3, out_channels=256, activation=activation)
+
+        self.embed = nn.Linear(33, 128)
+
+        self.net = nn.Sequential(
+            LinearOutputStack(128, 5, activation=activation,
+                              in_channels=128 * 2),
+            # MetaFormer(
+            #     128,
+            #     5,
+            #     lambda channels: AttnMixer(channels),
+            #     lambda channels: None)
+        )
+
+        self.mag = LinearOutputStack(
+            128, 3, out_channels=256, activation=activation)
+        self.phase = LinearOutputStack(
+            128, 3, out_channels=256, activation=activation)
         self.pos_encoder = pos_encoder
+
         self.apply(init_weights)
 
     def forward(self, conditioning):
@@ -124,13 +191,14 @@ class OneDNerf(nn.Module):
         Note: typically positional encoding would be passed
         in, but why not just generate it here, since it's static
         """
-        # pos = self.pos_encoder(1, 128, 16, device).repeat(conditioning.shape[0], 1, 1)
-        pos = random_fourier_features(conditioning.shape[0], 128, 64, 100)
+        pos = self.pos_encoder(1, 128, 16, device).repeat(
+            conditioning.shape[0], 1, 1)
         pos = self.embed(pos)
 
-        conditioning = conditioning[:, None, :].repeat(1, pos.shape[1], 1)
-        pos = torch.cat([conditioning, pos], dim=-1)
-        
+        if conditioning is not None:
+            conditioning = conditioning[:, None, :].repeat(1, pos.shape[1], 1)
+            pos = torch.cat([conditioning, pos], dim=-1)
+
         x = self.net(pos)
         mag = torch.abs(self.mag(x))
         phase = torch.sin(self.phase(x)) * (np.pi * 2)
@@ -163,8 +231,10 @@ pe = pos_encoded
 
 codec = AudioCodec(MelScale())
 model = OneDNerf(pos_encoder=pe).to(device)
-encoder = Encoder(pos_encoder=pe, reduction=reduce_mean).to(device)
+# model = ModulatedStack(128, 5, 256, pos_encoder=pe).to(device)
+encoder = Encoder(pos_encoder=pe, reduction=reduce_last).to(device)
 optim = Adam(model.parameters(), lr=1e-3, betas=(0, 0.9))
+
 
 def train_ae(batch):
     optim.zero_grad()
@@ -182,7 +252,6 @@ if __name__ == '__main__':
     app = zounds.ZoundsApp(locals=locals(), globals=globals())
     app.start_in_thread(9999)
 
-    
     batch_size = 4
     n_samples = 2 ** 15
     overfit = False
@@ -195,25 +264,25 @@ if __name__ == '__main__':
 
     def real_mag():
         return item[0, :, :, 0].data.cpu().numpy()
-    
+
     def real_phase():
         return item[0, :, :, 1].data.cpu().numpy()
-    
+
     def fake_mag():
         return r[0, :, :, 0].data.cpu().numpy()
-    
+
     def fake_phase():
         return r[0, :, :, 1].data.cpu().numpy()
-    
+
     def real():
-        return codec.listen(item.data.cpu())
-    
+        return codec.listen(item)
+
     def fake():
-        return codec.listen(r.data.cpu())
-    
+        return codec.listen(r)
+
     def latent():
         return e.data.cpu().numpy()
-    
+
     for item in data_stream:
         e, r = train_ae(item)
 
