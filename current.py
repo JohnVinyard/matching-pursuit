@@ -1,6 +1,6 @@
 from config import config_values
 import json
-from experiments import AdversarialAutoEncoderSingleResolution
+from experiments import ClassicalFeatureBasedLoss
 import os
 import zounds
 import argparse
@@ -45,8 +45,8 @@ if __name__ == '__main__':
         app = zounds.ZoundsApp(locals=locals(), globals=globals())
         app.start_in_thread(os.environ['PORT'])
 
-        exp = AdversarialAutoEncoderSingleResolution(
-            overfit=args.overfit, batch_size=4)
+        exp = ClassicalFeatureBasedLoss(
+            overfit=args.overfit, batch_size=8)
 
         if exp.__doc__ is None or exp.__doc__.strip() == '':
             raise ValueError('Please write a little about your experiment')

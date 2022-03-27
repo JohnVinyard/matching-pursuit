@@ -39,4 +39,5 @@
 # from .e_2022_3_9 import InstaneousFreqExperiment3
 # from .e_2022_3_10 import SingleResolutionPif
 # from .e_2022_3_12 import MetaFormerExperiment
-from .e_2022_3_17 import AdversarialAutoEncoderSingleResolution
+# from .e_2022_3_17 import AdversarialAutoEncoderSingleResolution
+from .e_2022_3_23 import ClassicalFeatureBasedLoss

@@ -167,7 +167,8 @@ class Encoder(nn.Module):
         features = []
         for layer in self.down:
             x = layer(x)
-            features.append(x.reshape(x.shape[0], -1))
+            feat = x.reshape(x.shape[0], -1)
+            features.append(feat / feat.shape[1])
         x = x.reshape(-1, 128)
         features = torch.cat(features, dim=1)
         return x, features
@@ -181,10 +182,13 @@ class Discriminator(nn.Module):
         self.final = LinearOutputStack(128, 3, out_channels=1)
         self.apply(init_weights)
     
-    def forward(self, x):
-        x, features = self.encoder(x)
-        x = self.final(x)
-        return x, features
+    def forward(self, x, return_encoded=False):
+        encoded, features = self.encoder(x)
+        x = self.final(encoded)
+        if return_encoded:
+            return x, features, encoded
+        else:
+            return x, features
 
 
 class AutoEncoder(nn.Module):
@@ -220,11 +224,11 @@ def train_gen(batch):
     h, n = decoded
 
     fj, ff = disc(h + n)
-    # rj, rf = disc(batch)
+    rj, rf = disc(batch)
     ll = latent_loss(encoded)
 
-    # loss = F.mse_loss(ff, rf) + ll
-    loss = least_squares_generator_loss(fj) + ll
+    feature_loss = F.mse_loss(ff, rf)
+    loss = least_squares_generator_loss(fj) + ll + feature_loss
     loss.backward()
     gen_optim.step()
     print('G', loss.item())
@@ -236,13 +240,13 @@ def train_disc(batch):
     h, n = decoded
 
     fj, ff = disc(h + n)
-    rj, rf = disc(batch)
+    rj, rf, encoded = disc(batch, return_encoded=True)
 
-    
     loss = least_squares_disc_loss(rj, fj)
     loss.backward()
     disc_optim.step()
     print('D', loss.item())
+    return encoded
 
 @readme
 class AdversarialAutoEncoderSingleResolution(object):
@@ -258,6 +262,8 @@ class AdversarialAutoEncoderSingleResolution(object):
 
         self.harm = None
         self.noise = None
+
+        self.disc_z = None
     
 
     def real(self):
@@ -278,6 +284,9 @@ class AdversarialAutoEncoderSingleResolution(object):
     
     def latent(self):
         return self.z.data.cpu().numpy().squeeze()
+    
+    def disc_latent(self):
+        return self.disc_z.data.cpu().numpy().squeeze()
     
     @property
     def recon(self):
@@ -300,4 +309,4 @@ class AdversarialAutoEncoderSingleResolution(object):
                 self.noise = n
                 self.z = e
             else:
-                train_disc(item)
+                self.disc_z = train_disc(item)

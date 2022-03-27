@@ -214,6 +214,9 @@ class MelScale(object):
         self.basis = torch.from_numpy(morlet_filter_bank(
             self.samplerate, self.fft_size, self.scale, 0.01)).to(device)
 
+    def n_time_steps(self, n_samples):
+        return n_samples // (self.fft_size // 2)
+
     def to_time_domain(self, spec):
         spec = spec.data.cpu().numpy()
         windowed = (spec @ self.basis.data.cpu().numpy()).real[..., ::-1]
@@ -224,8 +227,13 @@ class MelScale(object):
     def to_frequency_domain(self, audio_batch):
         windowed = windowed_audio(
             audio_batch, self.fft_size, self.fft_size // 2)
+
+        # KLUDGE: torch doesn't seem to support real-to-complex
+        # multiplication at the moment;  it expects the two terms
+        # to be homogeneous
         real = windowed @ self.basis.real.T
         imag = windowed @ self.basis.imag.T
+
         freq_domain = torch.complex(real, imag)
         return freq_domain
 

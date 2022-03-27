@@ -6,3 +6,8 @@ I haven't quite figured out how to make the latter transform differentiable all 
 settling for the AIM/PIF feature instead.
 
 This is a simple experiment to see if I can learn an autoencoder that uses adversarial loss
+
+Learnings
+===================
+- adding adversarial loss causes generator collapse and volume explosion
+- without adversarial loss, generations don't sound substantially different from vanilla autoencoder
