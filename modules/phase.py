@@ -8,6 +8,7 @@ import librosa
 from scipy.signal import morlet, hann
 
 from modules.ddsp import overlap_add
+from util import device
 
 
 def windowed_audio(audio_batch, window_size, step_size):
@@ -42,19 +43,33 @@ def rfft_freqs(window_size):
 
 
 def mag_phase_decomposition(spec, freqs):
-    batch_size = spec.shape[0]
+    if isinstance(freqs, np.ndarray):
+        freqs = torch.from_numpy(freqs).to(spec.device)
+    
+    batch_size, time, freq = spec.shape
     mag = torch.abs(spec)
+
+    # cosine distance
+    phase = torch.cat([spec.real[..., None], spec.imag[..., None]], dim=-1)
+    a = phase[:, 1:, :, :]
+    b = phase[:, :-1, :, :]
+
+    # cosine distance
+    # numerator = torch.sum(a * b, dim=-1)
+    # denominator = torch.norm(a, dim=-1) * torch.norm(b, dim=-1)
+    # phase = 1 - (numerator / (denominator + 1e-12))
+    # phase = phase * np.pi * 2
+    # padding = torch.zeros(batch_size, 1, freq).to(spec.device)
+    # phase = torch.cat([phase, padding], dim=1)
+    # # # print(phase.max().item(), phase.min().item())
+
+    # polar coordinates
     phase = torch.angle(spec)
-
-    # unwrap
-    phase = phase.data.cpu().numpy()
-    phase = np.unwrap(phase, axis=1)
-    phase = torch.from_numpy(phase).to(spec.device)
-
     phase = torch.diff(
         phase,
         dim=1,
         prepend=torch.zeros(batch_size, 1, spec.shape[-1]).to(spec.device))
+    phase = phase % (2 * np.pi)
 
     freqs = freqs * 2 * np.pi
     # subtract the expected value
@@ -64,6 +79,9 @@ def mag_phase_decomposition(spec, freqs):
 
 
 def mag_phase_recomposition(spec, freqs):
+    if isinstance(freqs, np.ndarray):
+        freqs = torch.from_numpy(freqs).to(spec.device)
+    
     real = spec[..., 0]
     phase = spec[..., 1]
 
@@ -72,7 +90,7 @@ def mag_phase_recomposition(spec, freqs):
     phase = phase + freqs[None, None, :]
 
     imag = torch.cumsum(phase, dim=1)
-    
+
     imag = (imag + np.pi) % (2 * np.pi) - np.pi
     spec = real * torch.exp(1j * imag)
     return spec
@@ -84,7 +102,7 @@ def morlet_filter_bank(
         scale,
         scaling_factor,
         normalize=True):
-    
+
     basis_size = len(scale)
     basis = np.zeros((basis_size, kernel_size), dtype=np.complex128)
 
@@ -185,6 +203,7 @@ class CQT(object):
         freqs /= int(self.samplerate)
         return freqs
 
+
 class MelScale(object):
     def __init__(self):
         super().__init__()
@@ -192,12 +211,12 @@ class MelScale(object):
         self.fft_size = 512
         self.freq_band = zounds.FrequencyBand(20, self.samplerate.nyquist)
         self.scale = zounds.MelScale(self.freq_band, self.fft_size // 2)
-        self.basis = morlet_filter_bank(
-            self.samplerate, self.fft_size, self.scale, 0.1)
-    
+        self.basis = torch.from_numpy(morlet_filter_bank(
+            self.samplerate, self.fft_size, self.scale, 0.01)).to(device)
+
     def to_time_domain(self, spec):
         spec = spec.data.cpu().numpy()
-        windowed = (spec @ self.basis).real[..., ::-1]
+        windowed = (spec @ self.basis.data.cpu().numpy()).real[..., ::-1]
         windowed = torch.from_numpy(windowed.copy())
         td = overlap_add(windowed[:, None, :, :], apply_window=False)
         return td
@@ -205,14 +224,14 @@ class MelScale(object):
     def to_frequency_domain(self, audio_batch):
         windowed = windowed_audio(
             audio_batch, self.fft_size, self.fft_size // 2)
-        windowed = windowed.data.cpu().numpy()
-        freq_domain = windowed @ self.basis.T
-        freq_domain = torch.from_numpy(freq_domain)
+        real = windowed @ self.basis.real.T
+        imag = windowed @ self.basis.imag.T
+        freq_domain = torch.complex(real, imag)
         return freq_domain
 
     @property
     def center_frequencies(self):
-        return np.array(list(self.scale.center_frequencies)) / int(self.samplerate)
+        return (np.array(list(self.scale.center_frequencies)) / int(self.samplerate)).astype(np.float32)
 
 
 class AudioCodec(object):
@@ -229,7 +248,6 @@ class AudioCodec(object):
         spec = mag_phase_recomposition(
             spec, self.short_time_transform.center_frequencies)
         return self.short_time_transform.to_time_domain(spec)
-    
 
     def listen(self, spec):
         with torch.no_grad():
@@ -267,7 +285,6 @@ if __name__ == '__main__':
                                 .numpy().squeeze(), samplerate).pad_with_silence()
         input('Next...')
 
-
     # Synthetic Test
     # frequencies = basis.center_frequencies
     # hz = frequencies * samplerate.nyquist
@@ -287,6 +304,4 @@ if __name__ == '__main__':
 
     # mean_phases = phases[1:-1].mean(axis=0)
 
-
-    
     input()
