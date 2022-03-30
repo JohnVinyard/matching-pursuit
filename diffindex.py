@@ -5,6 +5,7 @@ from torch import nn
 from torch.optim import Adam
 from torch.nn import functional as F
 import numpy as np
+from modules import stft
 from util import device
 from scipy.signal.windows import tukey
 
@@ -150,6 +151,10 @@ class OscBank(nn.Module):
         x = diff_index(wavetable, clamped) * amp
         return torch.sum(x, dim=0)
 
+def spectral_mag_loss(inp, t):
+    inp = stft(inp)
+    t = stft(t)
+    return F.mse_loss(inp, t)
 
 
 if __name__ == '__main__':
@@ -163,7 +168,8 @@ if __name__ == '__main__':
     while True:
         optim.zero_grad()
         recon = model(None)
-        loss = F.mse_loss(recon, t)
+        # loss = F.mse_loss(recon, t)
+        loss = spectral_mag_loss(recon, t)
         loss.backward()
         optim.step()
         print(loss.item())
