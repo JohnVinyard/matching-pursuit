@@ -1,0 +1,1 @@
+Can I figure out a way to get gradients to pass directly back to oscillator and noise model parameters?

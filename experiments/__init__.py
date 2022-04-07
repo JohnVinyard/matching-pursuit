@@ -40,4 +40,6 @@
 # from .e_2022_3_10 import SingleResolutionPif
 # from .e_2022_3_12 import MetaFormerExperiment
 # from .e_2022_3_17 import AdversarialAutoEncoderSingleResolution
-from .e_2022_3_23 import ClassicalFeatureBasedLoss
+# from .e_2022_3_23 import ClassicalFeatureBasedLoss
+# from .e_2022_3_27 import SingleBandGenerator
+from .e_2022_4_2 import ReinforcementLearningQuestionMark
