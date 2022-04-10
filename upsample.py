@@ -81,7 +81,7 @@ class FFTUpsampleBlock(nn.Module):
     def upsample(self, x):
         batch = x.shape[0]
 
-        x = x.view(batch, self.channels, self.size)
+        x = x.reshape(-1, self.channels, self.size)
 
         coeffs = torch.fft.rfft(x, axis=-1, norm='ortho')
 

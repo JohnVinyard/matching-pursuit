@@ -12,9 +12,11 @@ import torch
 from torch import nn
 from torch.optim import Adam
 from torch.nn import functional as F
+from torch.distributions import Normal
 
 from data.datastore import batch_stream
 from util.weight_init import make_initializer
+from torch.nn.utils.clip_grad import clip_grad_norm_, clip_grad_value_
 
 '''
 Questions to answer:
@@ -30,52 +32,64 @@ init_weights = make_initializer(0.14)
 
 
 def activation(x):
-    return F.leaky_relu(x, 0.2)
+    # return F.leaky_relu(x, 0.2)
+    # return F.gelu(x)
+    return torch.sin(x)
 
 
-def binary_pos_encoded(batch_size, time_dim, n_freqs, device):
-    n_freqs = (n_freqs * 2) + 1
-    pos = torch.zeros(batch_size, time_dim, n_freqs).to(device)
-    for i in range(n_freqs, 1, -1):
-        pos[:, ::i, i - 1] = 1
-    return pos
-# class ModulatedLayer(nn.Module):
-#     def __init__(self, channels, forward_layers, conditioning_layers):
-#         super().__init__()
-#         self.f = LinearOutputStack(channels, forward_layers, activation=activation)
-#         self.weight = LinearOutputStack(channels, conditioning_layers, activation=activation)
-#         self.bias = LinearOutputStack(channels, conditioning_layers, activation=activation)
+# def binary_pos_encoded(batch_size, time_dim, n_freqs, device):
+#     n_freqs = (n_freqs * 2) + 1
+#     pos = torch.zeros(batch_size, time_dim, n_freqs).to(device)
+#     for i in range(n_freqs, 1, -1):
+#         pos[:, ::i, i - 1] = 1
+#     return pos
 
-#     def forward(self, x, conditioning):
-#         x = self.f(x)
-#         w = self.weight(conditioning)
-#         b = self.bias(conditioning)
+class ModulatedLayer(nn.Module):
+    def __init__(self, channels, forward_layers, conditioning_layers):
+        super().__init__()
+        self.f = LinearOutputStack(channels, forward_layers, activation=activation)
+        self.weight = LinearOutputStack(channels, conditioning_layers, activation=activation)
+        self.bias = LinearOutputStack(channels, conditioning_layers, activation=activation)
 
-#         return (x * torch.sigmoid(w)) + b
+    def forward(self, x, conditioning):
+        x = self.f(x)
+        w = self.weight(conditioning)
+        b = self.bias(conditioning)
+
+        return (x * w) + b
 
 
-# class ModulatedStack(nn.Module):
-#     def __init__(self, channels, layers, freq_bins, pos_encoder):
-#         super().__init__()
+class ModulatedStack(nn.Module):
+    def __init__(self, channels, layers, freq_bins, pos_encoder):
+        super().__init__()
 
-#         self.pos_encoder = pos_encoder
-#         self.initial = LinearOutputStack(channels, 1, in_channels=33, activation=activation)
-#         self.net = nn.Sequential(
-#             *[ModulatedLayer(channels, 2, 2) for _ in range(layers)])
-#         self.mag = LinearOutputStack(channels, 3, out_channels=freq_bins, activation=activation)
-#         self.phase = LinearOutputStack(channels, 3, out_channels=freq_bins, activation=activation)
+        self.pos_encoder = pos_encoder
+        self.initial = LinearOutputStack(channels, 1, in_channels=33, activation=activation)
+        self.net = nn.Sequential(
+            *[ModulatedLayer(channels, 2, 2) for _ in range(layers)])
+        
+        self.mag = LinearOutputStack(channels, 3, out_channels=freq_bins, activation=activation)
+        self.phase_mean = LinearOutputStack(channels, 3, out_channels=freq_bins, activation=activation)
+        self.phase_std = LinearOutputStack(channels, 3, out_channels=freq_bins, activation=activation)
 
-#     def forward(self, latent):
-#         pos = self.pos_encoder(latent.shape[0], 128, 16, device)
-#         x = self.initial(pos)
+    def forward(self, latent):
+        pos = self.pos_encoder(latent.shape[0], 128, 16, device)
 
-#         for layer in self.net:
-#             x = layer(x, latent[:, None, :])
+        # embed positional encodings
+        x = self.initial(pos)
 
-#         mag = self.mag(x)
-#         phase = self.phase(x)
-#         x = torch.cat([mag[..., None], phase[..., None]], dim=-1)
-#         return x
+        # pass through FilM-modulated layers
+        for layer in self.net:
+            x = layer(x, latent[:, None, :])
+
+        # compute magnitude and phase
+        mag = torch.abs(self.mag(x))
+        phase_mean = torch.clamp(self.phase_mean(x), -np.pi, np.pi * 2)
+        phase_std = 1e-12 + torch.abs(self.phase_std(x))
+
+        # x = torch.cat([mag[..., None], phase[..., None]], dim=-1)
+
+        return mag, phase_mean, phase_std
 
 
 # def binary_pos_encoded(batch_size, time_dim, n_freqs, device):
@@ -92,6 +106,7 @@ def reduce_mean(x):
 
 def reduce_select(x, index=-1):
     return x[:, index, :]
+
 def reduce_last(x):
     return x[:, -1, :]
 
@@ -129,8 +144,8 @@ class Encoder(nn.Module):
     def forward(self, x):
         batch, time, channels, _ = x.shape
 
-        # pos = self.pos_encoder(batch, 128, 16, x.device)
-        pos = random_fourier_features(batch, 128, 64, 100)
+        pos = self.pos_encoder(batch, 128, 16, x.device)
+        # pos = random_fourier_features(batch, 128, 64, 100)
         pos = self.embed_pos(pos)
 
         mag = x[..., 0]
@@ -146,21 +161,21 @@ class Encoder(nn.Module):
         x = self.final(x)
         return x
 
-B = torch.FloatTensor(32, 32).normal_(0, 1).to(device)
+# B = torch.FloatTensor(32, 32).normal_(0, 1).to(device)
 
-def random_fourier_features(batch_size, seq_len, n_features, scale):
-    pos = torch.linspace(0, 1, seq_len).to(device)
-    freqs = torch.arange(1, (n_features // 2) + 1, 1).to(device)
-    z = torch.outer(pos, freqs)
-    z = z @ (B.T * scale)
+# def random_fourier_features(batch_size, seq_len, n_features, scale):
+#     pos = torch.linspace(0, 1, seq_len).to(device)
+#     freqs = torch.arange(1, (n_features // 2) + 1, 1).to(device)
+#     z = torch.outer(pos, freqs)
+#     z = z @ (B.T * scale)
 
-    s = torch.sin(z * 2 * np.pi)
-    c = torch.cos(z * 2 * np.pi)
+#     s = torch.sin(z * 2 * np.pi)
+#     c = torch.cos(z * 2 * np.pi)
 
-    final = torch.cat([s, c], dim=1)
+#     final = torch.cat([s, c], dim=1)
 
-    final = final[None, ...].repeat(batch_size, 1, 1)
-    return final
+#     final = final[None, ...].repeat(batch_size, 1, 1)
+#     return final
 
 class OneDNerf(nn.Module):
     def __init__(self, pos_encoder):
@@ -169,13 +184,7 @@ class OneDNerf(nn.Module):
         self.embed = nn.Linear(33, 128)
 
         self.net = nn.Sequential(
-            LinearOutputStack(128, 5, activation=activation,
-                              in_channels=128 * 2),
-            # MetaFormer(
-            #     128,
-            #     5,
-            #     lambda channels: AttnMixer(channels),
-            #     lambda channels: None)
+            LinearOutputStack(128, 5, activation=activation, in_channels=128 * 2),
         )
 
         self.mag = LinearOutputStack(
@@ -230,19 +239,44 @@ def stream(batch_size, n_samples, overfit=False):
 pe = pos_encoded
 
 codec = AudioCodec(MelScale())
-model = OneDNerf(pos_encoder=pe).to(device)
-# model = ModulatedStack(128, 5, 256, pos_encoder=pe).to(device)
+# model = OneDNerf(pos_encoder=pe).to(device)
+
+model = ModulatedStack(
+    channels=128, 
+    layers=5, 
+    freq_bins=256, 
+    pos_encoder=pe).to(device)
+
 encoder = Encoder(pos_encoder=pe, reduction=reduce_last).to(device)
-optim = Adam(model.parameters(), lr=1e-3, betas=(0, 0.9))
+optim = Adam(model.parameters(), lr=1e-4, betas=(0, 0.9))
 
 
 def train_ae(batch):
     optim.zero_grad()
     encoded = encoder(batch)
-    decoded = model(encoded)
+    mag, phase_mean, phase_std = model(encoded)
 
-    loss = F.mse_loss(decoded[..., 0], batch[..., 0]) + F.mse_loss(decoded[..., 1], batch[..., 1])
+    phase_dist = Normal(phase_mean, phase_std)
+
+    rmag = batch[..., 0]
+    rphase = batch[..., 1]
+
+    mag_loss = F.mse_loss(mag, rmag)
+    phase_loss = -phase_dist.log_prob(rphase).mean() * 1e-4
+
+    loss = mag_loss + phase_loss
+
+    if loss.item() > 10000:
+        return None, None
+
+    dphase = phase_dist.rsample()
+    
+    decoded = torch.cat([mag[..., None], dphase[..., None]], dim=-1)
+
     loss.backward()
+
+    # clip_grad_value_(model.parameters(), 0.5)
+
     optim.step()
     print(loss.item())
     return encoded, decoded
