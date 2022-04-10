@@ -10,3 +10,4 @@ from .reverb import NeuralReverb
 from .phase import AudioCodec, MelScale
 from .pif import AuditoryImage
 from .metaformer import MetaFormer, PoolMixer, MetaFormerBlock
+from .diffusion import DiffusionProcess

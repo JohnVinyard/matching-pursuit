@@ -1,7 +1,8 @@
 from tokenize import Single
 from config import config_values
 import json
-from experiments import ReinforcementLearningQuestionMark
+from data.audiostream import audio_stream
+from experiments import Current
 import os
 import zounds
 import argparse
@@ -38,6 +39,10 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--new', action='store_true')
     parser.add_argument('--overfit', action='store_true')
+    parser.add_argument('--batch-size', type=int, default=4)
+    parser.add_argument('--normalize', action='store_true')
+    parser.add_argument('--nsamples', type=int, default=14)
+
     args = parser.parse_args()
 
     if args.new:
@@ -46,8 +51,9 @@ if __name__ == '__main__':
         app = zounds.ZoundsApp(locals=locals(), globals=globals())
         app.start_in_thread(os.environ['PORT'])
 
-        exp = ReinforcementLearningQuestionMark(
-            overfit=args.overfit, batch_size=2)
+        stream = audio_stream(args.batch_size, 2**args.nsamples, args.overfit, args.normalize, as_torch=True)
+
+        exp = Current(stream)
 
         if exp.__doc__ is None or exp.__doc__.strip() == '':
             raise ValueError('Please write a little about your experiment')
