@@ -59,12 +59,12 @@ class LearnedUpsampleBlock(nn.Module):
 
 
 class FFTUpsampleBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, size, infer=False):
+    def __init__(self, in_channels, out_channels, size, factor=2, infer=False):
         super().__init__()
         self.channels = in_channels
         self.size = size
-
-        self.new_time = self.size * 2
+        self.factor = factor
+        self.new_time = self.size * self.factor 
         self.orig_coeffs = self.size // 2 + 1
         self.n_coeffs = self.new_time // 2 + 1
 
@@ -77,11 +77,11 @@ class FFTUpsampleBlock(nn.Module):
 
         self.inferred = nn.Parameter(c)
         self.final = nn.Conv1d(in_channels, out_channels, 3, 1, 1)
-
-    def forward(self, x):
+    
+    def upsample(self, x):
         batch = x.shape[0]
 
-        x = x.view(-1, self.channels, self.size)
+        x = x.view(batch, self.channels, self.size)
 
         coeffs = torch.fft.rfft(x, axis=-1, norm='ortho')
 
@@ -97,6 +97,10 @@ class FFTUpsampleBlock(nn.Module):
             new_coeffs[:, :, self.orig_coeffs:] = inferred
 
         x = torch.fft.irfft(new_coeffs, n=self.new_time, norm='ortho')
+        return x
+
+    def forward(self, x):
+        
         x = self.final(x)
         return x
 
