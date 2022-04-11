@@ -100,7 +100,7 @@ class FFTUpsampleBlock(nn.Module):
         return x
 
     def forward(self, x):
-        
+        x = self.upsample(x)
         x = self.final(x)
         return x
 
