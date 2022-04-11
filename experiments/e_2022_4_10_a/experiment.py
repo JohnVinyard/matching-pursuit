@@ -15,9 +15,9 @@ from util.weight_init import make_initializer
 scale = MelScale()
 codec = AudioCodec(scale)
 
-diff_process = DiffusionProcess(total_steps=100, variance_per_step=1)
+diff_process = DiffusionProcess(total_steps=100, variance_per_step=0.1)
 
-init_weights = make_initializer(0.1)
+init_weights = make_initializer(0.02)
 
 
 class DownsamplingBlock(nn.Module):
@@ -29,7 +29,7 @@ class DownsamplingBlock(nn.Module):
         self.stride = stride
         self.padding = padding
 
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding)
+        self.conv = nn.Conv1d(in_channels, out_channels, kernel_size, stride, padding)
         self.nl = nn.LeakyReLU(0.2)
 
     def forward(self, x):
@@ -47,7 +47,7 @@ class UpsamplingBlock(nn.Module):
         self.stride = stride
         self.padding = padding
 
-        self.conv = nn.ConvTranspose2d(in_channels, out_channels, kernel_size, stride, padding)
+        self.conv = nn.ConvTranspose1d(in_channels, out_channels, kernel_size, stride, padding)
         self.nl = nn.LeakyReLU(0.2)
     
     def forward(self, x):
@@ -63,8 +63,8 @@ class FilmLayer(nn.Module):
         self.bias = nn.Linear(1, channels)
     
     def forward(self, x, conditioning):
-        w = self.weight(conditioning)[:, :, None, None]
-        b = self.bias(conditioning)[:, :, None, None]
+        w = self.weight(conditioning)[:, :, None]
+        b = self.bias(conditioning)[:, :, None]
         return (x * w) + b
 
 class Model(nn.Module):
@@ -72,39 +72,37 @@ class Model(nn.Module):
         super().__init__()
 
         self.down = nn.Sequential(
-            DownsamplingBlock(2, 16, (3, 3), (1, 2), (1, 1)),
-            DownsamplingBlock(16, 32, (3, 3), (1, 2), (1, 1)),  # (batch, channels, 64, 64)
-            DownsamplingBlock(32, 64, (3, 3), (2, 2), (1, 1)),  # (32, 32)
-            DownsamplingBlock(64, 128, (3, 3), (2, 2), (1, 1)),  # (16, 16)
-            DownsamplingBlock(128, 256, (3, 3), (2, 2), (1, 1)),  # (8, 8)
-            DownsamplingBlock(256, 512, (3, 3), (2, 2), (1, 1)),  # (4, 4)
+            DownsamplingBlock(512, 128, 3, 2, 1), # 32
+            DownsamplingBlock(128, 128, 3, 2, 1), # 16
+            DownsamplingBlock(128, 128, 3, 2, 1), # 8
+            DownsamplingBlock(128, 128, 3, 2, 1), # 4
+            DownsamplingBlock(128, 128, 3, 2, 1), # 2
+            DownsamplingBlock(128, 128, 3, 1, 1), # 2
         )
 
         self.down_film = nn.Sequential(
-            FilmLayer(16),
-            FilmLayer(32),
-            FilmLayer(64),
             FilmLayer(128),
-            FilmLayer(256),
-            FilmLayer(512),
+            FilmLayer(128),
+            FilmLayer(128),
+            FilmLayer(128),
+            FilmLayer(128),
+            FilmLayer(128),
         )
 
         self.up = nn.Sequential(
-            UpsamplingBlock(512, 256, (4, 4), (2, 2), (1, 1)), # (8, 8)
-            UpsamplingBlock(256, 128, (4, 4), (2, 2), (1, 1)), # (16, 16)
-            UpsamplingBlock(128, 64, (4, 4), (2, 2), (1, 1)), # (32, 32)
-            UpsamplingBlock(64, 32, (4, 4), (2, 2), (1, 1)), # (64, 64)
-            UpsamplingBlock(32, 16, (3, 4), (1, 2), (1, 1)), # (64, 128)
-            UpsamplingBlock(16, 2, (3, 4), (1, 2), (1, 1)), # (64, 256)
+            UpsamplingBlock(128, 128, 4, 2, 1), # 4
+            UpsamplingBlock(128, 128, 4, 2, 1), # 8
+            UpsamplingBlock(128, 128, 4, 2, 1), # 16
+            UpsamplingBlock(128, 128, 4, 2, 1), # 32
+            UpsamplingBlock(128, 512, 4, 2, 1), # 64
         )
 
         self.up_film = nn.Sequential(
-            FilmLayer(256),
             FilmLayer(128),
-            FilmLayer(64),
-            FilmLayer(32),
-            FilmLayer(16),
-            FilmLayer(2),
+            FilmLayer(128),
+            FilmLayer(128),
+            FilmLayer(128),
+            FilmLayer(512),
         )
 
         self.apply(init_weights)
@@ -129,23 +127,22 @@ class Model(nn.Module):
 
 
 model = Model().to(device)
-optim = optimizer(model, lr=1e4)
+optim = optimizer(model, lr=1e-3)
 
 
 def train_model(batch):
     optim.zero_grad()
 
-    batch = batch.permute(0, 3, 1, 2)
+    batch = batch.reshape(-1, 64, 512).permute(0, 2, 1)
+
     steps = torch.rand(1)
-
-    steps = (1 - torch.cos(steps * np.pi)) / 2
-
-    steps = torch.zeros((batch.shape[0], 1)).fill_(float(steps))
+    steps = torch.zeros((batch.shape[0], 1)).fill_(float(steps)).to(device)
     x, step, noise = diff_process.forward_process(batch, steps)
     noise_pred = diff_process.backward_process(x, step, model)
-
     loss = torch.abs(noise_pred - noise).sum()
     loss.backward()
+    optim.step()
+
     print(steps[0, 0].item(), loss.item(), x.std().item())
     return loss.item()
 
@@ -155,30 +152,44 @@ class SpectrogramDiffusion(object):
     def __init__(self, stream):
         super().__init__()
         self.stream = stream
-
         self.spec = None
     
-    def listen(self):
-        with torch.no_grad():
-            start = torch.normal(0, 1, (1, 2, 64, 256))
+    def gen(self):
+        with torch.no_grad():   
+            start = torch.normal(0, 1.8, (1, 512, 64)).to(device)
+
             for i in range(diff_process.total_steps):
                 curr = 1 - torch.zeros((1, 1)).fill_(i / diff_process.total_steps).to(device)
                 noise_pred = diff_process.backward_process(start, curr, model)
                 start = start - noise_pred
             
-            start = start.permute(0, 2, 3, 1)
-            spec = start.data.cpu().numpy().squeeze()
-            audio = codec.to_time_domain(start)
-            return spec, playable(audio, zounds.SR22050())
+            start = start.reshape(-1, 2, 256, 64).permute(0, 3, 2, 1)
+            return start
     
-    def check_forward(self):
-        spec = self.spec[:1].permute(0, 3, 1, 2)
-        steps = torch.ones((1, 1)).to(device)
+    def listen(self):
+        start = self.gen()
+        audio = codec.to_time_domain(start)
+        return playable(audio, zounds.SR22050())
+    
+    def look(self, dim=0):
+        start = self.gen()
+        spec = start.data.cpu().numpy().squeeze()
+        return spec[..., dim]
+
+    
+    def check_forward(self, steps=1):
+        spec = self.spec[:1]
+        print(spec.shape)
+        spec = spec.reshape(-1, 64, 512).permute(0, 2, 1)
+
+        steps = torch.zeros((1, 1)).fill_(steps).to(device)
         x, step, noise = diff_process.forward_process(spec, steps)
-        return x.data.cpu().numpy().squeeze()
+        return x.data.cpu().numpy().squeeze().T.reshape((-1, 64, 256, 2)).squeeze()
 
     def run(self):
         for item in self.stream:
             spec = codec.to_frequency_domain(item)
             self.spec = spec
             train_model(spec)
+
+            self.check_forward()
