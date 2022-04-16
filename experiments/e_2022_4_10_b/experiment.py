@@ -1,10 +1,8 @@
 import math
 import zounds
-from typing import Sequence
 import torch
 from torch import nn
 from modules import OscillatorBank, NoiseModel
-import numpy as np
 from modules.decompose import fft_frequency_decompose, fft_frequency_recompose
 from modules.phase import AudioCodec, MelScale
 from train.optim import optimizer
@@ -14,6 +12,7 @@ from train import gan_cycle, get_latent
 from loss import least_squares_disc_loss, least_squares_generator_loss
 from util.readmedocs import readme
 from util.weight_init import make_initializer
+from torch.nn.utils.clip_grad import clip_grad_norm_, clip_grad_value_
 
 init_weights = make_initializer(0.1)
 
@@ -30,18 +29,16 @@ class UpsamplingBlock(nn.Module):
         self.padding = padding
         self.in_size = in_size
 
-        self.up = FFTUpsampleBlock(in_channels, in_channels, in_size)
-        # self.up = nn.ConvTranspose1d(in_channels, out_channels, kernel_size, stride, padding)
-
-        # self.up = nn.Upsample(scale_factor=2, mode='nearest')
-        self.conv = nn.Conv1d(in_channels, out_channels, 7, 1, 3)
+        # self.up = FFTUpsampleBlock(in_channels, in_channels, in_size)
+        # self.conv = nn.Conv1d(in_channels, out_channels, 7, 1, 3)
+        self.conv = nn.ConvTranspose1d(in_channels, out_channels, 4, 2, 1)
         self.norm = nn.BatchNorm1d(out_channels)
         self.nl = nn.LeakyReLU(0.2)
     
     def forward(self, x):
-        x = self.up(x)
+        # x = self.up(x)
         x = self.conv(x)
-        # x = self.norm(x)
+        x = self.norm(x)
         x = self.nl(x)
         return x
 
@@ -68,11 +65,10 @@ class BandGenerator(nn.Module):
             size, 
             constrain=True, 
             log_frequency=False, 
-            amp_activation=torch.relu)
+            amp_activation=torch.abs)
         
         self.noise = NoiseModel(
-            64, 32, 64, size, 32, activation=torch.relu)
-
+            64, 32, 64, size, 32, activation=torch.abs)
 
     
     def forward(self, x):
@@ -85,7 +81,7 @@ class BandGenerator(nn.Module):
         h = self.osc(h)
         n = self.noise(n)
 
-        return h + n
+        return (h + n)
 
 
 class Generator(nn.Module):
@@ -99,14 +95,12 @@ class Generator(nn.Module):
     def forward(self, x):
         x = x.view(-1, 64)
         x = self.initial(x).reshape(-1, 512, 4)
-        
-
         output = {k: model(x) for k, model in self.bands.items()}
         return output
 
 
 class DownsamplingBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, stride, padding, norm=False):
+    def __init__(self, in_channels, out_channels, kernel_size, stride, padding, norm=True):
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -127,7 +121,6 @@ class DownsamplingBlock(nn.Module):
         return x
 
 
-
 class BandDisc(nn.Module):
     def __init__(self, size):
         super().__init__()
@@ -140,6 +133,10 @@ class BandDisc(nn.Module):
         self.judge = nn.Conv1d(32, 1, 3, 1, 1)
     
     def forward(self, x):
+
+        noise = torch.normal(0, 0.05, x.shape).to(x.device)
+        x = noise + x
+
         features = []
         for layer in self.net:
             x = layer(x)
@@ -156,20 +153,25 @@ class Disc(nn.Module):
         super().__init__()
         self.band_sizes = [512, 1024, 2048, 4096, 8192, 16384]
         self.bands = nn.ModuleDict({str(bs): BandDisc(bs) for bs in self.band_sizes})
-        self.apply(init_weights)
+
+
+        self.initial = DownsamplingBlock(32 * len(self.band_sizes), 128, 7, 2, 3)
+        self.judge = nn.Conv1d(128, 1, 3, 1, 1)
 
         self.final = nn.Sequential(
-            DownsamplingBlock(32 * len(self.band_sizes), 128, 7, 2, 3),
             DownsamplingBlock(128, 256, 7, 2, 3),
             DownsamplingBlock(256, 512, 7, 2, 3),
             DownsamplingBlock(512, 512, 2, 2, 0, norm=False),
             nn.Conv1d(512, 1, 1, 1, 0)
         )
+
+        # TODO: Move this into the correct position to initialize all weights
+        self.apply(init_weights)
     
     def forward(self, x):
         features = []
         bands = []
-        judgements = []
+        # judgements = []
 
         x = {str(k): v for k, v in x.items()}
 
@@ -178,21 +180,26 @@ class Disc(nn.Module):
             z, f, j = v(x[k])
             bands.append(z)
             features.append(f)
-            judgements.append(j.view(f.shape[0], -1))
+            # judgements.append(j.view(f.shape[0], -1))
         
         x = torch.cat(bands, dim=1)
+        x = self.initial(x)
+
+        judgements = []
+        judgements.append(self.judge(x).view(-1))
+
         for layer in self.final:
             x = layer(x)
             features.append(x.view(x.shape[0], -1))
         
-        judgements = torch.cat(judgements, dim=1)
+        judgements = torch.cat(judgements)
         x = torch.cat([judgements.view(-1), x.view(-1)])
         
         features = torch.cat(features, dim=1)
         return x, features
 
 gen = Generator().to(device)
-gen_optim = optimizer(gen, lr=1e-4)
+gen_optim = optimizer(gen, lr=1e-3)
 
 disc = Disc().to(device)
 disc_optim = optimizer(disc, lr=1e-4)
@@ -204,7 +211,9 @@ def train_gen(batch):
     fake = gen(x)
     j, _ = disc(fake)
     loss = least_squares_generator_loss(j)
+
     loss.backward()
+    # clip_grad_value_(gen.parameters(), 0.5)
     gen_optim.step()
     print('G', loss.item())
     return fake
@@ -217,7 +226,9 @@ def train_disc(batch):
     rj, _ = disc(batch)
 
     loss = least_squares_disc_loss(rj, fj)
+
     loss.backward()
+    # clip_grad_value_(disc.parameters(), 0.5)
     disc_optim.step()
     print('D', loss.item())
 
