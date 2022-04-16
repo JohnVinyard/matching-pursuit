@@ -39,14 +39,14 @@ def band_filtered_noise(n_audio_samples, ws=512, step=256, mean=0.5, std=0.1):
     batch, atoms, seq_len = mean.shape
     frames = n_audio_samples // step
 
-    spec = noise_spec(n_audio_samples, ws, step)
+    spec = noise_spec(n_audio_samples, ws, step, device=mean.device)
     n_coeffs = spec.shape[-1]
 
     mean = mean * n_coeffs
     std = std * n_coeffs
 
     filt = pdf(
-        torch.arange(0, n_coeffs, 1).view(1, 1, n_coeffs, 1), 
+        torch.arange(0, n_coeffs, 1).view(1, 1, n_coeffs, 1).to(mean.device), 
         mean[:, :, None, :], 
         std[:, :, None, :])
 

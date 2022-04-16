@@ -217,11 +217,11 @@ class AudioEvent(nn.Module):
             sr=zounds.SR22050(),
             noise_ws=512,
             noise_step=256):
-        
+
         super().__init__()
 
-        self.noise_ws = 512,
-        self.noise_step = 256
+        self.noise_ws = noise_ws,
+        self.noise_step = noise_step
         frames = n_samples // self.noise_step
 
         if sequence_length != frames:
@@ -240,16 +240,25 @@ class AudioEvent(nn.Module):
         self.register_buffer(
             'harmonic_factor', torch.arange(2, 2 + n_harmonics, 1))
 
-    def forward(self, f0, overall_env, osc_env, noise_env, harm_env, noise_std):
+    def forward(
+            self,
+            f0,
+            overall_env,
+            osc_env,
+            noise_env,
+            harm_env,
+            noise_std,
+            f0_baselines=None):
         """
         Args
         -----------------
-        f0          : `(batch, n_events, sequence_length)`
-        overall_env : `(batch, n_events, sequence_length)`
-        osc_env     : `(batch, n_events, sequence_length)`
-        noise_env   : `(batch, n_events, sequence_length)`
-        harm_env    : `(batch, n_events, harmonics, sequence_length)`
-        noise_std   : `(batch, n_events, sequence_length)`
+        f0           : `(batch, n_events, sequence_length)`
+        overall_env  : `(batch, n_events, sequence_length)`
+        osc_env      : `(batch, n_events, sequence_length)`
+        noise_env    : `(batch, n_events, sequence_length)`
+        harm_env     : `(batch, n_events, harmonics, sequence_length)`
+        noise_std    : `(batch, n_events, sequence_length)`
+        f0_baselines : `None or (batch, n_events, 1)`
         """
 
         # ensure everything's in the right shape
@@ -261,6 +270,12 @@ class AudioEvent(nn.Module):
             -1, self.n_events, self.n_harmonics, self.sequence_length)
         noise_std = noise_std.view(-1, self.n_events, self.sequence_length)
 
+        if f0_baselines is not None:
+            f0_baselines = f0_baselines.view(-1, self.n_events, 1)
+            # TODO: This should be plus or minus ERB
+            f0 = f0_baselines + (f0 * 0.1)
+            f0 = torch.clamp(f0, 0, 1)
+
         # ensure everything's in the right range
         orig_f0 = f0 = torch.clamp(f0, 0, 1)
         overall_env = torch.clamp(overall_env, 0, 1)
@@ -268,29 +283,33 @@ class AudioEvent(nn.Module):
         noise_env = torch.clamp(noise_env, 0, 1)
         harm_env = torch.clamp(harm_env, 0, 1)
         noise_std = torch.clamp(noise_std, 1e-12, 1)
-        
+
         # build harmonic component
         f0 = self.min_f0 + (f0 * self.f0_diff)
 
         # each harmonic is a whole number factor of f0
-        harmonics = f0[:, :, None, :] * self.harmonic_factor[None, None, :, None]
+        harmonics = f0[:, :, None, :] * \
+            self.harmonic_factor[None, None, :, None]
         harm_env = osc_env[:, :, None, :] * harm_env[:, :, :, :]
 
         fundamental = F.upsample(f0, size=self.n_samples, mode='linear')
         harmonics = F.upsample(
-            harmonics.view(-1, self.n_events * self.n_harmonics, self.sequence_length), 
-            size=self.n_samples, 
+            harmonics.view(-1, self.n_events * self.n_harmonics,
+                           self.sequence_length),
+            size=self.n_samples,
             mode='linear').view(-1, self.n_events, self.n_harmonics, self.n_samples)
 
-        osc_env = F.upsample(osc_env, size=self.n_samples, mode='linear')        
+        osc_env = F.upsample(osc_env, size=self.n_samples, mode='linear')
         harm_env = F.upsample(
-            harm_env.view(-1, self.n_events * self.n_harmonics, self.sequence_length), 
-            size=self.n_samples, 
+            harm_env.view(-1, self.n_events * self.n_harmonics,
+                          self.sequence_length),
+            size=self.n_samples,
             mode='linear').view(-1, self.n_events, self.n_harmonics, self.n_samples)
-        
 
-        fundamental = torch.sin(torch.cumsum(fundamental * np.pi, -1)) * osc_env
-        harmonics = (torch.sin(torch.cumsum(harmonics * np.pi, -1)) * harm_env).sum(dim=-2)
+        fundamental = torch.sin(torch.cumsum(
+            fundamental * np.pi, -1)) * osc_env
+        harmonics = (torch.sin(torch.cumsum(harmonics * np.pi, -1))
+                     * harm_env).sum(dim=-2)
         osc = fundamental + harmonics
 
         # build noise component
@@ -298,11 +317,12 @@ class AudioEvent(nn.Module):
         # translate f0 into noise space
         noise_mean = self.min_f0 + (orig_f0 * self.f0_diff)
         noise_std = noise_std * self.f0_diff
-        noise = band_filtered_noise(self.n_samples, mean=noise_mean, std=noise_std)
-
+        noise = band_filtered_noise(
+            self.n_samples, mean=noise_mean, std=noise_std)
 
         osc_mix = F.upsample(overall_env, size=self.n_samples, mode='linear')
-        noise_mix = F.upsample(1 - overall_env, size=self.n_samples, mode='linear')
+        noise_mix = F.upsample(
+            1 - overall_env, size=self.n_samples, mode='linear')
 
         final = (osc * osc_mix) + (noise * noise_mix)
 
