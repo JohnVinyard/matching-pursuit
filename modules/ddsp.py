@@ -10,39 +10,54 @@ from .normal_pdf import pdf
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
-def noise_spec(n_audio_samples, ws=512, step=256):
+def noise_spec(n_audio_samples, ws=512, step=256, device=None):
     """
     Create a spectrogram of white noise with shape
     (n_noise_frames, n_coeffs)
     """
 
     # create time-domain noise
-    x = torch.FloatTensor(n_audio_samples).uniform_(-1, 1).to(device)
-    x = F.pad(x, (0, ws))
+    x = torch.FloatTensor(n_audio_samples).uniform_(-1, 1)
+    if device is not None:
+        x = x.to(device)
+    x = F.pad(x, (0, step))
     x = x.unfold(-1, ws, step)
 
     # take the STFT of the noise
     window = torch.hamming_window(ws).to(device)
     x = x * window[None, :]
-    x = torch.fft.rfft(x, norm='ortho')
+    x = torch.fft.rfft(x, norm='ortho') 
+
+    # output shape
+    # (n_audio_samples / step, ws // 2 + 1)
+
     return x
 
 
 def band_filtered_noise(n_audio_samples, ws=512, step=256, mean=0.5, std=0.1):
+
+    batch, atoms, seq_len = mean.shape
+    frames = n_audio_samples // step
+
     spec = noise_spec(n_audio_samples, ws, step)
     n_coeffs = spec.shape[-1]
 
     mean = mean * n_coeffs
     std = std * n_coeffs
 
-    filt = pdf(torch.arange(0, n_coeffs, 1), mean, std)
+    filt = pdf(
+        torch.arange(0, n_coeffs, 1).view(1, 1, n_coeffs, 1), 
+        mean[:, :, None, :], 
+        std[:, :, None, :])
+
 
     # normalize frequency-domain filter to have peak at 1
     filt = filt / filt.max()
-    spec = spec * filt[None, :]
+    spec = spec.T[None, None, ...] * filt
+    spec = spec.view(batch, atoms, n_coeffs, frames).permute(0, 1, 3, 2)
 
     windowed = torch.fft.irfft(spec, dim=-1, norm='ortho')
-    samples = overlap_add(windowed[None, None, :, :])
+    samples = overlap_add(windowed)
     return samples[..., :n_audio_samples]
 
 
