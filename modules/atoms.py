@@ -228,6 +228,7 @@ class AudioEvent(nn.Module):
             raise ValueError(
                 f'sequence length and FFT frames must agree, but they were, {sequence_length} and {frames}, respectively')
 
+        self.sr = sr
         self.sequence_length = sequence_length
         self.n_samples = n_samples
         self.n_harmonics = n_harmonics
@@ -239,6 +240,13 @@ class AudioEvent(nn.Module):
 
         self.register_buffer(
             'harmonic_factor', torch.arange(2, 2 + n_harmonics, 1))
+    
+    def erb(self, f):
+        f = f * self.sr.nyquist
+        return (0.108 * f) + 24.7
+
+    def scaled_erb(self, f):
+        return self.erb(f) / self.sr.nyquist
 
     def forward(
             self,
@@ -262,7 +270,6 @@ class AudioEvent(nn.Module):
         """
 
         # ensure everything's in the right shape
-        f0 = f0.view(-1, self.n_events, self.sequence_length)
         overall_env = overall_env.view(-1, self.n_events, self.sequence_length)
         osc_env = osc_env.view(-1, self.n_events, self.sequence_length)
         noise_env = noise_env.view(-1, self.n_events, self.sequence_length)
@@ -270,14 +277,15 @@ class AudioEvent(nn.Module):
             -1, self.n_events, self.n_harmonics, self.sequence_length)
         noise_std = noise_std.view(-1, self.n_events, self.sequence_length)
 
-        if f0_baselines is not None:
-            f0_baselines = f0_baselines.view(-1, self.n_events, 1)
-            # TODO: This should be plus or minus ERB
-            f0 = f0_baselines + (f0 * 0.1)
-            f0 = torch.clamp(f0, 0, 1)
-
         # ensure everything's in the right range
+        if f0_baselines is not None:
+            # f0 can vary by 1/2 ERB up or down
+            f0 = torch.clamp(f0, -0.5, 0.5)
+            f0_baselines = f0_baselines.view(-1, self.n_events, 1)
+            f0 = f0_baselines + (f0 * self.scaled_erb(f0_baselines))
+        
         orig_f0 = f0 = torch.clamp(f0, 0, 1)
+        
         overall_env = torch.clamp(overall_env, 0, 1)
         osc_env = torch.clamp(osc_env, 0, 1)
         noise_env = torch.clamp(noise_env, 0, 1)

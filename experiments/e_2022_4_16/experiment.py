@@ -12,7 +12,7 @@ sequence_length = 64
 n_harmonics = 64
 n_samples = 2 ** 14
 samplerate = zounds.SR22050()
-n_events = 16
+n_events = 8
 latent_dim = 128
 
 
@@ -49,7 +49,7 @@ class Model(nn.Module):
         self.atoms = AudioEvent(
             sequence_length=sequence_length,
             n_samples=n_samples,
-            n_events=16,
+            n_events=n_events,
             min_f0=20,
             max_f0=1000,
             n_harmonics=n_harmonics,
