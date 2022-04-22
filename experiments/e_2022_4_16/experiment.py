@@ -23,21 +23,21 @@ latent_dim = 128
 init_weights = make_initializer(0.1)
 
 
-band = zounds.FrequencyBand(20, samplerate.nyquist)
-scale = zounds.MelScale(band, 128)
-fb = zounds.learn.FilterBank(
-    samplerate, 
-    512, 
-    scale, 
-    0.01, 
-    normalize_filters=True, 
-    a_weighting=False).to(device)
-aim = AuditoryImage(512, 64, do_windowing=False, check_cola=True).to(device)
+# band = zounds.FrequencyBand(20, samplerate.nyquist)
+# scale = zounds.MelScale(band, 128)
+# fb = zounds.learn.FilterBank(
+#     samplerate, 
+#     512, 
+#     scale, 
+#     0.01, 
+#     normalize_filters=True, 
+#     a_weighting=False).to(device)
+# aim = AuditoryImage(512, 64, do_windowing=False, check_cola=True).to(device)
 
-def perceptual_features(x):
-    x = fb.forward(x, normalize=False)
-    x = aim(x)
-    return x
+# def perceptual_features(x):
+#     x = fb.forward(x, normalize=False)
+#     x = aim(x)
+#     return x
 
 class DownsamplingBlock(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride, padding, norm=True):
@@ -67,8 +67,10 @@ class Discriminator(nn.Module):
         self.net = nn.Sequential(
             nn.Conv1d(1, 4, 3, 2, 1),
             nn.LeakyReLU(0.2),
+
             nn.Conv1d(4, 8, 3, 2, 1),
             nn.LeakyReLU(0.2),
+
             nn.Conv1d(8, 16, 3, 2, 1), # 2048
             nn.LeakyReLU(0.2),
 
@@ -120,7 +122,7 @@ class Generator(nn.Module):
             noise_ws=512,
             noise_step=256)
         self.n_atoms = n_atoms
-        self.ln = nn.Linear(128, 128 * n_atoms)
+        self.ln = LinearOutputStack(128, 3, out_channels=128 * n_atoms)
         self.net = LinearOutputStack(128, 5, out_channels=70 * 64)
         self.baselines = LinearOutputStack(128, 3, out_channels=1)
 
@@ -135,14 +137,16 @@ class Generator(nn.Module):
         x = x.view(-1, self.n_atoms, 128)
         baselines = self.baselines(x).view(-1, self.n_atoms, 1)
         x = self.net(x)
+        print(x.std().item())
         x = x.view(-1, self.n_atoms, 70, 64)
 
         # scale and shift
+        baselines = baselines * 0.5
         x = (x + 1) / 2
 
-        f0 = x[:, :, 0, :]
-        osc_env = x[:, :, 1, :]
-        noise_env = x[:, :, 2, :]
+        f0 = x[:, :, 0, :] ** 2
+        osc_env = x[:, :, 1, :] ** 2
+        noise_env = x[:, :, 2, :] ** 2
         overall_env = x[:, :, 3, :]
         noise_std = x[:, :, 4, :]
         harm_env = x[:, :, 5:-1, :]
@@ -210,7 +214,7 @@ optim = optimizer(model, lr=1e-4)
 
 
 disc = Discriminator().to(device)
-disc_optim = optimizer(disc)
+disc_optim = optimizer(disc, lr=1e-4)
 
 def train_generator(batch):
     optim.zero_grad()
