@@ -1,7 +1,7 @@
 from pyclbr import readmodule_ex
 
 import numpy as np
-from modules import stft
+from modules import audio_features, stft
 from modules.atoms import AudioEvent
 from modules.linear import LinearOutputStack
 from modules.metaformer import AttnMixer, MetaFormer
@@ -50,7 +50,8 @@ def compute_feature(x):
 def feature_loss(inp, target):
     f = compute_feature(inp)
     t = compute_feature(target)
-    return F.mse_loss(f, t)
+    loss = torch.abs(f - t).mean(dim=(1, 2, 3))
+    return loss, f, t
 
 
 class Encoder(nn.Module):
@@ -77,6 +78,51 @@ class Encoder(nn.Module):
         x = self.up(x)
         return x
 
+
+class SyntheticLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.baselines = LinearOutputStack(128, 3, in_channels=n_events)
+
+        self.features = MetaFormer(
+            128,
+            4,
+            lambda channels: AttnMixer(channels),
+            lambda channels: lambda x: x,
+            return_features=False)
+        
+        self.down = nn.Linear(70 * n_events, 128)
+        self.params = MetaFormer(
+            128,
+            4,
+            lambda channels: AttnMixer(channels),
+            lambda channels: lambda x: x,
+            return_features=False)
+        
+        self.to_loss = LinearOutputStack(128, 3, out_channels=1)
+
+        self.apply(init_weights)
+        
+    
+    def forward(self, audio_feature, baselines, synth_params):
+        batch = audio_feature.shape[0]
+
+        audio_feature = audio_feature.view(batch, 128, 64, 257)
+        baselines = baselines.view(batch, n_events)
+        synth_params = synth_params.view(batch, n_events * 70, 64).permute(0, 2, 1)
+        synth_params = self.down(synth_params)
+        synth_params = self.params(synth_params)[:, -1, :]
+
+        baselines = self.baselines(baselines)
+
+        audio_feature = torch.norm(audio_feature, dim=-1)
+        audio_feature = audio_feature.permute(0, 2, 1)
+        audio_feature = self.features(audio_feature)[:, -1, :]
+
+        x = baselines + audio_feature + synth_params
+        x = self.to_loss(x)
+
+        return x
 
 class Generator(nn.Module):
     def __init__(self, n_atoms=n_events):
@@ -116,7 +162,7 @@ class Generator(nn.Module):
         noise_std = x[:, :, 4, :]
         harm_env = x[:, :, 5:-1, :]
 
-        x = self.atoms.forward(
+        signal = self.atoms.forward(
             f0,
             overall_env,
             osc_env,
@@ -124,8 +170,8 @@ class Generator(nn.Module):
             harm_env,
             noise_std,
             baselines)
-        x = x.sum(dim=1, keepdim=True)
-        return x * 0.1
+        signal = signal.sum(dim=1, keepdim=True) * 0.1
+        return signal, baselines, x
 
 
 class AutoEncoder(nn.Module):
@@ -137,28 +183,37 @@ class AutoEncoder(nn.Module):
 
     def forward(self, x):
         e = self.encoder(x)
-        d = self.decoder(e)
-        return e, d
+        d, baselines, params = self.decoder(e)
+        return e, d, baselines, params
 
 
 model = AutoEncoder().to(device)
 optim = optimizer(model, lr=1e-4)
 
+synth_loss = SyntheticLoss()
+loss_optim = optimizer(synth_loss)
+
+def train_loss(batch):
+    loss_optim.zero_grad()
+    e, d, baselines, params = model(batch)
+    loss, recon_feat, real_feat = feature_loss(d, batch)
+    sl = synth_loss.forward(recon_feat, baselines, params)
+
+    diff = torch.abs(loss - sl).mean()
+    diff.backward()
+    loss_optim.step()
+    print('SL', diff.item())
+
 
 def train_model(batch):
     optim.zero_grad()
-
-    e, d = model(batch)
-
-    # real_spec = stft(batch, log_amplitude=True)
-    # fake_spec = stft(d, log_amplitude=True)
-
-    # loss = F.mse_loss(fake_spec, real_spec)
-
-    loss = feature_loss(d, batch)
+    e, d, baselines, params = model(batch)
+    # loss, recon_feat, real_feat = feature_loss(d, batch)
+    recon_feat = compute_feature(d)
+    loss = synth_loss.forward(recon_feat, baselines, params).mean()
     loss.backward()
     optim.step()
-    print(loss.item())
+    print('AE', loss.item())
     return e, d
 
 
@@ -188,9 +243,13 @@ class SynthParamsDecoder(object):
         return self.latent.data.cpu().numpy().squeeze()
 
     def run(self):
-        for item in self.stream:
+        for i, item in enumerate(self.stream):
             item = item.view(-1, 1, n_samples)
-            self.orig = item
-            e, d = train_model(item)
-            self.latent = e
-            self.recon = d
+
+            if i % 2 == 0:
+                train_loss(item)
+            else:
+                self.orig = item
+                e, d = train_model(item)
+                self.latent = e
+                self.recon = d
