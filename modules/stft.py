@@ -4,7 +4,7 @@ import numpy as np
 from scipy.signal import morlet
 import zounds
 
-def stft(x, ws=512, step=256, pad=False):
+def stft(x, ws=512, step=256, pad=False, log_amplitude=False, log_epsilon=1e-4):
     if pad:
         x = F.pad(x, (0, step))
     
@@ -13,6 +13,10 @@ def stft(x, ws=512, step=256, pad=False):
     x = x * win[None, None, :]
     x = torch.fft.rfft(x, norm='ortho')
     x = torch.abs(x)
+
+    if log_amplitude:
+        x = torch.log(x + log_epsilon)
+    
     return x
 
 

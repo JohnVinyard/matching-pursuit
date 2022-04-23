@@ -1,0 +1,1 @@
+What happens when I use synth params as the decoder of an autoencoder

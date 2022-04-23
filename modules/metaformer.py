@@ -25,14 +25,17 @@ class AttnMixer(nn.Module):
         self.value = nn.Linear(channels, channels)
     
     def forward(self, x):
+        batch, time, channels = x.shape
+
         q = self.query(x)
         k = self.key(x)
         v = self.value(x)
 
         attn = q @ k.permute(0, 2, 1)
         attn = attn / np.sqrt(x.shape[1])
-        attn = torch.softmax(attn, dim=1)
-        x = attn @ v.permute(0, 2, 1)
+        # attn = torch.softmax(attn, dim=-1)
+        attn = torch.sigmoid(attn)
+        x = attn @ v
         return x
 
 class MetaFormerBlock(nn.Module):

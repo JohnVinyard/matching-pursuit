@@ -1,1 +1,1 @@
-from .e_2022_4_18 import MultiScaleSelfSimilarity as Current
+from .e_2022_4_22 import SynthParamsDecoder as Current
