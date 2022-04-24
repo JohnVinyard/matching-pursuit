@@ -1,12 +1,11 @@
 from pyclbr import readmodule_ex
 
 import numpy as np
-from modules import audio_features, stft
+from modules import stft
 from modules.atoms import AudioEvent
 from modules.linear import LinearOutputStack
 from modules.metaformer import AttnMixer, MetaFormer
 from modules.pif import AuditoryImage
-from modules.transformer import Transformer
 from train.optim import optimizer
 from util import device, playable
 
@@ -90,7 +89,7 @@ class SyntheticLoss(nn.Module):
             lambda channels: AttnMixer(channels),
             lambda channels: lambda x: x,
             return_features=False)
-        
+
         self.down = nn.Linear(70 * n_events, 128)
         self.params = MetaFormer(
             128,
@@ -98,18 +97,18 @@ class SyntheticLoss(nn.Module):
             lambda channels: AttnMixer(channels),
             lambda channels: lambda x: x,
             return_features=False)
-        
+
         self.to_loss = LinearOutputStack(128, 3, out_channels=1)
 
         self.apply(init_weights)
-        
-    
+
     def forward(self, audio_feature, baselines, synth_params):
         batch = audio_feature.shape[0]
 
         audio_feature = audio_feature.view(batch, 128, 64, 257)
         baselines = baselines.view(batch, n_events)
-        synth_params = synth_params.view(batch, n_events * 70, 64).permute(0, 2, 1)
+        synth_params = synth_params.view(
+            batch, n_events * 70, 64).permute(0, 2, 1)
         synth_params = self.down(synth_params)
         synth_params = self.params(synth_params)[:, -1, :]
 
@@ -123,6 +122,7 @@ class SyntheticLoss(nn.Module):
         x = self.to_loss(x)
 
         return x
+
 
 class Generator(nn.Module):
     def __init__(self, n_atoms=n_events):
@@ -192,6 +192,7 @@ optim = optimizer(model, lr=1e-4)
 
 synth_loss = SyntheticLoss()
 loss_optim = optimizer(synth_loss)
+
 
 def train_loss(batch):
     loss_optim.zero_grad()
