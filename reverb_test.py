@@ -1,97 +1,111 @@
-import zounds
-from config.dotenv import Config
-from data.datastore import batch_stream
-from modules import stft
-from modules.psychoacoustic import PsychoacousticFeature
-from util import device
-from modules.reverb import NeuralReverb
 import torch
 import numpy as np
-from torch.nn import functional as F
+from modules.linear import LinearOutputStack
+from modules.pos_encode import ExpandUsingPosEncodings
+from modules.self_similarity import SelfSimNetwork, self_sim
+import zounds
+from data import audio_stream
 from torch import nn
-from torch.optim import Adam
+from train.gan import get_latent
+from loss import least_squares_disc_loss, least_squares_generator_loss
+from train.optim import optimizer
+from util import playable
+from util.weight_init import make_initializer
 
-feature = PsychoacousticFeature().to(device)
-
-def loss_func(inp, target):
-    inp = feature.compute_feature_dict(inp)
-    target = feature.compute_feature_dict(target)
-    loss = 0
-    for k, v in inp.items():
-        loss = loss + torch.abs(inp[k] - target[k]).sum()
-    
-    return loss
-
-    inp = stft(inp)
-    target = stft(target)
-    return F.mse_loss(inp, target)
+init_weights = make_initializer(0.1)
 
 
-class VerbWrapper(nn.Module):
-    def __init__(self, n_samples):
+class Generator(nn.Module):
+    def __init__(self):
         super().__init__()
-        self.verb = NeuralReverb(n_samples, 1)
-        self.mix = nn.Parameter(torch.FloatTensor(1, 1).fill_(1))
+        self.expand = ExpandUsingPosEncodings(128, 128, 16, 128, multiply=True, learnable_encodings=True)
+        self.net = nn.Sequential(
+            nn.ConvTranspose1d(128, 64, 4, 2, 1),
+            nn.LeakyReLU(0.2),
+            nn.ConvTranspose1d(64, 32, 4, 2, 1),
+            nn.LeakyReLU(0.2),
+            nn.ConvTranspose1d(32, 16, 4, 2, 1),
+            nn.LeakyReLU(0.2),
+            nn.ConvTranspose1d(16, 8, 4, 2, 1),
+            nn.LeakyReLU(0.2),
+            nn.ConvTranspose1d(8, 4, 4, 2, 1),
+            nn.LeakyReLU(0.2),
+            nn.ConvTranspose1d(4, 2, 4, 2, 1),
+            nn.LeakyReLU(0.2),
+            nn.ConvTranspose1d(2, 1, 4, 2, 1),
+        )
+        self.apply(init_weights)
     
     def forward(self, x):
-        x = self.verb.forward(x, self.mix)
+        x = self.expand(x)
+        x = self.net(x)
+        m = torch.abs(x).max()
+        x = x / (m + 1e-12)
         return x
 
 
+class Discriminator(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.sim = SelfSimNetwork(128, 5)
+        self.final = nn.Linear(128, 1)
+        self.frames = LinearOutputStack(128, 4, out_channels=1, in_channels=512)
+        self.apply(init_weights)
+    
+    def forward(self, x):
+        x, y = self.sim(x)
+        y = self.frames(y).mean(dim=-2)
+        x = self.final(x)
+        return torch.cat([x.view(-1), y.view(-1)])
+
+gen = Generator()
+gen_optim = optimizer(gen, lr=1e-4)
+
+disc = Discriminator()
+disc_optim = optimizer(disc, lr=1e-4)
+
+
+def train_gen(batch):
+    gen_optim.zero_grad()
+    z = get_latent(batch.shape[0], 128)
+    fake = gen(z)
+    j = disc(fake)
+    loss = least_squares_generator_loss(j)
+    loss.backward()
+    gen_optim.step()
+    print('G', loss.item())
+    return fake
+
+
+def train_disc(batch):
+    disc_optim.zero_grad()
+    z = get_latent(batch.shape[0], 128)
+    fake = gen(z)
+
+    rj = disc(batch)
+    fj = disc(fake)
+
+    loss = least_squares_disc_loss(rj, fj)
+    loss.backward()
+    disc_optim.step()
+    print('D', loss.item())
+    
 if __name__ == '__main__':
 
-    # settings
-    n_samples = 2**15
+    # signal = torch.zeros(4, 1, 2**14)
+    model = SelfSimNetwork(128, 4)
+    app = zounds.ZoundsApp(globals=globals(), locals=locals())
+    app.start_in_thread(8888)
+    stream = audio_stream(4, 2**14, overfit=False, normalize=True)
+
     sr = zounds.SR22050()
 
-    # start the app
-    app = zounds.ZoundsApp(locals=locals(), globals=globals())
-    app.start_in_thread(9999)
+    def listen():
+        return playable(recon, sr)
 
-    # get some audio
-    bs = batch_stream(Config.audio_path(), '*.wav', 1, n_samples)
-    audio = next(bs)
-    audio /= (np.abs(audio).max() + 1e-12)
-    audio = torch.from_numpy(audio).to(device)
-
-    # get the impulse
-    impulse = zounds.AudioSamples\
-        .from_file('/home/john/Downloads/reverbs/Five Columns.wav')\
-        .mono[:n_samples]
-    impulse /= np.abs(impulse.max())
-    
-    # apply a known impulse response
-    with torch.no_grad():
-        static_verb = NeuralReverb(
-            n_samples, 1, impulses=impulse.reshape((1, n_samples)))
-        dry = zounds.AudioSamples(audio.data.cpu().numpy().squeeze(), sr).pad_with_silence()
-        with_verb = static_verb(audio, torch.FloatTensor(1, 1).fill_(1))
-
-    # create a model to learn reverb settings
-    model = VerbWrapper(n_samples).to(device)
-    optim = Adam(model.parameters(), lr=1e-4, betas=(0, 0.9))
-
-
-    def real():
-        return zounds.AudioSamples(with_verb.data.cpu().numpy().squeeze(), sr).pad_with_silence()
-    
-    def fake():
-        return zounds.AudioSamples(f.data.cpu().numpy().squeeze(), sr).pad_with_silence()
-    
-    def real_impulse():
-        return np.array(impulse.squeeze())
-
-    def fake_impulse():
-        return model.verb.rooms.data.cpu().numpy().squeeze()
-
-    while True:
-        optim.zero_grad()
-        f = model.forward(audio)
-        loss = loss_func(f, with_verb)
-        loss.backward()
-        optim.step()
-        print(loss.item())
-
-
-
-    input('waiting..')
+    for i, sample in enumerate(stream):
+        sample = sample.view(-1, 1, 2**14)
+        if i % 2 == 0:
+            recon = train_gen(sample)
+        else:
+            train_disc(sample)
