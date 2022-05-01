@@ -1,1 +1,1 @@
-from .e_2022_4_22 import SynthParamsDecoder as Current
+from .e_2022_4_29 import SynthParamsDecoderGan as Current
