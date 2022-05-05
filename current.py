@@ -8,7 +8,9 @@ import argparse
 from datetime import datetime
 import os
 import numpy as np
+import torch
 
+torch.backends.cudnn.benchmark = True
 
 def new_experiment():
     dt = datetime.now()

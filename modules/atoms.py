@@ -300,19 +300,21 @@ class AudioEvent(nn.Module):
             self.harmonic_factor[None, None, :, None]
         harm_env = osc_env[:, :, None, :] * harm_env[:, :, :, :]
 
-        fundamental = F.upsample(f0, size=self.n_samples, mode='linear')
-        harmonics = F.upsample(
-            harmonics.view(-1, self.n_events * self.n_harmonics,
+        
+
+        fundamental = F.interpolate(f0, size=self.n_samples, mode='linear')
+        harmonics = F.interpolate(
+            harmonics.reshape(-1, self.n_events * self.n_harmonics,
                            self.sequence_length),
             size=self.n_samples,
-            mode='linear').view(-1, self.n_events, self.n_harmonics, self.n_samples)
+            mode='linear').reshape(-1, self.n_events, self.n_harmonics, self.n_samples)
 
-        osc_env = F.upsample(osc_env, size=self.n_samples, mode='linear')
-        harm_env = F.upsample(
-            harm_env.view(-1, self.n_events * self.n_harmonics,
+        osc_env = F.interpolate(osc_env, size=self.n_samples, mode='linear')
+        harm_env = F.interpolate(
+            harm_env.reshape(-1, self.n_events * self.n_harmonics,
                           self.sequence_length),
             size=self.n_samples,
-            mode='linear').view(-1, self.n_events, self.n_harmonics, self.n_samples)
+            mode='linear').reshape(-1, self.n_events, self.n_harmonics, self.n_samples)
 
         fundamental = torch.sin(torch.cumsum(
             fundamental * np.pi, -1)) * osc_env
@@ -328,8 +330,8 @@ class AudioEvent(nn.Module):
         noise = band_filtered_noise(
             self.n_samples, mean=noise_mean, std=noise_std)
 
-        osc_mix = F.upsample(overall_env, size=self.n_samples, mode='linear')
-        noise_mix = F.upsample(
+        osc_mix = F.interpolate(overall_env, size=self.n_samples, mode='linear')
+        noise_mix = F.interpolate(
             1 - overall_env, size=self.n_samples, mode='linear')
 
         final = (osc * osc_mix) + (noise * noise_mix)

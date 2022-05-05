@@ -7,7 +7,7 @@ gan_cycle = cycle(['gen', 'disc'])
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def get_latent(batch_size, dim):
-    return torch.FloatTensor(batch_size, dim).normal_(0, 1).to(device)
+    return torch.zeros((batch_size, dim), device=device).normal_(0, 1)
 
 
 def train_gen(batch, gen, disc, gen_optim, get_latent, loss=least_squares_generator_loss):
