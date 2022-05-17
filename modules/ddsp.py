@@ -290,7 +290,7 @@ class OscillatorBank(nn.Module):
         if self.compete:
             self.dist = nn.Conv1d(input_channels, self.n_osc, 1, 1, 0)
 
-    def forward(self, x):
+    def forward(self, x, add_noise=False):
         batch_size = x.shape[0]
         x = x.view(batch_size, self.input_channels, -1)
 
@@ -318,6 +318,10 @@ class OscillatorBank(nn.Module):
 
         amp_params = amp
         freq_params = freq
+
+        if add_noise:
+            amp = amp + torch.zeros_like(amp).normal_(0, 0.1)
+            freq = freq + torch.zeros_like(freq).normal_(0, 0.1)
 
         amp = F.upsample(amp, size=self.n_audio_samples, mode='linear')
         freq = F.upsample(freq, size=self.n_audio_samples, mode='linear')
@@ -371,7 +375,7 @@ class NoiseModel(nn.Module):
 
         self.final = nn.Conv1d(channels, self.noise_coeffs, 1, 1, 0)
 
-    def forward(self, x):
+    def forward(self, x, add_noise=False):
         batch_size = x.shape[0]
         x = x.view(batch_size, self.input_channels, self.input_size)
         x = self.initial(x)
@@ -385,6 +389,8 @@ class NoiseModel(nn.Module):
             x[:, :self.mask_after, :] = 1
         
         noise_params = x
+        if add_noise:
+            x = x + torch.zeros_like(x).normal_(0, 0.1)
         x = noise_bank2(x)
         if self.return_params:
             return x, noise_params

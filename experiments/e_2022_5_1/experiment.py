@@ -2,6 +2,7 @@ import numpy as np
 from modules.atoms import AudioEvent
 from modules.linear import LinearOutputStack
 from modules.metaformer import AttnMixer, MetaFormer
+from modules.pif import AuditoryImage
 from modules.pos_encode import pos_encoded
 from modules.reverb import NeuralReverb
 from train.gan import get_latent
@@ -22,13 +23,20 @@ from util.weight_init import make_initializer
 n_clusters = 512
 n_samples = 2 ** 14
 samplerate = zounds.SR22050()
-small_batch = 4
+small_batch = 2
 
 latent_dim = 128
 band = zounds.FrequencyBand(20, samplerate.nyquist)
 mel_scale = zounds.MelScale(band, latent_dim)
 fb = zounds.learn.FilterBank(
     samplerate, 512, mel_scale, 0.1, normalize_filters=True, a_weighting=False).to(device)
+
+aim = AuditoryImage(512, 64, do_windowing=False, check_cola=True).to(device)
+
+def perceptual_features(x):
+    x = fb.forward(x, normalize=False)
+    x = aim(x)
+    return x
 
 scale = MelScale()
 codec = AudioCodec(scale)
@@ -130,7 +138,6 @@ class Discriminator(nn.Module):
         return x, torch.cat(features, dim=-1)
 
 
-
 class SynthGenerator(nn.Module):
     def __init__(self, n_atoms=n_events, channels=latent_dim):
         super().__init__()
@@ -140,7 +147,7 @@ class SynthGenerator(nn.Module):
         self.embedding = nn.Embedding(n_clusters, channels)
 
         self.n_atoms = n_atoms
-        
+
         self.amp = nn.Sequential(
             nn.Conv1d(1, 16, 7, 1, 3),
             nn.LeakyReLU(0.2),
@@ -157,14 +164,13 @@ class SynthGenerator(nn.Module):
         #     lambda channels: AttnMixer(channels),
         #     lambda channels: nn.LayerNorm((n_frames, channels)),
         #     return_features=False)
-        
+
         self.transform_latent = LinearOutputStack(c, 3)
         self.embed_pos = LinearOutputStack(c, 2, in_channels=33)
 
         self.to_synth = LinearOutputStack(c, 3, out_channels=n_atoms * 70)
         self.to_rooms = LinearOutputStack(c, 3, out_channels=n_rooms)
         self.to_verb_mix = LinearOutputStack(c, 3, out_channels=1)
-
 
         self.transform = nn.Sequential(
             nn.Conv1d(c, c, 7, 1, 3),
@@ -177,7 +183,6 @@ class SynthGenerator(nn.Module):
             nn.LeakyReLU(0.2),
         )
 
-        
         self.atoms = AudioEvent(
             sequence_length=sequence_length,
             n_samples=n_samples,
@@ -188,7 +193,6 @@ class SynthGenerator(nn.Module):
             sr=samplerate,
             noise_ws=512,
             noise_step=256)
-        
 
         # self.atom_gen = AtomGenerator()
         # self.n_atoms = n_atoms
@@ -237,9 +241,9 @@ class SynthGenerator(nn.Module):
 
         x = synth.permute(0, 2, 1).reshape(-1, self.n_atoms, 70, 64)
 
-        f0 = x[:, :, 0, :]
-        osc_env = x[:, :, 1, :]
-        noise_env = x[:, :, 2, :]
+        f0 = x[:, :, 0, :] ** 2
+        osc_env = x[:, :, 1, :] ** 2
+        noise_env = x[:, :, 2, :] ** 2
         overall_env = x[:, :, 3, :]
         noise_std = x[:, :, 4, :]
         harm_env = x[:, :, 5:-1, :]
@@ -322,7 +326,7 @@ class Generator(nn.Module):
 
 
 gen = Generator(channels=latent_dim, fft=True).to(device)
-gen_optim = optimizer(gen, lr=1e-3)
+gen_optim = optimizer(gen, lr=1e-4)
 
 disc = Discriminator(latent_dim).to(device)
 disc_optim = optimizer(disc)
@@ -333,10 +337,15 @@ def train_gen(batch, indices, norms):
     z = get_latent(batch.shape[0], latent_dim)
     fake = gen.forward(z, indices, norms)
 
-    fj, f_feat = disc.forward(fake, indices, norms)
-    rj, r_feat = disc.forward(batch, indices, norms)
+    # fj, f_feat = disc.forward(fake, indices, norms)
+    # rj, r_feat = disc.forward(batch, indices, norms)
 
-    feat_loss = F.mse_loss(f_feat, r_feat)
+    # feat_loss = F.mse_loss(f_feat, r_feat)
+
+    real_feat = perceptual_features(batch)
+    fake_feat = perceptual_features(fake)
+    feat_loss = F.mse_loss(real_feat, fake_feat)
+    
 
     # judge_loss = least_squares_generator_loss(fj)
 
@@ -412,11 +421,15 @@ class TokenExperiment(object):
             norms = norms[:small_batch].to(device)
             item = item[:small_batch].view(-1, 1, n_samples)
 
-            if i % 2 == 0:
-                self.fake, loss = train_gen(item, indices, norms)
-                if i % 10 == 0:
-                    print('G', i, loss.item())
-            else:
-                loss = train_disc(item, indices, norms)
-                if (i + 1) % 10 == 0:
-                    print('D', i, loss.item())
+            self.fake, loss = train_gen(item, indices, norms)
+            if i % 10 == 0:
+                print('G', i, loss.item())
+
+            # if i % 2 == 0:
+            #     self.fake, loss = train_gen(item, indices, norms)
+            #     if i % 10 == 0:
+            #         print('G', i, loss.item())
+            # else:
+            #     loss = train_disc(item, indices, norms)
+            #     if (i + 1) % 10 == 0:
+            #         print('D', i, loss.item())
