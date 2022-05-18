@@ -1,5 +1,6 @@
 from config import config_values
 import json
+from data.audioiter import AudioIterator
 from data.audiostream import audio_stream
 from experiments import Current
 import os
@@ -53,7 +54,12 @@ if __name__ == '__main__':
         app = zounds.ZoundsApp(locals=locals(), globals=globals())
         app.start_in_thread(os.environ['PORT'])
 
-        stream = audio_stream(args.batch_size, 2**args.nsamples, args.overfit, args.normalize, as_torch=True)
+        stream = AudioIterator(
+            args.batch_size, 
+            2**args.nsamples, 
+            zounds.SR22050(), 
+            args.normalize, 
+            args.overfit)
 
         exp = Current(stream)
 

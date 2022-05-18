@@ -162,7 +162,8 @@ class ConvUpsample(nn.Module):
             start_size,
             end_size,
             mode,
-            out_channels):
+            out_channels,
+            from_latent=True):
 
         super().__init__()
         self.latent_dim = latent_dim
@@ -171,6 +172,7 @@ class ConvUpsample(nn.Module):
         self.start_size = start_size
         self.end_size = end_size
         self.n_layers = int(np.log2(end_size) - np.log2(start_size))
+        self.from_latent = from_latent
 
         self.begin = nn.Linear(
             self.latent_dim, self.channels * self.start_size)
@@ -201,9 +203,11 @@ class ConvUpsample(nn.Module):
         self.apply(init_weights)
 
     def forward(self, x):
-        x = x.view(-1, self.latent_dim)
-        x = self.begin(x)
-        x = x.view(-1, self.channels, self.start_size)
+        if self.from_latent:
+            x = x.view(-1, self.latent_dim)
+            x = self.begin(x)
+            x = x.view(-1, self.channels, self.start_size)
+        
         x = self.net(x)
         x = self.final(x)
         return x
