@@ -137,6 +137,7 @@ def train_model(batch):
 
     steps = torch.rand(1)
     steps = torch.zeros((batch.shape[0], 1)).fill_(float(steps)).to(device)
+    
     x, step, noise = diff_process.forward_process(batch, steps)
     noise_pred = diff_process.backward_process(x, step, model)
     loss = torch.abs(noise_pred - noise).sum()
