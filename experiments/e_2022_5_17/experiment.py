@@ -26,7 +26,7 @@ from util.weight_init import make_initializer
 n_clusters = 512
 n_samples = 2 ** 14
 samplerate = zounds.SR22050()
-small_batch = 4
+small_batch = 8
 
 latent_dim = 128
 band = zounds.FrequencyBand(20, samplerate.nyquist)
@@ -91,16 +91,23 @@ def decode_batch(kmeans, indices, norms):
 
 
 class DilatedBlock(nn.Module):
-    def __init__(self, channels, dilation):
+    def __init__(self, channels, dilation, unit_norm=False, nl=True):
         super().__init__()
         self.dilated = nn.Conv1d(channels, channels, 3, padding=dilation, dilation=dilation)
         self.conv = nn.Conv1d(channels, channels, 1, 1, 0)
+        self.unit_norm = unit_norm
+        self.nl = nl
     
     def forward(self, x):
         orig = x
         x = self.dilated(x)
         x = self.conv(x)
-        x = F.leaky_relu(x + orig, 0.2)
+        x = x + orig
+        if self.nl:
+            x = F.leaky_relu(x, 0.2)
+        if self.unit_norm:
+            norms = torch.norm(x, dim=1, keepdim=True)
+            x = x / (norms + 1e-12)
         return x
 
 class Discriminator(nn.Module):
@@ -123,19 +130,21 @@ class Discriminator(nn.Module):
 
         self.net = nn.Sequential(
             nn.Conv1d(self.channels * 3, self.channels, 3, 1, 1),
-            DilatedBlock(self.channels, 1),
-            DilatedBlock(self.channels, 3),
-            DilatedBlock(self.channels, 9),
-            DilatedBlock(self.channels, 1),
-            DilatedBlock(self.channels, 3),
-            DilatedBlock(self.channels, 9),
-            DilatedBlock(self.channels, 1),
+            DilatedBlock(self.channels, 1, unit_norm=True),
+            DilatedBlock(self.channels, 3, unit_norm=True),
+            DilatedBlock(self.channels, 9, unit_norm=True),
+            DilatedBlock(self.channels, 1, unit_norm=True),
+            DilatedBlock(self.channels, 3, unit_norm=True),
+            DilatedBlock(self.channels, 9, unit_norm=True),
+            DilatedBlock(self.channels, 1, unit_norm=True, nl=False),
         )
 
         self.final = nn.Conv1d(self.channels, 1, 1, 1, 0)
+
+        self.apply(init_weights)
     
     def forward(self, x, indices, norms):
-        x = perceptual_features(x).permute(0, 2, 1)
+        spec = x = perceptual_features(x).permute(0, 2, 1)
         x = self.embed_spec(x)
 
         indices = indices.view(-1, n_frames)
@@ -156,8 +165,9 @@ class Discriminator(nn.Module):
             x = layer(x)
             features.append(x)
         
+        latent = x
         x = self.final(x)
-        return x, features
+        return x, features, spec, latent
 
 
 class Generator(nn.Module):
@@ -183,7 +193,33 @@ class Generator(nn.Module):
             DilatedBlock(c, 9),
             DilatedBlock(c, 1),
         )
-        self.up = ConvUpsample(c, c, 64, 16384, 'nearest', c, from_latent=False)
+
+        self.to_osc = nn.Conv1d(c, c, 3, 1, 1)
+        self.to_noise = nn.Conv1d(c, c, 3, 1, 1)
+
+        self.osc = OscillatorBank(
+            input_channels=128,
+            n_osc=128,
+            n_audio_samples=n_samples,
+            activation=torch.sigmoid,
+            amp_activation=torch.abs,
+            constrain=True,
+            log_frequency=False,
+            lowest_freq=40 / samplerate.nyquist,
+            sharpen=False,
+            compete=False)
+
+        self.noise = NoiseModel(
+            input_channels=128,
+            input_size=64,
+            n_noise_frames=512,
+            n_audio_samples=n_samples,
+            channels=128,
+            activation=lambda x: x,
+            squared=False,
+            mask_after=1)
+        
+        # self.up = ConvUpsample(c, c, 64, 16384, 'fft_learned', c, from_latent=False)
 
         self.to_verb_mix = nn.Conv1d(c, 1, 3, 1, 1)
 
@@ -214,10 +250,20 @@ class Generator(nn.Module):
         mix = self.to_verb_mix.forward(x.mean(dim=-1))
         mix = torch.sigmoid(mix).view(-1, 1, 1)
 
-        
-        signal = self.up(x)
-        signal = F.pad(signal, (0, 1))
-        signal = fb.transposed_convolve(signal)
+        osc = self.to_osc(x)
+        noise = self.to_noise(x)
+
+
+
+        osc = self.osc(osc)
+        noise = self.noise(noise)
+
+
+        signal = osc + noise
+        # signal = self.up(x)
+        # signal = F.pad(signal, (0, 1))
+        # signal = fb.transposed_convolve(signal)
+
         wet = self.verb.forward(signal, verb)
         x = (signal * mix) + (wet * (1 - mix))
         return x
@@ -234,12 +280,19 @@ def train_gen(batch, indices, norms):
     gen_optim.zero_grad()
     fake = gen.forward(indices, norms)
 
-    rj, rf = disc(batch, indices, norms)
-    fj, ff = disc(fake, indices, norms)
+    rj, rf, real_spec, _ = disc(batch, indices, norms)
+    fj, ff, fake_spec, _ = disc(fake, indices, norms)
 
     loss = 0
     for i in range(len(rf)):
         loss = loss + F.mse_loss(ff[i], rf[i])
+    
+    fake_norms = torch.norm(fake_spec, dim=1).view(batch.shape[0], sequence_length)
+    amp_loss = F.mse_loss(fake_norms, norms.view(batch.shape[0], sequence_length))
+
+    
+
+    loss = (amp_loss * 0.01) + loss
     
     loss.backward()
     gen_optim.step()
@@ -249,13 +302,13 @@ def train_disc(batch, indices, norms):
     disc_optim.zero_grad()
     fake = gen.forward(indices, norms)
 
-    rj, rf = disc(batch, indices, norms)
-    fj, ff = disc(fake, indices, norms)
+    rj, rf, _, real_latent = disc(batch, indices, norms)
+    fj, ff, _, fake_latent = disc(fake, indices, norms)
 
     loss = least_squares_disc_loss(rj, fj)
     loss.backward()
     disc_optim.step()
-    return loss
+    return loss, real_latent, fake_latent
 
 @readme
 class DumbestPossibleVQExperiment(object):
@@ -267,6 +320,9 @@ class DumbestPossibleVQExperiment(object):
         self.indices = None
         self.norms = None
         self.fake = None
+
+        self.rl = None
+        self.fl = None
 
         self.kmeans = MiniBatchKMeans(n_clusters=n_clusters)
         self.gen = gen
@@ -291,6 +347,12 @@ class DumbestPossibleVQExperiment(object):
 
     def fake_spec(self):
         return np.abs(zounds.spectral.stft(self.listen()))
+    
+    def real_latent(self):
+        return self.rl.data.cpu().numpy().squeeze()[0]
+    
+    def fake_latent(self):
+        return self.fl.data.cpu().numpy().squeeze()[0]
 
     def run(self):
         for i, item in enumerate(self.stream):
@@ -309,7 +371,7 @@ class DumbestPossibleVQExperiment(object):
             if i % 2 == 0:
                 self.fake, gen_loss = train_gen(real, indices, norms)
             else:
-                disc_loss = train_disc(real, indices, norms)
+                disc_loss, self.rl, self.fl = train_disc(real, indices, norms)
 
             if i > 0 and i % 10 == 0:
                 print('GEN', i, gen_loss.item())
