@@ -8,10 +8,11 @@ from util.weight_init import make_initializer
 import numpy as np
 from torch.nn import functional as F
 
-init_weights = make_initializer(0.01)
+init_weights = make_initializer(0.05)
 
 def activation(x):
-    return torch.sin(x * 30)
+    # return torch.sin(x * 30)
+    return F.leaky_relu(x, 0.2)
 
 
 class Synth(nn.Module):
@@ -39,6 +40,8 @@ class Synth(nn.Module):
         osc = self.to_osc_params(x).view(batch, time, self.n_osc, 2)
         amp = torch.norm(osc, dim=-1).permute(0, 2, 1)
         freq = (torch.angle(torch.complex(osc[..., 0], osc[..., 1])) / np.pi).permute(0, 2, 1)
+
+        freq = (freq * .98) + 0.0036
 
         amp = F.interpolate(amp, size=self.samples_per_frame * time, mode='linear')
         freq = F.interpolate(freq, size=self.samples_per_frame * time, mode='linear')
@@ -73,9 +76,12 @@ class RecurrentSynth(nn.Module):
         for i in range(max_iter):
             x = self.net(x)
             x = unit_norm(x)
-            g = torch.softmax(self.gate(x), dim=-1)
+
+            g = self.gate(x)
+            g = torch.softmax(g, dim=-1)
             mask = g @ self.mask
             x = x * mask
+
             results.append(x[None, ...])
 
             index = torch.argmax(g, dim=-1)
@@ -111,15 +117,13 @@ class Conductor(nn.Module):
         self.samples_per_frame = samples_per_frame
         self.total_frames = total_frames
 
-        instruments = \
-            [RecurrentSynth(layers, channels, samples_per_frame) for _ in range(self.voices)] \
-            + [Silence(self.samples_per_frame)]
+        instruments = [RecurrentSynth(layers, channels, samples_per_frame) for _ in range(self.voices)]
         
         self.instruments = nn.ModuleList(instruments)
 
         self.net = LinearOutputStack(channels, layers)
         self.router = LinearOutputStack(
-            channels, layers, out_channels=self.voices + 1)
+            channels, layers, out_channels=self.voices)
 
         n_rooms = 8
         self.to_rooms = LinearOutputStack(channels, layers, out_channels=n_rooms)
@@ -136,11 +140,6 @@ class Conductor(nn.Module):
             raise NotImplementedError('Batch mode not implemented')
         
 
-        z = torch.mean(x, dim=1)
-        rooms = torch.softmax(self.to_rooms(z), dim=-1)
-        mix = torch.sigmoid(self.to_mix(z))
-
-
         total_samples = self.samples_per_frame * self.total_frames
 
         out_samples = torch.zeros(total_samples)
@@ -148,6 +147,11 @@ class Conductor(nn.Module):
         x = x.view(time, channels)
 
         x = self.net(x)
+
+
+        z = torch.mean(x, dim=0, keepdim=True)
+        rooms = torch.softmax(self.to_rooms(z), dim=-1)
+        mix = torch.sigmoid(self.to_mix(z))
 
         routes = self.router(x)
         # get probabilities for each instrument at each time step
@@ -158,13 +162,15 @@ class Conductor(nn.Module):
         for i in range(time):
             # get the winning instrument index a this time step
             index = indices[i].item()
+
             # get the factor used to scale the output from the instrument
             r = routes[i, index]
             inst = self.instruments[index]
 
             # run the instrument and scale it by the probability
-            inst_output = inst.forward(x[i], time - i) * r
-            
+            max_iter = time - i
+            inst_output = inst.forward(x[i], max_iter) * r 
+
             if len(inst_output.shape) == 1:
                 start_sample = i * self.samples_per_frame
                 end_sample = start_sample + inst_output.shape[0]
