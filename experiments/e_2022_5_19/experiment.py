@@ -1,4 +1,5 @@
 
+from re import M
 from modules.diffusion import DiffusionProcess
 from util.readmedocs import readme
 import numpy as np
@@ -17,7 +18,7 @@ from util.weight_init import make_initializer
 n_clusters = 512
 n_samples = 2 ** 14
 samplerate = zounds.SR22050()
-small_batch = 4
+small_batch = 8
 
 latent_dim = 128
 
@@ -34,7 +35,7 @@ n_freq_bins = 256
 n_frames = n_samples // 256
 
 
-init_weights = make_initializer(0.02)
+init_weights = make_initializer(0.05)
 
 
 def to_frames(batch):
@@ -66,6 +67,20 @@ def decode_batch(kmeans, indices, norms):
     return frames * norms
 
 
+class DilatedBlock(nn.Module):
+    def __init__(self, channels, dilation):
+        super().__init__()
+        self.dilated = nn.Conv1d(channels, channels, 3, padding=dilation, dilation=dilation)
+        self.conv = nn.Conv1d(channels, channels, 1, 1, 0)
+    
+    def forward(self, x):
+        orig = x
+        x = self.dilated(x)
+        x = self.conv(x)
+        x = x + orig
+        x = F.leaky_relu(x, 0.2)
+        return x
+
 class Generator(nn.Module):
     def __init__(self, channels=latent_dim):
         super().__init__()
@@ -86,14 +101,48 @@ class Generator(nn.Module):
 
         self.embed_audio = nn.Conv1d(1, 128, 25, 1, 12)
 
-        self.net = nn.Sequential(
-            nn.Conv1d(512, 256, 7, 1, 3),
+        self.embed_context = nn.Conv1d(c * 3, c, 1, 1, 0)
+
+        self.downsample_audio = nn.Sequential(
+            nn.Conv1d(c, c, 9, 4, 4), # 4096
             nn.LeakyReLU(0.2),
-            nn.Conv1d(256, 128, 7, 1, 3),
+            nn.Conv1d(c, c, 9, 4, 4), # 1024
             nn.LeakyReLU(0.2),
-            nn.Conv1d(128, 64, 7, 1, 3),
+            nn.Conv1d(c, c, 9, 4, 4), # 256
             nn.LeakyReLU(0.2),
-            nn.Conv1d(64, 1, 7, 1, 3)
+            nn.Conv1d(c, c, 9, 4, 4), # 64
+        )
+
+
+
+        self.upsample_audio = nn.Sequential(
+            nn.Conv1d(c*2, c, 3, 1, 1),
+
+            # context
+            DilatedBlock(c, 1),
+            DilatedBlock(c, 3),
+            DilatedBlock(c, 9),
+            DilatedBlock(c, 1),
+
+            nn.LeakyReLU(0.2),
+            nn.ConvTranspose1d(c, c, 8, 4, 2),
+            nn.LeakyReLU(0.2),
+            nn.ConvTranspose1d(c, c, 8, 4, 2),
+            nn.LeakyReLU(0.2),
+            nn.ConvTranspose1d(c, c, 8, 4, 2),
+            nn.LeakyReLU(0.2),
+            nn.ConvTranspose1d(c, c, 8, 4, 2),
+        )
+        
+
+        self.final = nn.Sequential(
+            nn.Conv1d(c*2, c, 3, 1, 1),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(c, c, 25, 1, 12),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(c, c, 25, 1, 12),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(c, 1, 25, 1, 12),
         )
 
         self.apply(init_weights)
@@ -111,20 +160,26 @@ class Generator(nn.Module):
         amp = self.amp(norms)
 
         audio = self.embed_audio(noisy)
+        ds_audio = self.downsample_audio(audio)
 
         step = self.embed_step(step).view(-1, 128, 1).repeat(1, 1, 64)
 
         x = torch.cat([embedded, amp, step], dim=1)
-        x = F.upsample(x, size=n_samples)
+        x = self.embed_context(x)
+
+        x = torch.cat([x, ds_audio], dim=1)
+        x = self.upsample_audio(x)
+
 
         x = torch.cat([x, audio], dim=1)
-        x = self.net(x)
+
+        x = self.final(x)
 
         return x
 
 
 gen = Generator(channels=latent_dim).to(device)
-gen_optim = optimizer(gen, lr=1e-3)
+gen_optim = optimizer(gen, lr=1e-4)
 
 
 diff = DiffusionProcess(total_steps=25, variance_per_step=0.5)
