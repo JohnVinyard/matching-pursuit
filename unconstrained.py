@@ -5,9 +5,10 @@ import zounds
 from data.audiostream import audio_stream
 from modules.ddsp import NoiseModel, UnconstrainedOscillatorBank
 from modules.phase import AudioCodec, MelScale
+from modules.pif import AuditoryImage
 from modules.reverb import NeuralReverb
 from train.optim import optimizer
-from util import playable
+from util import device, playable
 from util.weight_init import make_initializer
 from torch.nn import functional as F
 
@@ -21,13 +22,59 @@ n_osc = 64
 mel_scale = MelScale()
 codec = AudioCodec(mel_scale)
 
+band = zounds.FrequencyBand(20, sr.nyquist)
+scale = zounds.MelScale(band, 128)
+fb = zounds.learn.FilterBank(
+    sr, 512, scale, 0.1, normalize_filters=True, a_weighting=False).to(device)
+
+aim = AuditoryImage(512, 32, do_windowing=False, check_cola=False).to(device)
+
 init_weights = make_initializer(0.1)
 
+# def feature(x):
+#     x = x.view(-1, n_samples)
+#     x = codec.to_frequency_domain(x)
+#     return x[..., 0]
+
+# def feature(x):
+#     x = fb.forward(x, normalize=False)
+#     return x
+
+# def feature(x):
+#     x = fb.forward(x, normalize=False)
+#     x = fb.temporal_pooling(x, 512, 256)
+#     return x
+
 def feature(x):
-    x = codec.to_frequency_domain(x)
-    return x[..., 0]
+    x = fb.forward(x, normalize=False)
+    x = aim.forward(x)
+    return x
+
+
+# def feature(x):
+#     """
+#     spike timing
+#     """
+
+#     # filter, half-wave rectification, log amplitude
+#     x = fb.forward(x, normalize=False)
+#     pooled = F.avg_pool1d(x, 512, 1, padding=256)[..., :-1]
+#     x = x - pooled
+
+#     # reduce sample rate
+#     p1 = F.max_pool1d(pooled, 512, 256)
+
+#     # find patterns in residual
+#     x = F.conv1d(x, fb.filter_bank, bias=None, groups=128)
+
+#     p2 = F.max_pool1d(x, 512, 256, padding=256)
+
+#     return torch.cat([p1.view(-1), p2.view(-1)])
+
 
 def loss(a, b):
+    a = feature(a)
+    b = feature(b)
     return F.mse_loss(a, b)
 
 
@@ -65,7 +112,7 @@ class Model(nn.Module):
         x = (signal * mix) + (wet * (1 - mix))
         return x
 
-model = Model()
+model = Model().to(device)
 optim = optimizer(model, lr=1e-3)
 
 if __name__ == '__main__':
@@ -84,6 +131,7 @@ if __name__ == '__main__':
     def real():
         return playable(target, sr)
 
+    i = 0
     while True:
         optim.zero_grad()
         fake = model.forward(None)
@@ -91,4 +139,5 @@ if __name__ == '__main__':
         l.backward()
         optim.step()
 
-        print(l.item())
+        print(i, l.item())
+        i += 1
