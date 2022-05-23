@@ -1,5 +1,9 @@
 from .erb import erb, scaled_erb
-from .ddsp import OscillatorBank, NoiseModel, band_filtered_noise
+
+from .ddsp import \
+    OscillatorBank, NoiseModel, band_filtered_noise, \
+    UnconstrainedOscillatorBank
+
 from .multiresolution import EncoderShell, DecoderShell, BandEncoder, ConvBandDecoder, ConvExpander
 from .linear import LinearOutputStack
 from .stft import geom_basis, stft, log_stft, stft_relative_phase, short_time_transform

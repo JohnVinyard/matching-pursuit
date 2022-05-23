@@ -5,7 +5,10 @@ import numpy as np
 from scipy.signal import hann
 from torchvision.transforms.functional import adjust_sharpness
 
+from upsample import FFTUpsampleBlock
+
 from .normal_pdf import pdf
+import zounds
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -26,7 +29,7 @@ def noise_spec(n_audio_samples, ws=512, step=256, device=None):
     # take the STFT of the noise
     window = torch.hamming_window(ws).to(device)
     x = x * window[None, :]
-    x = torch.fft.rfft(x, norm='ortho') 
+    x = torch.fft.rfft(x, norm='ortho')
 
     # output shape
     # (n_audio_samples / step, ws // 2 + 1)
@@ -46,10 +49,9 @@ def band_filtered_noise(n_audio_samples, ws=512, step=256, mean=0.5, std=0.1):
     std = std * n_coeffs
 
     filt = pdf(
-        torch.arange(0, n_coeffs, 1).view(1, 1, n_coeffs, 1).to(mean.device), 
-        mean[:, :, None, :], 
+        torch.arange(0, n_coeffs, 1).view(1, 1, n_coeffs, 1).to(mean.device),
+        mean[:, :, None, :],
         std[:, :, None, :])
-
 
     # normalize frequency-domain filter to have peak at 1
     filt = filt / filt.max()
@@ -111,7 +113,7 @@ def _torch_overlap_add(x, apply_window=True, flip=False):
 
     if flip:
         first_half = first_half[:, :, ::-1]
-    
+
     output = first_half + second_half
     return output
 
@@ -126,7 +128,6 @@ def _np_overlap_add(x, apply_window=True, flip=False):
     hop_size = samples // 2
     first_half = x[:, :, :, :hop_size].reshape((batch, channels, -1))
     second_half = x[:, :, :, hop_size:].reshape((batch, channels, -1))
-
 
     first_half = np.pad(first_half, [(0, 0), (0, 0), (0, hop_size)])
     second_half = np.pad(second_half, [(0, 0), (0, 0), (hop_size, 0)])
@@ -277,7 +278,6 @@ class OscillatorBank(nn.Module):
         else:
             bands = np.linspace(lowest_freq, 1, n_osc)
 
-
         bp = np.concatenate([[0], bands])
         spans = np.diff(bp)
 
@@ -297,11 +297,10 @@ class OscillatorBank(nn.Module):
         amp = self.amp(x)
         freq = self.freq(x)
 
-
         amp = self.amp_activation(amp)
         if self.log_amplitude:
             amp = amp ** 2
-        
+
         if self.sharpen:
             amp = amp.view(batch_size, 1, self.n_osc, -1)
             adjust_sharpness(amp, sharpness_factor=self.sharpen)
@@ -332,6 +331,75 @@ class OscillatorBank(nn.Module):
             return x, freq_params, amp_params
         else:
             return x
+
+
+class UnconstrainedOscillatorBank(nn.Module):
+    def __init__(
+            self,
+            input_channels,
+            n_osc,
+            n_audio_samples,
+            min_frequency_hz=40,
+            max_frequency_hz=9000,
+            samplerate=zounds.SR22050(),
+            fft_upsample=False,
+            baselines=True):
+
+        super().__init__()
+        self.to_osc = nn.Conv1d(input_channels, n_osc * 2, 1, 1, 0)
+        self.n_audio_samples = n_audio_samples
+
+        self.baselines = baselines
+
+        if self.baselines:
+            self._baselines = nn.Parameter(torch.zeros(n_osc, 2).uniform_(-0.1, 0.1))
+        
+        self.fft_upsample = fft_upsample
+
+        if self.fft_upsample:
+            self.upsample = FFTUpsampleBlock(n_osc, n_osc, 128, factor=256)
+
+        self.min_frequency_hz = min_frequency_hz
+        self.max_frequency_hz = max_frequency_hz
+        self.samplerate = samplerate
+        self.n_osc = n_osc
+
+    def forward(self, x):
+        batch, channels, time = x.shape
+
+        x = self.to_osc(x)
+        x = x.view(batch, self.n_osc, 2, time)
+
+        if self.baselines:
+            x = (x * 0.01) + self._baselines[None, :, :, None]
+
+        amp = torch.norm(x, dim=2)
+        r = x[:, :, 0, :]
+        i = x[:, :, 1, :]
+        freq = torch.angle(torch.complex(r, i)) / np.pi
+
+        amp = amp ** 2
+        freq = freq ** 2
+
+        # base_freq = self.min_frequency_hz / self.samplerate.nyquist
+        # max_freq = self.max_frequency_hz / self.samplerate.nyquist
+        # freq_range = max_freq - base_freq
+        # amp = base_freq + (amp * freq_range)
+
+        
+
+        if self.fft_upsample:
+            amp = self.upsample(amp)
+            freq = self.upsample(freq)
+        else:
+            amp = F.interpolate(amp, size=self.n_audio_samples, mode='linear')
+            freq = F.interpolate(freq, size=self.n_audio_samples, mode='linear')
+
+        # phase accumulator
+        osc = torch.sin(torch.cumsum(freq * np.pi, dim=-1)) * amp
+        # sum over all oscillators
+        osc = torch.sum(osc, dim=1, keepdim=True)
+        return osc
 
 
 class NoiseModel(nn.Module):
@@ -384,10 +452,10 @@ class NoiseModel(nn.Module):
         x = self.activation(x)
         if self.squared:
             x = x ** 2
-        
+
         if self.mask_after is not None:
             x[:, :self.mask_after, :] = 1
-        
+
         noise_params = x
         if add_noise:
             x = x + torch.zeros_like(x).normal_(0, 0.1)
