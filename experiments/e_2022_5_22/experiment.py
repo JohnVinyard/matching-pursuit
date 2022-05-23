@@ -26,7 +26,7 @@ from util.weight_init import make_initializer
 n_clusters = 512
 n_samples = 2 ** 14
 samplerate = zounds.SR22050()
-small_batch = 8
+small_batch = 16
 
 latent_dim = 128
 band = zounds.FrequencyBand(20, samplerate.nyquist)
