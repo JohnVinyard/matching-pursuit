@@ -45,9 +45,9 @@ class FreqModModel(nn.Module):
 
         super().__init__()
         self.freq_hz_range = freq_hz_range
-        # self.n_osc = 8
+        self.n_osc = 8
 
-        # self.baselines = nn.Parameter(torch.zeros(n_osc, 2).normal_(0, 1))
+        self.baselines = nn.Parameter(torch.zeros(n_osc, 2).normal_(0, 0.5))
 
         self.min_freq = self.freq_hz_range[0] / samplerate.nyquist
         self.max_freq = self.freq_hz_range[1] / samplerate.nyquist
@@ -56,9 +56,11 @@ class FreqModModel(nn.Module):
 
         self.dim = 10
 
-    def _translate(self, x, translate=0, scale=1):
+    def _translate(self, x, translate=0, scale=1, squared=False):
         angle = torch.angle(torch.complex(
             x[:, :, 0, :], x[:, :, 1, :])) / np.pi
+        if squared:
+            angle = angle ** 2
         return translate + (angle * scale)
 
     def forward(self, x):
@@ -66,20 +68,20 @@ class FreqModModel(nn.Module):
 
         # amp and f0
         basic = x[:, :, 0:2, :]
-        # baselines = self.baselines[None, :, :, None]
-        # basic = (basic * 0.1) + baselines
+        baselines = self.baselines[None, :, :, None]
+        basic = (basic * 0.01) + baselines
 
         mix = x[:, :, 2:4, :]
         noise_std = x[:, :, 4:6, :]
         mod_factor = x[:, :, 6:8, :]
         b = x[:, :, 8: 10, :]
 
-        amp = torch.norm(basic, dim=2)  # (batch, n_osc, 1, time)
+        amp = torch.norm(basic, dim=2) ** 2  # (batch, n_osc, 1, time)
 
         amp = F.interpolate(amp, size=n_samples, mode='linear')
 
         # (batch, n_osc, time)
-        f0 = self._translate(basic, self.min_freq, self.freq_range)
+        f0 = self._translate(basic, self.min_freq, self.freq_range, squared=True)
         mix = self._translate(mix, 1, 0.5)
         mix = F.interpolate(mix, size=n_samples, mode='linear')
 
@@ -90,6 +92,7 @@ class FreqModModel(nn.Module):
         mod_factor = self._translate(mod_factor, 0.25, 4.75)
         b = self._translate(b, 0.1, 9.9)
 
+        mod_factor[:] = 2
 
         bfn = band_filtered_noise(n_samples, mean=f0, std=noise_std)
         noise = noise_amp * bfn
@@ -98,7 +101,7 @@ class FreqModModel(nn.Module):
         mod_factor = F.interpolate(mod_factor, size=n_samples, mode='linear')
         b = F.interpolate(b, size=n_samples, mode='linear')
 
-        mod = b * torch.sin(torch.cumsum(mod_factor, dim=-1))
+        mod = b * torch.sin(torch.cumsum(mod_factor * f0, dim=-1))
 
         sig = harm_amp * torch.sin(torch.cumsum(f0, axis=-1) + mod)
 
@@ -139,9 +142,9 @@ def make(freq, factor, b=1):
 class Model(nn.Module):
     def __init__(self):
         super().__init__()
-        self.n_voices = 3
+        self.n_voices = 8
         self.inputs = nn.Parameter(torch.zeros(
-            (1, self.n_voices, 10, n_frames)).normal_(0, 1))
+            (1, self.n_voices, 10, n_frames)).normal_(0, 0.1))
         self.fm = FreqModModel(freq_hz_range=(40, 900))
 
     def forward(self, x):
