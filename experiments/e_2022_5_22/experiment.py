@@ -1,4 +1,5 @@
 
+from modules.pos_encode import pos_encoded
 from unconstrained import feature
 from upsample import ConvUpsample
 from util.readmedocs import readme
@@ -22,12 +23,13 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+
 from util.weight_init import make_initializer
 
 n_clusters = 512
 n_samples = 2 ** 14
 samplerate = zounds.SR22050()
-small_batch = 8
+small_batch = 4
 
 latent_dim = 128
 band = zounds.FrequencyBand(20, samplerate.nyquist)
@@ -35,7 +37,7 @@ mel_scale = zounds.MelScale(band, latent_dim)
 fb = zounds.learn.FilterBank(
     samplerate, 512, mel_scale, 0.1, normalize_filters=True, a_weighting=False).to(device)
 
-aim = AuditoryImage(512, 128, do_windowing=True, check_cola=True).to(device)
+aim = AuditoryImage(512, 64, do_windowing=True, check_cola=True).to(device)
 
 
 def perceptual_features(x):
@@ -108,64 +110,102 @@ class DilatedBlock(nn.Module):
             x = x / (norms + 1e-12)
         return x
 
-# class Discriminator(nn.Module):
-#     def __init__(self, channels=latent_dim):
-#         super().__init__()
-#         self.channels = channels
 
-#         self.embedding = nn.Embedding(n_clusters, channels)
-#         self.channels = channels
+class Discriminator(nn.Module):
+    def __init__(self, channels=latent_dim):
+        super().__init__()
+        self.channels = channels
 
-#         self.amp = nn.Sequential(
-#             nn.Conv1d(1, 16, 7, 1, 3),
-#             nn.LeakyReLU(0.2),
-#             nn.Conv1d(16, 32, 7, 1, 3),
-#             nn.LeakyReLU(0.2),
-#             nn.Conv1d(32, self.channels, 7, 1, 3),
-#         )
+        self.embedding = nn.Embedding(n_clusters, channels)
+        self.channels = channels
 
-#         self.embed_spec = nn.Conv1d(256, self.channels, 3, 1, 1)
+        self.amp = nn.Sequential(
+            nn.Conv1d(1, 16, 7, 1, 3),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(16, 32, 7, 1, 3),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(32, self.channels, 7, 1, 3),
+        )
 
-#         self.net = nn.Sequential(
-#             nn.Conv1d(self.channels * 3, self.channels, 3, 1, 1),
-#             DilatedBlock(self.channels, 1, unit_norm=True),
-#             DilatedBlock(self.channels, 3, unit_norm=True),
-#             DilatedBlock(self.channels, 9, unit_norm=True),
-#             DilatedBlock(self.channels, 1, unit_norm=True),
-#             DilatedBlock(self.channels, 3, unit_norm=True),
-#             DilatedBlock(self.channels, 9, unit_norm=True),
-#             DilatedBlock(self.channels, 1, unit_norm=True, nl=False),
-#         )
+        self.embed_spec = nn.Sequential(
+            nn.Sequential(
+                nn.Conv2d(257, 64, (3, 3), (1, 1), (1, 1)),
+                nn.LeakyReLU(0.2),
+                nn.BatchNorm2d(64)
+            ),
+            nn.Sequential(
+                nn.Conv2d(64, 32, (3, 3), (1, 1), (1, 1)),
+                nn.LeakyReLU(0.2),
+                nn.BatchNorm2d(32)
+            ),
+            nn.Sequential(
+                nn.Conv2d(32, 8, (3, 3), (1, 1), (1, 1)),
+                nn.LeakyReLU(0.2),
+                nn.BatchNorm2d(8)
+            ),
+            nn.Conv2d(8, 1, (3, 3), (1, 1), (1, 1)),
+        )
 
-#         self.final = nn.Conv1d(self.channels, 1, 1, 1, 0)
+        # self.net = nn.Sequential(
+        #     nn.Conv1d(self.channels * 3, self.channels, 1, 1, 0),
+        #     DilatedBlock(self.channels, 1),
+        #     DilatedBlock(self.channels, 3),
+        #     DilatedBlock(self.channels, 9),
+        #     DilatedBlock(self.channels, 1),
+        #     DilatedBlock(self.channels, 3),
+        #     DilatedBlock(self.channels, 9),
+        #     DilatedBlock(self.channels, 1),
+        # )
 
-#         self.apply(init_weights)
+        layer = nn.TransformerEncoderLayer(self.channels, nhead=4, dim_feedforward=self.channels, batch_first=True)
 
-#     def forward(self, x, indices, norms):
-#         spec = x = perceptual_features(x).permute(0, 2, 1)
-#         x = self.embed_spec(x)
+        self.reduce = nn.Conv1d(self.channels * 3 + 33, self.channels, 1, 1, 0)
 
-#         indices = indices.view(-1, n_frames)
-#         norms = norms.view(-1, 1, n_frames)
+        self.net = nn.TransformerEncoder(layer, 5)
 
-#         embedded = self\
-#             .embedding(indices).view(-1, n_frames, self.channels)\
-#             .permute(0, 2, 1)\
-#             .view(-1, self.channels, n_frames)
+        self.final = nn.Conv1d(self.channels, 1, 1, 1, 0)
 
-#         amp = self.amp(norms)
+        self.apply(init_weights)
 
-#         x = torch.cat([x, embedded, amp], dim=1)
+    def forward(self, x, indices, norms):
 
-#         features = []
+        features = []
 
-#         for layer in self.net:
-#             x = layer(x)
-#             features.append(x)
+        spec = perceptual_features(x).permute(0, 3, 1, 2)
 
-#         latent = x
-#         x = self.final(x)
-#         return x, features, spec, latent
+        for layer in self.embed_spec:
+            spec = layer(spec)
+            features.append(spec)
+        
+        spec = spec.view(-1, self.channels, n_frames)
+
+        indices = indices.view(-1, n_frames)
+        norms = norms.view(-1, 1, n_frames)
+
+        embedded = self\
+            .embedding(indices).view(-1, n_frames, self.channels)\
+            .permute(0, 2, 1)\
+            .view(-1, self.channels, n_frames)
+
+        amp = self.amp(norms)
+
+        pos = pos_encoded(x.shape[0], n_frames, 16, device=amp.device)
+        pos = pos.permute(0, 2, 1)
+
+        x = torch.cat([embedded, amp, spec, pos], dim=1)
+
+        features.append(x)
+
+        x = self.reduce(x)
+        x = x.permute(0, 2, 1)
+        x = self.net(x)
+        x = x.permute(0, 2, 1)
+        # for layer in self.net:
+        #     x = layer(x)
+        #     features.append(x)
+
+        x = self.final(x)
+        return x, features
 
 
 class Generator(nn.Module):
@@ -251,9 +291,6 @@ class Generator(nn.Module):
         noise = self.noise(noise)
 
         signal = osc + noise
-        # signal = self.up(x)
-        # signal = F.pad(signal, (0, 1))
-        # signal = fb.transposed_convolve(signal)
 
         wet = self.verb.forward(signal, verb)
         x = (signal * mix) + (wet * (1 - mix))
@@ -263,45 +300,39 @@ class Generator(nn.Module):
 gen = Generator(channels=latent_dim).to(device)
 gen_optim = optimizer(gen, lr=1e-4)
 
-# disc = Discriminator(channels=latent_dim).to(device)
-# disc_optim = optimizer(disc, lr=1e-4)
+disc = Discriminator(channels=latent_dim).to(device)
+disc_optim = optimizer(disc, lr=1e-4)
 
 
 def train_gen(batch, indices, norms):
     gen_optim.zero_grad()
     fake = gen.forward(indices, norms)
 
-    real_feat = feature(batch)
-    fake_feat = feature(fake)
-    loss = F.mse_loss(fake_feat, real_feat)
+    rj, rf = disc(batch, indices, norms)
+    fj, ff = disc(fake, indices, norms)
 
-    # rj, rf, real_spec, _ = disc(batch, indices, norms)
-    # fj, ff, fake_spec, _ = disc(fake, indices, norms)
+    loss = 0
+    for i in range(len(rf)):
+        loss = loss + F.mse_loss(ff[i], rf[i])
 
-    # loss = 0
-    # for i in range(len(rf)):
-    #     loss = loss + F.mse_loss(ff[i], rf[i])
-
-    # fake_norms = torch.norm(fake_spec, dim=1).view(batch.shape[0], sequence_length)
-    # amp_loss = F.mse_loss(fake_norms, norms.view(batch.shape[0], sequence_length))
-
-    # loss = (amp_loss * 0.01) + loss
+    loss = loss + least_squares_generator_loss(fj)
 
     loss.backward()
     gen_optim.step()
     return fake, loss
 
-# def train_disc(batch, indices, norms):
-#     disc_optim.zero_grad()
-#     fake = gen.forward(indices, norms)
 
-#     rj, rf, _, real_latent = disc(batch, indices, norms)
-#     fj, ff, _, fake_latent = disc(fake, indices, norms)
+def train_disc(batch, indices, norms):
+    disc_optim.zero_grad()
+    fake = gen.forward(indices, norms)
 
-#     loss = least_squares_disc_loss(rj, fj)
-#     loss.backward()
-#     disc_optim.step()
-#     return loss, real_latent, fake_latent
+    rj, rf = disc(batch, indices, norms)
+    fj, ff = disc(fake, indices, norms)
+
+    loss = least_squares_disc_loss(rj, fj)
+    loss.backward()
+    disc_optim.step()
+    return loss
 
 
 @readme
@@ -314,9 +345,6 @@ class UnconstrainedVQGan(object):
         self.indices = None
         self.norms = None
         self.fake = None
-
-        self.rl = None
-        self.fl = None
 
         self.kmeans = MiniBatchKMeans(n_clusters=n_clusters)
         self.gen = gen
@@ -342,12 +370,6 @@ class UnconstrainedVQGan(object):
     def fake_spec(self):
         return np.abs(zounds.spectral.stft(self.listen()))
 
-    def real_latent(self):
-        return self.rl.data.cpu().numpy().squeeze()[0]
-
-    def fake_latent(self):
-        return self.fl.data.cpu().numpy().squeeze()[0]
-
     def run(self):
         for i, item in enumerate(self.stream):
             spec, norms = to_frames(item)
@@ -362,11 +384,11 @@ class UnconstrainedVQGan(object):
             norms = norms[:small_batch].to(device)
             real = item[:small_batch].view(-1, 1, n_samples)
 
-            # if i % 2 == 0:
-            self.fake, gen_loss = train_gen(real, indices, norms)
-            # else:
-            #     disc_loss, self.rl, self.fl = train_disc(real, indices, norms)
+            if i % 2 == 0:
+                self.fake, gen_loss = train_gen(real, indices, norms)
+            else:
+                disc_loss = train_disc(real, indices, norms)
 
             if i > 0 and i % 10 == 0:
                 print('GEN', i, gen_loss.item())
-                # print('DISC', i, disc_loss.item())
+                print('DISC', i, disc_loss.item())
