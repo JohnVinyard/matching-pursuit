@@ -10,7 +10,7 @@ from modules.pif import AuditoryImage
 from modules.reverb import NeuralReverb
 from train.optim import optimizer
 
-from util import playable
+from util import device, playable
 
 from torch.nn import functional as F
 
@@ -20,11 +20,6 @@ n_samples = 2 ** 15
 n_frames = n_samples // 256
 sr = zounds.SR22050()
 
-band = zounds.FrequencyBand(30, sr.nyquist)
-scale = zounds.MelScale(band, 128)
-fb = zounds.learn.FilterBank(
-    sr, 512, scale, 0.1, normalize_filters=True, a_weighting=False)
-aim = AuditoryImage(512, 128, do_windowing=True, check_cola=True)
 
 
 mel_scale = MelScale()
@@ -34,8 +29,8 @@ codec = AudioCodec(mel_scale)
 def feature(x):
     # x = fb.forward(x, normalize=False)
     # x = aim(x)
-    # x = codec.to_frequency_domain(x.view(-1, n_samples))[..., 0]
-    x = stft(x)
+    x = codec.to_frequency_domain(x.view(-1, n_samples))[..., 0]
+    # x = stft(x)
     return x
 
 
@@ -251,7 +246,7 @@ class Model(nn.Module):
         self.noise_params = nn.Parameter(torch.zeros(
             1, self.noise_channels, n_frames).normal_(0, 0.1))
         self.noise = NoiseModel(self.noise_channels,
-                                n_frames, self.noise_frames, n_samples, 16, squared=True)
+                                n_frames, self.noise_frames, n_samples, 16, squared=True, mask_after=1)
 
         self.verb_params = nn.Parameter(
             torch.zeros(1, self.n_rooms).normal_(0, 1))
@@ -272,15 +267,15 @@ class Model(nn.Module):
         return signal
 
 
-model = Model()
+model = Model().to(device)
 optim = optimizer(model, lr=1e-3)
 
 if __name__ == '__main__':
     app = zounds.ZoundsApp(globals=globals(), locals=locals())
     app.start_in_thread(9999)
 
-    stream = audio_stream(1, n_samples, overfit=True,
-                          normalize=True, as_torch=True)
+    stream = audio_stream(
+        1, n_samples, overfit=True, normalize=True, as_torch=True)
     batch = next(stream)
 
     def real():

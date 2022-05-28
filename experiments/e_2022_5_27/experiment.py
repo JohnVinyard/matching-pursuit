@@ -246,6 +246,9 @@ class HarmonicModelVQExperiment(object):
 
         self.kmeans = MiniBatchKMeans(n_clusters=n_clusters)
         self.gen = gen
+    
+    def view_profiles(self):
+        return self.gen.harmonic.profiles.data.cpu().numpy()
 
     def view_spec(self):
         return self.spec.data.cpu().numpy()[0]

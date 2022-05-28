@@ -94,7 +94,7 @@ class Model(nn.Module):
             fft_upsample=False, 
             baselines=True)
         
-        self.noise = NoiseModel(channels, osc_frames, noise_frames, n_samples, channels)
+        self.noise = NoiseModel(channels, osc_frames, noise_frames, n_samples, channels, squared=True, mask_after=1)
 
         self.verb = NeuralReverb(n_samples, 8)
 
