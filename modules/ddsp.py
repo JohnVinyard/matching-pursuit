@@ -352,8 +352,9 @@ class UnconstrainedOscillatorBank(nn.Module):
         self.baselines = baselines
 
         if self.baselines:
-            self._baselines = nn.Parameter(torch.zeros(n_osc, 2).uniform_(-0.1, 0.1))
-        
+            self._baselines = nn.Parameter(
+                torch.zeros(n_osc, 2).uniform_(-0.1, 0.1))
+
         self.fft_upsample = fft_upsample
 
         if self.fft_upsample:
@@ -386,14 +387,13 @@ class UnconstrainedOscillatorBank(nn.Module):
         # freq_range = max_freq - base_freq
         # amp = base_freq + (amp * freq_range)
 
-        
-
         if self.fft_upsample:
             amp = self.upsample(amp)
             freq = self.upsample(freq)
         else:
             amp = F.interpolate(amp, size=self.n_audio_samples, mode='linear')
-            freq = F.interpolate(freq, size=self.n_audio_samples, mode='linear')
+            freq = F.interpolate(
+                freq, size=self.n_audio_samples, mode='linear')
 
         # phase accumulator
         osc = torch.sin(torch.cumsum(freq * np.pi, dim=-1)) * amp
@@ -464,3 +464,88 @@ class NoiseModel(nn.Module):
             return x, noise_params
         else:
             return x
+
+
+class HarmonicModel(nn.Module):
+    def __init__(
+            self,
+            n_voices=8,
+            n_profiles=16,
+            n_harmonics=64,
+            freq_hz_range=(40, 4000),
+            samplerate=zounds.SR22050(),
+            reduce=torch.sum,
+            n_frames=64,
+            n_samples=2**14):
+
+        super().__init__()
+        self.n_voices = n_voices
+        self.freq_hz_range = freq_hz_range
+        self.reduce = reduce
+        self.n_profiles = n_profiles
+        self.samplerate = samplerate
+        self.n_harmonics = n_harmonics
+        self.n_frames = n_frames
+        self.n_samples = n_samples
+
+        self.min_freq = self.freq_hz_range[0] / self.samplerate.nyquist
+        self.max_freq = self.freq_hz_range[1] / self.samplerate.nyquist
+        self.freq_interval = self.max_freq = self.min_freq
+
+        # harmonic profiles
+        self.profiles = nn.Parameter(torch.zeros(
+            n_profiles, n_harmonics).uniform_(0, 0.1))
+
+        self.baselines = nn.Parameter(
+            torch.zeros(self.n_voices, 2).uniform_(0, 0.05))
+
+        # harmonic ratios to the fundamental
+        self.register_buffer('ratios', torch.arange(
+            2, 2 + self.n_harmonics) ** 2)
+
+    def forward(self, f0, harmonics):
+        batch = f0.shape[0]
+
+        f0 = f0.view(f0.shape[0], self.n_voices, 2, -1)
+        # f0 = self.baselines[None, :, :, None] + (0.1 * f0)
+        harmonics = harmonics.view(
+            harmonics.shape[0], self.n_voices, self.n_profiles, -1)
+
+        f0_amp = torch.norm(f0, dim=-2) ** 2
+        f0 = (torch.angle(torch.complex(
+            f0[:, :, 0, :], f0[:, :, 1, :])) / np.pi)
+
+        f0 = f0 ** 2
+        f0 = self.min_freq + (f0 * self.freq_interval)
+
+        # harmonics are whole-number multiples of fundamental
+        harmonic_freqs = f0[:, :, None, :] * self.ratios[None, None, :, None]
+        harmonic_freqs = torch.clamp(harmonic_freqs, 0, 1)
+
+        # harmonic amplitudes are factors of fundamental amplitude
+        harmonics = harmonics.permute(0, 1, 3, 2)
+        harmonics = torch.softmax(harmonics, dim=-1)
+        harmonics = harmonics @ self.profiles
+        harmonic_amp = harmonics.permute(0, 1, 3, 2)
+        harmonic_amp = torch.clamp(harmonic_amp, 0, 1)
+        harmonic_amp = f0_amp[:, :, None, :] * harmonic_amp
+
+        full_freq = torch.cat([f0[:, :, None, :], harmonic_freqs], dim=2)
+        full_amp = torch.cat([f0_amp[:, :, None, :], harmonic_amp], dim=2)
+
+        full_freq = full_freq.view(
+            batch * self.n_voices, self.n_harmonics + 1, self.n_frames)
+        full_amp = full_amp.view(
+            batch * self.n_voices, self.n_harmonics + 1, self.n_frames)
+
+        full_freq = F.interpolate(full_freq, size=self.n_samples, mode='linear')
+        full_amp = F.interpolate(full_amp, size=self.n_samples, mode='linear')
+
+        signal = full_amp * torch.sin(torch.cumsum(full_freq, dim=-1) * np.pi)
+
+        signal = signal.view(batch, self.n_voices,
+                             self.n_harmonics + 1, self.n_samples)
+
+        signal = torch.sum(signal, dim=(1, 2)).view(batch, 1, self.n_samples)
+
+        return signal

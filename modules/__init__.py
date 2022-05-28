@@ -2,7 +2,7 @@ from .erb import erb, scaled_erb
 
 from .ddsp import \
     OscillatorBank, NoiseModel, band_filtered_noise, \
-    UnconstrainedOscillatorBank
+    UnconstrainedOscillatorBank, HarmonicModel
 
 from .multiresolution import EncoderShell, DecoderShell, BandEncoder, ConvBandDecoder, ConvExpander
 from .linear import LinearOutputStack
