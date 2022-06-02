@@ -1,5 +1,6 @@
 
-from modules.pos_encode import pos_encoded
+from sympy import C
+from loss.least_squares import least_squares_disc_loss
 from util.readmedocs import readme
 
 from modules.ddsp import NoiseModel, OscillatorBank
@@ -35,7 +36,6 @@ fb = zounds.learn.FilterBank(
     samplerate, 512, mel_scale, 0.1, normalize_filters=True, a_weighting=False).to(device)
 
 aim = AuditoryImage(512, 64, do_windowing=True, check_cola=True).to(device)
-
 
 scale = MelScale()
 codec = AudioCodec(scale)
@@ -106,6 +106,67 @@ class DilatedBlock(nn.Module):
 
 
 
+class Discriminator(nn.Module):
+    def __init__(self, channels=latent_dim):
+        super().__init__()
+
+        self.embedding = nn.Embedding(n_clusters, channels)
+        self.channels = channels
+
+        self.amp = nn.Sequential(
+            nn.Conv1d(1, 16, 7, 1, 3),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(16, 32, 7, 1, 3),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(32, self.channels, 7, 1, 3),
+        )
+
+        c = self.channels
+
+        self.spec = nn.Conv1d(256, c, 1, 1, 0)
+
+
+        self.context = nn.Sequential(
+            nn.Conv1d((c * 3), c, 1, 1, 0),
+            DilatedBlock(c, 1),
+            DilatedBlock(c, 3),
+            DilatedBlock(c, 9),
+            DilatedBlock(c, 1),
+            DilatedBlock(c, 3),
+            DilatedBlock(c, 9),
+            DilatedBlock(c, 1),
+        )
+
+        self.final = nn.Conv1d(c, 1, 1, 1, 0)
+    
+    def forward(self, audio, indices, norms):
+        spec = perceptual_features(audio).permute(0, 2, 1)
+        spec = self.spec(spec)
+    
+
+        # initial shape assertions
+        indices = indices.view(-1, n_frames)
+        norms = norms.view(-1, 1, n_frames)
+
+        embedded = self\
+            .embedding(indices).view(-1, n_frames, self.channels)\
+            .permute(0, 2, 1)\
+            .view(-1, self.channels, n_frames)
+
+        amp = self.amp(norms)
+
+        x = torch.cat([embedded, amp, spec], dim=1)
+
+        features = []
+        for layer in self.context:
+            x = layer(x)
+            features.append(x)
+        
+        x = self.final(x)
+
+        return x, features
+        
+
 
 class Generator(nn.Module):
     def __init__(self, channels=latent_dim):
@@ -123,14 +184,10 @@ class Generator(nn.Module):
 
         c = self.channels
 
-        # layer = nn.TransformerEncoderLayer(c, 4, dim_feedforward=c, batch_first=False)
 
 
         self.context = nn.Sequential(
-            # LinearOutputStack(c, 2, in_channels=(c * 2) + 33),
-            # nn.TransformerEncoder(layer, 8),
-
-            nn.Conv1d((c * 2) + 33, c, 1, 1, 0),
+            nn.Conv1d((c * 2), c, 1, 1, 0),
             DilatedBlock(c, 1),
             DilatedBlock(c, 3),
             DilatedBlock(c, 9),
@@ -187,13 +244,9 @@ class Generator(nn.Module):
 
         amp = self.amp(norms)
 
-        pos = pos_encoded(indices.shape[0], n_frames, 16, device=amp.device)
+        x = torch.cat([embedded, amp], dim=1)
 
-        x = torch.cat([embedded, amp, pos.permute(0, 2, 1)], dim=1)
-
-        # x = x.permute(0, 2, 1)
         x = self.context(x)
-        # x = x.permute(0, 2, 1)
 
         verb = self.to_verb_params.forward(x.mean(dim=-1))
         mix = self.to_verb_mix.forward(x.mean(dim=-1))
@@ -216,20 +269,48 @@ gen = Generator(channels=latent_dim).to(device)
 gen_optim = optimizer(gen, lr=1e-3)
 
 
+disc = Discriminator(channels=latent_dim).to(device)
+disc_optim = optimizer(disc, lr=1e-3)
+
 
 def train_gen(batch, indices, norms):
     gen_optim.zero_grad()
     fake = gen.forward(indices, norms)
 
-    real_feat = perceptual_features(batch)
-    fake_feat = perceptual_features(fake)
 
-    loss = F.mse_loss(fake_feat, real_feat)
+    _, ff = disc.forward(fake, indices, norms)
+    _, rf = disc.forward(batch, indices, norms)
+
+
+    loss = 0
+    for i in range(len(ff)):
+        loss = loss + F.mse_loss(ff[i], rf[i])
+
 
     loss.backward()
     gen_optim.step()
     return fake, loss
 
+
+def train_disc(batch, indices, norms):
+    disc_optim.zero_grad()
+
+    fake = gen.forward(indices, norms)
+
+    rj, rf = disc.forward(batch, indices, norms)
+    fj, ff = disc.forward(fake, indices, norms)
+
+    norms = 0
+    for i in range(len(rf)):
+        norms = norms + torch.norm(rf[i]) + torch.norm(ff[i])
+    norms = norms / i
+
+    norm_loss = torch.relu(norms - 200) * 0.01
+
+    loss = least_squares_disc_loss(rj, fj) + norm_loss
+    loss.backward()
+    disc_optim.step()
+    return loss
 
 @readme
 class ComplexFramesExperiment(object):
@@ -292,10 +373,16 @@ class ComplexFramesExperiment(object):
             norms = norms[:small_batch].to(device)
             real = item[:small_batch].view(-1, 1, n_samples)
 
-            self.fake, gen_loss = train_gen(real, indices, norms)
+
+            if i % 2 == 0:
+                self.fake, gen_loss = train_gen(real, indices, norms)
+            else:
+                disc_loss = train_disc(real, indices, norms)
 
             if i > 0 and i % 10 == 0:
+                print('======================================')
                 print('GEN', i, gen_loss.item())
+                print('DISC', i, disc_loss.item())
 
 
     
