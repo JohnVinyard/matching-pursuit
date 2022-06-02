@@ -213,6 +213,9 @@ class MelScale(object):
         self.scale = zounds.MelScale(self.freq_band, self.fft_size // 2)
         self.basis = torch.from_numpy(morlet_filter_bank(
             self.samplerate, self.fft_size, self.scale, 0.01)).to(device)
+    
+    def transformation_basis(self, other_scale):
+        return other_scale._basis(self.scale, zounds.OggVorbisWindowingFunc())
 
     def n_time_steps(self, n_samples):
         return n_samples // (self.fft_size // 2)

@@ -1,11 +1,8 @@
 
 from modules.pos_encode import pos_encoded
-from upsample import ConvUpsample
 from util.readmedocs import readme
 
-from loss.least_squares import least_squares_disc_loss, least_squares_generator_loss
-from modules import stft
-from modules.ddsp import NoiseModel, OscillatorBank, HarmonicModel
+from modules.ddsp import NoiseModel, OscillatorBank
 from util.readmedocs import readme
 
 import numpy as np
@@ -32,6 +29,13 @@ small_batch = 8
 latent_dim = 128
 n_rooms = 8
 
+band = zounds.FrequencyBand(20, samplerate.nyquist)
+mel_scale = zounds.MelScale(band, latent_dim)
+fb = zounds.learn.FilterBank(
+    samplerate, 512, mel_scale, 0.1, normalize_filters=True, a_weighting=False).to(device)
+
+aim = AuditoryImage(512, 64, do_windowing=True, check_cola=True).to(device)
+
 
 scale = MelScale()
 codec = AudioCodec(scale)
@@ -41,11 +45,11 @@ sequence_length = n_frames
 
 
 def perceptual_features(x):
+    # x = fb.forward(x, normalize=False)
+    # x = aim.forward(x)
     x = codec.to_frequency_domain(x.squeeze())
     x = x[..., 0]
     return x
-
-
 
 
 init_weights = make_initializer(0.1)
@@ -80,8 +84,6 @@ def decode_batch(kmeans, indices, norms):
     return frames * norms
 
 
-
-
 class DilatedBlock(nn.Module):
     def __init__(self, channels, dilation, unit_norm=False, nl=True):
         super().__init__()
@@ -104,6 +106,7 @@ class DilatedBlock(nn.Module):
 
 
 
+
 class Generator(nn.Module):
     def __init__(self, channels=latent_dim):
         super().__init__()
@@ -120,40 +123,37 @@ class Generator(nn.Module):
 
         c = self.channels
 
-        layer = nn.TransformerEncoderLayer(c, 4, dim_feedforward=c, batch_first=False)
+        # layer = nn.TransformerEncoderLayer(c, 4, dim_feedforward=c, batch_first=False)
 
 
         self.context = nn.Sequential(
-            LinearOutputStack(c, 2, in_channels=(c * 2) + 33),
-            nn.TransformerEncoder(layer, 8),
+            # LinearOutputStack(c, 2, in_channels=(c * 2) + 33),
+            # nn.TransformerEncoder(layer, 8),
+
+            nn.Conv1d((c * 2) + 33, c, 1, 1, 0),
+            DilatedBlock(c, 1),
+            DilatedBlock(c, 3),
+            DilatedBlock(c, 9),
+            DilatedBlock(c, 1),
+            DilatedBlock(c, 3),
+            DilatedBlock(c, 9),
+            DilatedBlock(c, 1),
         )
-
-        self.to_noise = nn.Conv1d(c, c, 3, 1, 1)
-
-        self.n_voices = 16
-        self.n_harmonics = 8
-        self.n_profiles = 16
-
-
-        self.to_fundamental = nn.Sequential(
-            nn.Conv1d(c, c, 3, 1, 1),
-            nn.LeakyReLU(0.2),
-            nn.Conv1d(c, self.n_voices * 2, 3, 1, 1)
-        )        
 
         self.to_harm = nn.Sequential(
             nn.Conv1d(c, c, 3, 1, 1),
             nn.LeakyReLU(0.2),
-            nn.Conv1d(c, self.n_voices * self.n_profiles, 3, 1, 1)
+            nn.Conv1d(c, c, 3, 1, 1)
         )
-        
-        self.harmonic = HarmonicModel(
-            n_voices=self.n_voices,
-            n_profiles=self.n_profiles,
-            n_harmonics=self.n_harmonics,
-            n_frames=n_frames,
-            n_samples=n_samples
+
+        self.to_noise = nn.Sequential(
+            nn.Conv1d(c, c, 3, 1, 1),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(c, c, 3, 1, 1)
         )
+
+        self.harmonic = OscillatorBank(
+            c, c, n_samples, constrain=True, complex_valued=True, lowest_freq=0.001)
 
         self.noise = NoiseModel(
             input_channels=128,
@@ -164,17 +164,16 @@ class Generator(nn.Module):
             activation=lambda x: x,
             squared=True,
             mask_after=1)
-        
+
 
         self.to_verb_mix = nn.Conv1d(c, 1, 3, 1, 1)
-
         self.to_verb_params = LinearOutputStack(c, 3, out_channels=n_rooms)
         self.to_verb_mix = LinearOutputStack(c, 3, out_channels=1)
-
-        
         self.verb = NeuralReverb(n_samples, n_rooms)
+        self.backward_indices = torch.arange(511, -1, step=-1)
 
         self.apply(init_weights)
+    
 
     def forward(self, indices, norms):
         # initial shape assertions
@@ -192,33 +191,29 @@ class Generator(nn.Module):
 
         x = torch.cat([embedded, amp, pos.permute(0, 2, 1)], dim=1)
 
-        x = x.permute(0, 2, 1)
+        # x = x.permute(0, 2, 1)
         x = self.context(x)
-        x = x.permute(0, 2, 1)
+        # x = x.permute(0, 2, 1)
 
         verb = self.to_verb_params.forward(x.mean(dim=-1))
         mix = self.to_verb_mix.forward(x.mean(dim=-1))
         mix = torch.sigmoid(mix).view(-1, 1, 1)
 
-        # I need (batch, n_voices, n_frames) and (batch, n_voices, n_harmonics, frames)
-
-        f0 = self.to_fundamental(x).view(-1, self.n_voices, 2, n_frames)
-        harm = self.to_harm(x).view(-1, self.n_voices, self.n_profiles, n_frames)
-
-        osc = self.harmonic.forward(f0, harm)
-        
+        harm = self.to_harm(x)
         noise = self.to_noise(x)
+
+        harm = self.harmonic(harm)
         noise = self.noise(noise)
 
-
-        signal = osc + noise
+        signal = harm + noise
+        
         wet = self.verb.forward(signal, verb)
         x = (signal * mix) + (wet * (1 - mix))
         return x
 
 
 gen = Generator(channels=latent_dim).to(device)
-gen_optim = optimizer(gen, lr=1e-4)
+gen_optim = optimizer(gen, lr=1e-3)
 
 
 
@@ -237,7 +232,7 @@ def train_gen(batch, indices, norms):
 
 
 @readme
-class HarmonicModelVQExperiment(object):
+class ComplexFramesExperiment(object):
     def __init__(self, stream):
         super().__init__()
         self.stream = stream

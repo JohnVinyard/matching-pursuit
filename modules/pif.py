@@ -1,6 +1,7 @@
-from torch import nn
+from torch import exp, nn
 import torch
 from torch.nn import functional as F
+
 
 class AuditoryImage(nn.Module):
     """
@@ -11,28 +12,50 @@ class AuditoryImage(nn.Module):
     absolute phase
     """
 
-    def __init__(self, window_size, time_steps, do_windowing=True, check_cola=True):
+    def __init__(
+            self,
+            window_size,
+            time_steps,
+            do_windowing=True,
+            check_cola=True,
+            causal=False,
+            exp_decay=False):
+
         super().__init__()
         self.window_size = window_size
         self.time_steps = time_steps
-        self.register_buffer('window', torch.hamming_window(window_size))
+        if do_windowing:
+            self.register_buffer('window', torch.hamming_window(window_size))
+        elif exp_decay:
+            self.register_buffer('window', torch.hamming_window(window_size * 2)[:window_size])
         self.do_windowing = do_windowing
         self.check_cola = check_cola
-    
+        self.causal = causal
+        self.exp_decay = exp_decay
+
     def forward(self, x):
         batch, channels, time = x.shape
         padding = self.window_size // 2
-        x = F.pad(x, (0, padding))
+
+        pad = (padding, 0) if self.causal else (0, padding)
+
+        x = F.pad(x, pad)
         step = time // self.time_steps
+        
 
         if self.check_cola:
             if step != self.window_size // 2:
-                raise ValueError(f'window and step ({self.window_size}, {step}) violate COLA')
+                raise ValueError(
+                    f'window and step ({self.window_size}, {step}) violate COLA')
 
         x = x.unfold(-1, self.window_size, step)
-        if self.do_windowing:
+
+        if self.do_windowing or self.exp_decay:
             x = x * self.window[None, None, None, :]
-        x = torch.abs(torch.fft.rfft(x, dim=-1, norm='ortho'))
+        
+        x = torch.fft.rfft(x, dim=-1, norm='ortho')
+        x = torch.abs(x)
+
         return x
 
 

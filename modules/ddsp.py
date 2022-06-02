@@ -252,26 +252,22 @@ class OscillatorBank(nn.Module):
             n_audio_samples,
             constrain=False,
             log_frequency=False,
-            log_amplitude=False,
             activation=torch.sigmoid,
             amp_activation=None,
             return_params=False,
             lowest_freq=0.01,
-            sharpen=False,
-            compete=False):
+            complex_valued=False):
 
         super().__init__()
         self.n_osc = n_osc
         self.n_audio_samples = n_audio_samples
         self.input_channels = input_channels
         self.constrain = constrain
-        self.log_amplitude = log_amplitude
         self.activation = activation
         self.return_params = return_params
         self.amp_activation = amp_activation or self.activation
         self.lowest_freq = lowest_freq
-        self.sharpen = sharpen
-        self.compete = compete
+        self.complex_valued = complex_valued
 
         if log_frequency:
             bands = np.geomspace(lowest_freq, 1, n_osc)
@@ -287,8 +283,6 @@ class OscillatorBank(nn.Module):
         self.amp = nn.Conv1d(input_channels, self.n_osc, 1, 1, 0)
         self.freq = nn.Conv1d(input_channels, self.n_osc, 1, 1, 0)
 
-        if self.compete:
-            self.dist = nn.Conv1d(input_channels, self.n_osc, 1, 1, 0)
 
     def forward(self, x, add_noise=False):
         batch_size = x.shape[0]
@@ -297,19 +291,16 @@ class OscillatorBank(nn.Module):
         amp = self.amp(x)
         freq = self.freq(x)
 
-        amp = self.amp_activation(amp)
-        if self.log_amplitude:
-            amp = amp ** 2
+        if self.complex_valued:
+            z = torch.cat([amp[:, :, None, :], freq[:, :, None, :]], dim=2)
+            a = torch.norm(z, dim=2)
+            f = torch.angle(torch.complex(amp, freq)) / np.pi
 
-        if self.sharpen:
-            amp = amp.view(batch_size, 1, self.n_osc, -1)
-            adjust_sharpness(amp, sharpness_factor=self.sharpen)
-            amp = amp.view(batch_size, self.n_osc, -1)
-        elif self.compete:
-            d = torch.softmax(self.dist(x), dim=1)
-            amp = amp * d
-
-        freq = self.activation(freq)
+            amp = a
+            freq = f
+        else:
+            amp = self.amp_activation(amp)
+            freq = self.activation(freq)
 
         if self.constrain:
             freq = self.bands[None, :, None] + \
@@ -318,12 +309,13 @@ class OscillatorBank(nn.Module):
         amp_params = amp
         freq_params = freq
 
+
         if add_noise:
             amp = amp + torch.zeros_like(amp).normal_(0, 0.1)
             freq = freq + torch.zeros_like(freq).normal_(0, 0.1)
 
-        amp = F.upsample(amp, size=self.n_audio_samples, mode='linear')
-        freq = F.upsample(freq, size=self.n_audio_samples, mode='linear')
+        amp = F.interpolate(amp, size=self.n_audio_samples, mode='linear')
+        freq = F.interpolate(freq, size=self.n_audio_samples, mode='linear')
 
         x = torch.sin(torch.cumsum(freq * np.pi, dim=-1)) * amp
         x = torch.mean(x, dim=1, keepdim=True)
@@ -372,20 +364,20 @@ class UnconstrainedOscillatorBank(nn.Module):
         x = x.view(batch, self.n_osc, 2, time)
 
         if self.baselines:
-            x = (x * 0.01) + self._baselines[None, :, :, None]
+            x = (x * 0.1) + self._baselines[None, :, :, None]
 
         amp = torch.norm(x, dim=2)
         r = x[:, :, 0, :]
         i = x[:, :, 1, :]
         freq = torch.angle(torch.complex(r, i)) / np.pi
 
-        amp = amp ** 2
         freq = freq ** 2
+        amp = amp ** 2
 
-        # base_freq = self.min_frequency_hz / self.samplerate.nyquist
-        # max_freq = self.max_frequency_hz / self.samplerate.nyquist
-        # freq_range = max_freq - base_freq
-        # amp = base_freq + (amp * freq_range)
+        base_freq = self.min_frequency_hz / self.samplerate.nyquist
+        max_freq = self.max_frequency_hz / self.samplerate.nyquist
+        freq_range = max_freq - base_freq
+        amp = base_freq + (amp * freq_range)
 
         if self.fft_upsample:
             amp = self.upsample(amp)
@@ -538,7 +530,8 @@ class HarmonicModel(nn.Module):
         full_amp = full_amp.view(
             batch * self.n_voices, self.n_harmonics + 1, self.n_frames)
 
-        full_freq = F.interpolate(full_freq, size=self.n_samples, mode='linear')
+        full_freq = F.interpolate(
+            full_freq, size=self.n_samples, mode='linear')
         full_amp = F.interpolate(full_amp, size=self.n_samples, mode='linear')
 
         signal = full_amp * torch.sin(torch.cumsum(full_freq, dim=-1) * np.pi)

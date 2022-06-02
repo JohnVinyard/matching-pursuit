@@ -19,7 +19,14 @@ from util.weight_init import make_initializer
 n_samples = 2 ** 15
 n_frames = n_samples // 256
 sr = zounds.SR22050()
+n_filters = 128
 
+band = zounds.FrequencyBand(30, sr.nyquist)
+scale = zounds.MelScale(band, n_filters)
+fb = zounds.learn.FilterBank(
+    sr, 512, scale, np.linspace(0.01, .9, n_filters), normalize_filters=True, a_weighting=False).to(device)
+aim = AuditoryImage(
+    512, 128, do_windowing=True, check_cola=True, causal=True, exp_decay=False).to(device)
 
 
 mel_scale = MelScale()
@@ -27,17 +34,17 @@ codec = AudioCodec(mel_scale)
 
 
 def feature(x):
-    # x = fb.forward(x, normalize=False)
-    # x = aim(x)
-    x = codec.to_frequency_domain(x.view(-1, n_samples))[..., 0]
-    # x = stft(x)
-    return x
+    x = fb.forward(x, normalize=False)
+    x = aim.forward(x)
+    spec = x[:, :, :, :1]
+    x = x[:, :, :, 1:] ** 2
+    return spec, x
 
 
-def feat_loss(inp, target):
-    inp = feature(inp)
-    target = feature(target)
-    return F.mse_loss(inp, target)
+# def feat_loss(inp, target):
+#     inp = feature(inp)
+#     target = feature(target)
+#     return F.mse_loss(inp, target)
 
 
 class HarmonicModel(nn.Module):
@@ -246,7 +253,7 @@ class Model(nn.Module):
         self.noise_params = nn.Parameter(torch.zeros(
             1, self.noise_channels, n_frames).normal_(0, 0.1))
         self.noise = NoiseModel(self.noise_channels,
-                                n_frames, self.noise_frames, n_samples, 16, squared=True, mask_after=1)
+                                n_frames, self.noise_frames, n_samples, 16, squared=True)
 
         self.verb_params = nn.Parameter(
             torch.zeros(1, self.n_rooms).normal_(0, 1))
@@ -274,29 +281,54 @@ if __name__ == '__main__':
     app = zounds.ZoundsApp(globals=globals(), locals=locals())
     app.start_in_thread(9999)
 
-    stream = audio_stream(
-        1, n_samples, overfit=True, normalize=True, as_torch=True)
+    stream = audio_stream(1, n_samples, overfit=True,
+                          normalize=True, as_torch=True)
     batch = next(stream)
+
+    real_spec, real_feat = feature(batch)
 
     def real():
         return playable(batch, sr)
     
-    def real_spec():
-        return np.log(1e-4 + np.abs(zounds.spectral.stft(real())))
+    # def real_spec():
+    #     return np.log(1e-4 + np.abs(zounds.spectral.stft(real())))
 
     def fake():
         return playable(recon, sr)
 
-    def fake_spec():
-        return np.log(1e-4 + np.abs(zounds.spectral.stft(fake())))
+    # def fake_spec():
+    #     return np.log(1e-4 + np.abs(zounds.spectral.stft(fake())))
     
     def profiles():
         return model.harm_model.profiles.data.cpu().numpy()
+    
+    # def feat():
+    #     return np.log(1e-4 + real_feat.data.cpu().numpy().squeeze())
+    
+    # def spec():
+    #     return real_feat.data.cpu().numpy().squeeze()[:, :, 0].T
+
+    def rs():
+        return real_spec.data.cpu().numpy().squeeze().T
+    
+    def fs():
+        return fake_spec.data.cpu().numpy().squeeze().T
+    
+    def feat():
+        return fake_feat.data.cpu().numpy().squeeze()
 
     while True:
         optim.zero_grad()
         recon = model.forward(None)
-        loss = feat_loss(recon, batch)
+        fake_spec, fake_feat = feature(recon)
+
+        spec_loss = F.mse_loss(fake_spec, real_spec)
+        spike_loss = F.mse_loss(fake_feat, real_feat)
+
+        # print(spec_loss.item(), spike_loss.item())
+
+        loss = spec_loss + spike_loss
+
         loss.backward()
         optim.step()
 
