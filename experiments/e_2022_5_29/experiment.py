@@ -71,11 +71,15 @@ class Model(nn.Module):
         self.apply(init_weights)
 
     def forward(self, x, drop_slice=None):
+
+        
         x = x.view(-1, 1, n_samples)
         x = torch.cat([x, torch.zeros(x.shape[0], 1, step_size)], dim=-1)
         x = x.unfold(-1, window_size, step_size) * \
             self.window[None, None, None, :]
         x = x.view(x.shape[0], -1, window_size)
+        orig = x.clone()
+
 
         if drop_slice is not None:
             z = torch.zeros_like(x)
@@ -92,6 +96,10 @@ class Model(nn.Module):
 
         x = self.transformer(x)
         x = self.synthesis(x)
+
+        orig[:, drop_slice, :] = x[:, drop_slice, :]
+        x = orig
+
         x = overlap_add(x[:, None, :, :], apply_window=False)
         return z, x[..., :n_samples]
 
@@ -163,7 +171,7 @@ def train_model(batch):
 
     fake_spec = feature(output)
     real_spec = feature(batch)
-    loss = F.mse_loss(fake_spec, real_spec) + loss
+    # loss = F.mse_loss(fake_spec, real_spec) + loss
     loss.backward()
     optim.step()
     print('G', loss.item())
