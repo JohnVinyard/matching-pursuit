@@ -1,5 +1,4 @@
 
-from sympy import C
 from loss.least_squares import least_squares_disc_loss
 from util.readmedocs import readme
 
@@ -125,9 +124,9 @@ class Discriminator(nn.Module):
 
         self.spec = nn.Conv1d(256, c, 1, 1, 0)
 
+        self.reduce = nn.Conv1d((c * 3), c, 1, 1, 0)
 
         self.context = nn.Sequential(
-            nn.Conv1d((c * 3), c, 1, 1, 0),
             DilatedBlock(c, 1),
             DilatedBlock(c, 3),
             DilatedBlock(c, 9),
@@ -140,7 +139,7 @@ class Discriminator(nn.Module):
         self.final = nn.Conv1d(c, 1, 1, 1, 0)
     
     def forward(self, audio, indices, norms):
-        spec = perceptual_features(audio).permute(0, 2, 1)
+        orig_spec = spec = perceptual_features(audio).permute(0, 2, 1)
         spec = self.spec(spec)
     
 
@@ -156,6 +155,7 @@ class Discriminator(nn.Module):
         amp = self.amp(norms)
 
         x = torch.cat([embedded, amp, spec], dim=1)
+        x = self.reduce(x)
 
         features = []
         for layer in self.context:
@@ -164,7 +164,7 @@ class Discriminator(nn.Module):
         
         x = self.final(x)
 
-        return x, features
+        return x, features, orig_spec
         
 
 
@@ -277,15 +277,12 @@ def train_gen(batch, indices, norms):
     gen_optim.zero_grad()
     fake = gen.forward(indices, norms)
 
-
-    _, ff = disc.forward(fake, indices, norms)
-    _, rf = disc.forward(batch, indices, norms)
-
+    _, ff, fs = disc.forward(fake, indices, norms)
+    _, rf, rs = disc.forward(batch, indices, norms)
 
     loss = 0
     for i in range(len(ff)):
         loss = loss + F.mse_loss(ff[i], rf[i])
-
 
     loss.backward()
     gen_optim.step()
@@ -297,17 +294,24 @@ def train_disc(batch, indices, norms):
 
     fake = gen.forward(indices, norms)
 
-    rj, rf = disc.forward(batch, indices, norms)
-    fj, ff = disc.forward(fake, indices, norms)
+    rj, rf, rs = disc.forward(batch, indices, norms)
+    fj, ff, fs = disc.forward(fake, indices, norms)
 
-    norms = 0
-    for i in range(len(rf)):
-        norms = norms + torch.norm(rf[i]) + torch.norm(ff[i])
-    norms = norms / i
+    loss = least_squares_disc_loss(rj, fj)
+    loss.backward()
+    disc_optim.step()
+    return loss
 
-    norm_loss = torch.relu(norms - 200) * 0.01
+def train_disc_wrong(batch, indices, norms):
+    disc_optim.zero_grad()
 
-    loss = least_squares_disc_loss(rj, fj) + norm_loss
+    b1, i1, n1 = batch[:4], indices[:4], norms[:4]
+    b2, i2, n2 = batch[4:], indices[4:], norms[4:]
+
+    rj, rf, rs = disc.forward(b1, i1, n1)
+    fj, ff, fs = disc.forward(b2, i1, n1)
+
+    loss = least_squares_disc_loss(rj, fj)
     loss.backward()
     disc_optim.step()
     return loss
@@ -378,11 +382,13 @@ class ComplexFramesExperiment(object):
                 self.fake, gen_loss = train_gen(real, indices, norms)
             else:
                 disc_loss = train_disc(real, indices, norms)
+                wrong_loss = train_disc_wrong(real, indices, norms)
 
             if i > 0 and i % 10 == 0:
                 print('======================================')
                 print('GEN', i, gen_loss.item())
                 print('DISC', i, disc_loss.item())
+                print('WRONG', i, wrong_loss.item())
 
 
     
