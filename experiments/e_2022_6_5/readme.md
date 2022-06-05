@@ -1,0 +1,1 @@
+Try a diffusion model, but with a multi-band architecture

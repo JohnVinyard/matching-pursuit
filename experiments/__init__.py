@@ -1,1 +1,1 @@
-from .e_2022_6_3 import DiffusionWithBetterStepEmbedding as Current
+from .e_2022_6_5 import MultibandDiffusionModel as Current
