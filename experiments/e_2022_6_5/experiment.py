@@ -49,18 +49,20 @@ def forward_process(audio, n_steps):
 
 
 def reverse_process(model, indices, norms):
-    degraded = torch.zeros(indices.shape[0], 1, n_samples).normal_(0, 1.6).to(device)
+    degraded = torch.zeros(
+        indices.shape[0], 1, n_samples).normal_(0, 1.6).to(device)
     degraded = fft_frequency_decompose(degraded, band_sizes[0])
 
     for i in range(n_steps - 1, -1, -1):
         pred_noise = model.forward(
             degraded, indices, norms, i)
-        
+
         for k, v in pred_noise.items():
-            degraded[k] = degraded[k] - v
-    
+            degraded[int(k)] = degraded[int(k)] - v
+
     degraded = fft_frequency_recompose(degraded, n_samples)
     return degraded
+
 
 def to_frames(batch):
     spec = codec.to_frequency_domain(batch)[..., 0]
@@ -131,9 +133,7 @@ class EmbedConditioning(nn.Module):
         indices = self.embedding(indices).view(-1, n_frames, model_dim)
         norms = self.amp(norms).view(-1, n_frames, model_dim)
         x = torch.cat([indices, norms], dim=-1)
-        x = self.reduce(x).permute(0, 2, 1)
-        x = F.interpolate(x, size=self.upsample_size, mode='linear')
-        x = x.permute(0, 2, 1)
+        x = self.reduce(x)
         return x
 
 
@@ -148,23 +148,8 @@ class StepEmbedding(nn.Module):
 
     def forward(self, x, step):
         pos = self.pos[:, step: step + 1, :]
-        pos = self.embed(pos).repeat(x.shape[0], self.upsample_size, 1)
+        pos = self.embed(pos).repeat(x.shape[0], n_frames, 1)
         return pos
-
-
-class StepAndConditioning(nn.Module):
-    def __init__(self, n_clusters, dim, upsample_size):
-        super().__init__()
-        self.cond = EmbedConditioning(n_clusters, dim, upsample_size)
-        self.step = StepEmbedding(dim, upsample_size)
-        self.reduce = LinearOutputStack(dim, 2, in_channels=dim * 2)
-
-    def forward(self, degraded, indices, norms, step):
-        pos = self.step.forward(degraded, step)
-        cond = self.cond.forward(indices, norms)
-        x = torch.cat([pos, cond], dim=-1)
-        x = self.reduce(x)
-        return x
 
 
 class DilatedBlock(nn.Module):
@@ -179,6 +164,29 @@ class DilatedBlock(nn.Module):
         x = self.dilated(x)
         x = self.conv(x)
         x = F.leaky_relu(x + orig, 0.2)
+        return x
+
+
+class StepAndConditioning(nn.Module):
+    def __init__(self, n_clusters, dim, upsample_size):
+        super().__init__()
+        self.cond = EmbedConditioning(n_clusters, dim, upsample_size)
+        self.step = StepEmbedding(dim, upsample_size)
+        self.reduce = LinearOutputStack(dim, 2, in_channels=dim * 2)
+        self.context = nn.Sequential(
+            DilatedBlock(dim, 1),
+            DilatedBlock(dim, 3),
+            DilatedBlock(dim, 9),
+        )
+        self.upsample_size = upsample_size
+
+    def forward(self, degraded, indices, norms, step):
+        pos = self.step.forward(degraded, step)
+        cond = self.cond.forward(indices, norms)
+        x = torch.cat([pos, cond], dim=-1)
+        x = self.reduce(x).permute(0, 2, 1)
+        x = self.context(x)
+        x = F.interpolate(x, size=self.upsample_size, mode='linear')
         return x
 
 
@@ -198,7 +206,6 @@ class DenoisingLayer(nn.Module):
 
     def forward(self, degraded, indices, norms, step):
         cond = self.cond.forward(degraded, indices, norms, step)
-        cond = cond.permute(0, 2, 1)
         x = self.embed(degraded)
         x = torch.cat([cond, x], dim=1)
         x = self.net(x)
@@ -214,10 +221,8 @@ class DenoisingStack(nn.Module):
         super().__init__()
         self.net = nn.ModuleList([
             DenoisingLayer(n_clusters, dim, band_size, [1, 3, 9], input_dim=1),
-            DenoisingLayer(n_clusters, dim, band_size,
-                           [1, 3, 9], input_dim=dim),
-            DenoisingLayer(n_clusters, dim, band_size,
-                           [1, 3, 9], input_dim=dim, to_audio=True),
+            DenoisingLayer(n_clusters, dim, band_size, 
+                [1, 3, 9], input_dim=dim, to_audio=True),
         ])
 
     def forward(self, degraded, indices, norms, step):
@@ -246,7 +251,7 @@ class DiffusionModel(nn.Module):
 
 
 model = DiffusionModel(model_dim)
-optim = optimizer(model)
+optim = optimizer(model, lr=1e-3)
 
 
 def train_model(batch, indices, norms):
@@ -260,7 +265,7 @@ def train_model(batch, indices, norms):
     loss = 0
     for k, v in pred_noise.items():
         loss = loss + torch.abs(v - noise[int(k)]).sum()
-    
+
     loss.backward()
     optim.step()
     return loss
@@ -299,9 +304,8 @@ class MultibandDiffusionModel(object):
         return playable(self.fake, samplerate)
 
     def fake_spec(self):
-        return np.abs(zounds.spectral.stft(self.listen()))
+        return np.abs(zounds.spectral.stft(self.denoise()))
 
-    
     def check_degraded(self):
         with torch.no_grad():
             audio, degraded, noise = forward_process(self.real, n_steps)
@@ -315,19 +319,20 @@ class MultibandDiffusionModel(object):
     def run(self):
         for i, item in enumerate(self.stream):
             spec, norms = to_frames(item)
-            self.norms = norms
             self.spec = spec
 
             update_kmeans(i, self.kmeans, spec)
 
             indices = encode_batch(self.kmeans, spec)
-            self.indices = indices
 
             small_batch = 4
 
             indices = torch.from_numpy(indices).long()[:small_batch].to(device)
             norms = norms[:small_batch].to(device)
             real = item[:small_batch].view(-1, 1, n_samples)
+
+            self.indices = indices
+            self.norms = norms
 
             self.real = real
 
