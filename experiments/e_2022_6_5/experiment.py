@@ -220,9 +220,8 @@ class DenoisingStack(nn.Module):
     def __init__(self, n_clusters, dim, band_size):
         super().__init__()
         self.net = nn.ModuleList([
-            DenoisingLayer(n_clusters, dim, band_size, [1, 3, 9], input_dim=1),
             DenoisingLayer(n_clusters, dim, band_size, 
-                [1, 3, 9], input_dim=dim, to_audio=True),
+                [1, 3, 9, 27, 81, 1], input_dim=1, to_audio=True),
         ])
 
     def forward(self, degraded, indices, norms, step):
@@ -264,7 +263,7 @@ def train_model(batch, indices, norms):
 
     loss = 0
     for k, v in pred_noise.items():
-        loss = loss + torch.abs(v - noise[int(k)]).sum()
+        loss = loss + torch.abs(v - noise[int(k)]).mean()
 
     loss.backward()
     optim.step()
