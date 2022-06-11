@@ -1,5 +1,7 @@
+from pyrsistent import m
 import torch
 import numpy as np
+from modules.ddsp import NoiseModel, OscillatorBank
 from modules.linear import LinearOutputStack
 from modules.pos_encode import ExpandUsingPosEncodings
 from modules.self_similarity import SelfSimNetwork, self_sim
@@ -11,6 +13,7 @@ from loss import least_squares_disc_loss, least_squares_generator_loss
 from train.optim import optimizer
 from util import playable
 from util.weight_init import make_initializer
+from torch.nn import functional as F
 
 init_weights = make_initializer(0.1)
 
@@ -18,29 +21,34 @@ init_weights = make_initializer(0.1)
 class Generator(nn.Module):
     def __init__(self):
         super().__init__()
-        self.expand = ExpandUsingPosEncodings(128, 128, 16, 128, multiply=True, learnable_encodings=True)
+
+        self.expand = nn.Linear(128, 512)
+
         self.net = nn.Sequential(
-            nn.ConvTranspose1d(128, 64, 4, 2, 1),
-            nn.LeakyReLU(0.2),
-            nn.ConvTranspose1d(64, 32, 4, 2, 1),
-            nn.LeakyReLU(0.2),
-            nn.ConvTranspose1d(32, 16, 4, 2, 1),
-            nn.LeakyReLU(0.2),
-            nn.ConvTranspose1d(16, 8, 4, 2, 1),
-            nn.LeakyReLU(0.2),
-            nn.ConvTranspose1d(8, 4, 4, 2, 1),
-            nn.LeakyReLU(0.2),
-            nn.ConvTranspose1d(4, 2, 4, 2, 1),
-            nn.LeakyReLU(0.2),
-            nn.ConvTranspose1d(2, 1, 4, 2, 1),
+            nn.Conv1d(128, 128, 3, 1, 1),
+            nn.Upsample(scale_factor=2, mode='nearest'),
+            nn.Conv1d(128, 128, 3, 1, 1),
+            nn.Upsample(scale_factor=2, mode='nearest'),
+            nn.Conv1d(128, 128, 3, 1, 1),
+            nn.Upsample(scale_factor=2, mode='nearest'),
+            nn.Conv1d(128, 128, 3, 1, 1),
+            nn.Upsample(scale_factor=2, mode='nearest'),
+            nn.Conv1d(128, 128, 3, 1, 1),
         )
+
+        self.osc = OscillatorBank(
+            128, 128, 2**14, constrain=True, lowest_freq=0.001, complex_valued=True)
+        self.noise = NoiseModel(128, 64, 512, 2**14, 128)
         self.apply(init_weights)
     
     def forward(self, x):
-        x = self.expand(x)
+        x = self.expand(x).view(-1, 128, 4)
+
         x = self.net(x)
-        m = torch.abs(x).max()
-        x = x / (m + 1e-12)
+
+        osc = self.osc(x)
+        noise = self.noise(x)
+        x = osc + noise
         return x
 
 
@@ -54,7 +62,7 @@ class Discriminator(nn.Module):
     
     def forward(self, x):
         x, y = self.sim(x)
-        y = self.frames(y).mean(dim=-2)
+        y = self.frames(y)#.mean(dim=-2)
         x = self.final(x)
         return torch.cat([x.view(-1), y.view(-1)])
 
