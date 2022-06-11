@@ -1,5 +1,4 @@
 from sklearn.cluster import MiniBatchKMeans
-from sympy import Line
 import zounds
 from modules.linear import LinearOutputStack
 from modules.phase import AudioCodec, MelScale

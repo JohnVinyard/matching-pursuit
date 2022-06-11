@@ -1,5 +1,4 @@
 
-from turtle import backward
 from loss.least_squares import least_squares_disc_loss
 from util.readmedocs import readme
 

@@ -446,7 +446,7 @@ class NoiseModel(nn.Module):
             x = x ** 2
 
         if self.mask_after is not None:
-            x[:, :self.mask_after, :] = 1
+            x[:, :self.mask_after, :] = 0
 
         noise_params = x
         if add_noise:

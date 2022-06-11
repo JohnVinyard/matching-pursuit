@@ -1,5 +1,4 @@
 from sklearn.cluster import MiniBatchKMeans
-from sympy import DenseNDimArray
 import torch
 from torch import nn
 from modules.linear import LinearOutputStack
@@ -15,7 +14,7 @@ from modules.decompose import fft_frequency_decompose, fft_frequency_recompose
 from util.weight_init import make_initializer
 
 n_clusters = 512
-model_dim = 64
+model_dim = 128
 samplerate = zounds.SR22050()
 n_samples = 2**14
 n_frames = n_samples // 256
@@ -236,6 +235,7 @@ class DiffusionModel(nn.Module):
         super().__init__()
         self.stacks = nn.ModuleDict(
             {str(bs): DenoisingStack(n_clusters, dim, bs) for bs in band_sizes})
+        self.apply(init_weights)
 
     def forward(self, degraded, indices, norms, step):
 
@@ -249,7 +249,7 @@ class DiffusionModel(nn.Module):
         return results
 
 
-model = DiffusionModel(model_dim)
+model = DiffusionModel(model_dim).to(device)
 optim = optimizer(model, lr=1e-3)
 
 
@@ -324,7 +324,7 @@ class MultibandDiffusionModel(object):
 
             indices = encode_batch(self.kmeans, spec)
 
-            small_batch = 4
+            small_batch = 2
 
             indices = torch.from_numpy(indices).long()[:small_batch].to(device)
             norms = norms[:small_batch].to(device)
