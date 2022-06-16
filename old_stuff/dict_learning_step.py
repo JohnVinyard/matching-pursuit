@@ -26,20 +26,19 @@ def unit_norm(x):
     norms = np.linalg.norm(x, axis=-1, keepdims=True)
     return x / (norms + 1e-8)
 
-
 def batch_fft_convolve1d(signal, d, use_gpu=True):
     """
     Convolves the dictionary/filterbank `d` with `signal`
 
     Parameters
     ------------
-    signal - A signal of shape `(batch_size, signal_size)`
+    signal - A signal of shape `(batch_size, signal_size)`fft_convolve
     d - A dictionary/filterbank of shape `(n_components, atom_size)`
 
     Returns
     ------------
     x - the results of convolving the dictionary with the batched signals
-        of dimensions `(batch, n_components, signal_size)`
+        of dimensions `(batch, n_components, signal_size)`fft_convofft_convolvelve
     """
     signal_size = signal.shape[1]
     atom_size = d.shape[1]
