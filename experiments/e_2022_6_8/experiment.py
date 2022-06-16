@@ -29,7 +29,7 @@ codec = AudioCodec(scale)
 n_freq_bins = 256
 sequence_length = n_frames
 
-init_weights = make_initializer(0.05)
+init_weights = make_initializer(0.1)
 
 feature = PsychoacousticFeature(
     kernel_sizes=[128] * 6
@@ -232,8 +232,9 @@ class DenoisingStack(nn.Module):
             a = feature.banks[self.band_size][0].forward(audio, normalize=False)
             a = feature.banks[self.band_size][0].temporal_pooling(a, self.window_size, self.step_size)[..., :n_frames]
             a = self.audio(a)
-            x = torch.cat([a, x], dim=1)
-            x = self.reduce(x)
+            # x = torch.cat([a, x], dim=1)
+            # x = self.reduce(x)
+            x = a
 
         x = self.net(x)
         return x
@@ -254,7 +255,7 @@ class AutoEncoder(nn.Module):
                 nn.LeakyReLU(0.2),
                 nn.Conv1d(dim, dim, 3, 1, 1)
             )
-            self.judge = nn.Conv1d(dim, 2, 1, 1, 0)
+            self.judge = nn.Conv1d(dim, 1, 1, 1, 0)
             self.amp = nn.Conv1d(dim, 1, 1, 1, 0)
             self.frame = nn.Conv1d(dim, n_clusters, 1, 1, 0)
         
@@ -263,6 +264,11 @@ class AutoEncoder(nn.Module):
     def forward(self, indices, norms, audio=None):
 
         x = self.cond(indices, norms)
+
+        if self.is_disc:
+            # the disc should act like a classifier, so no conditioning
+            # info allowed
+            x = torch.zeros_like(x)
 
         results = {str(bs): self.stacks[str(bs)].forward(x, audio=audio[bs] if audio else None)
                    for bs in band_sizes}
@@ -278,10 +284,10 @@ class AutoEncoder(nn.Module):
 
 
 model = AutoEncoder(model_dim).to(device)
-optim = optimizer(model, lr=1e-3)
+optim = optimizer(model, lr=1e-4)
 
 disc = AutoEncoder(model_dim, is_disc=True).to(device)
-disc_optim = optimizer(disc, lr=1e-3)
+disc_optim = optimizer(disc, lr=1e-4)
 
 def train_gen(batch, indices, norms):
     optim.zero_grad()
@@ -289,18 +295,19 @@ def train_gen(batch, indices, norms):
     recon = model.forward(indices, norms)
     recon = {int(k): v for k, v in recon.items()}
 
-    batch = fft_frequency_decompose(batch, band_sizes[0])
+    # batch = fft_frequency_decompose(batch, band_sizes[0])
     j, a, f, fx = disc.forward(indices, norms, recon)
 
-    adv_loss = F.cross_entropy(
-        j.permute(0, 2, 1).reshape(-1, 2), 
-        torch.zeros(indices.shape[0] * n_frames).fill_(1).to(device).long())
+    # adv_loss = F.cross_entropy(
+    #     j.permute(0, 2, 1).reshape(-1, 2), 
+    #     torch.zeros(indices.shape[0] * n_frames).fill_(1).to(device).long())
+    adv_loss = least_squares_generator_loss(j)
 
     amp_loss = F.mse_loss(a.view(-1, n_frames), norms.view(-1, n_frames))
 
     frame_loss = F.cross_entropy(f.permute(0, 2, 1).reshape(-1, n_clusters), indices.view(-1))
 
-    loss = (adv_loss * 0) + (amp_loss * 0.1) + frame_loss
+    loss = amp_loss + frame_loss + adv_loss
     
     loss.backward()
     optim.step()
@@ -315,11 +322,12 @@ def train_disc(batch, indices, norms):
     fj, fa, ff, fx = disc.forward(indices, norms, recon)
     rj, ra, rf, rx = disc.forward(indices, norms, fft_frequency_decompose(batch, band_sizes[0]))
 
-    adv_loss = F.cross_entropy(
-        fj.permute(0, 2, 1).reshape(-1, 2), 
-        torch.zeros(indices.shape[0] * n_frames).fill_(0).to(device).long()) + F.cross_entropy(
-        rj.permute(0, 2, 1).reshape(-1, 2), 
-        torch.zeros(indices.shape[0] * n_frames).fill_(1).to(device).long())
+    # adv_loss = F.cross_entropy(
+    #     fj.permute(0, 2, 1).reshape(-1, 2), 
+    #     torch.zeros(indices.shape[0] * n_frames).fill_(0).to(device).long()) + F.cross_entropy(
+    #     rj.permute(0, 2, 1).reshape(-1, 2), 
+    #     torch.zeros(indices.shape[0] * n_frames).fill_(1).to(device).long())
+    adv_loss = least_squares_disc_loss(rj, fj)
 
     # amp loss
     amp_loss = F.mse_loss(ra.view(-1, n_frames), norms.view(-1, n_frames))
@@ -327,7 +335,7 @@ def train_disc(batch, indices, norms):
     # frame loss
     frame_loss = F.cross_entropy(rf.permute(0, 2, 1).reshape(-1, n_clusters), indices.view(-1))
 
-    loss = (adv_loss * 0) + (amp_loss * 0.1) + frame_loss
+    loss = amp_loss + frame_loss + adv_loss
     
     loss.backward()
     disc_optim.step()

@@ -16,8 +16,9 @@ from torch.nn import functional as F
 
 from util.weight_init import make_initializer
 
-n_samples = 2 ** 15
-n_frames = n_samples // 256
+n_samples = 2 ** 14
+# n_frames = n_samples // 256
+n_frames = 128
 sr = zounds.SR22050()
 n_filters = 128
 

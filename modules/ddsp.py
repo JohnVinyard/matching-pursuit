@@ -48,6 +48,7 @@ def band_filtered_noise(n_audio_samples, ws=512, step=256, mean=0.5, std=0.1):
     mean = mean * n_coeffs
     std = std * n_coeffs
 
+
     filt = pdf(
         torch.arange(0, n_coeffs, 1).view(1, 1, n_coeffs, 1).to(mean.device),
         mean[:, :, None, :],
@@ -345,7 +346,7 @@ class UnconstrainedOscillatorBank(nn.Module):
 
         if self.baselines:
             self._baselines = nn.Parameter(
-                torch.zeros(n_osc, 2).uniform_(-0.1, 0.1))
+                torch.zeros(n_osc, 2).uniform_(0, 0.1))
 
         self.fft_upsample = fft_upsample
 
@@ -364,7 +365,7 @@ class UnconstrainedOscillatorBank(nn.Module):
         x = x.view(batch, self.n_osc, 2, time)
 
         if self.baselines:
-            x = (x * 0.1) + self._baselines[None, :, :, None]
+            x = (x * 0.01) + self._baselines[None, :, :, None]
 
         amp = torch.norm(x, dim=2)
         r = x[:, :, 0, :]
@@ -446,7 +447,7 @@ class NoiseModel(nn.Module):
             x = x ** 2
 
         if self.mask_after is not None:
-            x[:, :self.mask_after, :] = 0
+            x[:, :self.mask_after, :] = 1
 
         noise_params = x
         if add_noise:

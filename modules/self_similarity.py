@@ -73,7 +73,7 @@ class SelfSimNetwork(nn.Module):
         # assume audio in the shape (batch, 1, 16384)
         x = F.pad(x, (0, self.step))
         x = x.unfold(-1, self.window, self.step)
-        x = x * torch.hamming_window(self.window)
+        x = x * torch.hamming_window(self.window).to(x.device)
         x = y = self_sim(x, reduction=torch.mean)
         x = self_sim(x, return_full=return_full)
         if return_full:

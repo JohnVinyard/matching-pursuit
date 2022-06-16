@@ -1,1 +1,1 @@
-from .e_2022_6_8 import MultibandAutoEncoder as Current
+from .e_2022_6_15 import NoiseAndOscillatorExperiment as Current

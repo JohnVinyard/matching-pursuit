@@ -11,7 +11,7 @@ from torch import nn
 from train.gan import get_latent
 from loss import least_squares_disc_loss, least_squares_generator_loss
 from train.optim import optimizer
-from util import playable
+from util import device, playable
 from util.weight_init import make_initializer
 from torch.nn import functional as F
 
@@ -62,14 +62,15 @@ class Discriminator(nn.Module):
     
     def forward(self, x):
         x, y = self.sim(x)
-        y = self.frames(y)#.mean(dim=-2)
+        y = self.frames(y)
+        y = y.mean(dim=-2)
         x = self.final(x)
         return torch.cat([x.view(-1), y.view(-1)])
 
-gen = Generator()
+gen = Generator().to(device)
 gen_optim = optimizer(gen, lr=1e-4)
 
-disc = Discriminator()
+disc = Discriminator().to(device)
 disc_optim = optimizer(disc, lr=1e-4)
 
 
@@ -101,7 +102,7 @@ def train_disc(batch):
 if __name__ == '__main__':
 
     # signal = torch.zeros(4, 1, 2**14)
-    model = SelfSimNetwork(128, 4)
+    model = SelfSimNetwork(128, 4).to(device)
     app = zounds.ZoundsApp(globals=globals(), locals=locals())
     app.start_in_thread(8888)
     stream = audio_stream(4, 2**14, overfit=False, normalize=True)

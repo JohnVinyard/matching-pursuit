@@ -17,21 +17,21 @@ class Model(nn.Module):
         self.atoms = nn.Parameter(torch.zeros(self.n_filters, 1, self.filter_length).normal_(0, 0.1))
     
     def forward(self, x):
-        # norms = torch.norm(self.atoms, dim=-1, keepdim=True)
-        # atoms = self.atoms / (norms + 1e-12)
+        norms = torch.norm(self.atoms, dim=-1, keepdim=True)
+        atoms = self.atoms / (norms + 1e-12)
 
         atoms = self.atoms
         feature_map = x = F.conv1d(x, atoms, bias=None, stride=1, padding=self.filter_length // 2)
 
-        # shape = feature_map.shape
-        # feature_map = feature_map.view(-1)
-        # values, indices = torch.topk(torch.abs(feature_map), k=self.k)
-        # new_feature_map = torch.zeros_like(feature_map)
-        # new_feature_map[indices] = values
-        # feature_map = new_feature_map.reshape(shape)
+        shape = feature_map.shape
+        feature_map = feature_map.view(-1)
+        values, indices = torch.topk(torch.abs(feature_map), k=self.k)
+        new_feature_map = torch.zeros_like(feature_map)
+        new_feature_map[indices] = values
+        feature_map = new_feature_map.reshape(shape)
 
         x = F.conv_transpose1d(feature_map, atoms, bias=None, stride=1, padding=self.filter_length // 2)
-        return feature_map, x / self.n_filters
+        return feature_map, x
 
 
 model = Model().to(device)
@@ -44,9 +44,9 @@ def train_model(batch):
     real_spec = stft(batch)
     fake_spec = stft(recon)
     
-    sparsity = torch.abs(feature_map).sum()
+    # sparsity = torch.abs(feature_map).sum()
 
-    recon_loss = F.mse_loss(fake_spec, real_spec) + (sparsity * 1e-8)
+    recon_loss = F.mse_loss(fake_spec, real_spec)# + (sparsity * 1e-8)
 
 
     loss = recon_loss
