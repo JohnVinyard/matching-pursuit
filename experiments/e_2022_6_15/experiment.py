@@ -3,6 +3,7 @@ from sklearn.cluster import MiniBatchKMeans
 from torch import nn
 import torch
 from fm import HarmonicModel
+from loss.least_squares import least_squares_disc_loss, least_squares_generator_loss
 from modules.ddsp import NoiseModel, OscillatorBank, band_filtered_noise
 from modules.erb import scaled_erb
 import zounds
@@ -80,6 +81,36 @@ def perceptual_loss(a, b):
     b = perceptual_feature(b)
     return F.mse_loss(a, b)
 
+
+class Discriminator(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        self.net = nn.Sequential(
+            nn.Conv1d(1, 16, 25, 1, 12),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(16, 32, 25, 1, 12),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(32, 64, 25, 1, 12),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(64, 128, 25, 1, 12),
+            nn.LeakyReLU(0.2),
+
+            DilatedBlock(model_dim, 1),
+            DilatedBlock(model_dim, 3),
+            DilatedBlock(model_dim, 9),
+            DilatedBlock(model_dim, 27),
+            DilatedBlock(model_dim, 81),
+            DilatedBlock(model_dim, 1),
+
+            nn.Conv1d(model_dim, 1, 1, 1, 0)
+        )
+
+        self.apply(init_weights)
+    
+    def forward(self, x):
+        return self.net(x)
+    
 class AudioModel(nn.Module):
     def __init__(self, n_samples):
         super().__init__()
@@ -89,10 +120,10 @@ class AudioModel(nn.Module):
             model_dim, 
             len(mel_scale), 
             n_samples, 
-            constrain=False, 
+            constrain=True, 
             lowest_freq=40 / samplerate.nyquist,
             amp_activation=lambda x: x ** 2,
-            complex_valued=True)
+            complex_valued=False)
         
         self.noise = NoiseModel(
             model_dim,
@@ -223,15 +254,34 @@ class Generator(nn.Module):
 model = Generator().to(device)
 optim = optimizer(model, lr=1e-4)
 
+disc = Discriminator().to(device)
+disc_optim = optimizer(disc, lr=1e-4)
+
 
 def train_gen(item, indices, norms):
     optim.zero_grad()
     item = item.view(-1, 1, n_samples)
     recon = model.forward(indices, norms)
-    loss = perceptual_loss(recon, item)
+    j = disc.forward(recon)
+
+    loss = perceptual_loss(recon, item) + least_squares_generator_loss(j)
     loss.backward()
     optim.step()
     return loss, recon
+
+def train_disc(item, indices, norms):
+    disc_optim.zero_grad()
+
+    item = item.view(-1, 1, n_samples)
+    recon = model.forward(indices, norms)
+
+    fj = disc.forward(recon)
+    rj = disc.forward(item)
+
+    loss = least_squares_disc_loss(rj, fj)
+    loss.backward()
+    disc_optim.step()
+    return loss
 
 @readme
 class NoiseAndOscillatorExperiment(object):
@@ -279,15 +329,26 @@ class NoiseAndOscillatorExperiment(object):
             norms = norms.to(device)
             real = item
 
-            small_batch = 4
+            small_batch = 2
 
             self.indices = indices
             self.norms = norms
             self.real = real
 
-            loss, self.fake = train_gen(item[:small_batch], indices[:small_batch], norms[:small_batch])
+
+
+            if i % 2 == 0:
+                loss, self.fake = train_gen(item[:small_batch], indices[:small_batch], norms[:small_batch])
+            else:
+                disc_loss = train_disc(item[:small_batch], indices[:small_batch], norms[:small_batch])
 
             if i % 10 == 0:
-                print(loss.item())
+                try:
+                    print(i)
+                    print('G', loss.item())
+                    print('D', disc_loss.item())
+                    print('==========================')
+                except:
+                    pass
 
            
