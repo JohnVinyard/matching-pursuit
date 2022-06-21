@@ -81,6 +81,14 @@ class Discriminator(nn.Module):
         return x
 
 
+class NoOp(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        return x
+
+
 class Generator(nn.Module):
     def __init__(self):
         super().__init__()
@@ -95,9 +103,11 @@ class Generator(nn.Module):
 
         layer = nn.TransformerEncoderLayer(
             model_dim, n_heads, model_dim, batch_first=True)
+        layer.norm1 = NoOp()
+        layer.norm2 = NoOp()
         self.net = nn.TransformerEncoder(layer, n_layers)
         self.to_samples = LinearOutputStack(
-            model_dim, 3, out_channels=window_size, activation=torch.sin)
+            model_dim, 3, out_channels=window_size)
         self._mask = None
         self.apply(init_weights)
 
@@ -118,7 +128,7 @@ class Generator(nn.Module):
 
         x = self.net.forward(x, self._mask)
         x = self.to_samples(x)
-        x = overlap_add(x[:, None, :, :], apply_window=False)[..., :n_samples]
+        x = overlap_add(x[:, None, :, :], apply_window=True)[..., :n_samples]
         return x
 
 
@@ -131,6 +141,10 @@ disc_optim = optimizer(disc)
 
 def train_gen(batch):
     gen_optim.zero_grad()
+
+    batch = batch.clone()
+    batch[:, :, -n_frames_to_predict:] = 0
+
     pred = gen.forward(batch)
     # only consider the final judgement
     j = disc.forward(pred)[:, -n_frames_to_predict:, :]
