@@ -216,12 +216,13 @@ class AudioModel(nn.Module):
         return signal
 
 class EmbedClusterCenters(nn.Module):
-    def __init__(self, n_clusters, dim):
+    def __init__(self, n_clusters, dim, kmeans):
         super().__init__()
         # self.embedding = nn.Embedding(n_clusters, dim)
+        self.kmeans = kmeans
 
     def forward(self, x):
-        return torch.from_numpy(kmeans.cluster_centers_[x.view(-1).data.cpu().numpy()]).to(x.device)
+        return torch.from_numpy(self.kmeans.cluster_centers_[x.reshape(-1).data.cpu().numpy()]).to(x.device)
         # return self.embedding(x)
 
 
@@ -244,9 +245,9 @@ class EmbedAmp(nn.Module):
 
 
 class EmbedConditioning(nn.Module):
-    def __init__(self, n_clusters, dim):
+    def __init__(self, n_clusters, dim, kmeans):
         super().__init__()
-        self.embedding = EmbedClusterCenters(n_clusters, dim)
+        self.embedding = EmbedClusterCenters(n_clusters, dim, kmeans)
         self.amp = EmbedAmp(dim)
         self.reduce = LinearOutputStack(
             dim, 2, out_channels=dim, in_channels=dim + 256)
@@ -276,9 +277,9 @@ class DilatedBlock(nn.Module):
 
 
 class ConditioningContext(nn.Module):
-    def __init__(self, n_clusters, dim):
+    def __init__(self, n_clusters, dim, kmeans):
         super().__init__()
-        self.cond = EmbedConditioning(n_clusters, dim)
+        self.cond = EmbedConditioning(n_clusters, dim, kmeans)
         self.context = nn.Sequential(
             DilatedBlock(dim, 1),
             DilatedBlock(dim, 3),
@@ -294,9 +295,9 @@ class ConditioningContext(nn.Module):
 
 
 class Generator(nn.Module):
-    def __init__(self):
+    def __init__(self, kmeans):
         super().__init__()
-        self.cond = ConditioningContext(n_clusters, model_dim)
+        self.cond = ConditioningContext(n_clusters, model_dim, kmeans)
         self.net = nn.Sequential(
             DilatedBlock(model_dim, 1),
             DilatedBlock(model_dim, 3),
@@ -314,11 +315,14 @@ class Generator(nn.Module):
         x = self.audio(x)
         return x
 
-model = Generator().to(device)
+kmeans = MiniBatchKMeans(n_clusters=n_clusters)
+
+
+model = Generator(kmeans).to(device)
 optim = optimizer(model, lr=1e-4)
 
-disc = Discriminator().to(device)
-disc_optim = optimizer(disc, lr=1e-4)
+# disc = Discriminator().to(device)
+# disc_optim = optimizer(disc, lr=1e-4)
 
 
 def train_gen(item, indices, norms):
@@ -335,28 +339,27 @@ def train_gen(item, indices, norms):
     optim.step()
     return loss, recon
 
-def train_disc(item, indices, norms, wrong):
-    disc_optim.zero_grad()
+# def train_disc(item, indices, norms, wrong):
+#     disc_optim.zero_grad()
 
-    item = item.view(-1, 1, n_samples)
+#     item = item.view(-1, 1, n_samples)
     
-    recon = model.forward(indices, norms)
-    fj, _ = disc.forward(recon, indices, norms)
+#     recon = model.forward(indices, norms)
+#     fj, _ = disc.forward(recon, indices, norms)
     
-    rj, _ = disc.forward(item, indices, norms)
+#     rj, _ = disc.forward(item, indices, norms)
 
-    # loss = -(torch.mean(rj) - torch.mean(fj))
-    loss = least_squares_disc_loss(rj, fj)
+#     # loss = -(torch.mean(rj) - torch.mean(fj))
+#     loss = least_squares_disc_loss(rj, fj)
 
     
-    loss.backward()
-    disc_optim.step()
+#     loss.backward()
+#     disc_optim.step()
 
-    for p in disc.parameters():
-        p.data.clamp_(-0.02, 0.02)
-    return loss, recon
+#     for p in disc.parameters():
+#         p.data.clamp_(-0.02, 0.02)
+#     return loss, recon
 
-kmeans = MiniBatchKMeans(n_clusters=n_clusters)
 
 @readme
 class NoiseAndOscillatorExperiment(object):
