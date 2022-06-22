@@ -21,7 +21,8 @@ n_layers = 6
 window_size = 512
 step_size = 256
 sequence_length = n_samples // step_size
-n_frames_to_predict = 8
+n_frames_to_predict = 16
+n_samples_to_predict = n_frames_to_predict * step_size
 
 init_weights = make_initializer(0.1)
 
@@ -52,7 +53,7 @@ class Discriminator(nn.Module):
         super().__init__()
 
         self.pos = LinearOutputStack(model_dim, 3, in_channels=33)
-        self.frame = ComplexLayer(window_size, model_dim)
+        self.frame = LinearOutputStack(model_dim, 3, in_channels=window_size)
         self.reduce = LinearOutputStack(
             model_dim, 3, in_channels=model_dim * 2)
 
@@ -61,6 +62,8 @@ class Discriminator(nn.Module):
 
         layer = nn.TransformerEncoderLayer(
             model_dim, n_heads, model_dim, batch_first=True)
+        layer.norm1 = NoOp()
+        layer.norm2 = NoOp()
         self.net = nn.TransformerEncoder(layer, n_layers)
         self.judge = LinearOutputStack(model_dim, 3, out_channels=1)
         self.apply(init_weights)
@@ -94,7 +97,7 @@ class Generator(nn.Module):
         super().__init__()
 
         self.pos = LinearOutputStack(model_dim, 3, in_channels=33)
-        self.frame = ComplexLayer(window_size, model_dim)
+        self.frame = LinearOutputStack(model_dim, 3, in_channels=window_size)
         self.reduce = LinearOutputStack(
             model_dim, 3, in_channels=model_dim * 2)
 
@@ -108,13 +111,13 @@ class Generator(nn.Module):
         self.net = nn.TransformerEncoder(layer, n_layers)
         self.to_samples = LinearOutputStack(
             model_dim, 3, out_channels=window_size)
-        self._mask = None
+
+        self.to_samples = LinearOutputStack(
+            model_dim, 3, out_channels=window_size)
+
         self.apply(init_weights)
 
     def forward(self, x):
-        if self._mask is None:
-            self._mask = torch.triu(torch.full(
-                (sequence_length, sequence_length), float('-inf')), diagonal=1)
 
         x = torch.cat([x, torch.zeros(x.shape[0], 1, step_size)], dim=-1)
         x = x.unfold(-1, window_size, step_size) * self.window
@@ -126,7 +129,7 @@ class Generator(nn.Module):
         x = torch.cat([x.view(-1, sequence_length, model_dim), pos], dim=-1)
         x = self.reduce(x)
 
-        x = self.net.forward(x, self._mask)
+        x = self.net.forward(x)
         x = self.to_samples(x)
         x = overlap_add(x[:, None, :, :], apply_window=True)[..., :n_samples]
         return x
@@ -143,22 +146,39 @@ def train_gen(batch):
     gen_optim.zero_grad()
 
     batch = batch.clone()
-    batch[:, :, -n_frames_to_predict:] = 0
+    batch[:, :, -n_samples_to_predict:] = 0
 
     pred = gen.forward(batch)
     # only consider the final judgement
-    j = disc.forward(pred)[:, -n_frames_to_predict:, :]
+
+    combined = torch.cat([
+        batch[:, :, :-n_samples_to_predict],
+        pred[:, :, -n_samples_to_predict:]
+    ], dim=-1)
+
+    j = disc.forward(combined)[:, -n_frames_to_predict:, :]
     loss = -torch.mean(j)
     loss.backward()
     gen_optim.step()
-    return loss, pred
+    return loss, combined
 
 
 def train_disc(batch):
     disc_optim.zero_grad()
-    pred = gen.forward(batch)
+
+    degraded = batch.clone()
+    degraded[:, :, -n_samples_to_predict:] = 0
+
+    pred = gen.forward(degraded)
+
+    combined = torch.cat([
+        batch[:, :, :-n_samples_to_predict],
+        pred[:, :, -n_samples_to_predict:]
+    ], dim=-1)
+
     # only consider the final judgements
-    fj = disc.forward(pred)[:, -n_frames_to_predict:, :]
+    fj = disc.forward(combined)[:, -n_frames_to_predict:, :]
+
     rj = disc.forward(batch)[:, -n_frames_to_predict:, :]
     loss = -(torch.mean(rj) - torch.mean(fj))
     loss.backward()
