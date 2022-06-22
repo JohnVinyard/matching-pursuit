@@ -100,10 +100,10 @@ class PsychoacousticFeature(nn.Module):
             window_size=128,
             time_steps=32,
             fine_grained_factor=10,
-            size=16384):
+            size=16384,
+            size_avg=False):
 
         x = self._to_dict(x)
-
 
         bands = dict()
 
@@ -132,7 +132,10 @@ class PsychoacousticFeature(nn.Module):
 
             # limit to size time_steps
             spec = spec[:, :, :time_steps, :]
-            bands[size] = torch.cat([pooled.reshape(-1), spec.reshape(-1)])
+            combined = torch.cat([pooled.reshape(-1), spec.reshape(-1)])
+            if size_avg:
+                combined = combined / combined.shape[0]
+            bands[size] = combined
 
         return bands
 

@@ -113,7 +113,7 @@ class AutoEncoder(nn.Module):
         self.vq = VectorQuantize(
             model_dim, 
             n_clusters, 
-            decay=0.8, 
+            decay=0.9, 
             commitment_weight=1, 
             channel_last=False)
         
@@ -137,7 +137,7 @@ class AutoEncoder(nn.Module):
         return e, i, loss, signal
 
 ae = AutoEncoder().to(device)
-optim = optimizer(ae)
+optim = optimizer(ae, lr=1e-4)
 
 def train_ae(batch):
     optim.zero_grad()
@@ -149,7 +149,8 @@ def train_ae(batch):
     real = pif.scattering_transform(batch)
     real = torch.cat(list(real.values()))
 
-    loss = F.mse_loss(fake, real) + commit_loss
+
+    loss = F.mse_loss(fake, real) + (commit_loss * 10)
     loss.backward()
     optim.step()
     return signal, indices, loss
