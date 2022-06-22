@@ -3,6 +3,8 @@ import torch
 from torch.nn import functional as F
 
 
+
+
 class AuditoryImage(nn.Module):
     """
     Take the half-wave rectified output from a filterbank
@@ -27,7 +29,8 @@ class AuditoryImage(nn.Module):
         if do_windowing:
             self.register_buffer('window', torch.hamming_window(window_size))
         elif exp_decay:
-            self.register_buffer('window', torch.hamming_window(window_size * 2)[:window_size])
+            self.register_buffer('window', torch.hamming_window(
+                window_size * 2)[:window_size])
         self.do_windowing = do_windowing
         self.check_cola = check_cola
         self.causal = causal
@@ -37,11 +40,12 @@ class AuditoryImage(nn.Module):
         batch, channels, time = x.shape
         padding = self.window_size // 2
 
+        
+
         pad = (padding, 0) if self.causal else (0, padding)
 
         x = F.pad(x, pad)
         step = time // self.time_steps
-        
 
         if self.check_cola:
             if step != self.window_size // 2:
@@ -52,7 +56,7 @@ class AuditoryImage(nn.Module):
 
         if self.do_windowing or self.exp_decay:
             x = x * self.window[None, None, None, :]
-        
+
         x = torch.fft.rfft(x, dim=-1, norm='ortho')
         x = torch.abs(x)
 

@@ -17,7 +17,7 @@ band = zounds.FrequencyBand(20, samplerate.nyquist)
 scale = zounds.MelScale(band, 128)
 n_samples = 2**14
 
-fb = zounds.learn.FilterBank(samplerate, 512, scale, 0.1).to(device)
+fb = zounds.learn.FilterBank(samplerate, 512, scale, 0.1, normalize_filters=True, a_weighting=False).to(device)
 aim = AuditoryImage(512, 64, do_windowing=True, check_cola=True).to(device)
 
 n_clusters = 512
@@ -157,7 +157,7 @@ class AutoEncoder(nn.Module):
         x = self.decode(n)
 
         env = torch.abs(self.to_envelope(x))
-        env = F.interpolate(env, size=n_samples)
+        env = F.interpolate(env, size=n_samples, mode='linear')
         signal = self.audio(x)
         signal = signal * env
         return n, signal
@@ -170,8 +170,11 @@ def train_ae(batch):
     optim.zero_grad()
     encoded, decoded = ae.forward(batch)
 
-    f = aim.forward(decoded)
-    r = aim.forward(batch)
+    f = fb.forward(decoded, normalize=False)
+    f = aim.forward(f)
+
+    r = fb.forward(batch, normalize=False)
+    r = aim.forward(r)
 
     loss = F.mse_loss(f, r)
     loss.backward()

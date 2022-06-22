@@ -11,12 +11,16 @@ from modules.linear import LinearOutputStack
 from modules.normal_pdf import pdf
 from modules.phase import AudioCodec, MelScale
 from modules.pif import AuditoryImage
+from modules.pos_encode import pos_encoded
+from modules.psychoacoustic import PsychoacousticFeature
 from modules.reverb import NeuralReverb
+from modules.self_similarity import self_sim
 from train.optim import optimizer
 from util import device, playable
 from util.readmedocs import readme
 from torch.nn import functional as F
 import numpy as np
+import pickle
 
 from util.weight_init import make_initializer
 
@@ -24,10 +28,21 @@ n_clusters = 512
 
 samplerate = zounds.SR22050()
 band = zounds.FrequencyBand(30, samplerate.nyquist)
-mel_scale = zounds.MelScale(band, 128)
+mel_scale = zounds.MelScale(band, 256)
 n_samples = 2**14
-fb = zounds.learn.FilterBank(samplerate, 512, mel_scale, 0.1, normalize_filters=True, a_weighting=True).to(device)
-aim = AuditoryImage(512, 64, do_windowing=True, check_cola=True).to(device)
+
+fb = zounds.learn.FilterBank(
+    samplerate, 
+    512, 
+    mel_scale, 
+    0.01, 
+    normalize_filters=True, 
+    a_weighting=True).to(device)
+
+aim = AuditoryImage(512, 64).to(device)
+
+pif = PsychoacousticFeature(kernel_sizes=[128] * 6).to(device)
+
 model_dim = 128
 sequence_length = 64
 n_frames = 128
@@ -42,8 +57,15 @@ sequence_length = 64
 init_weights = make_initializer(0.1)
 
 def perceptual_feature(x):
-    x = fb.forward(x, normalize=False)
-    x = aim(x)
+
+    bands = pif.scattering_transform(
+        x, 
+        window_size=128, 
+        time_steps=32, 
+        fine_grained_factor=10)
+    
+    x = torch.cat(list(bands.values()))
+    
     return x
 
 
@@ -76,41 +98,79 @@ def decode_batch(kmeans, indices, norms):
     return frames * norms
 
 
-def perceptual_loss(a, b):
-    a = perceptual_feature(a)
-    b = perceptual_feature(b)
-    return F.mse_loss(a, b)
+# def perceptual_loss(a, b):
+#     a = perceptual_feature(a)
+#     b = perceptual_feature(b)
+#     return F.mse_loss(a, b)
 
 
 class Discriminator(nn.Module):
     def __init__(self):
         super().__init__()
 
-        self.net = nn.Sequential(
-            nn.Conv1d(1, 16, 25, 1, 12),
-            nn.LeakyReLU(0.2),
-            nn.Conv1d(16, 32, 25, 1, 12),
-            nn.LeakyReLU(0.2),
-            nn.Conv1d(32, 64, 25, 1, 12),
-            nn.LeakyReLU(0.2),
-            nn.Conv1d(64, 128, 25, 1, 12),
-            nn.LeakyReLU(0.2),
+        self.cond = ConditioningContext(n_clusters, model_dim)
+        
 
+        self.reduce = LinearOutputStack(model_dim, 3, out_channels=8, in_channels=257)
+        # self.sim = LinearOutputStack(model_dim, 3, in_channels=2016)
+        self.encode = nn.Conv1d(8 * model_dim, model_dim, 1, 1, 0)
+
+        self.net = nn.Sequential(
+            nn.Conv1d(model_dim * 2, model_dim , 1, 1, 0),
+
+            # nn.Sequential(
+            #     nn.Conv1d(model_dim, model_dim, 3, 2, 1),
+            #     nn.LeakyReLU(0.2)
+            # ),
+            # nn.Sequential(
+            #     nn.Conv1d(model_dim, model_dim, 3, 2, 1),
+            #     nn.LeakyReLU(0.2)
+            # ),
+            # nn.Sequential(
+            #     nn.Conv1d(model_dim, model_dim, 3, 2, 1),
+            #     nn.LeakyReLU(0.2)
+            # ),
+            # nn.Sequential(
+            #     nn.Conv1d(model_dim, model_dim, 3, 2, 1),
+            #     nn.LeakyReLU(0.2)
+            # ),
+            # nn.Sequential(
+            #     nn.Conv1d(model_dim, model_dim, 2, 2, 0),
+            #     nn.LeakyReLU(0.2)
+            # ),
             DilatedBlock(model_dim, 1),
             DilatedBlock(model_dim, 3),
             DilatedBlock(model_dim, 9),
-            DilatedBlock(model_dim, 27),
-            DilatedBlock(model_dim, 81),
             DilatedBlock(model_dim, 1),
-
-            nn.Conv1d(model_dim, 1, 1, 1, 0)
         )
+
+        self.judge = nn.Conv1d(model_dim, 1, 1, 1, 0)
 
         self.apply(init_weights)
     
-    def forward(self, x):
-        return self.net(x)
-    
+    def forward(self, x, indices, norms):
+        cond = self.cond.forward(indices, norms)
+
+
+        x = fb.forward(x, normalize=False)
+        x = aim.forward(x)
+
+        features = x
+
+        x = self.reduce(x)
+        x = x.permute(0, 3, 1, 2).reshape(indices.shape[0], 8 * model_dim, -1)
+        x = self.encode(x)
+
+        
+        x = torch.cat([cond, x], dim=1)
+
+        x = self.net(x)
+        
+        x = self.judge(x)
+
+        return x, features
+
+
 class AudioModel(nn.Module):
     def __init__(self, n_samples):
         super().__init__()
@@ -158,10 +218,11 @@ class AudioModel(nn.Module):
 class EmbedClusterCenters(nn.Module):
     def __init__(self, n_clusters, dim):
         super().__init__()
-        self.embedding = nn.Embedding(n_clusters, dim)
+        # self.embedding = nn.Embedding(n_clusters, dim)
 
     def forward(self, x):
-        return self.embedding(x)
+        return torch.from_numpy(kmeans.cluster_centers_[x.view(-1).data.cpu().numpy()]).to(x.device)
+        # return self.embedding(x)
 
 
 class EmbedAmp(nn.Module):
@@ -188,10 +249,11 @@ class EmbedConditioning(nn.Module):
         self.embedding = EmbedClusterCenters(n_clusters, dim)
         self.amp = EmbedAmp(dim)
         self.reduce = LinearOutputStack(
-            dim, 2, out_channels=dim, in_channels=dim*2)
+            dim, 2, out_channels=dim, in_channels=dim + 256)
 
     def forward(self, indices, norms):
-        indices = self.embedding(indices).view(-1, sequence_length, model_dim)
+        indices = self.embedding(indices)
+        indices = indices.view(-1, sequence_length, 256)
         norms = self.amp(norms).view(-1, sequence_length, model_dim)
         x = torch.cat([indices, norms], dim=-1)
         x = self.reduce(x)
@@ -240,7 +302,8 @@ class Generator(nn.Module):
             DilatedBlock(model_dim, 3),
             DilatedBlock(model_dim, 9),
             DilatedBlock(model_dim, 1),
-            nn.ConvTranspose1d(model_dim, model_dim, 4, 2, 1)
+            nn.Upsample(scale_factor=2, mode='nearest'),
+            nn.Conv1d(model_dim, model_dim, 7, 1, 3)
         )
         self.audio = AudioModel(n_samples)
         self.apply(init_weights)
@@ -262,26 +325,38 @@ def train_gen(item, indices, norms):
     optim.zero_grad()
     item = item.view(-1, 1, n_samples)
     recon = model.forward(indices, norms)
-    j = disc.forward(recon)
+    
+    a = perceptual_feature(recon)
+    b = perceptual_feature(item)
 
-    loss = perceptual_loss(recon, item) + least_squares_generator_loss(j)
+    loss = F.mse_loss(a, b)
+
     loss.backward()
     optim.step()
     return loss, recon
 
-def train_disc(item, indices, norms):
+def train_disc(item, indices, norms, wrong):
     disc_optim.zero_grad()
 
     item = item.view(-1, 1, n_samples)
+    
     recon = model.forward(indices, norms)
+    fj, _ = disc.forward(recon, indices, norms)
+    
+    rj, _ = disc.forward(item, indices, norms)
 
-    fj = disc.forward(recon)
-    rj = disc.forward(item)
-
+    # loss = -(torch.mean(rj) - torch.mean(fj))
     loss = least_squares_disc_loss(rj, fj)
+
+    
     loss.backward()
     disc_optim.step()
-    return loss
+
+    for p in disc.parameters():
+        p.data.clamp_(-0.02, 0.02)
+    return loss, recon
+
+kmeans = MiniBatchKMeans(n_clusters=n_clusters)
 
 @readme
 class NoiseAndOscillatorExperiment(object):
@@ -295,7 +370,7 @@ class NoiseAndOscillatorExperiment(object):
         self.stream = stream
         self.real_feat = None
 
-        self.kmeans = MiniBatchKMeans(n_clusters=n_clusters)
+        self.kmeans = kmeans
         self.gen = model
 
     def view_spec(self):
@@ -329,7 +404,7 @@ class NoiseAndOscillatorExperiment(object):
             norms = norms.to(device)
             real = item
 
-            small_batch = 2
+            small_batch = 4
 
             self.indices = indices
             self.norms = norms
@@ -337,18 +412,25 @@ class NoiseAndOscillatorExperiment(object):
 
 
 
-            if i % 2 == 0:
-                loss, self.fake = train_gen(item[:small_batch], indices[:small_batch], norms[:small_batch])
-            else:
-                disc_loss = train_disc(item[:small_batch], indices[:small_batch], norms[:small_batch])
+            # if i % 2 == 0:
+            loss, self.fake = train_gen(item[:small_batch], indices[:small_batch], norms[:small_batch])
+            # else:
+            #     disc_loss, f = train_disc(item[:small_batch], indices[:small_batch], norms[:small_batch], item[small_batch:small_batch + small_batch])
+            #     if f is not None:
+            #         self.fake = f
 
             if i % 10 == 0:
                 try:
                     print(i)
                     print('G', loss.item())
-                    print('D', disc_loss.item())
+                    # print('D', disc_loss.item())
                     print('==========================')
                 except:
                     pass
+            
 
-           
+            if i % 1000 == 0:
+                print('Checkpoint')
+                with open('kmeans.dat', 'wb') as f:
+                    pickle.dump(self.kmeans, f, pickle.HIGHEST_PROTOCOL)
+                torch.save(self.gen.state_dict(), 'gen.dat')
