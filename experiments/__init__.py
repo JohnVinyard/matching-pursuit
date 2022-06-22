@@ -1,1 +1,1 @@
-from .e_2022_6_22 import TokenTransformerExperiment as Current
+from .e_2022_6_22a import VectorQuantizeExperiment as Current
