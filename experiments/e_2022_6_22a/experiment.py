@@ -109,11 +109,13 @@ class AutoEncoder(nn.Module):
             nn.Conv1d(model_dim, model_dim, 7, 4, 3),
             nn.LeakyReLU(0.2),
             nn.Conv1d(model_dim, model_dim, 7, 4, 3),
-        ) 
+        )
+        self.amp = nn.Conv1d(model_dim, 1, 1, 1, 0)
         self.vq = VectorQuantize(
             model_dim, 
             n_clusters, 
             decay=0.9, 
+            use_cosine_sim=True,
             commitment_weight=1, 
             channel_last=False)
         
@@ -131,17 +133,24 @@ class AutoEncoder(nn.Module):
     def forward(self, x):
         x = fb.forward(x, normalize=False)
         x = e = self.encode(x)
+
+        # compute amplitudes
+        amp = F.relu(self.amp(x))
+
         q, i, loss = self.vq.forward(x)
         x = self.decode.forward(q)
+
+        # re-apply amplitudes
+        x = x * amp
         signal = self.audio(x)
-        return e, i, loss, signal
+        return e, i, loss, signal, amp
 
 ae = AutoEncoder().to(device)
 optim = optimizer(ae, lr=1e-4)
 
 def train_ae(batch):
     optim.zero_grad()
-    encoded, indices, commit_loss, signal = ae.forward(batch)
+    encoded, indices, commit_loss, signal, amp = ae.forward(batch)
 
     fake = pif.scattering_transform(signal)
     fake = torch.cat(list(fake.values()))
