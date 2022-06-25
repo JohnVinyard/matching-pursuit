@@ -155,13 +155,13 @@ class MultiBandSparseModel(nn.Module):
 
         full_features = torch.cat(full_maps, dim=-1)
 
-        rooms = torch.softmax(self.to_rooms(full_features), dim=-1)
-        mix = torch.sigmoid(self.to_mix(full_features)).view(-1, 1, 1)
+        # rooms = torch.softmax(self.to_rooms(full_features), dim=-1)
+        # mix = torch.sigmoid(self.to_mix(full_features)).view(-1, 1, 1)
 
         signal = fft_frequency_recompose(recon, n_samples)
 
-        wet = self.verb.forward(signal, rooms)
-        signal = (signal * mix) + (wet * (1 - mix))
+        # wet = self.verb.forward(signal, rooms)
+        # signal = (signal * mix) + (wet * (1 - mix))
 
         return feature_maps, signal, sparse
 
