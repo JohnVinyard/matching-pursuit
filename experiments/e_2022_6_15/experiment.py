@@ -218,12 +218,12 @@ class AudioModel(nn.Module):
 class EmbedClusterCenters(nn.Module):
     def __init__(self, n_clusters, dim, kmeans):
         super().__init__()
-        # self.embedding = nn.Embedding(n_clusters, dim)
+        self.embedding = nn.Embedding(n_clusters, dim)
         self.kmeans = kmeans
 
     def forward(self, x):
-        return torch.from_numpy(self.kmeans.cluster_centers_[x.reshape(-1).data.cpu().numpy()]).to(x.device)
-        # return self.embedding(x)
+        # return torch.from_numpy(self.kmeans.cluster_centers_[x.reshape(-1).data.cpu().numpy()]).to(x.device)
+        return self.embedding(x)
 
 
 class EmbedAmp(nn.Module):
@@ -250,11 +250,11 @@ class EmbedConditioning(nn.Module):
         self.embedding = EmbedClusterCenters(n_clusters, dim, kmeans)
         self.amp = EmbedAmp(dim)
         self.reduce = LinearOutputStack(
-            dim, 2, out_channels=dim, in_channels=dim + 256)
+            dim, 2, out_channels=dim, in_channels=dim * 2)
 
     def forward(self, indices, norms):
         indices = self.embedding(indices)
-        indices = indices.view(-1, sequence_length, 256)
+        indices = indices.view(-1, sequence_length, model_dim)
         norms = self.amp(norms).view(-1, sequence_length, model_dim)
         x = torch.cat([indices, norms], dim=-1)
         x = self.reduce(x)
@@ -407,7 +407,7 @@ class NoiseAndOscillatorExperiment(object):
             norms = norms.to(device)
             real = item
 
-            small_batch = 4
+            small_batch = 8
 
             self.indices = indices
             self.norms = norms

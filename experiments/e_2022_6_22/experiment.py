@@ -98,7 +98,7 @@ class MusicGenerator(nn.Module):
         x = self.transformer.forward(x, self._mask)
 
         indices = self.to_frame(x)
-        amp = torch.relu(self.to_amp(x))
+        amp = self.to_amp(x) ** 2
 
         return indices, amp
 
@@ -138,10 +138,11 @@ class TokenTransformerExperiment(object):
         self.norms = None
         self.real = None
         self.kmeans = kmeans
+        self.model = music_gen
     
     def view_indices(self):
         with torch.no_grad():
-            indices = torch.softmax(self.pred_indices, dim=1)
+            indices = torch.softmax(self.pred_indices, dim=-1)
             return indices.data.cpu().numpy()[0]
     
     def view_norms(self):
@@ -150,12 +151,13 @@ class TokenTransformerExperiment(object):
         
     
     def generate(self, steps=512):
-        indices = self.indices[:1]
-        norms = self.norms[:1]
+        indices = self.indices[:1, :-1]
+        norms = self.norms[:1, :-1]
 
         with torch.no_grad():
             for j in range(steps):
-                i, n = music_gen.forward(indices[:, j:-1], norms[:, j:-1])
+
+                i, n = music_gen.forward(indices[:, j:], norms[:, j:])
 
                 i = torch.argmax(i, dim=-1, keepdim=True)
 
@@ -171,6 +173,29 @@ class TokenTransformerExperiment(object):
             
             audio = torch.cat(audio, dim=-1)
             return playable(audio, samplerate)
+    
+    # def generate(self, steps=512):
+    #     indices = self.indices[:1]
+    #     norms = self.norms[:1]
+
+    #     with torch.no_grad():
+    #         for j in range(steps):
+    #             i, n = music_gen.forward(indices[:, j:-1], norms[:, j:-1])
+
+    #             i = torch.argmax(i, dim=-1, keepdim=True)
+
+    #             indices = torch.cat([indices, i[:, -1:]], dim=1)
+    #             norms = torch.cat([norms, n[:, -1:]], dim=1)
+            
+    #         audio = []
+    #         for j in range(4):
+    #             start = j * 64
+    #             stop = (j + 1) * 64
+    #             a = gen.forward(indices[:, start:stop], norms[:, start:stop])
+    #             audio.append(a)
+            
+    #         audio = torch.cat(audio, dim=-1)
+    #         return playable(audio, samplerate)
     
     def run(self):
         for i, item in enumerate(self.stream):
@@ -191,3 +216,4 @@ class TokenTransformerExperiment(object):
 
             if i > 0 and i % 10 == 0:
                 print(loss.item())
+            
