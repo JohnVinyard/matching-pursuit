@@ -1,4 +1,3 @@
-from mimetypes import init
 import zounds
 from torch import nn
 import torch
@@ -10,6 +9,7 @@ from modules.pif import AuditoryImage
 from modules.reverb import NeuralReverb
 from modules.pos_encode import pos_encoded
 from train.optim import optimizer
+from torch.nn import functional as F
 
 from util import device, playable
 from util.readmedocs import readme
@@ -19,8 +19,9 @@ from util.weight_init import make_initializer
 n_samples = 2**15
 samplerate = zounds.SR22050()
 
-model_dim = 128
-freq_bands = 128
+model_dim = 64
+
+freq_bands = 64
 kernel_size = 512
 step_size = kernel_size // 2
 n_rooms = 8
@@ -73,7 +74,7 @@ class AudioModel(nn.Module):
 
     
     def forward(self, x):
-        x = x.view(-1, model_dim, n_frames)
+        x = x.reshape(-1, model_dim, n_frames)
 
         agg = x.mean(dim=-1)
         room = self.to_rooms(agg)
@@ -93,23 +94,27 @@ class Discriminator(nn.Module):
         super().__init__()
         self.reduce_scattering = LinearOutputStack(
             model_dim, 2, in_channels=kernel_size // 2 + 1, out_channels=8)
-        self.reduce = LinearOutputStack(model_dim, 2, in_channels=model_dim * 8)
+        self.reduce = LinearOutputStack(model_dim, 2, in_channels=freq_bands * 8)
 
         self.reduce_again = LinearOutputStack(model_dim, 2, in_channels=model_dim + 33)
 
-        layer = nn.TransformerEncoderLayer(model_dim, 4, model_dim)
+        layer = nn.TransformerEncoderLayer(model_dim, 2, model_dim)
         layer.norm1 = nn.Identity()
         layer.norm2 = nn.Identity()
-        self.net = nn.TransformerEncoder(layer, 6)
+        self.net = nn.TransformerEncoder(layer, 2)
         self.final = LinearOutputStack(model_dim, 2, out_channels=1)
         self.apply(init_weights)
     
-    def forward(self, x):
+    def forward(self, x, just_features=False):
         batch_size = x.shape[0]
         x = fb.forward(x, normalize=False)
         x = aim(x)
+
+        if just_features:
+            return x
+
         x = self.reduce_scattering(x)
-        x = x.permute(0, 2, 1, 3).reshape(batch_size, -1, model_dim * 8)
+        x = x.permute(0, 2, 1, 3).reshape(batch_size, -1, freq_bands * 8)
         x = self.reduce(x)
 
         pos = pos_encoded(batch_size, x.shape[1], 16, device=x.device)
@@ -126,13 +131,13 @@ class Generator(nn.Module):
         super().__init__()
         self.reduce_scattering = LinearOutputStack(
             model_dim, 2, in_channels=kernel_size // 2 + 1, out_channels=8)
-        self.reduce = LinearOutputStack(model_dim, 2, in_channels=model_dim * 8)
+        self.reduce = LinearOutputStack(model_dim, 2, in_channels=freq_bands * 8)
         self.reduce_again = LinearOutputStack(model_dim, 2, in_channels=model_dim + 33)
 
-        layer = nn.TransformerEncoderLayer(model_dim, 4, model_dim)
+        layer = nn.TransformerEncoderLayer(model_dim, 2, model_dim)
         layer.norm1 = nn.Identity()
         layer.norm2 = nn.Identity()
-        self.net = nn.TransformerEncoder(layer, 6)
+        self.net = nn.TransformerEncoder(layer, 2)
         
         self.audio = AudioModel(n_samples)
         self.apply(init_weights)
@@ -142,9 +147,9 @@ class Generator(nn.Module):
 
         batch_size = x.shape[0]
         x = fb.forward(x, normalize=False)
-        x = aim(x)
+        real_feat = x = aim(x)
         x = self.reduce_scattering(x)
-        x = x.permute(0, 2, 1, 3).reshape(batch_size, -1, model_dim * 8)
+        x = x.permute(0, 2, 1, 3).reshape(batch_size, -1, freq_bands * 8)
         x = self.reduce(x)
 
         pos = pos_encoded(batch_size, x.shape[1], 16, device=x.device)
@@ -153,18 +158,20 @@ class Generator(nn.Module):
 
         x = self.net.forward(x).permute(0, 2, 1)
 
+
         signal = self.audio(x)
 
-        ow = windowed_audio(orig, kernel_size, step_size)
-        sw = windowed_audio(signal, kernel_size, step_size)
+        # ow = windowed_audio(orig, kernel_size, step_size)
+        # sw = windowed_audio(signal, kernel_size, step_size)
 
-        final = torch.zeros_like(ow)
-        final[:, :, :-frames_to_predict, :] = ow[:, :, :-frames_to_predict, :]
-        final[:, :, -frames_to_predict:, :] = sw[:, :, -frames_to_predict:, :]
+        # final = torch.zeros_like(ow)
+        # ftp = frames_to_predict + 1
+        # final[:, :, :-ftp, :] = ow[:, :, :-ftp, :]
+        # final[:, :, -ftp:, :] = sw[:, :, -ftp:, :]
 
-        signal = overlap_add(final, apply_window=False)
+        # signal = overlap_add(final, apply_window=False)
         
-        return signal
+        return signal, real_feat
         
 
 disc = Discriminator().to(device)
@@ -173,16 +180,30 @@ disc_optim = optimizer(disc, lr=1e-4)
 gen = Generator().to(device)
 gen_optim = optimizer(gen, lr=1e-4)
 
+
+def zero_frames(x, n):
+    x = windowed_audio(x, kernel_size, step_size)
+    z = torch.zeros_like(x)
+
+    if n == 0:
+        final = x
+    else:
+        final = torch.cat([x[:, :, :-n, :], z[:, :, -n:, :]], dim=2)
+    
+    signal = overlap_add(final, apply_window=False)
+    return signal
+
 def train_disc(batch):
     disc_optim.zero_grad()
 
     r = batch.clone()
-    rj = disc(r)[:, -frames_to_predict:, :]
+    r = zero_frames(r, 0)
+    rj = disc(r)
 
     f = batch.clone()
-    f[:, :, -samples_to_predict:] = 0
-    f = gen(f)
-    fj = disc(f)[:, -frames_to_predict:, :]
+    f = zero_frames(f, frames_to_predict)
+    f, _ = gen(f)
+    fj = disc(f)
 
     # loss = -(torch.mean(rj) - torch.mean(fj))
     loss = least_squares_disc_loss(rj, fj)
@@ -192,18 +213,24 @@ def train_disc(batch):
     # for p in disc.parameters():
     #     p.data.clamp_(-0.01, 0.01)
     
-    return loss
+    return loss, r
 
 def train_gen(batch):
     gen_optim.zero_grad()
 
     f = batch.clone()
-    f[:, :, -samples_to_predict:] = 0
+    f = zero_frames(f, frames_to_predict)
     
-    f = gen(f)
+    f, rf = gen(f)
+
+    ff = disc.forward(f, just_features=True)[:, :frames_to_predict, :]
+
+    feat_loss = F.mse_loss(ff, rf[:, :frames_to_predict, :])
+
     fj = disc(f)[:, -frames_to_predict:, :]
-    # loss = -torch.mean(fj)
-    loss = least_squares_generator_loss(fj)
+
+    # loss = (-torch.mean(fj)) + feat_loss
+    loss = least_squares_generator_loss(fj) + feat_loss
     loss.backward()
     gen_optim.step()
     return loss, f
@@ -214,9 +241,13 @@ class AdversarialAutoregressiveExperiment(object):
         super().__init__()
         self.stream = stream
         self.fake = None
+        self.real = None
     
     def listen(self):
         return playable(self.fake, samplerate)
+    
+    def r(self):
+        return playable(self.real, samplerate)
     
     def run(self):
         for i, item in enumerate(self.stream):
@@ -225,7 +256,7 @@ class AdversarialAutoregressiveExperiment(object):
             if i % 2 == 0:
                 gen_loss, self.fake = train_gen(item)
             else:
-                disc_loss = train_disc(item)
+                disc_loss, self.real = train_disc(item)
             
 
             if i > 0 and i % 10 == 0:
