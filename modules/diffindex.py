@@ -1,8 +1,9 @@
 import torch
 
+
 def to_hard_indices(soft, size):
     indices = torch.clamp(soft, -0.999, 0.999).view(-1)
-    hard_indices = (((indices + 1) / 2) * size).long()
+    hard_indices = torch.round((((indices + 1) / 2) * size)).long()
     return hard_indices
 
 
