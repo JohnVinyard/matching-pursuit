@@ -3,6 +3,7 @@ import zounds
 from data.audiostream import audio_stream
 from torch import nn
 from modules.ddsp import overlap_add
+from modules.decompose import fft_frequency_decompose
 from modules.phase import morlet_filter_bank, windowed_audio
 from modules.psychoacoustic import PsychoacousticFeature
 from train.optim import optimizer
@@ -11,34 +12,45 @@ from torch.nn import functional as F
 
 
 samplerate = zounds.SR22050()
-n_samples = 2**15
+n_samples = 2 ** 15
 window_size = 512
 step_size = window_size // 2
 n_frames = n_samples // step_size
-batch_size = 8
+batch_size = 2
 
 n_freq_bands = 256
 
 
-band = zounds.FrequencyBand(20, samplerate.nyquist)
-scale = zounds.MelScale(band, n_freq_bands)
-fb = zounds.learn.FilterBank(
-    samplerate, window_size, scale, 0.1, normalize_filters=True, a_weighting=True)
+# band = zounds.FrequencyBand(20, samplerate.nyquist)
+# scale = zounds.MelScale(band, n_freq_bands)
+# fb = zounds.learn.FilterBank(
+#     samplerate,
+#     window_size,
+#     scale,
+#     0.1,
+#     normalize_filters=True,
+#     a_weighting=True).to(device)
 
-pif = PsychoacousticFeature([128] * 6)
+pif = PsychoacousticFeature([128] * 6).to(device)
 
 
 def perceptual_feature(x):
     # x = fb.forward(x, normalize=True)
-    return x
+    # return x
     # return pif.scattering_transform(
-    # x, window_size=512, time_steps=128)
+    #     x, window_size=512, time_steps=128)
+
+    x = fft_frequency_decompose(x, min_size=1024)
+    return x
 
 
 def perceptual_loss(a, b):
     a = perceptual_feature(a)
     b = perceptual_feature(b)
-    loss = F.mse_loss(a, b)
+
+    loss = 0
+    for k, v in a.items():
+        loss = loss + F.mse_loss(v, b[k])
     return loss
 
 
@@ -121,11 +133,11 @@ class Model(nn.Module):
 
         residual = residual - r2
         r3 = self._level(self.scale3, residual)
-        
+
         return r1 + r2 + r3
 
 
-model = Model()
+model = Model().to(device)
 optim = optimizer(model, lr=1e-3)
 
 if __name__ == '__main__':

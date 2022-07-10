@@ -20,8 +20,11 @@ class NeuralReverb(nn.Module):
 
     def forward(self, x, reverb_mix):
 
+        mx, _ = torch.max(self.rooms, dim=-1, keepdim=True)
+        rooms = self.rooms / (mx + 1e-12)
+
         # choose a linear mixture of "rooms"
-        mix = (reverb_mix[:, None, :] @ self.rooms)
+        mix = (reverb_mix[:, None, :] @ rooms)
 
         reverb_spec = torch.fft.rfft(mix, dim=-1, norm='ortho')
         signal_spec = torch.fft.rfft(x, dim=-1, norm='ortho')

@@ -166,11 +166,11 @@ class PsychoacousticFeature(nn.Module):
             spec = F.pad(spec, (padding, padding))
             spec = spec.unfold(-1, window_size, step)
 
-            import warnings
-            warnings.warn('Remember that youre doing windowing here!')
-            spec = spec * \
-                torch.hamming_window(
-                    spec.shape[-1])[None, None, None, :].to(spec.device)
+            # import warnings
+            # warnings.warn('Remember that youre doing windowing here!')
+            # spec = spec * \
+            #     torch.hamming_window(
+            #         spec.shape[-1])[None, None, None, :].to(spec.device)
             spec = torch.abs(torch.fft.rfft(spec, dim=-1))
 
             # limit to size time_steps

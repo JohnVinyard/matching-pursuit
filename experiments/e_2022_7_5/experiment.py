@@ -3,6 +3,7 @@ from torch import nn
 from torch.nn import functional as F
 from modules.decompose import fft_frequency_decompose, fft_frequency_recompose
 from modules.linear import LinearOutputStack
+from modules.psychoacoustic import PsychoacousticFeature
 from modules.reverb import NeuralReverb
 from train.optim import optimizer
 from util import device, playable
@@ -29,7 +30,24 @@ atoms_counts = {
 
 n_rooms = 8
 
+pif = PsychoacousticFeature([128] * 6)
+
 init_weights = make_initializer(0.1)
+
+class DilatedBlock(nn.Module):
+    def __init__(self, channels, dilation):
+        super().__init__()
+        self.dilated = nn.Conv1d(channels, channels, 3, padding=dilation, dilation=dilation)
+        self.conv = nn.Conv1d(channels, channels, 1, 1, 0)
+    
+    def forward(self, x):
+        orig = x
+        x = self.dilated(x)
+        x = self.conv(x)
+        x = x + orig
+        x = F.leaky_relu(x, 0.2)
+        return x
+
 
 class AtomCollection(nn.Module):
     def __init__(
@@ -40,12 +58,13 @@ class AtomCollection(nn.Module):
             atoms_to_apply=None):
 
         super().__init__()
-        # self.net = nn.Sequential(
-        #     nn.Conv1d(n_atoms, 32, 1, 1, 0),
-        #     DilatedBlock(32, 1),
-        #     DilatedBlock(32, 3),
-        #     nn.Conv1d(32, n_atoms, 1, 1, 0)
-        # )
+
+        self.net = nn.Sequential(
+            nn.Conv1d(n_atoms, 32, 1, 1, 0),
+            DilatedBlock(32, 1),
+            DilatedBlock(32, 3),
+            nn.Conv1d(32, n_atoms, 1, 1, 0)
+        )
 
         self.n_atoms = n_atoms
         self.kernel_size = kernel_size
@@ -55,7 +74,7 @@ class AtomCollection(nn.Module):
         self.atoms = nn.Parameter(
             torch.zeros(n_atoms, 1, self.kernel_size).uniform_(-1, 1))
         
-        # self.apply(init_weights)
+        self.apply(init_weights)
     
     def clip_atom_norms(self):
         self.atoms.data[:] = self.unit_norm_atoms()
@@ -80,29 +99,18 @@ class AtomCollection(nn.Module):
         # give atoms unit norm
         atoms = self.unit_norm_atoms()
 
-        # use only a subset of the atoms
-        # atom_indices_to_apply = torch.randperm(
-        #     self.n_atoms)[:self.atoms_to_apply]
-        # atoms = atoms[atom_indices_to_apply]
-
-        # TODO: keep the atoms in the frequency domain and do
-        # the convolution there
         full = feature_map = x = F.conv1d(
             x, atoms, bias=None, stride=1, padding=self.kernel_size // 2)
 
-        # minimize sum of columns of full feature map
-        # (encourage a single atom at a time)
+        feature_map = self.net(feature_map)
 
-        # feature_map = self.net(feature_map)
 
         shape = feature_map.shape
-
         feature_map = feature_map.reshape(batch_size, -1)
 
 
         values, indices = torch.topk(
             feature_map, k=self.atoms_to_keep, dim=-1)
-
 
         values = feature_map.gather(-1, indices)
 
@@ -111,9 +119,8 @@ class AtomCollection(nn.Module):
 
         feature_map = new_feature_map.reshape(shape)
 
-
-        x = F.conv_transpose1d(feature_map, atoms, bias=None,
-                               stride=1, padding=self.kernel_size // 2)
+        x = F.conv_transpose1d(
+            feature_map, atoms, bias=None, stride=1, padding=self.kernel_size // 2)
         return feature_map, x, full
 
 
@@ -212,7 +219,7 @@ def perceptual_loss(fake, real):
 def train_model(batch):
     optim.zero_grad()
     feature_maps, signal, sparse = model.forward(batch)
-    loss = perceptual_loss(signal, batch) + model.orthogonal_loss()
+    loss = perceptual_loss(signal, batch) #+ model.orthogonal_loss()
     loss.backward()
     optim.step()
     with torch.no_grad():

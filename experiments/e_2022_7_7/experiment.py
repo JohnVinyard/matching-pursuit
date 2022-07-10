@@ -3,6 +3,8 @@ from torch import nn
 from torch.nn import functional as F
 from modules.decompose import fft_frequency_decompose, fft_frequency_recompose
 from modules.linear import LinearOutputStack
+from modules.pif import AuditoryImage
+from modules.psychoacoustic import PsychoacousticFeature
 from modules.reverb import NeuralReverb
 from train.optim import optimizer
 from util import device, playable
@@ -27,9 +29,48 @@ atoms_counts = {
     32768: base_keep * 16
 }
 
+kernel_sizes = {
+    1024: 512,
+    2048: 512,
+    4096: 512,
+    8192: 512,
+    16384: 512,
+    32768: 512
+}
+
+band_1 = zounds.FrequencyBand(1, samplerate.nyquist)
+band_2 = zounds.FrequencyBand(samplerate.nyquist / 2, samplerate.nyquist)
+
+scale_1 = zounds.LinearScale(band_1, 128)
+scale_2 = zounds.LinearScale(band_2, 128)
+
+fb_1 = zounds.learn.FilterBank(
+    samplerate, 128, scale_1, 0.1, normalize_filters=True, a_weighting=False).to(device)
+fb_2 = zounds.learn.FilterBank(
+    samplerate, 128, scale_2, 0.1, normalize_filters=True, a_weighting=False).to(device)
+
+# aim = AuditoryImage(256, 128, do_windowing=False, check_cola=False)
+
 n_rooms = 8
 
+# pif = PsychoacousticFeature([128] * 6)
+
 init_weights = make_initializer(0.1)
+
+class DilatedBlock(nn.Module):
+    def __init__(self, channels, dilation):
+        super().__init__()
+        self.dilated = nn.Conv1d(channels, channels, 3, padding=dilation, dilation=dilation)
+        self.conv = nn.Conv1d(channels, channels, 1, 1, 0)
+    
+    def forward(self, x):
+        orig = x
+        x = self.dilated(x)
+        x = self.conv(x)
+        x = x + orig
+        x = F.leaky_relu(x, 0.2)
+        return x
+
 
 class AtomCollection(nn.Module):
     def __init__(
@@ -37,15 +78,22 @@ class AtomCollection(nn.Module):
             n_atoms,
             kernel_size,
             atoms_to_keep,
+            band_size,
             atoms_to_apply=None):
 
         super().__init__()
-        # self.net = nn.Sequential(
-        #     nn.Conv1d(n_atoms, 32, 1, 1, 0),
-        #     DilatedBlock(32, 1),
-        #     DilatedBlock(32, 3),
-        #     nn.Conv1d(32, n_atoms, 1, 1, 0)
-        # )
+        self.band_size = band_size
+
+        model_dim = 32
+        self.net = nn.Sequential(
+            nn.Conv1d(128, model_dim, 1, 1, 0),
+            DilatedBlock(model_dim, 1),
+            DilatedBlock(model_dim, 3),
+            nn.Conv1d(model_dim, n_atoms, 1, 1, 0),
+        )
+
+        self.choice = nn.Conv1d(n_atoms, n_atoms, 1, 1, 0)
+        self.value = nn.Conv1d(n_atoms, n_atoms, 1, 1, 0)
 
         self.n_atoms = n_atoms
         self.kernel_size = kernel_size
@@ -55,7 +103,7 @@ class AtomCollection(nn.Module):
         self.atoms = nn.Parameter(
             torch.zeros(n_atoms, 1, self.kernel_size).uniform_(-1, 1))
         
-        # self.apply(init_weights)
+        self.apply(init_weights)
     
     def clip_atom_norms(self):
         self.atoms.data[:] = self.unit_norm_atoms()
@@ -80,40 +128,49 @@ class AtomCollection(nn.Module):
         # give atoms unit norm
         atoms = self.unit_norm_atoms()
 
-        # use only a subset of the atoms
-        # atom_indices_to_apply = torch.randperm(
-        #     self.n_atoms)[:self.atoms_to_apply]
-        # atoms = atoms[atom_indices_to_apply]
 
-        # TODO: keep the atoms in the frequency domain and do
-        # the convolution there
-        full = feature_map = x = F.conv1d(
-            x, atoms, bias=None, stride=1, padding=self.kernel_size // 2)
+        if self.band_size == band_sizes[0]:
+            filter = fb_1
+        else:
+            filter = fb_2
 
-        # minimize sum of columns of full feature map
-        # (encourage a single atom at a time)
+        x = filter.forward(x, normalize=False)
+        
+        feature_map = x
 
-        # feature_map = self.net(feature_map)
+        full = feature_map = self.net(feature_map)
+        c = self.choice(feature_map)
+        v = self.value(feature_map)
 
         shape = feature_map.shape
-
         feature_map = feature_map.reshape(batch_size, -1)
 
+        c = c.reshape(batch_size, -1)
+        v = v.reshape(batch_size, -1)
 
+        c = torch.softmax(c, dim=-1)
+
+
+        # TODO: Would a mask be better to allow gradients
+        # to continue to flow?
         values, indices = torch.topk(
-            feature_map, k=self.atoms_to_keep, dim=-1)
+            c, k=self.atoms_to_keep, dim=-1)
 
+        logits = c.gather(-1, indices)
+        logits = logits + (1 - logits)
+        values = v.gather(-1, indices)
 
-        values = feature_map.gather(-1, indices)
+        values = values * logits
 
         new_feature_map = torch.zeros_like(feature_map)
         new_feature_map.scatter_(-1, indices, values)
 
         feature_map = new_feature_map.reshape(shape)
 
+        x = F.conv_transpose1d(
+            feature_map, atoms, bias=None, stride=1, padding=self.kernel_size // 2)
+        
 
-        x = F.conv_transpose1d(feature_map, atoms, bias=None,
-                               stride=1, padding=self.kernel_size // 2)
         return feature_map, x, full
 
 
@@ -122,20 +179,21 @@ class MultiBandSparseModel(nn.Module):
         super().__init__()
         # [32768, 16384, 8192, 4096, 2048, 1024]
 
-        n_atoms = 512
+        n_atoms = 256
 
         self.bands = nn.ModuleDict({
             str(bs): AtomCollection(
                 n_atoms=n_atoms,
-                kernel_size=256,
-                atoms_to_keep=atoms_counts[bs]) for bs in band_sizes
+                kernel_size=kernel_sizes[bs],
+                atoms_to_keep=atoms_counts[bs],
+                band_size=bs) for bs in band_sizes
         })
 
-        self.verb = NeuralReverb(n_samples, n_rooms)
-        self.to_rooms = LinearOutputStack(
-            128, 2, out_channels=n_rooms, in_channels=n_atoms * len(band_sizes))
-        self.to_mix = LinearOutputStack(
-            128, 2, out_channels=1, in_channels=n_atoms * len(band_sizes))
+        # self.verb = NeuralReverb(n_samples, n_rooms)
+        # self.to_rooms = LinearOutputStack(
+        #     128, 2, out_channels=n_rooms, in_channels=n_atoms * len(band_sizes))
+        # self.to_mix = LinearOutputStack(
+        #     128, 2, out_channels=1, in_channels=n_atoms * len(band_sizes))
 
     def clip_atom_norms(self):
         for size, band in self.bands.items():
@@ -169,7 +227,7 @@ class MultiBandSparseModel(nn.Module):
         # full_features = torch.cat(full_maps, dim=-1)
 
         # rooms = torch.softmax(self.to_rooms(full_features), dim=-1)
-        # mix = torch.sigmoid(self.to_mix(full_features)).view(-1, 1, 1)
+        # mix = 0.9 + (torch.sigmoid(self.to_mix(full_features)).view(-1, 1, 1) * 0.1)
 
         signal = fft_frequency_recompose(recon, n_samples)
 
@@ -184,20 +242,17 @@ optim = optimizer(model, lr=1e-3)
 
 
 def perceptual_feature(x):
+    final_bands = {}
     bands = fft_frequency_decompose(x, band_sizes[-1])
-    return bands
 
-    # x = pif.scattering_transform(
-    #     x, 
-    #     window_size=512, 
-    #     time_steps=128, 
-    #     size=n_samples, 
-    #     fine_grained_factor=10)
-    # return x
+    for k, v in bands.items():
+        filt = fb_1 if k == band_sizes[0] else fb_2
+        z = filt.forward(v, normalize=False)
+        z = z.unfold(-1, 128, 64)
+        z = torch.abs(torch.fft.rfft(z, dim=-1, norm='ortho'))
+        final_bands[k] = z
+    return final_bands
 
-    # bands = pif.compute_feature_dict(
-    #     x, constant_window_size=512, time_steps=64)
-    # return bands
 
 
 def perceptual_loss(fake, real):
@@ -212,7 +267,11 @@ def perceptual_loss(fake, real):
 def train_model(batch):
     optim.zero_grad()
     feature_maps, signal, sparse = model.forward(batch)
-    loss = perceptual_loss(signal, batch) + model.orthogonal_loss()
+
+    #ortho_loss = model.orthogonal_loss() * 10
+
+
+    loss = perceptual_loss(signal, batch) #+ ortho_loss
     loss.backward()
     optim.step()
     with torch.no_grad():
