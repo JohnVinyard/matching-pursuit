@@ -12,15 +12,16 @@ from util.weight_init import make_initializer
 
 n_samples = 2 ** 15
 samplerate = zounds.SR22050()
-atom_size = 2048
-n_atoms = 2048
 
-kernel_size = 512
+atom_size = 512
+n_atoms = 512
+
+kernel_size = 128
 n_bands = 128
 
 model_dim = 128
 
-atoms_to_keep = 32
+atoms_to_keep = 256
 
 sample_index_factor = n_samples // 128
 
@@ -40,15 +41,15 @@ init_weights = make_initializer(0.1)
 
 
 def perceptual_feature(x):
-    x = fb.forward(x, normalize=False)
-    x = aim.forward(x)
+    # x = fb.forward(x, normalize=False)
+    # x = aim.forward(x)
     return x
 
 
 def perceptual_loss(a, b):
     a = perceptual_feature(a)
     b = perceptual_feature(b)
-    loss = torch.abs(a - b).sum()
+    loss = F.mse_loss(a, b)
     return loss
 
 
@@ -85,14 +86,35 @@ class SparseAudioModel(nn.Module):
         )
 
         self.up = nn.Sequential(
-            # nn.Upsample(scale_factor=4),
-            nn.Conv1d(model_dim, n_atoms, 7, 1, 3),
+            nn.Upsample(scale_factor=4),
+            nn.Conv1d(model_dim, model_dim, 7, 1, 3),
+            nn.LeakyReLU(0.2),
 
+            nn.Upsample(scale_factor=4),
+            nn.Conv1d(model_dim, model_dim, 7, 1, 3),
+            nn.LeakyReLU(0.2),
+
+            nn.Upsample(scale_factor=4),
+            nn.Conv1d(model_dim, model_dim, 7, 1, 3),
+            nn.LeakyReLU(0.2),
+
+            nn.Upsample(scale_factor=4),
+            nn.Conv1d(model_dim, n_atoms, 7, 1, 3),
         )
 
         self.to_values = nn.Conv1d(n_atoms, n_atoms, 1, 1, 0)
         self.apply(init_weights)
 
+    def unit_norm_atoms(self):
+        norms = torch.norm(self.atoms, dim=-1, keepdim=True)
+        atoms = self.atoms / (norms + 1e-12)
+        return atoms
+
+    def orthogonal_loss(self):
+        x = self.unit_norm_atoms().view(n_atoms, atom_size)
+        sim = x @ x.T
+        return sim.mean()
+    
     def forward(self, x):
         x = fb.forward(x, normalize=False)
         x = aim.forward(x)
@@ -102,44 +124,37 @@ class SparseAudioModel(nn.Module):
         x = self.context(x)
         x = self.up(x)
 
-        v = torch.abs(self.to_values(x).view(x.shape[0], -1))
+        # v = torch.abs(self.to_values(x).view(x.shape[0], -1))
         
+        
+        # x = torch.softmax(x, 1)
         x = x.view(x.shape[0], -1)
-        x = torch.softmax(x, -1)
         values, indices = torch.topk(x, atoms_to_keep, dim=-1)
-        v = torch.gather(v, -1, indices)
-        v = values * v
+        # v = torch.gather(v, -1, indices)
+        v = values
 
-        output = torch.zeros(x.shape[0], 1, n_samples + atom_size).to(x.device)
-
+        output = torch.zeros(x.shape[0], n_atoms * n_samples).to(device)
+        output = output.scatter(-1, indices, v)
+        output = output.reshape(-1, n_atoms, n_samples)
 
         norms = torch.norm(self.atoms, dim=-1, keepdim=True)
         atoms = self.atoms / (norms + 1e-8)
+        atoms = atoms.reshape(n_atoms, 1, atom_size)
 
-        for b in range(x.shape[0]):
-            for i in range(atoms_to_keep):
-                index = indices[b, i].long()
-                atom_index = index // (n_samples // sample_index_factor)
-                sample_index = index % (n_samples // sample_index_factor)
+        output = F.pad(output, (0, 1))
+        output = F.conv_transpose1d(output, atoms, padding=atom_size // 2)
 
-                start = sample_index * sample_index_factor
-                stop = start + atom_size
-
-                factor = v[b, i]
-
-                output[b, 0, start: stop] += atoms[atom_index] * factor
-
-        return output[..., :n_samples]
+        return output
 
 
 model = SparseAudioModel().to(device)
-optim = optimizer(model)
+optim = optimizer(model, lr=1e-4)
 
 
 def train(batch):
     optim.zero_grad()
     result = model.forward(batch)
-    loss = perceptual_loss(result, batch)
+    loss = perceptual_loss(result, batch) + model.orthogonal_loss()
     loss.backward()
     optim.step()
     return loss, result

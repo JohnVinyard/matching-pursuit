@@ -9,6 +9,7 @@ from train.optim import optimizer
 from util import device, playable
 from util.readmedocs import readme
 import zounds
+import numpy as np
 
 from util.weight_init import make_initializer
 
@@ -20,17 +21,37 @@ n_samples = 2 ** 15
 band_sizes = [2 ** (15 - i) for i in range(6)]
 base_keep = 8
 atoms_counts = {
-    1024: base_keep * 4,
-    2048: base_keep * 4,
-    4096: base_keep * 8,
-    8192: base_keep * 8,
+    1024: base_keep * 8,
+    2048: base_keep * 8,
+    4096: base_keep * 16,
+    8192: base_keep * 16,
     16384: base_keep * 16,
     32768: base_keep * 16
 }
 
+kernel_sizes = {
+    1024: 512,
+    2048: 512,
+    4096: 512,
+    8192: 512,
+    16384: 512,
+    32768: 512
+}
+
+
+band_1 = zounds.FrequencyBand(1, samplerate.nyquist)
+band_2 = zounds.FrequencyBand(samplerate.nyquist / 2, samplerate.nyquist)
+
+scale_1 = zounds.LinearScale(band_1, 128)
+scale_2 = zounds.LinearScale(band_2, 128)
+
+fb_1 = zounds.learn.FilterBank(
+    samplerate, 128, scale_1, 0.1, normalize_filters=True, a_weighting=False).to(device)
+fb_2 = zounds.learn.FilterBank(
+    samplerate, 128, scale_2, 0.1, normalize_filters=True, a_weighting=False).to(device)
+
 n_rooms = 8
 
-pif = PsychoacousticFeature([128] * 6)
 
 init_weights = make_initializer(0.1)
 
@@ -59,12 +80,15 @@ class AtomCollection(nn.Module):
 
         super().__init__()
 
-        self.net = nn.Sequential(
-            nn.Conv1d(n_atoms, 32, 1, 1, 0),
-            DilatedBlock(32, 1),
-            DilatedBlock(32, 3),
-            nn.Conv1d(32, n_atoms, 1, 1, 0)
-        )
+        # self.net = nn.Sequential(
+        #     nn.Conv1d(n_atoms, 32, 1, 1, 0),
+        #     nn.Dropout(0.5),
+        #     DilatedBlock(32, 1),
+        #     nn.Dropout(0.5),
+        #     DilatedBlock(32, 3),
+        #     nn.Dropout(0.5),
+        #     nn.Conv1d(32, n_atoms, 1, 1, 0)
+        # )
 
         self.n_atoms = n_atoms
         self.kernel_size = kernel_size
@@ -72,7 +96,8 @@ class AtomCollection(nn.Module):
         self.atoms_to_apply = atoms_to_apply or n_atoms
 
         self.atoms = nn.Parameter(
-            torch.zeros(n_atoms, 1, self.kernel_size).uniform_(-1, 1))
+            torch.zeros(n_atoms, 1, self.kernel_size).uniform_(-0.01, 0.01))
+        
         
         self.apply(init_weights)
     
@@ -80,8 +105,11 @@ class AtomCollection(nn.Module):
         self.atoms.data[:] = self.unit_norm_atoms()
 
     def unit_norm_atoms(self):
-        norms = torch.norm(self.atoms, dim=-1, keepdim=True)
-        atoms = self.atoms / (norms + 1e-12)
+        indices = torch.randperm(self.n_atoms)[:self.atoms_to_apply]
+
+        atoms = self.atoms[indices]
+        norms = torch.norm(atoms, dim=-1, keepdim=True)
+        atoms = atoms / (norms + 1e-12)
         return atoms
 
     def orthogonal_loss(self):
@@ -99,15 +127,17 @@ class AtomCollection(nn.Module):
         # give atoms unit norm
         atoms = self.unit_norm_atoms()
 
+
         full = feature_map = x = F.conv1d(
             x, atoms, bias=None, stride=1, padding=self.kernel_size // 2)
+        
 
-        feature_map = self.net(feature_map)
-
+        # logits = torch.softmax(feature_map, dim=1)
+        # logits = logits.reshape(batch_size, -1)
 
         shape = feature_map.shape
-        feature_map = feature_map.reshape(batch_size, -1)
 
+        feature_map = feature_map.reshape(batch_size, -1)
 
         values, indices = torch.topk(
             feature_map, k=self.atoms_to_keep, dim=-1)
@@ -121,6 +151,7 @@ class AtomCollection(nn.Module):
 
         x = F.conv_transpose1d(
             feature_map, atoms, bias=None, stride=1, padding=self.kernel_size // 2)
+        
         return feature_map, x, full
 
 
@@ -134,11 +165,18 @@ class MultiBandSparseModel(nn.Module):
         self.bands = nn.ModuleDict({
             str(bs): AtomCollection(
                 n_atoms=n_atoms,
-                kernel_size=256,
+                kernel_size=kernel_sizes[bs],
                 atoms_to_keep=atoms_counts[bs]) for bs in band_sizes
         })
 
-        self.verb = NeuralReverb(n_samples, n_rooms)
+        rooms = np.random.uniform(-1, 1, (n_rooms, n_samples))
+
+        lin = np.linspace(1, 0, num=n_samples)
+        pow = np.array([1, 3, 5, 7, 9, 11, 13, 15])
+
+        rooms = rooms * (lin[None, :] ** pow[:, None])
+
+        self.verb = NeuralReverb(n_samples, n_rooms, impulses=rooms)
         self.to_rooms = LinearOutputStack(
             128, 2, out_channels=n_rooms, in_channels=n_atoms * len(band_sizes))
         self.to_mix = LinearOutputStack(
@@ -156,8 +194,11 @@ class MultiBandSparseModel(nn.Module):
 
     def forward(self, x):
 
-        bands = fft_frequency_decompose(x, band_sizes[-1])
-        n_samples = x.shape[-1]
+        # bands = fft_frequency_decompose(x, band_sizes[-1])
+
+        bands = x
+
+        # n_samples = x.shape[-1]
 
         feature_maps = {}
         recon = {}
@@ -174,11 +215,11 @@ class MultiBandSparseModel(nn.Module):
             feature_maps[size] = fm
 
         # full_features = torch.cat(full_maps, dim=-1)
-
         # rooms = torch.softmax(self.to_rooms(full_features), dim=-1)
         # mix = torch.sigmoid(self.to_mix(full_features)).view(-1, 1, 1)
 
-        signal = fft_frequency_recompose(recon, n_samples)
+        # signal = fft_frequency_recompose(recon, n_samples)
+        signal = recon
 
         # wet = self.verb.forward(signal, rooms)
         # signal = (signal * mix) + (wet * (1 - mix))
@@ -191,21 +232,18 @@ optim = optimizer(model, lr=1e-3)
 
 
 def perceptual_feature(x):
-    bands = fft_frequency_decompose(x, band_sizes[-1])
+    # final_bands = {}
+    # bands = fft_frequency_decompose(x, band_sizes[-1])
+    bands = x
+
+    # for k, v in bands.items():
+    #     filt = fb_1 if k == band_sizes[0] else fb_2
+    #     z = filt.forward(v, normalize=False)
+    #     z = z.unfold(-1, 128, 64)
+    #     z = torch.abs(torch.fft.rfft(z, dim=-1, norm='ortho'))
+    #     final_bands[k] = z
+    # return final_bands
     return bands
-
-    # x = pif.scattering_transform(
-    #     x, 
-    #     window_size=512, 
-    #     time_steps=128, 
-    #     size=n_samples, 
-    #     fine_grained_factor=10)
-    # return x
-
-    # bands = pif.compute_feature_dict(
-    #     x, constant_window_size=512, time_steps=64)
-    # return bands
-
 
 def perceptual_loss(fake, real):
     fake_bands = perceptual_feature(fake)
@@ -218,12 +256,21 @@ def perceptual_loss(fake, real):
 
 def train_model(batch):
     optim.zero_grad()
+
+    batch = fft_frequency_decompose(batch, band_sizes[-1])
+
     feature_maps, signal, sparse = model.forward(batch)
-    loss = perceptual_loss(signal, batch) #+ model.orthogonal_loss()
+
+
+    # ortho_loss = model.orthogonal_loss() * 100
+    loss = perceptual_loss(signal, batch) #+ ortho_loss
     loss.backward()
     optim.step()
     with torch.no_grad():
         model.clip_atom_norms()
+    
+    signal = fft_frequency_recompose(signal, n_samples)
+
     return loss, signal, feature_maps
 
 
@@ -241,6 +288,9 @@ class MultiBandMatchingPursuitExperiment(object):
     def listen(self):
         return playable(self.signal, samplerate)
     
+    def fake_spec(self):
+        return np.log(1e-4 + np.abs(zounds.spectral.stft(self.listen())))
+    
     def real(self):
         return playable(self.r, samplerate)
 
@@ -250,6 +300,9 @@ class MultiBandMatchingPursuitExperiment(object):
     def run(self):
         for i, item in enumerate(self.stream):
             item = item.view(-1, 1, n_samples)
+            # item = zounds.mu_law(item)
+            # item = torch.from_numpy(item).float().to(device)
+
             self.r = item
 
             loss, self.signal, self.feature_maps = train_model(item)

@@ -92,8 +92,6 @@ class AtomCollection(nn.Module):
             nn.Conv1d(model_dim, n_atoms, 1, 1, 0),
         )
 
-        self.choice = nn.Conv1d(n_atoms, n_atoms, 1, 1, 0)
-        self.value = nn.Conv1d(n_atoms, n_atoms, 1, 1, 0)
 
         self.n_atoms = n_atoms
         self.kernel_size = kernel_size
