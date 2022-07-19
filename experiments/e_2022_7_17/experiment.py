@@ -19,14 +19,14 @@ from loss import least_squares_generator_loss, least_squares_disc_loss
 n_samples = 2 ** 14
 samplerate = zounds.SR22050()
 model_dim = 128
-batch_size = 4
+batch_size = 2
 
 positions = pos_encoded(batch_size, n_samples, 16, device=device)
 
 band = zounds.FrequencyBand(20, samplerate.nyquist)
 scale = zounds.MelScale(band, 128)
 fb = zounds.learn.FilterBank(
-    samplerate, 512, scale, 0.1, normalize_filters=True, a_weighting=False).to(device)
+    samplerate, 128, scale, 0.1, normalize_filters=True, a_weighting=False).to(device)
 
 
 def activation(x):
@@ -37,28 +37,40 @@ def activation(x):
 init_weights = make_initializer(0.1)
 
 
+def perceptual_feature(x):
+    return fb.forward(x, normalize=False)
+
+def perceptual_loss(a, b):
+    a = perceptual_feature(a)
+    b = perceptual_feature(b)
+    return F.mse_loss(a, b)
+
 class Modulator(nn.Module):
     def __init__(self):
         super().__init__()
-        self.weight = nn.Linear(model_dim, model_dim)
-        self.bias = nn.Linear(model_dim, model_dim)
+        # self.weight = nn.Linear(model_dim, model_dim)
+        # self.bias = nn.Linear(model_dim, model_dim)
+
+        self.weight = LinearOutputStack(model_dim, 2, activation=activation)
+        self.bias = LinearOutputStack(model_dim, 2, activation=activation)
 
     def forward(self, x, cond):
         cond = cond.view(-1, model_dim)
 
         w = self.weight(cond)
-        w = torch.sigmoid(w)[:, None, :]
+        w = w[:, None, :]
         
         b = self.bias(cond)
         b = b[:, None, :]
 
-        return (x * w) + b
+        return activation((x * w) + b)
 
 
 class NerfLayer(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
-        self.net = nn.Linear(in_channels, out_channels)
+        # self.net = nn.Linear(in_channels, out_channels)
+        self.net = LinearOutputStack(model_dim, 2, in_channels=in_channels, out_channels=out_channels, activation=activation)
 
     def forward(self, x):
         x = self.net(x)
@@ -163,7 +175,7 @@ class Model(nn.Module):
 
 
 model = Model().to(device)
-encoder = Disc(encoder=True)
+encoder = Disc(encoder=True).to(device)
 optim = Adam(chain(model.parameters(), encoder.parameters()),
              lr=1e-4, betas=(0, 0.9))
 
@@ -176,15 +188,17 @@ def train_model(batch):
     # cond = torch.zeros(batch_size, model_dim).normal_(0, 1).to(device)
     cond, _ = encoder.forward(batch, None)
     recon = model.forward(positions, cond)
-    j, fake_feat = disc.forward(recon, cond)
-    _, real_feat = disc.forward(batch, cond)
+    # j, fake_feat = disc.forward(recon, cond)
+    # _, real_feat = disc.forward(batch, cond)
 
-    recon_loss = 0
-    for i in range(len(fake_feat)):
-        recon_loss = recon_loss + F.mse_loss(fake_feat[i], real_feat[i])
+    # recon_loss = 0
+    # for i in range(len(fake_feat)):
+    #     recon_loss = recon_loss + F.mse_loss(fake_feat[i], real_feat[i])
     
-    adv_loss = least_squares_generator_loss(j)
-    loss = adv_loss + latent_loss(cond.view(-1, model_dim)) + recon_loss
+    # adv_loss = least_squares_generator_loss(j)
+    # loss = adv_loss + latent_loss(cond.view(-1, model_dim)) + recon_loss
+
+    loss = perceptual_loss(recon, batch) #+ latent_loss(cond.view(-1, model_dim))
     loss.backward()
     optim.step()
     return recon, loss, cond
@@ -237,11 +251,11 @@ class NerfAgain(object):
             item = item.view(-1, 1, n_samples)
             self.real = item
 
-            if i % 2 == 0:
-                self.fake, loss, self.cond = train_model(item)
-            else:
-                disc_loss = train_disc(item)
+            # if i % 2 == 0:
+            self.fake, loss, self.cond = train_model(item)
+            # else:
+                # disc_loss = train_disc(item)
 
             if i > 0 and i % 10 == 0:
                 print('G', loss.item())
-                print('D', disc_loss.item())
+                # print('D', disc_loss.item())
