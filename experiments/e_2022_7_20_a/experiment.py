@@ -4,7 +4,9 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from loss.least_squares import least_squares_disc_loss, least_squares_generator_loss
+from modules.ddsp import NoiseModel, OscillatorBank
 from modules.linear import LinearOutputStack
+from modules.reverb import NeuralReverb
 from train.optim import optimizer
 from modules.latent_loss import latent_loss
 from upsample import ConvUpsample
@@ -15,6 +17,12 @@ from util.weight_init import make_initializer
 
 n_samples = 2 ** 14
 samplerate = zounds.SR22050()
+model_dim = 128
+
+n_frames = 128
+n_noise_frames = 512
+
+n_rooms = 8
 
 init_weights = make_initializer(0.1)
 
@@ -85,6 +93,50 @@ class Discriminator(nn.Module):
         x = self.judge(x + e)
         return x
 
+class AudioModel(nn.Module):
+    def __init__(self, n_samples):
+        super().__init__()
+        self.n_samples = n_samples
+
+        self.osc = OscillatorBank(
+            model_dim, 
+            model_dim, 
+            n_samples, 
+            constrain=True, 
+            lowest_freq=40 / samplerate.nyquist,
+            amp_activation=lambda x: x ** 2,
+            complex_valued=False)
+        
+        self.noise = NoiseModel(
+            model_dim,
+            n_frames,
+            n_noise_frames,
+            n_samples,
+            model_dim,
+            squared=True,
+            mask_after=1)
+        
+        self.verb = NeuralReverb(n_samples, n_rooms)
+
+        self.to_rooms = LinearOutputStack(model_dim, 3, out_channels=n_rooms)
+        self.to_mix = LinearOutputStack(model_dim, 3, out_channels=1)
+
+    
+    def forward(self, x):
+        x = x.view(-1, model_dim, n_frames)
+
+        agg = x.mean(dim=-1)
+        room = self.to_rooms(agg)
+        mix = torch.sigmoid(self.to_mix(agg)).view(-1, 1, 1)
+
+        harm = self.osc.forward(x)
+        noise = self.noise(x)
+
+        dry = harm + noise
+        wet = self.verb(dry, room)
+        signal = (dry * mix) + (wet * (1 - mix))
+        return signal
+
 
 class Generator(nn.Module):
     def __init__(self):
@@ -95,25 +147,35 @@ class Generator(nn.Module):
             nn.Conv1d(256, 128, 7, 1, 3),
 
             nn.Upsample(scale_factor=4, mode='nearest'), # 128
-            nn.Conv1d(128, 64, 7, 1, 3),
+            nn.Conv1d(128, 128, 7, 1, 3),
 
-            nn.Upsample(scale_factor=4, mode='nearest'), # 512
-            nn.Conv1d(64, 32, 7, 1, 3),
+            DilatedBlock(128, 1),
+            DilatedBlock(128, 3),
+            DilatedBlock(128, 9),
+            DilatedBlock(128, 1),
 
-            nn.Upsample(scale_factor=4, mode='nearest'), # 2048
-            nn.Conv1d(32, 16, 7, 1, 3),
+            # nn.Upsample(scale_factor=4, mode='nearest'), # 512
+            # nn.Conv1d(64, 32, 7, 1, 3),
 
-            nn.Upsample(scale_factor=4, mode='nearest'), # 8192
-            nn.Conv1d(16, 8, 7, 1, 3),
+            # nn.Upsample(scale_factor=4, mode='nearest'), # 2048
+            # nn.Conv1d(32, 16, 7, 1, 3),
 
-            nn.Upsample(scale_factor=2, mode='nearest'), # 16384
-            nn.Conv1d(8, 1, 7, 1, 3),
+            # nn.Upsample(scale_factor=4, mode='nearest'), # 8192
+            # nn.Conv1d(16, 8, 7, 1, 3),
+
+            # nn.Upsample(scale_factor=2, mode='nearest'), # 16384
+            # nn.Conv1d(8, 1, 7, 1, 3),
         )
+        
+        # TODO: Which is better here.  Does a strong inductive bias
+        # actually screw things up here?
+        self.audio = AudioModel(n_samples)
         self.apply(init_weights)
     
     def forward(self, x):
         x = self.initial(x).view(-1, 256, 8)
         x = self.up(x)
+        x = self.audio(x)
         return x
 
 embedding = EmbeddingModule().to(device)
