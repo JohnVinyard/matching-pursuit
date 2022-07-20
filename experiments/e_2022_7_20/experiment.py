@@ -1,8 +1,9 @@
+import numpy as np
 from torch import nn
 import torch
 from modules.pos_encode import pos_encoded
 from train.optim import optimizer
-from util import device
+from util import device, playable
 from util.readmedocs import readme
 from torch.nn import functional as F
 import zounds
@@ -16,6 +17,30 @@ model_dim = 128
 n_steps = 25
 
 positions = pos_encoded(1, n_steps, 16).view(n_steps, 33).to(device)
+
+stds = np.linspace(0.01, 0.99, n_steps) ** 2
+
+scratch = np.zeros(n_samples)
+estimates = []
+for i in range(n_steps):
+    scratch += np.random.normal(0, stds[i], n_samples)
+    estimates.append(scratch.std())
+
+estimates = torch.from_numpy(np.array(estimates))
+
+def forward_process(audio, n_steps):
+    degraded = audio
+    for i in range(n_steps):
+        noise = torch.zeros_like(audio).normal_(0, stds[i]).to(device)
+        degraded = degraded + noise
+    return audio, degraded, noise
+
+def reverse_process(model):
+    degraded = torch.zeros(1, 1, n_samples).normal_(0, 1.3).to(device)
+    for i in range(n_steps - 1, -1, -1):
+        pred_noise = model.forward(degraded, positions[i, :])
+        degraded = degraded - pred_noise
+    return degraded
 
 init_weights = make_initializer(0.1)
 
@@ -64,14 +89,6 @@ class Model(nn.Module):
             DilatedBlock(c, 27),
             DilatedBlock(c, 81),
             DilatedBlock(c, 243),
-
-            DilatedBlock(c, 1),
-            DilatedBlock(c, 3),
-            DilatedBlock(c, 9),
-            DilatedBlock(c, 27),
-            DilatedBlock(c, 81),
-            DilatedBlock(c, 243),
-
             DilatedBlock(c, 1),
         )
 
@@ -106,18 +123,40 @@ optim = optimizer(model, lr=1e-3)
 
 def train(batch):
     optim.zero_grad()
-    pos = torch.randint(0, n_steps, (batch.shape[0],))
-    p = positions[pos]
+
+    pos = np.random.randint(1, n_steps)
+
+    p = positions[pos].view(1, 33, 1).repeat(batch.shape[0], 1, 1)
+    orig, degraded, noise = forward_process(batch, pos)
     pred = model.forward(batch, p)
-    print(pred.shape)
+    loss = F.mse_loss(pred, noise)
+    loss.backward()
+    optim.step()
+    return loss
 
 @readme
 class DiffusionExperimentTwo(object):
     def __init__(self, stream):
         super().__init__()
         self.stream = stream
+        self.real = None
+    
+    def fake_spec(self):
+        return np.abs(zounds.spectral.stft(self.denoise()))
+
+    def check_degraded(self, step=n_steps - 1):
+        with torch.no_grad():
+            audio, degraded, noise = forward_process(self.real[:1], step)
+            return playable(degraded, samplerate)
+
+    def denoise(self):
+        with torch.no_grad():
+            result = reverse_process(model)
+            return playable(result, samplerate)
     
     def run(self):
         for i, item in enumerate(self.stream):
             item = item.view(-1, 1, n_samples)
-            train(item)
+            self.real = item
+            loss = train(item)
+            print(loss.item())
