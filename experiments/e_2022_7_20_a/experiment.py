@@ -9,7 +9,6 @@ from modules.linear import LinearOutputStack
 from modules.reverb import NeuralReverb
 from train.optim import optimizer
 from modules.latent_loss import latent_loss
-from upsample import ConvUpsample
 
 from util import device, playable
 from util.readmedocs import readme
@@ -147,35 +146,25 @@ class Generator(nn.Module):
             nn.Conv1d(256, 128, 7, 1, 3),
 
             nn.Upsample(scale_factor=4, mode='nearest'), # 128
-            nn.Conv1d(128, 128, 7, 1, 3),
+            nn.Conv1d(128, 64, 7, 1, 3),
 
-            DilatedBlock(128, 1),
-            DilatedBlock(128, 3),
-            DilatedBlock(128, 9),
-            DilatedBlock(128, 1),
+            nn.Upsample(scale_factor=4, mode='nearest'), # 512
+            nn.Conv1d(64, 32, 7, 1, 3),
 
-            # nn.Upsample(scale_factor=4, mode='nearest'), # 512
-            # nn.Conv1d(64, 32, 7, 1, 3),
+            nn.Upsample(scale_factor=4, mode='nearest'), # 2048
+            nn.Conv1d(32, 16, 7, 1, 3),
 
-            # nn.Upsample(scale_factor=4, mode='nearest'), # 2048
-            # nn.Conv1d(32, 16, 7, 1, 3),
+            nn.Upsample(scale_factor=4, mode='nearest'), # 8192
+            nn.Conv1d(16, 8, 7, 1, 3),
 
-            # nn.Upsample(scale_factor=4, mode='nearest'), # 8192
-            # nn.Conv1d(16, 8, 7, 1, 3),
-
-            # nn.Upsample(scale_factor=2, mode='nearest'), # 16384
-            # nn.Conv1d(8, 1, 7, 1, 3),
+            nn.Upsample(scale_factor=2, mode='nearest'), # 16384
+            nn.Conv1d(8, 1, 7, 1, 3),
         )
-        
-        # TODO: Which is better here.  Does a strong inductive bias
-        # actually screw things up here?
-        self.audio = AudioModel(n_samples)
         self.apply(init_weights)
     
     def forward(self, x):
         x = self.initial(x).view(-1, 256, 8)
         x = self.up(x)
-        x = self.audio(x)
         return x
 
 embedding = EmbeddingModule().to(device)
@@ -228,12 +217,14 @@ def train_embedding(batch):
     embedding_optim.zero_grad()
     e1 = embedding.forward(batch[:, :, :n_samples])
     e2 = embedding.forward(batch[:, :, n_samples:])
-    ll = latent_loss(e1)
+
+    all_embeddings = torch.cat([e1, e2], dim=0)
+    ll = latent_loss(all_embeddings)
     dist_loss = ((e1 - e2) ** 2).mean()
     loss = ll + dist_loss
     loss.backward()
     embedding_optim.step()
-    return loss, e2
+    return loss, all_embeddings
 
 
 @readme
