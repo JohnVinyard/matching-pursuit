@@ -23,7 +23,7 @@ n_noise_frames = 512
 
 n_rooms = 8
 
-init_weights = make_initializer(0.1)
+init_weights = make_initializer(0.12)
 
 
 class DilatedBlock(nn.Module):
@@ -75,6 +75,8 @@ class EmbeddingModule(nn.Module):
         x = x.view(-1, 1, n_samples)
         x = self.net(x)
         x = x.view(x.shape[0], 128)
+        norm = torch.norm(x, dim=-1, keepdim=True)
+        x = x / (norm + 1e-8)
         return x
 
 
@@ -168,7 +170,7 @@ class Generator(nn.Module):
         return x
 
 embedding = EmbeddingModule().to(device)
-embedding_optim = optimizer(embedding, lr=1e-3)
+embedding_optim = optimizer(embedding, lr=1e-4)
 
 disc = Discriminator().to(device)
 disc_optim = optimizer(disc, lr=1e-3)
@@ -219,9 +221,13 @@ def train_embedding(batch):
     e2 = embedding.forward(batch[:, :, n_samples:])
 
     all_embeddings = torch.cat([e1, e2], dim=0)
-    ll = latent_loss(all_embeddings)
-    dist_loss = ((e1 - e2) ** 2).mean()
-    loss = ll + dist_loss
+
+    sim = F.cosine_similarity(e1, e2).mean()
+    neg = F.cosine_similarity(e1, torch.roll(e2, (1,), dims=(0,))).mean()
+
+    
+    loss = torch.abs(1 - sim) + torch.abs(0 - neg)
+
     loss.backward()
     embedding_optim.step()
     return loss, all_embeddings
