@@ -12,7 +12,7 @@ from util.weight_init import make_initializer
 
 n_samples = 2 ** 14
 samplerate = zounds.SR22050()
-model_dim = 128
+model_dim = 64
 
 n_steps = 25
 
@@ -65,206 +65,92 @@ class Activation(nn.Module):
         return activation(x)
 
 
+
 class DilatedBlock(nn.Module):
     def __init__(self, channels, dilation):
         super().__init__()
-        self.dilated = nn.Conv1d(
-            channels, channels, 3, padding=dilation, dilation=dilation)
-        self.conv = nn.Conv1d(channels, channels, 1, 1, 0)
+        self.channels = channels
+        self.out = nn.Conv1d(channels, channels, 1, 1, 0)
+        self.next = nn.Conv1d(channels, channels, 1, 1, 0)
+
+        self.down = nn.Conv1d(channels * 2, channels, 1, 1, 0)
+
+        self.scale = nn.Conv1d(channels, channels, 3, 1, dilation=dilation, padding=dilation)
+        self.gate = nn.Conv1d(channels, channels, 3, 1, dilation=dilation, padding=dilation)
     
-    def forward(self, x):
-        orig = x
-        x = self.dilated(x)
-        x = self.conv(x)
-        x = x + orig
-        x = activation(x)
-        return x
+    def forward(self, x, step, cond=None):
+        batch = x.shape[0]
 
-class DownsamplingBlock(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super().__init__()
-        self.in_channels = in_channels
-        self.out_channels = out_channels
+        skip = x
 
-        self.conv1 = nn.Conv1d(in_channels, out_channels, 7, 1, 3)
-        self.context = nn.Sequential(
-            DilatedBlock(out_channels, 1),
-            DilatedBlock(out_channels, 3),
-        )
-        self.conv2 = nn.Conv1d(out_channels + 33, out_channels, 7, 4, 3)
-        
+        step = step.view(batch, self.channels, 1).repeat(1, 1, x.shape[-1])
 
-    def forward(self, x, step):
-        x = self.conv1(x)
-        x = activation(x)
-
-        x = self.context(x)
-        
-        step = step.view(x.shape[0], 33, 1).repeat(1, 1, x.shape[-1])
         x = torch.cat([x, step], dim=1)
-        x = self.conv2(x)
-        x = activation(x)
+        x = self.down(x)
 
+        scale = self.scale(x + cond)
+        gate = self.gate(x + cond)
 
-        return x
+        x = torch.tanh(scale) * F.sigmoid(gate)
 
+        out = self.out(x)
+        next = self.next(x) + skip
 
-class UpsamplingBlock(nn.Module):
-    def __init__(self, in_channels, out_channels):
+        return next, out
+
+class Model(nn.Module):
+    def __init__(self, channels):
         super().__init__()
+        self.channels = channels
 
-        self.conv1 = nn.Conv1d(in_channels + 33, in_channels, 7, 1, 3)
-        self.context = nn.Sequential(
-            DilatedBlock(in_channels, 1),
-            DilatedBlock(in_channels, 3),
-        )
-        self.up = nn.ConvTranspose1d(in_channels, in_channels, 12, 4, 4)
+        c = channels
 
-        self.conv2 = nn.Conv1d(in_channels, out_channels, 7, 1, 3)
+        self.initial = nn.Conv1d(1, channels, 7, 1, 3)
 
+        self.embed_step = nn.Conv1d(33, channels, 1, 1, 0)
 
-    def forward(self, x, d, step):
-
-        x = x + d
-
-        step = step.view(x.shape[0], 33, 1).repeat(1, 1, x.shape[-1])
-        x = torch.cat([x, step], dim=1)
-        x = self.conv1(x)
-        x = activation(x)
-
-        x = self.context(x)
-
-        # x = F.upsample(x, scale_factor=4, mode='nearest')
-        x = self.up(x)
-        
-        x = activation(x)
-
-        x = self.conv2(x)
-        return x
-
-
-class Generator(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-        self.down = nn.Sequential(
-            DownsamplingBlock(1, 16),
-            DownsamplingBlock(16, 32),
-            DownsamplingBlock(32, 64),
-            DownsamplingBlock(64, 128),
-            DownsamplingBlock(128, 256),
+        self.stack = nn.Sequential(
+            DilatedBlock(c, 1),
+            DilatedBlock(c, 3),
+            DilatedBlock(c, 9),
+            DilatedBlock(c, 27),
+            DilatedBlock(c, 81),
+            DilatedBlock(c, 243),
+            DilatedBlock(c, 1),
         )
 
-        self.up = nn.Sequential(
-            UpsamplingBlock(256, 128),
-            UpsamplingBlock(128, 64),
-            UpsamplingBlock(64, 32),
-            UpsamplingBlock(32, 16),
-            UpsamplingBlock(16, 1),
+        self.final = nn.Sequential(
+            nn.Conv1d(c, c, 1, 1, 0),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(c, 1, 1, 1, 0),
         )
-
-
+    
         self.apply(init_weights)
+    
+    def forward(self, x, step, cond=None):
+        batch = x.shape[0]
 
-    def forward(self, audio, pos_embedding):
-        x = audio
+        n = F.leaky_relu(self.initial(x), 0.2)
 
-        d = {}
+        if cond is None:
+            cond = torch.zeros(1, self.channels, 1, device=x.device)
 
-        # initial shape assertions
-        for layer in self.down:
-            x = layer.forward(x, pos_embedding)
-            d[x.shape[-1]] = x
+        step = step.view(batch, 33, 1)
+        step = self.embed_step(step)
 
-        for layer in self.up:
-            z = d[x.shape[-1]]
-            x = layer.forward(x, z, pos_embedding)
+        outputs = torch.zeros(batch, self.channels, x.shape[-1], device=x.device)
+
+        for layer in self.stack:
+            n, o = layer.forward(n, step, cond)
+            outputs = outputs + o
         
+        x = self.final(outputs)
+
+        means = torch.mean(x, dim=-1, keepdim=True)
+        x = x - means
         return x
 
-# class DilatedBlock(nn.Module):
-#     def __init__(self, channels, dilation):
-#         super().__init__()
-#         self.channels = channels
-#         self.out = nn.Conv1d(channels, channels, 1, 1, 0)
-#         self.next = nn.Conv1d(channels, channels, 1, 1, 0)
-
-#         self.down = nn.Conv1d(channels * 2, channels, 1, 1, 0)
-
-#         self.scale = nn.Conv1d(channels, channels, 3, 1, dilation=dilation, padding=dilation)
-#         self.gate = nn.Conv1d(channels, channels, 3, 1, dilation=dilation, padding=dilation)
-    
-#     def forward(self, x, step, cond=None):
-#         batch = x.shape[0]
-
-#         skip = x
-
-#         step = step.view(batch, self.channels, 1).repeat(1, 1, x.shape[-1])
-
-#         x = torch.cat([x, step], dim=1)
-#         x = self.down(x)
-
-#         scale = self.scale(x + cond)
-#         gate = self.gate(x + cond)
-
-#         x = torch.tanh(scale) * F.sigmoid(gate)
-
-#         out = self.out(x)
-#         next = self.next(x) + skip
-
-#         return next, out
-
-# class Model(nn.Module):
-#     def __init__(self, channels):
-#         super().__init__()
-#         self.channels = channels
-
-#         c = channels
-
-#         self.initial = nn.Conv1d(1, channels, 7, 1, 3)
-
-#         self.embed_step = nn.Conv1d(33, channels, 1, 1, 0)
-
-#         self.stack = nn.Sequential(
-#             DilatedBlock(c, 1),
-#             DilatedBlock(c, 3),
-#             DilatedBlock(c, 9),
-#             DilatedBlock(c, 27),
-#             DilatedBlock(c, 81),
-#             DilatedBlock(c, 243),
-#             DilatedBlock(c, 1),
-#         )
-
-#         self.final = nn.Sequential(
-#             nn.Conv1d(c, c, 1, 1, 0),
-#             nn.LeakyReLU(0.2),
-#             nn.Conv1d(c, 1, 1, 1, 0),
-#         )
-    
-#         self.apply(init_weights)
-    
-#     def forward(self, x, step, cond=None):
-#         batch = x.shape[0]
-
-#         n = F.leaky_relu(self.initial(x), 0.2)
-
-#         if cond is None:
-#             cond = torch.zeros(1, self.channels, 1, device=x.device)
-
-#         step = step.view(batch, 33, 1)
-#         step = self.embed_step(step)
-
-#         outputs = torch.zeros(batch, self.channels, x.shape[-1], device=x.device)
-
-#         for layer in self.stack:
-#             n, o = layer.forward(n, step, cond)
-#             outputs = outputs + o
-        
-#         x = self.final(outputs)
-#         return x
-
-# model = Model(model_dim).to(device)
-model = Generator().to(device)
+model = Model(model_dim).to(device)
 optim = optimizer(model, lr=1e-3)
 
 def train(batch):
