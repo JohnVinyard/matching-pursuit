@@ -1,1 +1,1 @@
-from .e_2022_7_23  import SparseAudioExperimentWithSparsityConstraint as Current
+from .e_2022_7_25  import EfficientSparseModelExperiment as Current

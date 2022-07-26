@@ -2,13 +2,11 @@ import numpy as np
 import zounds
 import torch
 from torch import nn
-from modules.linear import LinearOutputStack
 from modules.pif import AuditoryImage
 from train.optim import optimizer
 from util import device, playable
 from util.readmedocs import readme
 from torch.nn import functional as F
-from torch.nn.init import orthogonal_
 
 from util.weight_init import make_initializer
 
@@ -21,7 +19,7 @@ n_atoms = 512
 kernel_size = 128
 n_bands = 128
 
-model_dim = 128
+model_dim = 64
 
 atoms_to_keep = 256
 
@@ -43,8 +41,8 @@ init_weights = make_initializer(0.05)
 
 
 def perceptual_feature(x):
-    x = fb.forward(x, normalize=False)
-    x = aim.forward(x)
+    # x = fb.forward(x, normalize=False)
+    # x = aim.forward(x)
     return x
 
 
@@ -55,21 +53,6 @@ def perceptual_loss(a, b):
     return loss
 
 
-# class DilatedBlock(nn.Module):
-#     def __init__(self, channels, dilation):
-#         super().__init__()
-#         self.dilated = nn.Conv1d(
-#             channels, channels, 3, padding=dilation, dilation=dilation)
-#         self.conv = nn.Conv1d(channels, channels, 1, 1, 0)
-
-#     def forward(self, x):
-#         orig = x
-#         x = self.dilated(x)
-#         x = self.conv(x)
-#         x = x + orig
-#         x = F.leaky_relu(x, 0.2)
-#         return x
-
 
 class DilatedBlock(nn.Module):
     def __init__(self, channels, dilation):
@@ -77,26 +60,17 @@ class DilatedBlock(nn.Module):
         self.channels = channels
         self.out = nn.Conv1d(channels, channels, 1, 1, 0)
         self.next = nn.Conv1d(channels, channels, 1, 1, 0)
-
-        # self.down = nn.Conv1d(channels * 2, channels, 1, 1, 0)
-
         self.scale = nn.Conv1d(channels, channels, 3, 1, dilation=dilation, padding=dilation)
         self.gate = nn.Conv1d(channels, channels, 3, 1, dilation=dilation, padding=dilation)
     
     def forward(self, x):
         batch = x.shape[0]
-
         skip = x
-
-
         scale = self.scale(x)
         gate = self.gate(x)
-
         x = torch.tanh(scale) * F.sigmoid(gate)
-
         out = self.out(x)
         next = self.next(x) + skip
-
         return next, out
 
 class Model(nn.Module):
@@ -147,40 +121,10 @@ class Model(nn.Module):
 class SparseAudioModel(nn.Module):
     def __init__(self):
         super().__init__()
-        # self.reduce = LinearOutputStack(
-            # model_dim, 3, in_channels=257, out_channels=8)
-        # self.conv = nn.Conv1d(model_dim * 8, model_dim, 1, 1, 0)
-
         self.model = Model(model_dim)
         self.atoms = nn.Parameter(torch.zeros(
             n_atoms, atom_size).uniform_(-1, 1))
-
-        # self.context = nn.Sequential(
-        #     DilatedBlock(model_dim, 1),
-        #     DilatedBlock(model_dim, 3),
-        #     DilatedBlock(model_dim, 9),
-        # )
-
-        # self.up = nn.Sequential(
-        #     nn.Upsample(scale_factor=4),
-        #     nn.Conv1d(model_dim, model_dim, 7, 1, 3),
-        #     nn.LeakyReLU(0.2),
-
-        #     nn.Upsample(scale_factor=4),
-        #     nn.Conv1d(model_dim, model_dim, 7, 1, 3),
-        #     nn.LeakyReLU(0.2),
-
-        #     nn.Upsample(scale_factor=4),
-        #     nn.Conv1d(model_dim, model_dim, 7, 1, 3),
-        #     nn.LeakyReLU(0.2),
-
-        #     nn.Upsample(scale_factor=4),
-        #     nn.Conv1d(model_dim, n_atoms, 7, 1, 3),
-        # )
-
-        # self.to_values = nn.Conv1d(n_atoms, n_atoms, 1, 1, 0)
         self.apply(init_weights)
-        # orthogonal_(self.atoms.data)
 
     def unit_norm_atoms(self):
         norms = torch.norm(self.atoms, dim=-1, keepdim=True)
@@ -196,30 +140,33 @@ class SparseAudioModel(nn.Module):
         atoms = self.unit_norm_atoms()
         self.atoms.data[:] = atoms
     
-    def forward(self, x):
-        # x = fb.forward(x, normalize=False)
-        # x = aim.forward(x)
-        # x = self.reduce(x)
-        # x = x.permute(0, 3, 2, 1).reshape(-1, model_dim * 8, 128)
-        # x = self.conv(x)
-        # x = self.context(x)
-        # x = self.up(x)
-
-        output = self.model(x)
-        features = output
-
-        # features = output = x
-
-        norms = torch.norm(self.atoms, dim=-1, keepdim=True)
-        atoms = self.atoms / (norms + 1e-8)
+    def from_features(self, x, sparse=False):
+        # norms = torch.norm(self.atoms, dim=-1, keepdim=True)
+        # atoms = self.atoms / (norms + 1e-8)
         atoms = self.atoms.reshape(n_atoms, 1, atom_size)
 
-        # output = F.dropout(output, p=0.1)
-
+        if sparse:
+            values, indices = torch.topk(x, atoms_to_keep, -1)
+            f = torch.zeros_like(x)
+            f = torch.scatter(f, -1, indices, values)
+            output = f
+        else:
+            output = x
+        
         output = F.pad(output, (0, 1))
         output = F.conv_transpose1d(output, atoms, padding=atom_size // 2)
-
-        return output, features
+        return output
+    
+    def compute_features(self, x):
+        output = self.model(x)
+        return output
+    
+    
+    def forward(self, x):
+        feat = self.compute_features(x)
+        full = self.from_features(feat, sparse=False)
+        sparse = self.from_features(feat, sparse=True)
+        return feat, full, sparse
 
 
 model = SparseAudioModel().to(device)
@@ -228,22 +175,20 @@ optim = optimizer(model, lr=1e-4)
 
 def train(batch):
     optim.zero_grad()
-    result, features = model.forward(batch)
+    feat, full, sparse = model.forward(batch)
+
+    # TODO: If this doesn't work well, consider
+    # trying the earlier l1 norm of all but top-k
+    # approach
+    recon_loss = perceptual_loss(full, batch)
+    sparse_loss = perceptual_loss(sparse, full)
 
 
-    f = features.clone().reshape(batch.shape[0], -1)
-    values, indices = torch.topk(f, atoms_to_keep, -1)
-    z = torch.zeros_like(values)
-    f = torch.scatter(f, -1, indices, z)
-    sparsity_loss = torch.abs(f).sum() * 0.0001
-
-    recon_loss = perceptual_loss(result, batch)
-
-    loss = recon_loss + sparsity_loss
+    loss = recon_loss + sparse_loss
     loss.backward()
     optim.step()
     model.clip_atoms()
-    return loss, result, features
+    return loss, full, sparse, feat
 
 
 @readme
@@ -252,22 +197,28 @@ class SparseAudioExperimentWithSparsityConstraint(object):
         super().__init__()
         self.stream = stream
         self.real = None
+
+        self.sparse = None
         self.fake = None
         self.features = None
 
     def r(self):
         return playable(self.real, samplerate)
 
-    def listen(self):
-        return playable(self.fake, samplerate)
+    def listen(self, sparse=False):
+        if sparse:
+            return playable(self.sparse, samplerate)
+        else:
+            return playable(self.fake, samplerate)
     
     def feat(self):
-        return np.abs(self.features.data.cpu().numpy()[0])
+        with torch.no_grad():
+            x = F.avg_pool1d(self.features, 512, 256, 256)
+            return np.abs(x.data.cpu().numpy()[0])
 
     def run(self):
         for i, item in enumerate(self.stream):
             item = item.view(-1, 1, n_samples)
             self.real = item
-            loss, self.fake, self.features = train(item)
-
+            loss, self.fake, self.sparse, self.features = train(item)
             print(loss.item())

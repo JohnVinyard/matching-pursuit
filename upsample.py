@@ -97,6 +97,7 @@ class FFTUpsampleBlock(nn.Module):
             new_coeffs[:, :, self.orig_coeffs:] = inferred
 
         x = torch.fft.irfft(new_coeffs, n=self.new_time, norm='ortho')
+        # x = self.final(x)
         return x
 
     def forward(self, x):
