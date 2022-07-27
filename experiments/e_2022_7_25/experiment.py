@@ -6,6 +6,7 @@ from torch import nn
 from modules.ddsp import NoiseModel, OscillatorBank
 from modules.decompose import fft_frequency_recompose
 from modules.linear import LinearOutputStack
+from modules.nerf import NerfStack
 from modules.pif import AuditoryImage
 from modules.pos_encode import pos_encoded
 from modules.reverb import NeuralReverb
@@ -241,77 +242,83 @@ class AtomGenerator(nn.Module):
         self.n_atoms = n_atoms
         self.atom_size = atom_size
         self.to_atoms = nn.Linear(model_dim, n_atoms * atom_latent)
-        self.to_seq = nn.Linear(atom_latent, 8 * 128)
+        # self.to_seq = nn.Linear(atom_latent, 8 * 128)
 
-        self.to_samples = nn.ModuleDict({
-            '128': nn.Conv1d(16, 1, 7, 1, 3),
-            '256': nn.Conv1d(16, 1, 7, 1, 3),
-            '512': nn.Conv1d(16, 1, 7, 1, 3),
-            '1024': nn.Conv1d(16, 1, 7, 1, 3),
-            '2048': nn.Conv1d(16, 1, 7, 1, 3),
-            '4096': nn.Conv1d(16, 1, 7, 1, 3),
-        })
+        # self.to_samples = nn.ModuleDict({
+        #     '128': nn.Conv1d(16, 1, 7, 1, 3),
+        #     '256': nn.Conv1d(16, 1, 7, 1, 3),
+        #     '512': nn.Conv1d(16, 1, 7, 1, 3),
+        #     '1024': nn.Conv1d(16, 1, 7, 1, 3),
+        #     '2048': nn.Conv1d(16, 1, 7, 1, 3),
+        #     '4096': nn.Conv1d(16, 1, 7, 1, 3),
+        # })
 
-        self.up = nn.Sequential(
-            nn.Sequential(
-                nn.ConvTranspose1d(128, 64, 8, 4, 2),  # 16
-                nn.LeakyReLU(0.2),
-            ),
-            nn.Sequential(
-                nn.ConvTranspose1d(64, 16, 8, 4, 2),  # 64
-                nn.LeakyReLU(0.2),
-            ),
+        # self.up = nn.Sequential(
+        #     nn.Sequential(
+        #         nn.ConvTranspose1d(128, 64, 8, 4, 2),  # 16
+        #         nn.LeakyReLU(0.2),
+        #     ),
+        #     nn.Sequential(
+        #         nn.ConvTranspose1d(64, 16, 8, 4, 2),  # 64
+        #         nn.LeakyReLU(0.2),
+        #     ),
 
-            nn.Sequential(
-                nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 128
-                nn.LeakyReLU(0.2)
-            ),
+        #     nn.Sequential(
+        #         nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 128
+        #         nn.LeakyReLU(0.2)
+        #     ),
 
-            nn.Sequential(
-                nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 256
-                nn.LeakyReLU(0.2)
-            ),
+        #     nn.Sequential(
+        #         nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 256
+        #         nn.LeakyReLU(0.2)
+        #     ),
 
-            nn.Sequential(
-                nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 512
-                nn.LeakyReLU(0.2)
-            ),
+        #     nn.Sequential(
+        #         nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 512
+        #         nn.LeakyReLU(0.2)
+        #     ),
 
-            nn.Sequential(
-                nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 1024
-                nn.LeakyReLU(0.2)
-            ),
+        #     nn.Sequential(
+        #         nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 1024
+        #         nn.LeakyReLU(0.2)
+        #     ),
 
-            nn.Sequential(
-                nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 2048
-                nn.LeakyReLU(0.2)
-            ),
+        #     nn.Sequential(
+        #         nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 2048
+        #         nn.LeakyReLU(0.2)
+        #     ),
 
-            nn.Sequential(
-                nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 4096
-                nn.LeakyReLU(0.2)
-            ),
+        #     nn.Sequential(
+        #         nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 4096
+        #         nn.LeakyReLU(0.2)
+        #     ),
 
-        )
+        # )
+
+        self.nerf = NerfStack(atom_size, atom_latent, 5, factor=30)
 
     def forward(self, x):
         batch = x.shape[0]
         x = x.view(batch, 1, model_dim)
 
         x = self.to_atoms(x)
-        x = x.view(batch, n_atoms, atom_latent)
+        x = x.view(batch * n_atoms, atom_latent)
 
-        x = self.to_seq(x).view(-1, 128, 8)
+        x = self.nerf.forward(x)
 
-        bands = {}
-        for layer in self.up:
-            x = layer(x)
-            try:
-                to_samples = self.to_samples[str(x.shape[-1])]
-                bands[int(x.shape[-1])] = to_samples.forward(x)
-            except KeyError:
-                pass
-        x = fft_frequency_recompose(bands, atom_size)
+        # x = x.view(batch, n_atoms, atom_latent)
+
+        # x = self.to_seq(x).view(-1, 128, 8)
+
+        # bands = {}
+        # for layer in self.up:
+        #     x = layer(x)
+        #     try:
+        #         to_samples = self.to_samples[str(x.shape[-1])]
+        #         bands[int(x.shape[-1])] = to_samples.forward(x)
+        #     except KeyError:
+        #         pass
+        # x = fft_frequency_recompose(bands, atom_size)
 
         x = x.view(batch, n_atoms, atom_size)
         x = x * window[None, None, :]
