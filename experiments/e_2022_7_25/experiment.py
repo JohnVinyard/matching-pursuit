@@ -332,7 +332,7 @@ class Model(nn.Module):
             n_samples, n_atoms, atom_size, atoms_to_keep)
 
         self.verb = NeuralReverb.from_directory(
-            '/home/john/Downloads/reverbs', samplerate, n_samples)
+            '/hdd/reverbs', samplerate, n_samples)
 
         self.to_room = LinearOutputStack(model_dim, 3, out_channels=self.verb.n_rooms)
         self.to_mix = LinearOutputStack(model_dim, 3, out_channels=1)
@@ -383,6 +383,7 @@ class EfficientSparseModelExperiment(object):
         self.stream = stream
         self.real = None
         self.fake = None
+        self.model = model
 
     def listen(self):
         return playable(self.fake, samplerate)
