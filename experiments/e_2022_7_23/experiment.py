@@ -3,6 +3,7 @@ import zounds
 import torch
 from torch import nn
 from modules.pif import AuditoryImage
+from modules.reverb import NeuralReverb
 from train.optim import optimizer
 from util import device, playable
 from util.readmedocs import readme

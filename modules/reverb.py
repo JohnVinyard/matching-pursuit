@@ -1,6 +1,10 @@
 from torch import nn
 import torch
-
+import glob
+import pathlib
+import zounds
+import numpy as np
+from librosa import load, to_mono
 
 class NeuralReverb(nn.Module):
     def __init__(self, size, n_rooms, impulses=None):
@@ -17,6 +21,25 @@ class NeuralReverb(nn.Module):
                 raise ValueError(
                     f'impulses must have shape ({self.n_rooms}, {self.size}) but had shape {imp.shape}')
             self.register_buffer('rooms', imp)
+    
+    @staticmethod
+    def from_directory(path, samplerate, n_samples):
+        root = pathlib.Path(path)
+        g = root.joinpath('*.wav')
+
+        audio = []
+        for p in glob.iglob(str(g)):
+            a, sr = load(p)
+            a = to_mono(a)
+            if len(a) < n_samples:
+                a = np.pad(a, [(0, n_samples - len(a))])
+            else:
+                a = a[:n_samples]
+            audio.append(a[None, ...])
+            print('Processed', p)
+        
+        audio = np.concatenate(audio, axis=0)
+        return NeuralReverb(n_samples, audio.shape[0], audio)
 
         
 

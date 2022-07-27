@@ -7,6 +7,7 @@ from modules.ddsp import NoiseModel, OscillatorBank
 from modules.decompose import fft_frequency_recompose
 from modules.linear import LinearOutputStack
 from modules.pif import AuditoryImage
+from modules.reverb import NeuralReverb
 from train.optim import optimizer
 
 from upsample import ConvUpsample, FFTUpsampleBlock
@@ -31,6 +32,8 @@ n_bands = 128
 kernel_size = 256
 
 
+
+
 window = torch.from_numpy(tukey(atom_size, 0.1)).float().to(device)
 
 band = zounds.FrequencyBand(40, samplerate.nyquist)
@@ -52,6 +55,7 @@ def perceptual_feature(x):
     x = fb.forward(x, normalize=False)
     x = aim.forward(x)
     return x
+
 
 def perceptual_loss(a, b):
     a = perceptual_feature(a)
@@ -97,7 +101,6 @@ class ContextModel(nn.Module):
 
         self.initial = nn.Conv1d(n_bands, channels, 1, 1, 0)
 
-
         self.stack = nn.Sequential(
             DilatedBlock(c, 1),
             DilatedBlock(c, 3),
@@ -108,7 +111,6 @@ class ContextModel(nn.Module):
             DilatedBlock(c, 1),
             nn.Conv1d(c, c, 1, 1, 0),
         )
-
 
         self.apply(init_weights)
 
@@ -136,7 +138,8 @@ class AtomPlacement(jit.ScriptModule):
         features = features.view(batch, -1)
         values, indices = torch.topk(features, self.to_keep, dim=-1)
 
-        output = torch.zeros(batch, 1, self.n_samples + self.atom_size).to(features.device)
+        output = torch.zeros(batch, 1, self.n_samples +
+                             self.atom_size).to(features.device)
         for b in range(batch):
             for j in range(self.to_keep):
                 index = indices[b, j]
@@ -150,12 +153,9 @@ class AtomPlacement(jit.ScriptModule):
                 start = sample_index
                 stop = start + self.atom_size
 
-
                 output[b, 0, start: stop] += atom * factor
 
         return output[..., :self.n_samples]
-
-
 
 
 class AtomGenerator(nn.Module):
@@ -177,49 +177,46 @@ class AtomGenerator(nn.Module):
 
         self.up = nn.Sequential(
             nn.Sequential(
-                nn.ConvTranspose1d(128, 64, 8, 4, 2), # 16
+                nn.ConvTranspose1d(128, 64, 8, 4, 2),  # 16
                 nn.LeakyReLU(0.2),
             ),
             nn.Sequential(
-                nn.ConvTranspose1d(64, 16, 8, 4, 2), # 64
+                nn.ConvTranspose1d(64, 16, 8, 4, 2),  # 64
                 nn.LeakyReLU(0.2),
             ),
 
             nn.Sequential(
-                nn.ConvTranspose1d(16, 16, 4, 2, 1), # 128
+                nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 128
                 nn.LeakyReLU(0.2)
             ),
 
             nn.Sequential(
-                nn.ConvTranspose1d(16, 16, 4, 2, 1), # 256
+                nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 256
                 nn.LeakyReLU(0.2)
             ),
 
             nn.Sequential(
-                nn.ConvTranspose1d(16, 16, 4, 2, 1), # 512
+                nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 512
                 nn.LeakyReLU(0.2)
             ),
 
             nn.Sequential(
-                nn.ConvTranspose1d(16, 16, 4, 2, 1), # 1024
+                nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 1024
                 nn.LeakyReLU(0.2)
             ),
 
             nn.Sequential(
-                nn.ConvTranspose1d(16, 16, 4, 2, 1), # 2048
+                nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 2048
                 nn.LeakyReLU(0.2)
             ),
 
             nn.Sequential(
-                nn.ConvTranspose1d(16, 16, 4, 2, 1), # 4096
+                nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 4096
                 nn.LeakyReLU(0.2)
             ),
 
         )
 
-
-
-        
     def forward(self, x):
         batch = x.shape[0]
         x = x.view(batch, 1, model_dim)
@@ -256,6 +253,14 @@ class Model(nn.Module):
 
         self.placement = AtomPlacement(
             n_samples, n_atoms, atom_size, atoms_to_keep)
+
+        self.verb = NeuralReverb.from_directory(
+            '/home/john/Downloads/reverbs', samplerate, n_samples)
+
+        self.to_room = LinearOutputStack(model_dim, 3, out_channels=self.verb.n_rooms)
+        self.to_mix = LinearOutputStack(model_dim, 3, out_channels=1)
+        
+        
         self.apply(init_weights)
 
     def forward(self, x):
@@ -265,12 +270,19 @@ class Model(nn.Module):
 
         g, _ = x.max(dim=-1)
 
+        room = torch.softmax(self.to_room(g), dim=-1)
+        mix = torch.clamp(self.to_mix(g).view(-1, 1, 1), 0, 1)
+
         g = self.to_atom_latent(g)
         atoms = self.atom_gen(g)
 
-        
         x = self.to_placement_latent(x)
         final = self.placement.forward(x, atoms)
+
+        wet = self.verb.forward(final, room)
+
+        final = (mix * wet) + (final * (1 - mix))
+        
         return final
 
 
@@ -294,10 +306,10 @@ class EfficientSparseModelExperiment(object):
         self.stream = stream
         self.real = None
         self.fake = None
-    
+
     def listen(self):
         return playable(self.fake, samplerate)
-    
+
     def fake_spec(self):
         return np.log(1e-4 + np.abs(zounds.spectral.stft(self.listen())))
 
