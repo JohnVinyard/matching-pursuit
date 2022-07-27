@@ -205,7 +205,7 @@ class ConvUpsample(nn.Module):
 
     def forward(self, x):
         if self.from_latent:
-            x = x.view(-1, self.latent_dim)
+            x = x.reshape(-1, self.latent_dim)
             x = self.begin(x)
             x = x.view(-1, self.channels, self.start_size)
         
