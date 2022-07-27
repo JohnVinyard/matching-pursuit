@@ -18,7 +18,7 @@ from util.weight_init import make_initializer
 import torch.jit as jit
 from scipy.signal import tukey
 
-model_dim = 128
+model_dim = 64
 n_samples = 2 ** 15
 samplerate = zounds.SR22050()
 
@@ -29,7 +29,7 @@ atom_latent = 16
 atom_size = 4096
 
 # Loss function
-n_bands = 128
+n_bands = 64
 kernel_size = 256
 
 
@@ -103,97 +103,97 @@ class ContextModel(nn.Module):
 
         c = channels
 
-        self.register_buffer('pos', pos_encoded(1, n_bands, 4).permute(0, 2, 1).view(1, 9, 128)[:, :8, :])
+        # self.register_buffer('pos', pos_encoded(1, n_bands, 4).permute(0, 2, 1).view(1, 9, n_bands)[:, :8, :])
 
 
 
-        # self.initial = nn.Conv1d(n_bands, channels, 1, 1, 0)
+        self.initial = nn.Conv1d(n_bands, channels, 1, 1, 0)
 
-        # self.stack = nn.Sequential(
-        #     DilatedBlock(c, 1),
-        #     DilatedBlock(c, 3),
-        #     DilatedBlock(c, 9),
-        #     DilatedBlock(c, 27),
-        #     DilatedBlock(c, 81),
-        #     DilatedBlock(c, 243),
-        #     DilatedBlock(c, 1),
-        #     nn.Conv1d(c, c, 1, 1, 0),
+        self.stack = nn.Sequential(
+            DilatedBlock(c, 1),
+            DilatedBlock(c, 3),
+            DilatedBlock(c, 9),
+            DilatedBlock(c, 27),
+            DilatedBlock(c, 81),
+            DilatedBlock(c, 243),
+            DilatedBlock(c, 1),
+            nn.Conv1d(c, c, 1, 1, 0),
+        )
+
+        # self.initial = nn.Conv2d(1, 8, 3, 1, 1)
+
+        # self.down = nn.Sequential(
+        #     nn.Sequential(
+        #         nn.Conv2d(8, 8, 3, 2, 1), # (64, 16384)
+        #         nn.LeakyReLU(0.2)
+        #     ),
+
+        #     nn.Sequential(
+        #         nn.Conv2d(8, 16, 3, 2, 1), # (32, 8192)
+        #         nn.LeakyReLU(0.2)
+        #     ),
+
+        #     nn.Sequential(
+        #         nn.Conv2d(16, 32, 3, 2, 1), # (16, 4096)
+        #         nn.LeakyReLU(0.2)
+        #     ),
+
+        #     nn.Sequential(
+        #         nn.Conv2d(32, 64, 3, 2, 1), # (8, 2048)
+        #         nn.LeakyReLU(0.2)
+        #     ),
         # )
 
-        self.initial = nn.Conv2d(1, 8, 3, 1, 1)
+        # self.up = nn.Sequential(
+        #     nn.Sequential(
+        #         nn.ConvTranspose2d(64, 32, 4, 2, 1),
+        #         nn.LeakyReLU(0.2)
+        #     ),
 
-        self.down = nn.Sequential(
-            nn.Sequential(
-                nn.Conv2d(8, 8, 3, 2, 1), # (64, 16384)
-                nn.LeakyReLU(0.2)
-            ),
+        #     nn.Sequential(
+        #         nn.ConvTranspose2d(32, 16, 4, 2, 1),
+        #         nn.LeakyReLU(0.2)
+        #     ),
 
-            nn.Sequential(
-                nn.Conv2d(8, 16, 3, 2, 1), # (32, 8192)
-                nn.LeakyReLU(0.2)
-            ),
+        #     nn.Sequential(
+        #         nn.ConvTranspose2d(16, 8, 4, 2, 1),
+        #         nn.LeakyReLU(0.2)
+        #     ),
 
-            nn.Sequential(
-                nn.Conv2d(16, 32, 3, 2, 1), # (16, 4096)
-                nn.LeakyReLU(0.2)
-            ),
-
-            nn.Sequential(
-                nn.Conv2d(32, 64, 3, 2, 1), # (8, 2048)
-                nn.LeakyReLU(0.2)
-            ),
-        )
-
-        self.up = nn.Sequential(
-            nn.Sequential(
-                nn.ConvTranspose2d(64, 32, 4, 2, 1),
-                nn.LeakyReLU(0.2)
-            ),
-
-            nn.Sequential(
-                nn.ConvTranspose2d(32, 16, 4, 2, 1),
-                nn.LeakyReLU(0.2)
-            ),
-
-            nn.Sequential(
-                nn.ConvTranspose2d(16, 8, 4, 2, 1),
-                nn.LeakyReLU(0.2)
-            ),
-
-            nn.Sequential(
-                nn.ConvTranspose2d(8, 1, 4, 2, 1),
-                nn.LeakyReLU(0.2)
-            ),
-        )
+        #     nn.Sequential(
+        #         nn.ConvTranspose2d(8, 1, 4, 2, 1),
+        #         nn.LeakyReLU(0.2)
+        #     ),
+        # )
 
         self.apply(init_weights)
 
     def forward(self, x):
         x = fb.forward(x, normalize=False)
-        # x = F.leaky_relu(self.initial(x), 0.2)
-        # x = self.stack(x)
+        x = F.leaky_relu(self.initial(x), 0.2)
+        x = self.stack(x)
 
-        if n_bands != model_dim:
-            raise ValueError('n_bands and model_dim must match for this approach')
+        # if n_bands != model_dim:
+        #     raise ValueError('n_bands and model_dim must match for this approach')
         
-        x = x.view(x.shape[0], 1, n_bands, n_samples)
+        # x = x.view(x.shape[0], 1, n_bands, n_samples)
 
-        x = self.initial(x)
+        # x = self.initial(x)
 
-        x = x + self.pos[:, :, :, None]
+        # x = x + self.pos[:, :, :, None]
 
-        skip = {}
-        for layer in self.down:
-            x = layer(x)
-            skip[x.shape[-1]] = x
+        # skip = {}
+        # for layer in self.down:
+        #     x = layer(x)
+        #     skip[x.shape[-1]] = x
         
-        for layer in self.up:
-            s = skip.get(x.shape[-1])
-            if s is not None:
-                x = x + s
-            x = layer(x)
+        # for layer in self.up:
+        #     s = skip.get(x.shape[-1])
+        #     if s is not None:
+        #         x = x + s
+        #     x = layer(x)
         
-        x = x.view(x.shape[0], n_bands, n_samples)
+        # x = x.view(x.shape[0], n_bands, n_samples)
         
         return x
 
@@ -245,14 +245,14 @@ class AudioModel(nn.Module):
             model_dim, 
             n_samples, 
             constrain=True, 
-            lowest_freq=40 / samplerate.nyquist,
+            lowest_freq=30 / samplerate.nyquist,
             amp_activation=lambda x: x ** 2,
             complex_valued=False)
         
         self.noise = NoiseModel(
             model_dim,
             n_samples // 256,
-            (n_samples // 256) * 8,
+            (n_samples // 256) * 2,
             n_samples,
             model_dim,
             squared=True,
@@ -275,59 +275,57 @@ class AtomGenerator(nn.Module):
         self.to_atoms = nn.Linear(model_dim, n_atoms * atom_latent)
 
         self.to_seq = nn.Linear(atom_latent, 8 * 128)
-        self.up = nn.ConvTranspose1d(128, model_dim, 4, 2, 1)
-        self.audio = AudioModel(atom_size)
 
-        # self.to_samples = nn.ModuleDict({
-        #     '128': nn.Conv1d(16, 1, 7, 1, 3),
-        #     '256': nn.Conv1d(16, 1, 7, 1, 3),
-        #     '512': nn.Conv1d(16, 1, 7, 1, 3),
-        #     '1024': nn.Conv1d(16, 1, 7, 1, 3),
-        #     '2048': nn.Conv1d(16, 1, 7, 1, 3),
-        #     '4096': nn.Conv1d(16, 1, 7, 1, 3),
-        # })
+        self.to_samples = nn.ModuleDict({
+            '128': nn.Conv1d(16, 1, 7, 1, 3),
+            '256': nn.Conv1d(16, 1, 7, 1, 3),
+            '512': nn.Conv1d(16, 1, 7, 1, 3),
+            '1024': nn.Conv1d(16, 1, 7, 1, 3),
+            '2048': nn.Conv1d(16, 1, 7, 1, 3),
+            '4096': nn.Conv1d(16, 1, 7, 1, 3),
+        })
 
-        # self.up = nn.Sequential(
-        #     nn.Sequential(
-        #         nn.ConvTranspose1d(128, 64, 8, 4, 2),  # 16
-        #         nn.LeakyReLU(0.2),
-        #     ),
-        #     nn.Sequential(
-        #         nn.ConvTranspose1d(64, 16, 8, 4, 2),  # 64
-        #         nn.LeakyReLU(0.2),
-        #     ),
+        self.up = nn.Sequential(
+            nn.Sequential(
+                nn.ConvTranspose1d(128, 64, 8, 4, 2),  # 16
+                nn.LeakyReLU(0.2),
+            ),
+            nn.Sequential(
+                nn.ConvTranspose1d(64, 16, 8, 4, 2),  # 64
+                nn.LeakyReLU(0.2),
+            ),
 
-        #     nn.Sequential(
-        #         nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 128
-        #         nn.LeakyReLU(0.2)
-        #     ),
+            nn.Sequential(
+                nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 128
+                nn.LeakyReLU(0.2)
+            ),
 
-        #     nn.Sequential(
-        #         nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 256
-        #         nn.LeakyReLU(0.2)
-        #     ),
+            nn.Sequential(
+                nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 256
+                nn.LeakyReLU(0.2)
+            ),
 
-        #     nn.Sequential(
-        #         nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 512
-        #         nn.LeakyReLU(0.2)
-        #     ),
+            nn.Sequential(
+                nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 512
+                nn.LeakyReLU(0.2)
+            ),
 
-        #     nn.Sequential(
-        #         nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 1024
-        #         nn.LeakyReLU(0.2)
-        #     ),
+            nn.Sequential(
+                nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 1024
+                nn.LeakyReLU(0.2)
+            ),
 
-        #     nn.Sequential(
-        #         nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 2048
-        #         nn.LeakyReLU(0.2)
-        #     ),
+            nn.Sequential(
+                nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 2048
+                nn.LeakyReLU(0.2)
+            ),
 
-        #     nn.Sequential(
-        #         nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 4096
-        #         nn.LeakyReLU(0.2)
-        #     ),
+            nn.Sequential(
+                nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 4096
+                nn.LeakyReLU(0.2)
+            ),
 
-        # )
+        )
 
     def forward(self, x):
         batch = x.shape[0]
@@ -337,18 +335,16 @@ class AtomGenerator(nn.Module):
         x = x.view(batch, n_atoms, atom_latent)
 
         x = self.to_seq(x).view(-1, 128, 8)
-        x = self.up(x)
-        x = self.audio(x)
 
-        # bands = {}
-        # for layer in self.up:
-        #     x = layer(x)
-        #     try:
-        #         to_samples = self.to_samples[str(x.shape[-1])]
-        #         bands[int(x.shape[-1])] = to_samples.forward(x)
-        #     except KeyError:
-        #         pass
-        # x = fft_frequency_recompose(bands, atom_size)
+        bands = {}
+        for layer in self.up:
+            x = layer(x)
+            try:
+                to_samples = self.to_samples[str(x.shape[-1])]
+                bands[int(x.shape[-1])] = to_samples.forward(x)
+            except KeyError:
+                pass
+        x = fft_frequency_recompose(bands, atom_size)
 
         x = x.view(batch, n_atoms, atom_size)
         x = x * window[None, None, :]
@@ -369,7 +365,7 @@ class Model(nn.Module):
             n_samples, n_atoms, atom_size, atoms_to_keep)
 
         self.verb = NeuralReverb.from_directory(
-            '/home/john/Downloads/reverbs', samplerate, n_samples)
+            '/hdd/reverbs', samplerate, n_samples)
 
         self.to_room = LinearOutputStack(model_dim, 3, out_channels=self.verb.n_rooms)
         self.to_mix = LinearOutputStack(model_dim, 3, out_channels=1)
@@ -385,7 +381,7 @@ class Model(nn.Module):
         g, _ = x.max(dim=-1)
 
         room = torch.softmax(self.to_room(g), dim=-1)
-        mix = torch.sigmoid(self.to_mix(g).view(-1, 1, 1)) ** 2
+        mix = torch.sigmoid(self.to_mix(g).view(-1, 1, 1)) * 0.2
 
         g = self.to_atom_latent(g)
         atoms = self.atom_gen(g)
@@ -420,6 +416,7 @@ class EfficientSparseModelExperiment(object):
         self.stream = stream
         self.real = None
         self.fake = None
+        self.model = model
 
     def listen(self):
         return playable(self.fake, samplerate)
