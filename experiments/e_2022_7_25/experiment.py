@@ -235,64 +235,99 @@ class AtomPlacement(jit.ScriptModule):
         return output[..., :self.n_samples]
 
 
+class AudioModel(nn.Module):
+    def __init__(self, n_samples):
+        super().__init__()
+        self.n_samples = n_samples
+
+        self.osc = OscillatorBank(
+            model_dim, 
+            model_dim, 
+            n_samples, 
+            constrain=True, 
+            lowest_freq=40 / samplerate.nyquist,
+            amp_activation=lambda x: x ** 2,
+            complex_valued=False)
+        
+        self.noise = NoiseModel(
+            model_dim,
+            n_samples // 256,
+            (n_samples // 256) * 8,
+            n_samples,
+            model_dim,
+            squared=True,
+            mask_after=1)
+        
+
+    
+    def forward(self, x):
+        x = x.view(x.shape[0], model_dim, -1)
+        harm = self.osc.forward(x)
+        noise = self.noise(x)
+        signal = harm + noise
+        return signal
+
 class AtomGenerator(nn.Module):
     def __init__(self, n_atoms, atom_size):
         super().__init__()
         self.n_atoms = n_atoms
         self.atom_size = atom_size
         self.to_atoms = nn.Linear(model_dim, n_atoms * atom_latent)
+
         self.to_seq = nn.Linear(atom_latent, 8 * 128)
+        self.up = nn.ConvTranspose1d(128, model_dim, 4, 2, 1)
+        self.audio = AudioModel(atom_size)
 
-        self.to_samples = nn.ModuleDict({
-            '128': nn.Conv1d(16, 1, 7, 1, 3),
-            '256': nn.Conv1d(16, 1, 7, 1, 3),
-            '512': nn.Conv1d(16, 1, 7, 1, 3),
-            '1024': nn.Conv1d(16, 1, 7, 1, 3),
-            '2048': nn.Conv1d(16, 1, 7, 1, 3),
-            '4096': nn.Conv1d(16, 1, 7, 1, 3),
-        })
+        # self.to_samples = nn.ModuleDict({
+        #     '128': nn.Conv1d(16, 1, 7, 1, 3),
+        #     '256': nn.Conv1d(16, 1, 7, 1, 3),
+        #     '512': nn.Conv1d(16, 1, 7, 1, 3),
+        #     '1024': nn.Conv1d(16, 1, 7, 1, 3),
+        #     '2048': nn.Conv1d(16, 1, 7, 1, 3),
+        #     '4096': nn.Conv1d(16, 1, 7, 1, 3),
+        # })
 
-        self.up = nn.Sequential(
-            nn.Sequential(
-                nn.ConvTranspose1d(128, 64, 8, 4, 2),  # 16
-                nn.LeakyReLU(0.2),
-            ),
-            nn.Sequential(
-                nn.ConvTranspose1d(64, 16, 8, 4, 2),  # 64
-                nn.LeakyReLU(0.2),
-            ),
+        # self.up = nn.Sequential(
+        #     nn.Sequential(
+        #         nn.ConvTranspose1d(128, 64, 8, 4, 2),  # 16
+        #         nn.LeakyReLU(0.2),
+        #     ),
+        #     nn.Sequential(
+        #         nn.ConvTranspose1d(64, 16, 8, 4, 2),  # 64
+        #         nn.LeakyReLU(0.2),
+        #     ),
 
-            nn.Sequential(
-                nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 128
-                nn.LeakyReLU(0.2)
-            ),
+        #     nn.Sequential(
+        #         nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 128
+        #         nn.LeakyReLU(0.2)
+        #     ),
 
-            nn.Sequential(
-                nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 256
-                nn.LeakyReLU(0.2)
-            ),
+        #     nn.Sequential(
+        #         nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 256
+        #         nn.LeakyReLU(0.2)
+        #     ),
 
-            nn.Sequential(
-                nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 512
-                nn.LeakyReLU(0.2)
-            ),
+        #     nn.Sequential(
+        #         nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 512
+        #         nn.LeakyReLU(0.2)
+        #     ),
 
-            nn.Sequential(
-                nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 1024
-                nn.LeakyReLU(0.2)
-            ),
+        #     nn.Sequential(
+        #         nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 1024
+        #         nn.LeakyReLU(0.2)
+        #     ),
 
-            nn.Sequential(
-                nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 2048
-                nn.LeakyReLU(0.2)
-            ),
+        #     nn.Sequential(
+        #         nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 2048
+        #         nn.LeakyReLU(0.2)
+        #     ),
 
-            nn.Sequential(
-                nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 4096
-                nn.LeakyReLU(0.2)
-            ),
+        #     nn.Sequential(
+        #         nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 4096
+        #         nn.LeakyReLU(0.2)
+        #     ),
 
-        )
+        # )
 
     def forward(self, x):
         batch = x.shape[0]
@@ -302,16 +337,18 @@ class AtomGenerator(nn.Module):
         x = x.view(batch, n_atoms, atom_latent)
 
         x = self.to_seq(x).view(-1, 128, 8)
+        x = self.up(x)
+        x = self.audio(x)
 
-        bands = {}
-        for layer in self.up:
-            x = layer(x)
-            try:
-                to_samples = self.to_samples[str(x.shape[-1])]
-                bands[int(x.shape[-1])] = to_samples.forward(x)
-            except KeyError:
-                pass
-        x = fft_frequency_recompose(bands, atom_size)
+        # bands = {}
+        # for layer in self.up:
+        #     x = layer(x)
+        #     try:
+        #         to_samples = self.to_samples[str(x.shape[-1])]
+        #         bands[int(x.shape[-1])] = to_samples.forward(x)
+        #     except KeyError:
+        #         pass
+        # x = fft_frequency_recompose(bands, atom_size)
 
         x = x.view(batch, n_atoms, atom_size)
         x = x * window[None, None, :]
