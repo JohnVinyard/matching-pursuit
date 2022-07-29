@@ -4,8 +4,9 @@ import zounds
 import torch
 from torch.nn import functional as F
 from torch import nn
+from fft_basis import morlet_filter_bank
 from modules.ddsp import NoiseModel, OscillatorBank
-from modules.decompose import fft_frequency_recompose
+from modules.decompose import fft_frequency_decompose, fft_frequency_recompose
 from modules.linear import LinearOutputStack
 from modules.pif import AuditoryImage
 from modules.pos_encode import pos_encoded
@@ -25,10 +26,10 @@ samplerate = zounds.SR22050()
 n_frames = n_samples // 256
 
 # Core
-n_atoms = 32
-atoms_to_keep = 32
+n_atoms = 512
+atoms_to_keep = 512
+atom_size = 512
 atom_latent = 32
-atom_size = 4096
 
 # Loss function
 n_bands = 128
@@ -53,15 +54,18 @@ init_weights = make_initializer(0.05)
 
 
 def perceptual_feature(x):
-    x = fb.forward(x, normalize=False)
-    x = aim.forward(x)
+    # x = fb.forward(x, normalize=False)
+    # x = aim.forward(x)
+    bands = fft_frequency_decompose(x, 1024)
+    x = torch.cat(list(bands.values()), dim=-1)
     return x
 
 
 def perceptual_loss(a, b):
     a = perceptual_feature(a)
     b = perceptual_feature(b)
-    loss = F.mse_loss(a, b)
+    # loss = F.mse_loss(a, b)
+    loss = torch.abs(a - b).sum() / a.shape[0]
     return loss
 
 
@@ -274,13 +278,29 @@ class AtomGenerator(nn.Module):
         return x
 
 
+class StaticAtoms(nn.Module):
+    def __init__(self, n_atoms, atom_size):
+        super().__init__()
+        self.n_atoms = n_atoms
+        self.atom_size = atom_size
+        bank = morlet_filter_bank(
+            samplerate, 
+            atom_size, 
+            zounds.MelScale(zounds.FrequencyBand(20, 3520), n_atoms),
+            0.1).real * 0.1
+        self.atoms = nn.Parameter(torch.from_numpy(bank[None, ...]))
+    
+    def forward(self, x):
+        return self.atoms.repeat(x.shape[0], 1, 1)
+
 class Model(nn.Module):
     def __init__(self):
         super().__init__()
         self.context = ContextModel(model_dim)
 
         self.to_atom_latent = LinearOutputStack(model_dim, 3)
-        self.atom_gen = AtomGenerator(n_atoms, atom_size)
+        # self.atom_gen = AtomGenerator(n_atoms, atom_size)
+        self.atom_gen = StaticAtoms(n_atoms, atom_size)
 
         self.to_placement_latent = nn.Conv1d(model_dim, n_atoms, 1, 1, 0)
 
