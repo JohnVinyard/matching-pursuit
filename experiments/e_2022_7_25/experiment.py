@@ -1,3 +1,4 @@
+from operator import mod
 import numpy as np
 import zounds
 import torch
@@ -11,7 +12,7 @@ from modules.pos_encode import pos_encoded
 from modules.reverb import NeuralReverb
 from train.optim import optimizer
 
-from upsample import ConvUpsample, FFTUpsampleBlock
+from upsample import ConvUpsample, FFTUpsampleBlock, Linear
 from util import device, playable
 from util.readmedocs import readme
 from util.weight_init import make_initializer
@@ -21,18 +22,17 @@ from scipy.signal import tukey
 model_dim = 128
 n_samples = 2 ** 15
 samplerate = zounds.SR22050()
+n_frames = n_samples // 256
 
 # Core
-n_atoms = 64
+n_atoms = 32
 atoms_to_keep = 32
-atom_latent = 16
+atom_latent = 32
 atom_size = 4096
 
 # Loss function
 n_bands = 128
 kernel_size = 256
-
-
 
 
 window = torch.from_numpy(tukey(atom_size, 0.1)).float().to(device)
@@ -49,7 +49,7 @@ fb = zounds.learn.FilterBank(
 
 aim = AuditoryImage(512, 128, do_windowing=False, check_cola=False)
 
-init_weights = make_initializer(0.1)
+init_weights = make_initializer(0.05)
 
 
 def perceptual_feature(x):
@@ -69,27 +69,12 @@ class DilatedBlock(nn.Module):
     def __init__(self, channels, dilation):
         super().__init__()
         self.channels = channels
-        # self.out = nn.Conv1d(channels, channels, 1, 1, 0)
-        # self.next = nn.Conv1d(channels, channels, 1, 1, 0)
-        # self.scale = nn.Conv1d(channels, channels, 3, 1,
-        #                        dilation=dilation, padding=dilation)
-        # self.gate = nn.Conv1d(channels, channels, 3, 1,
-        #                       dilation=dilation, padding=dilation)
         self.net = nn.Conv1d(
             channels, channels, 3, 1, dilation=dilation, padding=dilation)
 
     def forward(self, x):
-        batch = x.shape[0]
         skip = x
-
-        # scale = self.scale(x)
-        # gate = self.gate(x)
-        # x = torch.tanh(scale) * F.sigmoid(gate)
         x = F.leaky_relu(self.net(x + skip), 0.2)
-
-        # out = self.out(x)
-        # next = self.next(x) + skip
-        # return next, out
         return x
 
 
@@ -101,100 +86,22 @@ class ContextModel(nn.Module):
         super().__init__()
         self.channels = channels
 
-        c = channels
-
-        self.register_buffer('pos', pos_encoded(1, n_bands, 4).permute(0, 2, 1).view(1, 9, 128)[:, :8, :])
-
-
-
-        # self.initial = nn.Conv1d(n_bands, channels, 1, 1, 0)
-
-        # self.stack = nn.Sequential(
-        #     DilatedBlock(c, 1),
-        #     DilatedBlock(c, 3),
-        #     DilatedBlock(c, 9),
-        #     DilatedBlock(c, 27),
-        #     DilatedBlock(c, 81),
-        #     DilatedBlock(c, 243),
-        #     DilatedBlock(c, 1),
-        #     nn.Conv1d(c, c, 1, 1, 0),
-        # )
-
-        self.initial = nn.Conv2d(1, 8, 3, 1, 1)
-
-        self.down = nn.Sequential(
-            nn.Sequential(
-                nn.Conv2d(8, 8, 3, 2, 1), # (64, 16384)
-                nn.LeakyReLU(0.2)
-            ),
-
-            nn.Sequential(
-                nn.Conv2d(8, 16, 3, 2, 1), # (32, 8192)
-                nn.LeakyReLU(0.2)
-            ),
-
-            nn.Sequential(
-                nn.Conv2d(16, 32, 3, 2, 1), # (16, 4096)
-                nn.LeakyReLU(0.2)
-            ),
-
-            nn.Sequential(
-                nn.Conv2d(32, 64, 3, 2, 1), # (8, 2048)
-                nn.LeakyReLU(0.2)
-            ),
+        self.net = nn.Sequential(
+            DilatedBlock(model_dim, 1),
+            DilatedBlock(model_dim, 3),
+            DilatedBlock(model_dim, 9),
+            DilatedBlock(model_dim, 27),
+            DilatedBlock(model_dim, 81),
+            DilatedBlock(model_dim, 243),
+            DilatedBlock(model_dim, 1),
         )
-
-        self.up = nn.Sequential(
-            nn.Sequential(
-                nn.ConvTranspose2d(64, 32, 4, 2, 1),
-                nn.LeakyReLU(0.2)
-            ),
-
-            nn.Sequential(
-                nn.ConvTranspose2d(32, 16, 4, 2, 1),
-                nn.LeakyReLU(0.2)
-            ),
-
-            nn.Sequential(
-                nn.ConvTranspose2d(16, 8, 4, 2, 1),
-                nn.LeakyReLU(0.2)
-            ),
-
-            nn.Sequential(
-                nn.ConvTranspose2d(8, 1, 4, 2, 1),
-                nn.LeakyReLU(0.2)
-            ),
-        )
+        
 
         self.apply(init_weights)
 
     def forward(self, x):
         x = fb.forward(x, normalize=False)
-        # x = F.leaky_relu(self.initial(x), 0.2)
-        # x = self.stack(x)
-
-        if n_bands != model_dim:
-            raise ValueError('n_bands and model_dim must match for this approach')
-        
-        x = x.view(x.shape[0], 1, n_bands, n_samples)
-
-        x = self.initial(x)
-
-        x = x + self.pos[:, :, :, None]
-
-        skip = {}
-        for layer in self.down:
-            x = layer(x)
-            skip[x.shape[-1]] = x
-        
-        for layer in self.up:
-            s = skip.get(x.shape[-1])
-            if s is not None:
-                x = x + s
-            x = layer(x)
-        
-        x = x.view(x.shape[0], n_bands, n_samples)
-        
+        x = self.net(x)        
         return x
 
 
@@ -235,64 +142,112 @@ class AtomPlacement(jit.ScriptModule):
         return output[..., :self.n_samples]
 
 
+class AudioModel(nn.Module):
+    def __init__(self, n_samples):
+        super().__init__()
+        self.n_samples = n_samples
+
+        self.osc = OscillatorBank(
+            model_dim, 
+            model_dim, 
+            n_samples, 
+            constrain=True, 
+            lowest_freq=30 / samplerate.nyquist,
+            amp_activation=lambda x: x ** 2,
+            complex_valued=False)
+        
+        self.noise = NoiseModel(
+            model_dim,
+            n_samples // 256,
+            (n_samples // 256) * 2,
+            n_samples,
+            model_dim,
+            squared=True,
+            mask_after=1)
+        
+
+    
+    def forward(self, x):
+        x = x.view(x.shape[0], model_dim, -1)
+        harm = self.osc.forward(x)
+        noise = self.noise(x)
+        signal = harm + noise
+        return signal
+
 class AtomGenerator(nn.Module):
     def __init__(self, n_atoms, atom_size):
         super().__init__()
         self.n_atoms = n_atoms
         self.atom_size = atom_size
         self.to_atoms = nn.Linear(model_dim, n_atoms * atom_latent)
+
         self.to_seq = nn.Linear(atom_latent, 8 * 128)
 
-        self.to_samples = nn.ModuleDict({
-            '128': nn.Conv1d(16, 1, 7, 1, 3),
-            '256': nn.Conv1d(16, 1, 7, 1, 3),
-            '512': nn.Conv1d(16, 1, 7, 1, 3),
-            '1024': nn.Conv1d(16, 1, 7, 1, 3),
-            '2048': nn.Conv1d(16, 1, 7, 1, 3),
-            '4096': nn.Conv1d(16, 1, 7, 1, 3),
-        })
-
         self.up = nn.Sequential(
-            nn.Sequential(
-                nn.ConvTranspose1d(128, 64, 8, 4, 2),  # 16
-                nn.LeakyReLU(0.2),
-            ),
-            nn.Sequential(
-                nn.ConvTranspose1d(64, 16, 8, 4, 2),  # 64
-                nn.LeakyReLU(0.2),
-            ),
-
-            nn.Sequential(
-                nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 128
-                nn.LeakyReLU(0.2)
-            ),
-
-            nn.Sequential(
-                nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 256
-                nn.LeakyReLU(0.2)
-            ),
-
-            nn.Sequential(
-                nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 512
-                nn.LeakyReLU(0.2)
-            ),
-
-            nn.Sequential(
-                nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 1024
-                nn.LeakyReLU(0.2)
-            ),
-
-            nn.Sequential(
-                nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 2048
-                nn.LeakyReLU(0.2)
-            ),
-
-            nn.Sequential(
-                nn.ConvTranspose1d(16, 16, 4, 2, 1),  # 4096
-                nn.LeakyReLU(0.2)
-            ),
-
+            nn.ConvTranspose1d(128, 64, 8, 4, 2), # 32
+            nn.LeakyReLU(0.2),
+            nn.ConvTranspose1d(64, 32, 8, 4, 2), # 128
+            nn.LeakyReLU(0.2),
+            nn.ConvTranspose1d(32, 16, 8, 4, 2), # 512
+            nn.LeakyReLU(0.2),
+            nn.ConvTranspose1d(16, 8, 8, 4, 2), # 2048
+            nn.LeakyReLU(0.2),
+            nn.ConvTranspose1d(8, 1, 4, 2, 1), # 4096
         )
+        # self.up = nn.ConvTranspose1d(model_dim, model_dim, 4, 2, 1)
+        # self.audio = AudioModel(atom_size)
+        
+
+        # self.to_samples = nn.ModuleDict({
+        #     '128': nn.Conv1d(model_dim, 1, 7, 1, 3),
+        #     '256': nn.Conv1d(model_dim, 1, 7, 1, 3),
+        #     '512': nn.Conv1d(model_dim, 1, 7, 1, 3),
+        #     '1024': nn.Conv1d(model_dim, 1, 7, 1, 3),
+        #     '2048': nn.Conv1d(model_dim, 1, 7, 1, 3),
+        #     '4096': nn.Conv1d(model_dim, 1, 7, 1, 3),
+        # })
+
+        # self.up = nn.Sequential(
+        #     nn.Sequential(
+        #         nn.ConvTranspose1d(model_dim, model_dim, 8, 4, 2),  # 16
+        #         nn.LeakyReLU(0.2),
+        #     ),
+        #     nn.Sequential(
+        #         nn.ConvTranspose1d(model_dim, model_dim, 8, 4, 2),  # 64
+        #         nn.LeakyReLU(0.2),
+        #     ),
+
+        #     nn.Sequential(
+        #         nn.ConvTranspose1d(model_dim, model_dim, 4, 2, 1),  # 128
+        #         nn.LeakyReLU(0.2)
+        #     ),
+
+        #     nn.Sequential(
+        #         nn.ConvTranspose1d(model_dim, model_dim, 4, 2, 1),  # 256
+        #         nn.LeakyReLU(0.2)
+        #     ),
+
+        #     nn.Sequential(
+        #         nn.ConvTranspose1d(model_dim, model_dim, 4, 2, 1),  # 512
+        #         nn.LeakyReLU(0.2)
+        #     ),
+
+        #     nn.Sequential(
+        #         nn.ConvTranspose1d(model_dim, model_dim, 4, 2, 1),  # 1024
+        #         nn.LeakyReLU(0.2)
+        #     ),
+
+        #     nn.Sequential(
+        #         nn.ConvTranspose1d(model_dim, model_dim, 4, 2, 1),  # 2048
+        #         nn.LeakyReLU(0.2)
+        #     ),
+
+        #     nn.Sequential(
+        #         nn.ConvTranspose1d(model_dim, model_dim, 4, 2, 1),  # 4096
+        #         nn.LeakyReLU(0.2)
+        #     ),
+
+        # )
 
     def forward(self, x):
         batch = x.shape[0]
@@ -300,18 +255,19 @@ class AtomGenerator(nn.Module):
 
         x = self.to_atoms(x)
         x = x.view(batch, n_atoms, atom_latent)
-
         x = self.to_seq(x).view(-1, 128, 8)
+        x = self.up(x)
 
-        bands = {}
-        for layer in self.up:
-            x = layer(x)
-            try:
-                to_samples = self.to_samples[str(x.shape[-1])]
-                bands[int(x.shape[-1])] = to_samples.forward(x)
-            except KeyError:
-                pass
-        x = fft_frequency_recompose(bands, atom_size)
+
+        # bands = {}
+        # for layer in self.up:
+        #     x = layer(x)
+        #     try:
+        #         to_samples = self.to_samples[str(x.shape[-1])]
+        #         bands[int(x.shape[-1])] = to_samples.forward(x)
+        #     except KeyError:
+        #         pass
+        # x = fft_frequency_recompose(bands, atom_size)
 
         x = x.view(batch, n_atoms, atom_size)
         x = x * window[None, None, :]
@@ -348,16 +304,16 @@ class Model(nn.Module):
         g, _ = x.max(dim=-1)
 
         room = torch.softmax(self.to_room(g), dim=-1)
-        mix = torch.sigmoid(self.to_mix(g).view(-1, 1, 1)) ** 2
+        mix = torch.sigmoid(self.to_mix(g).view(-1, 1, 1)) * 0.2
 
         g = self.to_atom_latent(g)
         atoms = self.atom_gen(g)
 
         x = self.to_placement_latent(x)
+        
         final = self.placement.forward(x, atoms)
 
         wet = self.verb.forward(final, room)
-
         final = (mix * wet) + (final * (1 - mix))
         
         return final
