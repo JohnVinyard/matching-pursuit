@@ -109,6 +109,62 @@ class ContextModel(nn.Module):
         return x
 
 
+
+class SparseAutoEncoder(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.channels = channels
+
+        c = channels
+
+        self.net = nn.Sequential(
+            nn.Conv1d(n_bands, model_dim, 1, 1, 0),
+            DilatedBlock(c, 1),
+            DilatedBlock(c, 3),
+            DilatedBlock(c, 9),
+            DilatedBlock(c, 27),
+            DilatedBlock(c, 81),
+            DilatedBlock(c, 243),
+            DilatedBlock(c, 1),
+            nn.Conv1d(model_dim, 1024, 1, 1, 0)
+        )
+
+
+        self.decode = nn.Sequential(
+            nn.Conv1d(1024, c, 1, 1, 0),
+            DilatedBlock(c, 1),
+            DilatedBlock(c, 3),
+            DilatedBlock(c, 9),
+            DilatedBlock(c, 27),
+            DilatedBlock(c, 81),
+            DilatedBlock(c, 243),
+            DilatedBlock(c, 1),
+            nn.Conv1d(c, 1, 1, 1, 0)
+        )
+
+        self.to_g = nn.Linear(1024, model_dim)
+
+        self.apply(init_weights)
+    
+    def forward(self, x):
+        batch = x.shape[0]
+        x = fb.forward(x, normalize=False)
+        x = self.net(x)
+        features = F.dropout(x, 0.05)
+
+        context, _ = features.max(dim=-1)
+        context = self.to_g(context)
+
+        features = features.view(batch, -1)
+        values, indices = torch.topk(features, atoms_to_keep, dim=-1)
+
+        x = torch.zeros_like(features)
+        x = torch.scatter(x, -1, indices, values)
+
+        x = x.reshape(batch, 1024, n_samples)
+        x = self.decode(x)
+        return x, context
+
 class AtomPlacement(jit.ScriptModule):
     def __init__(self, n_samples, n_atoms, atom_size, to_keep):
         super().__init__()
@@ -313,25 +369,28 @@ class Model(nn.Module):
         self.to_room = LinearOutputStack(model_dim, 3, out_channels=self.verb.n_rooms)
         self.to_mix = LinearOutputStack(model_dim, 3, out_channels=1)
         
+        self.ae = SparseAutoEncoder(model_dim)
         
         self.apply(init_weights)
 
     def forward(self, x):
-        x = self.context(x)
+        final, g = self.ae.forward(x)
 
-        x = F.dropout(x, 0.05)
+        # x = self.context(x)
 
-        g, _ = x.max(dim=-1)
+        # x = F.dropout(x, 0.05)
+
+        # g, _ = x.max(dim=-1)
 
         room = torch.softmax(self.to_room(g), dim=-1)
         mix = torch.sigmoid(self.to_mix(g).view(-1, 1, 1)) * 0.2
 
-        g = self.to_atom_latent(g)
-        atoms = self.atom_gen(g)
+        # g = self.to_atom_latent(g)
+        # atoms = self.atom_gen(g)
 
-        x = self.to_placement_latent(x)
+        # x = self.to_placement_latent(x)
         
-        final = self.placement.forward(x, atoms)
+        # final = self.placement.forward(x, atoms)
 
         wet = self.verb.forward(final, room)
         final = (mix * wet) + (final * (1 - mix))
