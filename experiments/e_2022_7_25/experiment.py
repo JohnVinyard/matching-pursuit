@@ -1,3 +1,4 @@
+from ast import Mult
 from operator import mod
 import numpy as np
 import zounds
@@ -26,10 +27,11 @@ samplerate = zounds.SR22050()
 n_frames = n_samples // 256
 
 # Core
-n_atoms = 512
-atoms_to_keep = 512
-atom_size = 512
+n_atoms = 1024
+atoms_to_keep = 256
+atom_size = 1024
 atom_latent = 32
+
 
 # Loss function
 n_bands = 128
@@ -183,7 +185,9 @@ class AtomGenerator(nn.Module):
         super().__init__()
         self.n_atoms = n_atoms
         self.atom_size = atom_size
-        self.to_atoms = nn.Linear(model_dim, n_atoms * atom_latent)
+
+
+        self.latents = nn.Parameter(torch.zeros(n_atoms, atom_latent).normal_(0, 1))
 
         self.to_seq = nn.Linear(atom_latent, 8 * 128)
 
@@ -194,85 +198,21 @@ class AtomGenerator(nn.Module):
             nn.LeakyReLU(0.2),
             nn.ConvTranspose1d(32, 16, 8, 4, 2), # 512
             nn.LeakyReLU(0.2),
-            nn.ConvTranspose1d(16, 8, 8, 4, 2), # 2048
-            nn.LeakyReLU(0.2),
-            nn.ConvTranspose1d(8, 1, 4, 2, 1), # 4096
+            nn.ConvTranspose1d(16, 1, 4, 2, 1), # 1024
+            # nn.LeakyReLU(0.2),
+            # nn.ConvTranspose1d(8, 1, 4, 2, 1), # 4096
         )
-        # self.up = nn.ConvTranspose1d(model_dim, model_dim, 4, 2, 1)
-        # self.audio = AudioModel(atom_size)
         
-
-        # self.to_samples = nn.ModuleDict({
-        #     '128': nn.Conv1d(model_dim, 1, 7, 1, 3),
-        #     '256': nn.Conv1d(model_dim, 1, 7, 1, 3),
-        #     '512': nn.Conv1d(model_dim, 1, 7, 1, 3),
-        #     '1024': nn.Conv1d(model_dim, 1, 7, 1, 3),
-        #     '2048': nn.Conv1d(model_dim, 1, 7, 1, 3),
-        #     '4096': nn.Conv1d(model_dim, 1, 7, 1, 3),
-        # })
-
-        # self.up = nn.Sequential(
-        #     nn.Sequential(
-        #         nn.ConvTranspose1d(model_dim, model_dim, 8, 4, 2),  # 16
-        #         nn.LeakyReLU(0.2),
-        #     ),
-        #     nn.Sequential(
-        #         nn.ConvTranspose1d(model_dim, model_dim, 8, 4, 2),  # 64
-        #         nn.LeakyReLU(0.2),
-        #     ),
-
-        #     nn.Sequential(
-        #         nn.ConvTranspose1d(model_dim, model_dim, 4, 2, 1),  # 128
-        #         nn.LeakyReLU(0.2)
-        #     ),
-
-        #     nn.Sequential(
-        #         nn.ConvTranspose1d(model_dim, model_dim, 4, 2, 1),  # 256
-        #         nn.LeakyReLU(0.2)
-        #     ),
-
-        #     nn.Sequential(
-        #         nn.ConvTranspose1d(model_dim, model_dim, 4, 2, 1),  # 512
-        #         nn.LeakyReLU(0.2)
-        #     ),
-
-        #     nn.Sequential(
-        #         nn.ConvTranspose1d(model_dim, model_dim, 4, 2, 1),  # 1024
-        #         nn.LeakyReLU(0.2)
-        #     ),
-
-        #     nn.Sequential(
-        #         nn.ConvTranspose1d(model_dim, model_dim, 4, 2, 1),  # 2048
-        #         nn.LeakyReLU(0.2)
-        #     ),
-
-        #     nn.Sequential(
-        #         nn.ConvTranspose1d(model_dim, model_dim, 4, 2, 1),  # 4096
-        #         nn.LeakyReLU(0.2)
-        #     ),
-
-        # )
-
     def forward(self, x):
         batch = x.shape[0]
-        x = x.view(batch, 1, model_dim)
 
-        x = self.to_atoms(x)
-        x = x.view(batch, n_atoms, atom_latent)
+        x = x.view(batch, atom_latent)
+        l = self.latents.view(n_atoms, atom_latent)
+
+        l = l[None, ...] + x[:, None, :]
+        x = l.view(batch, n_atoms, atom_latent)
         x = self.to_seq(x).view(-1, 128, 8)
         x = self.up(x)
-
-
-        # bands = {}
-        # for layer in self.up:
-        #     x = layer(x)
-        #     try:
-        #         to_samples = self.to_samples[str(x.shape[-1])]
-        #         bands[int(x.shape[-1])] = to_samples.forward(x)
-        #     except KeyError:
-        #         pass
-        # x = fft_frequency_recompose(bands, atom_size)
-
         x = x.view(batch, n_atoms, atom_size)
         x = x * window[None, None, :]
         return x
@@ -287,20 +227,49 @@ class StaticAtoms(nn.Module):
             samplerate, 
             atom_size, 
             zounds.MelScale(zounds.FrequencyBand(20, 3520), n_atoms),
-            0.1).real * 0.1
+            0.1).real
         self.atoms = nn.Parameter(torch.from_numpy(bank[None, ...]))
     
     def forward(self, x):
         return self.atoms.repeat(x.shape[0], 1, 1)
+
+
+class MultibandAtoms(nn.Module):
+    def __init__(self, n_atoms, atom_size, n_bands):
+        super().__init__()
+        self.n_atoms = n_atoms
+        self.atom_size = atom_size
+        self.n_bands = n_bands
+
+        start = int(np.log2(atom_size))
+
+        sizes = list(range(start, start - n_bands, -1))
+        self.atoms = nn.ParameterDict({
+            str(size): nn.Parameter(torch.zeros(n_atoms, 1, 2**size).uniform_(-0.01, 0.01))
+            for size in sizes})
+        
+        print('ATOM BANDS', [2**int(k) for k in self.atoms.keys()])
+    
+    def forward(self, x):        
+        z = fft_frequency_recompose(
+            {int(k): v for k, v in self.atoms.items()}, self.atom_size)
+        
+        z = z.view(1, self.n_atoms, self.atom_size)
+        z = z.repeat(x.shape[0], 1, 1)
+        z = z * window[None, None, :]
+        return z
+
 
 class Model(nn.Module):
     def __init__(self):
         super().__init__()
         self.context = ContextModel(model_dim)
 
-        self.to_atom_latent = LinearOutputStack(model_dim, 3)
-        # self.atom_gen = AtomGenerator(n_atoms, atom_size)
-        self.atom_gen = StaticAtoms(n_atoms, atom_size)
+        self.to_atom_latent = LinearOutputStack(model_dim, 3, out_channels=atom_latent)
+        self.atom_gen = AtomGenerator(n_atoms, atom_size)
+
+        # self.atom_gen = StaticAtoms(n_atoms, atom_size)
+        # self.atom_gen = MultibandAtoms(n_atoms, atom_size, 6)
 
         self.to_placement_latent = nn.Conv1d(model_dim, n_atoms, 1, 1, 0)
 
@@ -366,6 +335,9 @@ class EfficientSparseModelExperiment(object):
 
     def fake_spec(self):
         return np.log(1e-4 + np.abs(zounds.spectral.stft(self.listen())))
+    
+    def atoms(self):
+        return np.log(1e-4 + np.abs(np.fft.rfft(self.model.atom_gen.atoms.data.cpu().numpy().squeeze(), axis=-1)))
 
     def run(self):
         for i, item in enumerate(self.stream):
