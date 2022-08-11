@@ -10,11 +10,10 @@ from modules.ddsp import NoiseModel, OscillatorBank
 from modules.decompose import fft_frequency_decompose, fft_frequency_recompose
 from modules.linear import LinearOutputStack
 from modules.pif import AuditoryImage
-from modules.pos_encode import pos_encoded
+from modules.psychoacoustic import PsychoacousticFeature
 from modules.reverb import NeuralReverb
 from train.optim import optimizer
 
-from upsample import ConvUpsample, FFTUpsampleBlock, Linear
 from util import device, playable
 from util.readmedocs import readme
 from util.weight_init import make_initializer
@@ -27,9 +26,9 @@ samplerate = zounds.SR22050()
 n_frames = n_samples // 256
 
 # Core
-n_atoms = 1024
-atoms_to_keep = 256
-atom_size = 1024
+n_atoms = 512
+atoms_to_keep = 512
+atom_size = 512
 atom_latent = 32
 
 
@@ -52,14 +51,21 @@ fb = zounds.learn.FilterBank(
 
 aim = AuditoryImage(512, 128, do_windowing=False, check_cola=False)
 
-init_weights = make_initializer(0.05)
+pif = PsychoacousticFeature([128] * 6).to(device)
+
+init_weights = make_initializer(0.1)
 
 
 def perceptual_feature(x):
     # x = fb.forward(x, normalize=False)
     # x = aim.forward(x)
+
     bands = fft_frequency_decompose(x, 1024)
-    x = torch.cat(list(bands.values()), dim=-1)
+    x = torch.cat(list([b.reshape(x.shape[0], -1) for b in bands.values()]), dim=-1)
+
+    # spec = stft(x, 512, 256, log_amplitude=False)
+
+    # x = torch.cat([x.view(x.shape[0], -1), spec.view(spec.shape[0], -1)], dim=-1)
     return x
 
 
@@ -75,13 +81,20 @@ class DilatedBlock(nn.Module):
     def __init__(self, channels, dilation):
         super().__init__()
         self.channels = channels
-        self.net = nn.Conv1d(
-            channels, channels, 3, 1, dilation=dilation, padding=dilation)
-
+        self.out = nn.Conv1d(channels, channels, 1, 1, 0)
+        self.next = nn.Conv1d(channels, channels, 1, 1, 0)
+        self.scale = nn.Conv1d(channels, channels, 3, 1, dilation=dilation, padding=dilation)
+        self.gate = nn.Conv1d(channels, channels, 3, 1, dilation=dilation, padding=dilation)
+    
     def forward(self, x):
+        batch = x.shape[0]
         skip = x
-        x = F.leaky_relu(self.net(x + skip), 0.2)
-        return x
+        scale = self.scale(x)
+        gate = self.gate(x)
+        x = torch.tanh(scale) * F.sigmoid(gate)
+        out = self.out(x)
+        next = self.next(x) + skip
+        return next, out
 
 
 class ContextModel(nn.Module):
@@ -92,7 +105,7 @@ class ContextModel(nn.Module):
         super().__init__()
         self.channels = channels
 
-        self.net = nn.Sequential(
+        self.stack = nn.Sequential(
             DilatedBlock(model_dim, 1),
             DilatedBlock(model_dim, 3),
             DilatedBlock(model_dim, 9),
@@ -106,9 +119,16 @@ class ContextModel(nn.Module):
         self.apply(init_weights)
 
     def forward(self, x):
-        x = fb.forward(x, normalize=False)
-        x = self.net(x)        
-        return x
+        batch = x.shape[0]
+
+        n = x = fb.forward(x, normalize=False)
+        outputs = torch.zeros(batch, self.channels, x.shape[-1], device=x.device)
+
+        for layer in self.stack:
+            n, o = layer.forward(n)
+            outputs = outputs + o
+        
+        return outputs
 
 
 class AtomPlacement(jit.ScriptModule):
@@ -196,9 +216,9 @@ class AtomGenerator(nn.Module):
             nn.LeakyReLU(0.2),
             nn.ConvTranspose1d(64, 32, 8, 4, 2), # 128
             nn.LeakyReLU(0.2),
-            nn.ConvTranspose1d(32, 16, 8, 4, 2), # 512
-            nn.LeakyReLU(0.2),
-            nn.ConvTranspose1d(16, 1, 4, 2, 1), # 1024
+            nn.ConvTranspose1d(32, 1, 8, 4, 2), # 512
+            # nn.LeakyReLU(0.2),
+            # nn.ConvTranspose1d(16, 1, 4, 2, 1), # 1024
             # nn.LeakyReLU(0.2),
             # nn.ConvTranspose1d(8, 1, 4, 2, 1), # 4096
         )
@@ -227,11 +247,19 @@ class StaticAtoms(nn.Module):
             samplerate, 
             atom_size, 
             zounds.MelScale(zounds.FrequencyBand(20, 3520), n_atoms),
-            0.1).real
+            0.1).real * 0.1
         self.atoms = nn.Parameter(torch.from_numpy(bank[None, ...]))
     
     def forward(self, x):
-        return self.atoms.repeat(x.shape[0], 1, 1)
+        batch = x.shape[0]
+
+        # norms = torch.norm(self.atoms, dim=-1, keepdim=True)
+        # atoms = self.atoms / (norms + 1e-8)
+
+        x = self.atoms.repeat(x.shape[0], 1, 1)
+        x = x.view(batch, n_atoms, atom_size)
+        x = x * window[None, None, :]
+        return x
 
 
 class MultibandAtoms(nn.Module):
@@ -266,9 +294,9 @@ class Model(nn.Module):
         self.context = ContextModel(model_dim)
 
         self.to_atom_latent = LinearOutputStack(model_dim, 3, out_channels=atom_latent)
-        self.atom_gen = AtomGenerator(n_atoms, atom_size)
+        # self.atom_gen = AtomGenerator(n_atoms, atom_size)
 
-        # self.atom_gen = StaticAtoms(n_atoms, atom_size)
+        self.atom_gen = StaticAtoms(n_atoms, atom_size)
         # self.atom_gen = MultibandAtoms(n_atoms, atom_size, 6)
 
         self.to_placement_latent = nn.Conv1d(model_dim, n_atoms, 1, 1, 0)
@@ -288,7 +316,7 @@ class Model(nn.Module):
     def forward(self, x):
         x = self.context(x)
 
-        x = F.dropout(x, 0.05)
+        # x = F.dropout(x, 0.05)
 
         g, _ = x.max(dim=-1)
 
@@ -302,8 +330,8 @@ class Model(nn.Module):
         
         final = self.placement.forward(x, atoms)
 
-        wet = self.verb.forward(final, room)
-        final = (mix * wet) + (final * (1 - mix))
+        # wet = self.verb.forward(final, room)
+        # final = (mix * wet) + (final * (1 - mix))
         
         return final
 
@@ -337,7 +365,7 @@ class EfficientSparseModelExperiment(object):
         return np.log(1e-4 + np.abs(zounds.spectral.stft(self.listen())))
     
     def atoms(self):
-        return np.log(1e-4 + np.abs(np.fft.rfft(self.model.atom_gen.atoms.data.cpu().numpy().squeeze(), axis=-1)))
+        return np.abs(np.fft.rfft(self.model.atom_gen.atoms.data.cpu().numpy().squeeze(), axis=-1))
 
     def run(self):
         for i, item in enumerate(self.stream):
