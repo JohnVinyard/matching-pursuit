@@ -88,12 +88,16 @@ class KarplusStrong(nn.Module):
 
         n_frames = (piano_samples // 256) + 2
 
-        self.excitation_env = nn.Parameter(torch.zeros(n_frames).uniform_(0, 0.1))
+        self.excitation_env = nn.Parameter(torch.zeros(n_frames * 32).uniform_(0, 0.01))
 
         transfer_functions = torch.zeros(2, n_frames, 257).fill_(0.2)
         self.transfer_functions = nn.Parameter(torch.complex(
             transfer_functions[0, ...], transfer_functions[1, ...]))
+
         
+        excitation_transfer_function = torch.zeros(2, 257).fill_(0.2)
+        self.excitation_transfer_functions = nn.Parameter(torch.complex(
+            excitation_transfer_function[0, ...], excitation_transfer_function[1, ...]))
 
         self.learned_impulse = False
 
@@ -114,11 +118,22 @@ class KarplusStrong(nn.Module):
         # for i in range((self.n_samples // 256) - 1):
         i = 0
 
+
+        excitation = (self.excitation_env ** 2).view(1, 1, -1)
+        excitation = F.upsample(excitation, scale_factor=256 // 32, mode='linear')
+
+
         while (i * 256) < piano_samples:
             
-            excitation = torch.abs(self.excitation_env[i])
-
-            impulse = (torch.zeros(512).uniform_(-1, 1).to(device) * excitation)
+            # excitation = self.excitation_env[i * 8: i * 8 + 8].view(1, 1, -1) ** 2
+            # excitation = F.upsample(excitation, size=512)
+            exc = excitation[:, :, i * 256: i * 256 + 512]
+            
+            
+            impulse = (torch.zeros(512).uniform_(-1, 1).to(device) * exc)
+            spec = torch.fft.rfft(impulse, norm='ortho')
+            spec = spec * self.excitation_transfer_functions
+            impulse = torch.fft.irfft(spec, norm='ortho')
 
             if len(output) == 0:
                 if self.learned_impulse:
@@ -240,7 +255,7 @@ def simulate(entry_coord, entry_block, sampling_coord, width, height):
     return samples, all_states
 
 
-samples, _ = load('/home/user/workspace/audio-data/cello.wav')
+samples, _ = load('/home/user/workspace/audio-data/piano.wav')
 
 if samples.shape[0] < 2**15:
     samples = np.pad(samples, [(0, 2**15 - len(samples))])
@@ -252,7 +267,7 @@ piano_samples = samples.shape[0]
 print(samples.shape)
 
 model = KarplusStrong(256, 2**15).to(device)
-optim = optimizer(model, lr=1e-3)
+optim = optimizer(model, lr=1e-2)
 
 if __name__ == '__main__':
     app = zounds.ZoundsApp(locals=locals(), globals=globals())
@@ -280,7 +295,7 @@ if __name__ == '__main__':
         return playable(recon, samplerate)
 
     def excitation():
-        return model.excitation_env.data.cpu().numpy().squeeze()
+        return np.abs(model.excitation_env.data.cpu().numpy().squeeze())[:-2]
     
     def impulse():
         return model.impulse.data.cpu().numpy().squeeze()
