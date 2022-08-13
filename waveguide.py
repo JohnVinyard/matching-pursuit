@@ -60,7 +60,7 @@ def perceptual_feature(x):
     bands = torch.cat(list(bands.values()), dim=-2)
 
     env = torch.abs(x).view(1, 1, -1)
-    env = F.avg_pool1d(env, 64, 32) * 10
+    env = F.avg_pool1d(env, 64, 32)
 
     # x = codec.to_frequency_domain(x.view(1, -1))
     x = torch.cat([
