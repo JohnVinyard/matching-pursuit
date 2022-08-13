@@ -13,7 +13,11 @@ with open('.env', 'r') as f:
 class Config(object):
     def __init__():
         super().__init__()
-    
+
     @staticmethod
     def audio_path():
         return os.environ['AUDIO_PATH']
+
+    @staticmethod
+    def impulse_response_path():
+        return os.environ['IMPULSE_RESPONSE_PATH']
