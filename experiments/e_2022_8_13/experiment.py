@@ -47,7 +47,7 @@ fb = zounds.learn.FilterBank(
 
 pif = PsychoacousticFeature([128] * 6).to(device)
 
-init_weights = make_initializer(0.02)
+init_weights = make_initializer(0.1)
 
 def perceptual_feature(x):
     bands = pif.compute_feature_dict(x)
@@ -129,8 +129,8 @@ def generate_event(envelope, transfer_functions, envelope_transfer):
     final = overlap_add(output)
 
     final = final[..., :n_samples]
-    # mx, _ = final.max(dim=-1, keepdim=True)
-    # final = final / (mx + 1e-8)
+    mx, _ = final.max(dim=-1, keepdim=True)
+    final = final / (mx + 1e-8)
     return final
 
 
@@ -178,13 +178,17 @@ class Model(nn.Module):
         super().__init__()
 
         
-        self.context = nn.Sequential(
-            DilatedBlock(model_dim, 1),
-            DilatedBlock(model_dim, 3),
-            DilatedBlock(model_dim, 9),
-            DilatedBlock(model_dim, 27),
-            DilatedBlock(model_dim, 1),
-        )
+        # self.context = nn.Sequential(
+        #     DilatedBlock(model_dim, 1),
+        #     nn.LayerNorm((model_dim, n_frames)),
+        #     DilatedBlock(model_dim, 3),
+        #     nn.LayerNorm((model_dim, n_frames)),
+        #     DilatedBlock(model_dim, 9),
+        #     nn.LayerNorm((model_dim, n_frames)),
+        #     DilatedBlock(model_dim, 27),
+        #     nn.LayerNorm((model_dim, n_frames)),
+        #     DilatedBlock(model_dim, 1),
+        # )
 
         encoder = nn.TransformerEncoderLayer(model_dim, 4, model_dim, batch_first=True)
         self.context = nn.TransformerEncoder(encoder, 4, norm=None)
@@ -210,10 +214,9 @@ class Model(nn.Module):
         orig = x
 
         n = fb.forward(orig, normalize=False)
-        n = fb.temporal_pooling(n, 512, 256)[..., :n_frames]
+        spec = n = fb.temporal_pooling(n, 512, 256)[..., :n_frames]
 
         pos = pos_encoded(batch, n_frames, n_freqs=16, device=n.device).permute(0, 2, 1)
-
         n = torch.cat([pos, n], dim=1)
         n = self.embed(n)
 
@@ -222,6 +225,8 @@ class Model(nn.Module):
         x = x.permute(0, 2, 1)
 
         # x = F.dropout(x, 0.1)
+
+        x = x + spec
 
         norms = self.to_env(x).view(batch, -1)
         # norms = torch.norm(x, dim=1)
