@@ -121,7 +121,8 @@ class PosEncodedUpsample(nn.Module):
             layers,
             multiply=False,
             learnable_encodings=False,
-            transformer=False):
+            transformer=False,
+            concat=False):
 
         super().__init__()
         self.latent_dim = latent_dim
@@ -134,7 +135,7 @@ class PosEncodedUpsample(nn.Module):
         self.transformer = transformer
 
         self.expand = ExpandUsingPosEncodings(
-            channels, size, 16, latent_dim, multiply, learnable_encodings)
+            channels, size, 16, latent_dim, multiply, learnable_encodings, concat=concat)
 
         if self.transformer:
             self.net = nn.Sequential(
