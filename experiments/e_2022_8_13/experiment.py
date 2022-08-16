@@ -83,8 +83,13 @@ def generate_event(envelope, transfer_functions, envelope_transfer):
 
 
     norm = torch.norm(transfer_functions, dim=2, keepdim=True)
+
+    mx, _ = torch.max(norm.view(envelope.shape[0], -1), dim=-1)
+    scaled_norm = norm / (mx[:, None, None, None] + 1e-8)
+
     unit_norm = transfer_functions / (norm + 1e-8)
-    norm = 0.9 + (norm * 0.0999)
+
+    norm = 0.9 + (scaled_norm * 0.0999)
     transfer_functions = norm * unit_norm
 
     transfer_functions = torch.complex(
@@ -257,11 +262,11 @@ class Model(nn.Module):
         final = output[..., :n_samples]
 
         # reverb
-        agg, _ = torch.max(x, dim=-1)
-        r = torch.softmax(self.to_room(agg), dim=-1)
-        m = torch.sigmoid(self.to_mix(agg).view(-1, 1, 1))
-        wet = self.verb.forward(final, r)
-        final = (m * wet) + (final * (1 - m))
+        # agg, _ = torch.max(x, dim=-1)
+        # r = torch.softmax(self.to_room(agg), dim=-1)
+        # m = torch.sigmoid(self.to_mix(agg).view(-1, 1, 1))
+        # wet = self.verb.forward(final, r)
+        # final = (m * wet) + (final * (1 - m))
 
         mx, _ = torch.max(final, dim=-1, keepdim=True)
         final = final / (mx + 1e-8)
@@ -280,6 +285,9 @@ def train(batch):
     
     loss.backward()
     # clip_grad_norm_(model.parameters(), 1)
+
+    # 0.55 is too high, 0.5 never learns
+    # clip_grad_value_(model.parameters(), 0.525)
 
     optim.step()
 
