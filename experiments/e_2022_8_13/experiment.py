@@ -52,6 +52,7 @@ init_weights = make_initializer(0.1)
 def perceptual_feature(x):
     bands = pif.compute_feature_dict(x)
     return torch.cat(bands, dim=-2)
+
     # return stft(x, 512, 256)
 
     # x = torch.abs(torch.fft.rfft(x, dim=-1, norm='ortho'))
@@ -77,23 +78,33 @@ class DilatedBlock(nn.Module):
         return x
 
 
+# def polar2z(r,theta):
+#     return r * torch.exp( 1j * theta )
 
 def generate_event(envelope, transfer_functions, envelope_transfer):
     output = []
 
 
-    norm = torch.norm(transfer_functions, dim=2, keepdim=True)
+    # norm = torch.norm(transfer_functions, dim=2, keepdim=True)
 
-    mx, _ = torch.max(norm.view(envelope.shape[0], -1), dim=-1)
-    scaled_norm = norm / (mx[:, None, None, None] + 1e-8)
+    # mx, _ = torch.max(norm.view(envelope.shape[0], -1), dim=-1)
+    # scaled_norm = norm / (mx[:, None, None, None] + 1e-8)
 
-    unit_norm = transfer_functions / (norm + 1e-8)
+    # unit_norm = transfer_functions / (norm + 1e-8)
 
-    norm = 0.9 + (scaled_norm * 0.0999)
-    transfer_functions = norm * unit_norm
+    # norm = 0.9 + (scaled_norm * 0.0999)
+    # transfer_functions = norm * unit_norm
 
-    transfer_functions = torch.complex(
-        transfer_functions[..., 0, :], transfer_functions[..., 1, :])
+    # mag = 0.9 + torch.sigmoid(transfer_functions[..., 0, :]) * 0.09999
+    # phase = transfer_functions[..., 1, :]
+    # phase = torch.cumsum(phase, dim=-1)
+    # transfer_functions = mag * torch.exp(1j * phase)
+
+    transfer_functions = torch.fft.rfft(transfer_functions, dim=1, norm='ortho')
+    transfer_functions = transfer_functions / (torch.abs(transfer_functions) + 1e-8)
+
+    # transfer_functions = torch.complex(
+    #     transfer_functions[..., 0, :], transfer_functions[..., 1, :])
 
     transfer_functions = transfer_functions.view(-1, n_coeffs, n_frames)
 
@@ -134,8 +145,10 @@ def generate_event(envelope, transfer_functions, envelope_transfer):
     final = overlap_add(output)
 
     final = final[..., :n_samples]
-    mx, _ = final.max(dim=-1, keepdim=True)
-    final = final / (mx + 1e-8)
+
+    # mx, _ = final.max(dim=-1, keepdim=True)
+    # final = final / (mx + 1e-8)
+
     return final
 
 
@@ -144,7 +157,7 @@ class EventGenerator(nn.Module):
         super().__init__()
 
         self.gen_env = ConvUpsample(
-            latent_dim, model_dim, 8, n_frames * 8, mode='learned', out_channels=1)
+            latent_dim, model_dim, 8, n_frames * 8, mode='nearest', out_channels=1)
         
         # self.gen_env = PosEncodedUpsample(
         #     latent_dim, model_dim, n_frames, out_channels=1, layers=4, learnable_encodings=True, concat=True)
@@ -152,7 +165,7 @@ class EventGenerator(nn.Module):
         # self.gen_env = LinearOutputStack(model_dim, 3, out_channels=window_size)
         
         self.gen_transfer = ConvUpsample(
-            latent_dim, model_dim, 8, n_frames, mode='learned', out_channels=n_coeffs * 2)
+            latent_dim, model_dim, 8, n_frames, mode='nearest', out_channels=window_size)
         # self.gen_transfer = PosEncodedUpsample(
         #     latent_dim, model_dim, n_frames, out_channels=n_coeffs * 2, layers=4, learnable_encodings=False, concat=True)
 
@@ -166,11 +179,12 @@ class EventGenerator(nn.Module):
 
         env = torch.abs(self.gen_env(x))
         env = F.upsample(env, size=n_samples, mode='linear')
+
         mx, _ = env.max(dim=-1, keepdim=True)
         env = env / (mx + 1e-8)
         
 
-        transfer = self.gen_transfer(x).view(-1, n_coeffs, 2, n_frames)
+        transfer = self.gen_transfer(x)#.view(-1, n_coeffs, 2, n_frames)
 
         impulse = self.gen_impulse_transfer(x).reshape(-1, n_coeffs, 2)
 
@@ -270,6 +284,7 @@ class Model(nn.Module):
 
         mx, _ = torch.max(final, dim=-1, keepdim=True)
         final = final / (mx + 1e-8)
+
         return final
 
 
