@@ -1,1 +1,1 @@
-from .e_2022_8_13  import WaveguideExpiriment as Current
+from .e_2022_8_17  import MultibandDiffusionModel as Current
