@@ -1,1 +1,1 @@
-from .experiment import WaveguideExpiriment
+from .experiment import WaveguideExperiment
