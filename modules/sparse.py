@@ -2,6 +2,7 @@ import torch
 from torch import jit
 from torch import nn
 
+
 def sparsify(x, n_to_keep):
     orig_shape = x.shape
     x = x.view(x.shape[0], -1)
@@ -10,6 +11,25 @@ def sparsify(x, n_to_keep):
     out = torch.scatter(out, dim=-1, index=indices, src=values)
     out = out.view(*orig_shape)
     return out
+
+
+def sparsify_vectors(x, attn, n_to_keep):
+    batch, channels, time = x.shape
+
+    attn = attn.view(batch, time)
+    values, indices = torch.topk(attn, k=n_to_keep, dim=-1)
+
+    values = values + (1 - values)
+
+    latents = []
+    for b in range(batch):
+        for i in range(n_to_keep):
+            latent = x[b, :, indices[b, i]][None, :]
+            v = values[b, i]
+            latents.append(latent * v.view(1, 1, 1))
+
+    latents = torch.cat(latents, dim=0).view(batch, n_to_keep, channels)
+    return latents, indices
 
 
 class AtomPlacement(jit.ScriptModule):
@@ -62,7 +82,7 @@ class SparseAudioModel(nn.Module):
             torch.zeros(1, n_atoms, atom_size).uniform_(-0.01, 0.01))
         self.placement = AtomPlacement(
             n_samples, n_atoms, atom_size, to_keep)
-    
+
     def forward(self, x):
         a = self.atoms.repeat(x.shape[0], 1, 1)
         x = self.placement.forward(x, a)

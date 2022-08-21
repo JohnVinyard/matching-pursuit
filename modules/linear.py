@@ -6,16 +6,15 @@ class ResidualBlock(nn.Module):
             self,
             channels,
             bias=True,
-            activation=lambda x: F.leaky_relu(x, 0.2),
+            activation=None,
             shortcut=True):
 
         super().__init__()
         self.channels = channels
         self.l1 = nn.Linear(channels, channels, bias)
         self.l2 = nn.Linear(channels, channels, bias)
-        self.activation = activation
+        self.activation = activation or nn.LeakyReLU(0.2)
         self.shortcut = shortcut
-        # self.apply(init_weights)
 
     def forward(self, x):
         shortcut = x
