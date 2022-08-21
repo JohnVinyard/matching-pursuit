@@ -110,7 +110,6 @@ class Model(nn.Module):
 
 
         outputs = torch.zeros(batch, self.channels, x.shape[-1], device=x.device)
-
         for layer in self.stack:
             n, o = layer.forward(n)
             outputs = outputs + o
