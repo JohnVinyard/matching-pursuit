@@ -13,13 +13,14 @@ def sparsify(x, n_to_keep):
     return out
 
 
-def sparsify_vectors(x, attn, n_to_keep):
+def sparsify_vectors(x, attn, n_to_keep, normalize=True):
     batch, channels, time = x.shape
 
     attn = attn.view(batch, time)
     values, indices = torch.topk(attn, k=n_to_keep, dim=-1)
 
-    values = values + (1 - values)
+    if normalize:
+        values = values + (1 - values)
 
     latents = []
     for b in range(batch):
