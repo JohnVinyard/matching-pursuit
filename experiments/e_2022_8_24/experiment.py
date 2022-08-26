@@ -4,10 +4,11 @@ import zounds
 from torch.nn import functional as F
 from modules.linear import LinearOutputStack
 from modules.phase import overlap_add
+from modules.psychoacoustic import PsychoacousticFeature
 from modules.stft import stft
 from modules.pos_encode import pos_encoded
-from modules.psychoacoustic import PsychoacousticFeature
 from modules.sparse import sparsify_vectors
+from upsample import ConvUpsample
 from util import device, playable
 from util.readmedocs import readme
 from util.weight_init import make_initializer
@@ -29,7 +30,7 @@ resolution = 8
 env_size = resolution
 transfer_size = n_coeffs * 2 * resolution
 
-event_dim = 1 + env_size + transfer_size
+event_dim = n_frames + (n_coeffs * 2)
 
 n_bands = 128
 kernel_size = 512
@@ -45,19 +46,20 @@ fb = zounds.learn.FilterBank(
     a_weighting=False).to(device)
 
 
+
+init_weights = make_initializer(0.05)
+
+
 pif = PsychoacousticFeature([128] * 6).to(device)
 
-init_weights = make_initializer(0.1)
 
 
 def perceptual_feature(x):
     bands = pif.compute_feature_dict(x)
     return torch.cat(bands, dim=-2)
 
-
 def perceptual_loss(a, b):
     return F.mse_loss(a, b)
-
 
 class EventRenderer(object):
     """
@@ -68,26 +70,30 @@ class EventRenderer(object):
     def __init__(self):
         super().__init__()
 
-    def render(self, x):
-        x = x.view(-1, event_dim)
-        batch = x.shape[0]
+    def render(self, _, env, transfer):
+        # x = x.view(-1, event_dim)
+        batch = env.shape[0]
 
 
         # remove the absolute time, it's not relevant here
-        x = x[:, 1:]
+        # x = x[:, 1:]
 
         # TODO: This could be sparse interpolation for much finer control
-        env = x[:, :env_size].view(-1, 1, resolution)
-        amp = F.interpolate(env, size=n_frames, mode='linear')
-        noise = torch.zeros(batch, window_size, n_frames, device=x.device).uniform_(-1, 1)
+        # TODO: Energy gets harder and harder to apply?
+        env = env.view(batch, -1, n_frames)
+        
+        amp = env
+        noise = torch.zeros(batch, window_size, n_frames, device=env.device).uniform_(-1, 1)
         energy = amp * noise
 
-        transfer = x[:, env_size:].reshape(-1, n_coeffs * 2, resolution)
-        coeffs = F.interpolate(transfer, size=n_frames, mode='linear')
-        # tf = torch.complex(coeffs[:, :n_coeffs, :], coeffs[:, n_coeffs:, :])
-        real = (coeffs[:, :n_coeffs, :] * 2) - 1
-        imag = (coeffs[:, n_coeffs:, :] * np.pi)
-        imag = torch.cumsum(imag, dim=-1)
+        transfer = transfer.view(batch, n_coeffs * 2, n_frames)
+        coeffs = transfer
+
+        # TODO: Figure out magnitude
+        # TODO: Apply group delay
+        # TODO: higher frequencies require more energy for same amplitude
+        real = coeffs[:, :n_coeffs, :]
+        imag = coeffs[:, n_coeffs:, :] * np.pi
         tf = real * torch.exp(1j * imag)
 
         output_frames = []
@@ -102,12 +108,12 @@ class EventRenderer(object):
             spec = spec * tf[:, :, i: i + 1]
             new_frame = \
                 torch.fft.irfft(spec, dim=1, norm='ortho') \
-                * torch.hamming_window(window_size, device=x.device)[None, :, None]
+                * torch.hamming_window(window_size, device=env.device)[None, :, None]
 
             output_frames.append(new_frame)
 
         output_frames = torch.cat(output_frames, dim=-1)
-        output_frames = output_frames.view(batch, 1, window_size, n_frames)
+        output_frames = output_frames.view(batch, 1, window_size, n_frames).permute(0, 1, 3, 2)
         output = overlap_add(output_frames)[..., :n_samples]
         output = output.view(batch, 1, n_samples)
         return output
@@ -117,11 +123,11 @@ class AudioSegmentRenderer(object):
     def __init__(self):
         super().__init__()
     
-    def render(self, x):
+    def render(self, x, params, indices):
         x = x.view(-1, n_events, n_samples)
         batch = x.shape[0]
 
-        times = (x[:, :, 0] * n_samples).int()
+        times = indices * step_size
 
         output = torch.zeros(batch, 1, n_samples * 2, device=x.device)
 
@@ -133,6 +139,19 @@ class AudioSegmentRenderer(object):
         output = output[..., :n_samples]
         return output
 
+
+class DilatedBlock(nn.Module):
+    def __init__(self, channels, dilation):
+        super().__init__()
+        self.dilated = nn.Conv1d(channels, channels, 3, padding=dilation, dilation=dilation)
+        self.conv = nn.Conv1d(channels, channels, 1, 1, 0)
+    
+    def forward(self, x):
+        orig = x
+        x = self.dilated(x)
+        x = self.conv(x)
+        x = x + orig
+        return x
 
 class Summarizer(nn.Module):
     """
@@ -146,79 +165,49 @@ class Summarizer(nn.Module):
     def __init__(self):
         super().__init__()
 
-        encoder = nn.TransformerEncoderLayer(model_dim, 4, model_dim, batch_first=True)
-        self.context = nn.TransformerEncoder(encoder, 6, norm=None)
+
+        self.context = nn.Sequential(
+            DilatedBlock(model_dim, 1),
+            DilatedBlock(model_dim, 3),
+            DilatedBlock(model_dim, 9),
+            DilatedBlock(model_dim, 1),
+        )
         self.reduce = nn.Conv1d(model_dim + 33, model_dim, 1, 1, 0)
 
         self.attend = nn.Linear(model_dim, 1)
-        self.to_events = LinearOutputStack(model_dim, 4, out_channels=event_dim)
+        self.to_events = nn.Linear(model_dim, event_dim)
 
-    def forward(self, x):
+        self.env_factor = 32
+        self.to_env = ConvUpsample(
+            event_dim, model_dim, 8, n_frames * self.env_factor, mode='nearest', out_channels=1)
+        self.to_coeffs = nn.Linear(event_dim, n_coeffs * 2)
+
+    def forward(self, x, add_noise=False):
         batch = x.shape[0]
         x = x.view(-1, 1, n_samples)
-        x = fb.forward(x, normalize=False)
+        x = torch.abs(fb.convolve(x))
         x = fb.temporal_pooling(x, window_size, step_size)[..., :n_frames]
-        pos = pos_encoded(batch, n_frames, 16).permute(0, 2, 1)
+        pos = pos_encoded(batch, n_frames, 16, device=x.device).permute(0, 2, 1)
         x = torch.cat([x, pos], dim=1)
         x = self.reduce(x)
-        x = x.permute(0, 2, 1)
-        x = self.context(x)
-        attn = torch.softmax(self.attend(x), dim=1)
-        x = x.permute(0, 2, 1)
-        x, _ = sparsify_vectors(x, attn, n_events)
+
+        x = self.context(x) # channels last
+        attn = torch.softmax(self.attend(x.permute(0, 2, 1)).view(batch, n_frames), dim=-1)
+        x, indices = sparsify_vectors(x, attn, n_events)
         x = self.to_events(x)
-        x = torch.sigmoid(x)
-        return x
 
-
-class LossPredictor(nn.Module):
-    """
-    Accepts vector-encoded events and corresponding 
-    audio and attempts to predict a loss based on the
-    event parameters
-
-    events[:, :, :1] should be used to align the event
-    vectors with the audio representation prior to processing
-    
-    """
-
-    def __init__(self):
-        super().__init__()
-    
-        encoder = nn.TransformerEncoderLayer(model_dim, 4, model_dim, batch_first=True)
-        self.context = nn.TransformerEncoder(encoder, 6, norm=None)
-        self.reduce = nn.Conv1d(model_dim + 33 + event_dim, model_dim, 1, 1, 0)
-
-        self.to_loss = LinearOutputStack(model_dim, 3, out_channels=n_coeffs)
-        self.apply(init_weights)
-
-    def forward(self, events, x):
-        batch = events.shape[0]
-
-        events = events.view(-1, n_events, event_dim)
-        event_times = events[:, :, 0]
-        event_indices = (event_times * n_frames).int()
-
-        evt = torch.zeros(batch, n_frames, event_dim, device=x.device)
-        for b in range(batch):
-            for i in range(n_events):
-                index = event_indices[b, i]
-                evt[b, index] = events[b, i]
-
-        x = x.view(events.shape[0], 1, n_samples)
-        batch = x.shape[0]
-        x = x.view(-1, 1, n_samples)
-        x = fb.forward(x, normalize=False)
-        x = fb.temporal_pooling(x, window_size, step_size)[..., :n_frames]
-        pos = pos_encoded(batch, n_frames, 16).permute(0, 2, 1)
-
-        x = torch.cat([x, pos, evt.permute(0, 2, 1)], dim=1)
-        x = self.reduce(x)
-        x = x.permute(0, 2, 1)
-        x - self.context(x)
+        x = x.view(-1, event_dim)
+        env = self.to_env.forward(x).view(batch * n_events, 1, n_frames * self.env_factor)
+        env = F.interpolate(env, size=n_samples, mode='linear')
+        env = F.pad(env, (0, step_size))
+        env = env.unfold(-1, window_size, step_size) * torch.hamming_window(window_size, device=env.device)[None, None, None, :]
+        env = env.view(batch * n_events, 1, n_frames, window_size).permute(0, 3, 1, 2).view(batch * n_events, window_size, n_frames)
+        tf = self.to_coeffs(x).view(batch * n_events, n_coeffs * 2, 1).repeat(1, 1, n_frames)
         
-        x = self.to_loss(x)
-        return x
+
+        return x, env, tf, indices
+
+
 
 class Model(nn.Module):
     def __init__(self):
@@ -228,51 +217,31 @@ class Model(nn.Module):
         self.audio_renderer = AudioSegmentRenderer()
         self.apply(init_weights)
     
-    def render(self, params):
-        atoms = self.atom_renderer.render(params)
-        audio = self.audio_renderer.render(atoms)
+    def render(self, params, env, tf, indices):
+        atoms = self.atom_renderer.render(params, env, tf)
+        audio = self.audio_renderer.render(atoms, params, indices)
         return audio
     
-    def forward(self, x):
-        x = self.summary(x)
-        return x
+    def forward(self, x, add_noise=False):
+        x, env, tf, indices = self.summary(x, add_noise=add_noise)
+        return x, env, tf, indices
 
 
-model = Model()
-optim = optimizer(model, lr=1e-3)
-
-predictor = LossPredictor()
-loss_optim = optimizer(predictor, lr=1e-3)
+model = Model().to(device)
+optim = optimizer(model, lr=1e-4)
 
 
-def train(batch):
-    optim.zero_grad()
-    loss_optim.zero_grad()
-
-    params = model.forward(batch)
-    recon = model.render(params)
-
-    real_spec = stft(batch, window_size, step_size, pad=True)
-    fake_spec = stft(recon, window_size, step_size, pad=True)
-    real_loss = (real_spec - fake_spec).view(-1, n_frames, n_coeffs)
-    
-
-    pred_loss = predictor.forward(params, batch).view(-1, n_frames, n_coeffs)
-
-    p_loss = torch.abs(real_loss - pred_loss).sum()
-    p_loss.backward()
-    loss_optim.step()
-
-    return torch.abs(real_loss).sum(), p_loss, recon
 
 def train_model(batch):
     optim.zero_grad()
-    loss_optim.zero_grad()
-
-    params = model.forward(batch)
-    pred_loss = torch.abs(predictor.forward(params, batch)).sum()
-    pred_loss.backward()
+    params, env, tf, indices = model.forward(batch)
+    recon = model.render(params, env, tf, indices)
+    real_spec = stft(batch, window_size, step_size, pad=True)
+    fake_spec = stft(recon, window_size, step_size, pad=True)
+    loss = perceptual_loss(fake_spec, real_spec)
+    loss.backward()
     optim.step()
+    return env, loss, recon
 
 @readme
 class TransferFunctionReinforcementLearning(object):
@@ -282,6 +251,7 @@ class TransferFunctionReinforcementLearning(object):
 
         self.fake = None
         self.real = None
+        self.env = None
     
     def orig(self):
         return playable(self.real, samplerate)
@@ -291,15 +261,16 @@ class TransferFunctionReinforcementLearning(object):
     
     def fake_spec(self):
         return np.abs(zounds.spectral.stft(self.listen()))
+
+    def e(self):
+        return self.env.data.cpu().numpy().squeeze()
     
     def run(self):
         for i, item in enumerate(self.stream):
             item = item.view(-1, 1, n_samples)
             self.real = item
 
-            if i % 2 == 0:
-                audio_loss, predictor_loss, self.fake = train(item)
-                print(audio_loss.item(), ' | ', predictor_loss.item())
-            else:
-                train_model(item)
+            self.env, loss, self.fake = train_model(item)
+            print('GEN', loss.item())
+            
             
