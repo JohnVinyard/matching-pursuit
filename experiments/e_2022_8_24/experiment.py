@@ -47,12 +47,13 @@ fb = zounds.learn.FilterBank(
 
 init_weights = make_initializer(0.1)
 
-pif = PsychoacousticFeature([128] * 6).to(device)
+pif = PsychoacousticFeature().to(device)
 
 
 def perceptual_feature(x):
     bands = pif.compute_feature_dict(x)
     return torch.cat(bands, dim=-2)
+    # return stft(x, window_size, step_size, pad=True)
 
 def perceptual_loss(a, b):
     return F.mse_loss(a, b)
@@ -67,12 +68,8 @@ class EventRenderer(object):
         super().__init__()
 
     def render(self, _, env, transfer):
-        # x = x.view(-1, event_dim)
         batch = env.shape[0]
 
-
-        # remove the absolute time, it's not relevant here
-        # x = x[:, 1:]
 
         # TODO: This could be sparse interpolation for much finer control
         # TODO: Energy gets harder and harder to apply?
@@ -88,7 +85,7 @@ class EventRenderer(object):
         # TODO: Figure out magnitude
         real = coeffs[:, :n_coeffs, :]
         imag = coeffs[:, n_coeffs:, :] * np.pi
-        imag[:] = 1
+        # imag[:] = 1
         tf = real * torch.exp(1j * imag)
 
         output_frames = []
@@ -175,7 +172,8 @@ class Summarizer(nn.Module):
         self.env_factor = 32
         self.to_env = ConvUpsample(
             event_dim, model_dim, 8, n_frames * self.env_factor, mode='nearest', out_channels=1)
-        self.to_coeffs = nn.Linear(event_dim, n_coeffs * 2)
+        self.to_coeffs = ConvUpsample(
+            event_dim, model_dim, 8, n_frames, mode='nearest', out_channels=n_coeffs * 2)
 
     def forward(self, x, add_noise=False):
         batch = x.shape[0]
@@ -197,7 +195,9 @@ class Summarizer(nn.Module):
         env = F.pad(env, (0, step_size))
         env = env.unfold(-1, window_size, step_size) * torch.hamming_window(window_size, device=env.device)[None, None, None, :]
         env = env.view(batch * n_events, 1, n_frames, window_size).permute(0, 3, 1, 2).view(batch * n_events, window_size, n_frames)
-        tf = torch.sigmoid(self.to_coeffs(x).view(batch * n_events, n_coeffs * 2, 1).repeat(1, 1, n_frames))
+
+
+        tf = torch.sigmoid(self.to_coeffs(x).view(batch * n_events, n_coeffs * 2, n_frames))
         
 
         return x, env, tf, indices
@@ -250,6 +250,9 @@ class TransferFunctionReinforcementLearning(object):
     
     def orig(self):
         return playable(self.real, samplerate)
+    
+    def real_spec(self):
+        return np.abs(zounds.spectral.stft(self.orig()))
     
     def listen(self):
         return playable(self.fake, samplerate)
