@@ -17,3 +17,4 @@ from .metaformer import MetaFormer, PoolMixer, MetaFormerBlock
 from .diffusion import DiffusionProcess
 from .atoms import AudioEvent
 from .diffindex import diff_index
+from .scattering import MoreCorrectScattering

@@ -5,6 +5,7 @@ from torch.nn import functional as F
 from modules.phase import morlet_filter_bank
 import numpy as np
 from modules.psychoacoustic import PsychoacousticFeature
+from modules.sparse import sparsify
 from util import device
 from util.readmedocs import readme
 from train.optim import optimizer
@@ -52,22 +53,21 @@ def perceptual_loss(a, b):
     b = perceptual_feature(b)
     return F.mse_loss(a, b)
 
-filters = morlet_filter_bank(
-    samplerate, n_samples, scale, 0.1, normalize=True).real
+# filters = morlet_filter_bank(
+    # samplerate, n_samples, scale, 0.1, normalize=True).real
 
-print(filters.shape)
 
-noise = np.random.uniform(-1, 1, (1, n_samples))
+# noise = np.random.uniform(-1, 1, (1, n_samples))
 
-noise_spec = np.fft.rfft(noise, axis=-1, norm='ortho')
-filter_spec = np.fft.rfft(filters, axis=-1, norm='ortho')
-filtered_noise = noise_spec * filter_spec
-filtered_noise = np.fft.irfft(filtered_noise, norm='ortho')
+# noise_spec = np.fft.rfft(noise, axis=-1, norm='ortho')
+# filter_spec = np.fft.rfft(filters, axis=-1, norm='ortho')
+# filtered_noise = noise_spec * filter_spec
+# filtered_noise = np.fft.irfft(filtered_noise, norm='ortho')
 
-filters = torch.from_numpy(filters).view(n_bands, n_samples)
-noise = torch.from_numpy(filtered_noise).view(n_bands, n_samples)
+# filters = torch.from_numpy(filters).view(n_bands, n_samples)
+# noise = torch.from_numpy(filtered_noise).view(n_bands, n_samples)
 
-all_bands = torch.cat([filters, noise], dim=0).view(1, n_bands * 2, n_samples).float()
+# all_bands = torch.cat([filters, noise], dim=0).view(1, n_bands * 2, n_samples).float()
 
 
 class Model(nn.Module):
@@ -75,11 +75,11 @@ class Model(nn.Module):
         super().__init__()
 
         self.downsample = nn.Sequential(
-            nn.Conv1d(n_bands, model_dim, 7, 2, 3),  # 64
+            nn.Conv1d(n_bands, model_dim, 7, 2, 3),  # 16384
             nn.LeakyReLU(0.2),
-            nn.Conv1d(model_dim, model_dim, 7, 2, 3),  # 32
+            nn.Conv1d(model_dim, model_dim, 7, 2, 3),  # 8192
             nn.LeakyReLU(0.2),
-            nn.Conv1d(model_dim, model_dim, 7, 2, 3),  # 16
+            nn.Conv1d(model_dim, model_dim, 7, 2, 3),  # 4096
             nn.LeakyReLU(0.2),
             nn.Conv1d(model_dim, model_dim, 1, 1, 0)
         )
@@ -91,27 +91,21 @@ class Model(nn.Module):
             nn.LeakyReLU(0.2),
             nn.ConvTranspose1d(model_dim, model_dim, 4, 2, 1),
             nn.LeakyReLU(0.2),
-            nn.Conv1d(model_dim, n_bands * 2, 1, 1, 0)
+            nn.Conv1d(model_dim, 1, 7, 1, 3)
         )
         self.apply(init_weights)
 
     def forward(self, x):
         x = x.view(-1, 1, n_samples)
         x = fb.forward(x, normalize=False)
-        x = F.pad(x, (0, step_size))
-        x = fb.temporal_pooling(x, window_size, step_size)
-
         x = self.downsample(x)
-        x = self.upsample(x) ** 2
-
-        x = F.interpolate(x, size=n_samples, mode='nearest')
-        x = x * all_bands
-        x = torch.mean(x, dim=1)
+        x = sparsify(x, n_to_keep=128)
+        x = self.upsample(x)
         return x
 
 
 model = Model()
-optim = optimizer(model, lr=1e-4)
+optim = optimizer(model, lr=1e-3)
 
 
 def train(batch):
@@ -131,7 +125,6 @@ class SimpleWaveTableExperiment(object):
 
         self.real = None
         self.fake = None
-        self.af = all_bands.data.cpu().numpy().squeeze()
         self.filters = fb.filter_bank.data.cpu().numpy().squeeze()
     
     def listen(self):

@@ -34,6 +34,7 @@ event_dim = n_frames + (n_coeffs * 2)
 n_bands = 128
 kernel_size = 512
 
+# TODO: Package this up into a class
 band = zounds.FrequencyBand(40, samplerate.nyquist)
 scale = zounds.MelScale(band, n_bands)
 fb = zounds.learn.FilterBank(
@@ -53,7 +54,6 @@ pif = PsychoacousticFeature().to(device)
 def perceptual_feature(x):
     bands = pif.compute_feature_dict(x)
     return torch.cat(bands, dim=-2)
-    # return stft(x, window_size, step_size, pad=True)
 
 def perceptual_loss(a, b):
     return F.mse_loss(a, b)
@@ -132,18 +132,18 @@ class AudioSegmentRenderer(object):
         return output
 
 
-class DilatedBlock(nn.Module):
-    def __init__(self, channels, dilation):
-        super().__init__()
-        self.dilated = nn.Conv1d(channels, channels, 3, padding=dilation, dilation=dilation)
-        self.conv = nn.Conv1d(channels, channels, 1, 1, 0)
+# class DilatedBlock(nn.Module):
+#     def __init__(self, channels, dilation):
+#         super().__init__()
+#         self.dilated = nn.Conv1d(channels, channels, 3, padding=dilation, dilation=dilation)
+#         self.conv = nn.Conv1d(channels, channels, 1, 1, 0)
     
-    def forward(self, x):
-        orig = x
-        x = self.dilated(x)
-        x = self.conv(x)
-        x = x + orig
-        return x
+#     def forward(self, x):
+#         orig = x
+#         x = self.dilated(x)
+#         x = self.conv(x)
+#         x = x + orig
+#         return x
 
 class Summarizer(nn.Module):
     """
@@ -158,12 +158,16 @@ class Summarizer(nn.Module):
         super().__init__()
 
 
-        self.context = nn.Sequential(
-            DilatedBlock(model_dim, 1),
-            DilatedBlock(model_dim, 3),
-            DilatedBlock(model_dim, 9),
-            DilatedBlock(model_dim, 1),
-        )
+        # self.context = nn.Sequential(
+        #     DilatedBlock(model_dim, 1),
+        #     DilatedBlock(model_dim, 3),
+        #     DilatedBlock(model_dim, 9),
+        #     DilatedBlock(model_dim, 1),
+        # )
+
+        encoder = nn.TransformerEncoderLayer(model_dim, 4, model_dim, batch_first=True)
+        self.context = nn.TransformerEncoder(encoder, 6, norm=None)
+
         self.reduce = nn.Conv1d(model_dim + 33, model_dim, 1, 1, 0)
 
         self.attend = nn.Linear(model_dim, 1)
@@ -184,8 +188,10 @@ class Summarizer(nn.Module):
         x = torch.cat([x, pos], dim=1)
         x = self.reduce(x)
 
+        x = x.permute(0, 2, 1)
         x = self.context(x) 
-        attn = torch.softmax(self.attend(x.permute(0, 2, 1)).view(batch, n_frames), dim=-1)
+        attn = torch.softmax(self.attend(x).view(batch, n_frames), dim=-1)
+        x = x.permute(0, 2, 1)
         x, indices = sparsify_vectors(x, attn, n_events)
         x = self.to_events(x)
 
@@ -226,7 +232,6 @@ model = Model().to(device)
 optim = optimizer(model, lr=1e-4)
 
 
-
 def train_model(batch):
     optim.zero_grad()
     params, env, tf, indices = model.forward(batch)
@@ -237,6 +242,8 @@ def train_model(batch):
     loss.backward()
     optim.step()
     return env, loss, recon
+
+# TODO: Base class
 
 @readme
 class TransferFunctionReinforcementLearning(object):
