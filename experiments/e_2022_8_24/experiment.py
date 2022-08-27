@@ -2,7 +2,7 @@ import torch
 from torch import nn
 import zounds
 from torch.nn import functional as F
-from modules.phase import overlap_add
+from modules.phase import AudioCodec, MelScale, overlap_add
 from modules.psychoacoustic import PsychoacousticFeature
 from modules.stft import stft
 from modules.pos_encode import pos_encoded
@@ -50,13 +50,24 @@ init_weights = make_initializer(0.1)
 
 pif = PsychoacousticFeature().to(device)
 
+mel_scale = MelScale()
+codec = AudioCodec(mel_scale)
 
 def perceptual_feature(x):
-    bands = pif.compute_feature_dict(x)
-    return torch.cat(bands, dim=-2)
+    # bands = pif.compute_feature_dict(x)
+    # return torch.cat(list(bands.values()), dim=-1)
+    # return stft(
+    #     x, window_size, step_size, pad=True, log_amplitude=True)
+
+    spec = codec.to_frequency_domain(x.view(-1, n_samples))
+    return torch.abs(spec)
+
 
 def perceptual_loss(a, b):
+    a = perceptual_feature(a)
+    b = perceptual_feature(b)
     return F.mse_loss(a, b)
+
 
 class EventRenderer(object):
     """
@@ -70,13 +81,13 @@ class EventRenderer(object):
     def render(self, _, env, transfer):
         batch = env.shape[0]
 
-
         # TODO: This could be sparse interpolation for much finer control
         # TODO: Energy gets harder and harder to apply?
         env = env.view(batch, -1, n_frames)
-        
+
         amp = env
-        noise = torch.zeros(batch, window_size, n_frames, device=env.device).uniform_(-1, 1)
+        noise = torch.zeros(batch, window_size, n_frames,
+                            device=env.device).uniform_(-1, 1)
         energy = amp * noise
 
         transfer = transfer.view(batch, n_coeffs * 2, n_frames)
@@ -84,8 +95,16 @@ class EventRenderer(object):
 
         # TODO: Figure out magnitude
         real = coeffs[:, :n_coeffs, :]
-        imag = coeffs[:, n_coeffs:, :] * np.pi
-        # imag[:] = 1
+        imag = coeffs[:, n_coeffs:, :]
+
+        real = torch.norm(transfer.view(batch, n_coeffs, 2, n_frames), dim=2)
+
+        r = real.view(batch, -1)
+        mx, _ = torch.max(r, dim=-1,keepdim=True)
+        r = r / (mx + 1e-8)
+        real = r.view(batch, n_coeffs, n_frames) * 0.9999
+
+        imag = torch.angle(torch.complex(real, imag)) * np.pi
         tf = real * torch.exp(1j * imag)
 
         output_frames = []
@@ -105,7 +124,8 @@ class EventRenderer(object):
             output_frames.append(new_frame)
 
         output_frames = torch.cat(output_frames, dim=-1)
-        output_frames = output_frames.view(batch, 1, window_size, n_frames).permute(0, 1, 3, 2)
+        output_frames = output_frames.view(
+            batch, 1, window_size, n_frames).permute(0, 1, 3, 2)
         output = overlap_add(output_frames)[..., :n_samples]
         output = output.view(batch, 1, n_samples)
         return output
@@ -114,7 +134,7 @@ class EventRenderer(object):
 class AudioSegmentRenderer(object):
     def __init__(self):
         super().__init__()
-    
+
     def render(self, x, params, indices):
         x = x.view(-1, n_events, n_samples)
         batch = x.shape[0]
@@ -127,7 +147,7 @@ class AudioSegmentRenderer(object):
             for i in range(n_events):
                 time = times[b, i]
                 output[b, :, time: time + n_samples] += x[b, i][None, :]
-        
+
         output = output[..., :n_samples]
         return output
 
@@ -137,7 +157,7 @@ class AudioSegmentRenderer(object):
 #         super().__init__()
 #         self.dilated = nn.Conv1d(channels, channels, 3, padding=dilation, dilation=dilation)
 #         self.conv = nn.Conv1d(channels, channels, 1, 1, 0)
-    
+
 #     def forward(self, x):
 #         orig = x
 #         x = self.dilated(x)
@@ -154,9 +174,9 @@ class Summarizer(nn.Module):
 
     """
 
-    def __init__(self):
+    def __init__(self, disc=False):
         super().__init__()
-
+        self.disc = disc
 
         # self.context = nn.Sequential(
         #     DilatedBlock(model_dim, 1),
@@ -165,8 +185,10 @@ class Summarizer(nn.Module):
         #     DilatedBlock(model_dim, 1),
         # )
 
-        encoder = nn.TransformerEncoderLayer(model_dim, 4, model_dim, batch_first=True)
-        self.context = nn.TransformerEncoder(encoder, 6, norm=None)
+        encoder = nn.TransformerEncoderLayer(
+            model_dim, 4, model_dim, batch_first=True, activation=F.gelu)
+        self.context = nn.TransformerEncoder(
+            encoder, 6, norm=None)
 
         self.reduce = nn.Conv1d(model_dim + 33, model_dim, 1, 1, 0)
 
@@ -175,75 +197,106 @@ class Summarizer(nn.Module):
 
         self.env_factor = 32
         self.to_env = ConvUpsample(
-            event_dim, model_dim, 8, n_frames * self.env_factor, mode='nearest', out_channels=1)
+            event_dim, model_dim, 8, n_frames * self.env_factor, mode='learned', out_channels=1)
         self.to_coeffs = ConvUpsample(
-            event_dim, model_dim, 8, n_frames, mode='nearest', out_channels=n_coeffs * 2)
+            event_dim, model_dim, 8, n_frames, mode='learned', out_channels=n_coeffs * 2)
+
+        self.judge = nn.Linear(model_dim, 1)
 
     def forward(self, x, add_noise=False):
         batch = x.shape[0]
         x = x.view(-1, 1, n_samples)
         x = torch.abs(fb.convolve(x))
         x = fb.temporal_pooling(x, window_size, step_size)[..., :n_frames]
-        pos = pos_encoded(batch, n_frames, 16, device=x.device).permute(0, 2, 1)
+        pos = pos_encoded(batch, n_frames, 16,
+                          device=x.device).permute(0, 2, 1)
         x = torch.cat([x, pos], dim=1)
         x = self.reduce(x)
 
         x = x.permute(0, 2, 1)
-        x = self.context(x) 
+        x = self.context(x)
+        if self.disc:
+            x = self.judge(x)
+            x = torch.sigmoid(x)
+            return x
+
         attn = torch.softmax(self.attend(x).view(batch, n_frames), dim=-1)
         x = x.permute(0, 2, 1)
-        x, indices = sparsify_vectors(x, attn, n_events)
+        x, indices = sparsify_vectors(x, attn, n_events, normalize=True)
         x = self.to_events(x)
 
         x = x.view(-1, event_dim)
-        env = self.to_env.forward(x).view(batch * n_events, 1, n_frames * self.env_factor) ** 2
+        env = self.to_env.forward(x).view(
+            batch * n_events, 1, n_frames * self.env_factor) ** 2
         env = F.interpolate(env, size=n_samples, mode='linear')
         env = F.pad(env, (0, step_size))
-        env = env.unfold(-1, window_size, step_size) * torch.hamming_window(window_size, device=env.device)[None, None, None, :]
-        env = env.view(batch * n_events, 1, n_frames, window_size).permute(0, 3, 1, 2).view(batch * n_events, window_size, n_frames)
+        env = env.unfold(-1, window_size, step_size) * torch.hamming_window(
+            window_size, device=env.device)[None, None, None, :]
+        env = env.view(batch * n_events, 1, n_frames, window_size).permute(0,3, 1, 2).view(batch * n_events, window_size, n_frames)
 
-
-        tf = torch.sigmoid(self.to_coeffs(x).view(batch * n_events, n_coeffs * 2, n_frames))
-        
+        tf = self.to_coeffs(x).view(batch * n_events, n_coeffs * 2, n_frames)
 
         return x, env, tf, indices
 
 
-
 class Model(nn.Module):
-    def __init__(self):
+    def __init__(self, disc=False):
         super().__init__()
-        self.summary = Summarizer()
+        self.summary = Summarizer(disc=disc)
         self.atom_renderer = EventRenderer()
         self.audio_renderer = AudioSegmentRenderer()
+        self.disc = disc
         self.apply(init_weights)
-    
+
     def render(self, params, env, tf, indices):
         atoms = self.atom_renderer.render(params, env, tf)
         audio = self.audio_renderer.render(atoms, params, indices)
         return audio
-    
+
     def forward(self, x, add_noise=False):
-        x, env, tf, indices = self.summary(x, add_noise=add_noise)
-        return x, env, tf, indices
+        if self.disc:
+            return self.summary(x)
+        else:
+            x, env, tf, indices = self.summary(x, add_noise=add_noise)
+            return x, env, tf, indices
 
 
 model = Model().to(device)
-optim = optimizer(model, lr=1e-4)
+optim = optimizer(model, lr=1e-3)
+
+# disc = Model(disc=True).to(device)
+# disc_optim = optimizer(disc, lr=1e-4)
 
 
 def train_model(batch):
     optim.zero_grad()
     params, env, tf, indices = model.forward(batch)
     recon = model.render(params, env, tf, indices)
-    real_spec = stft(batch, window_size, step_size, pad=True)
-    fake_spec = stft(recon, window_size, step_size, pad=True)
-    loss = perceptual_loss(fake_spec, real_spec)
+
+
+    # env_loss = torch.abs(env).sum() * 0.01
+    recon_loss = perceptual_loss(recon, batch) 
+
+    loss = recon_loss
     loss.backward()
     optim.step()
     return env, loss, recon
 
-# TODO: Base class
+
+# def train_disc(batch):
+#     disc_optim.zero_grad()
+
+#     params, env, tf, indices = model.forward(batch)
+#     recon = model.render(params, env, tf, indices)
+
+#     rj = disc.forward(batch)
+#     fj = disc.forward(recon)
+
+#     loss = torch.abs(1 - rj).mean() + torch.abs(0 - fj).mean()
+#     loss.backward()
+#     disc_optim.step()
+#     return loss
+
 
 @readme
 class TransferFunctionReinforcementLearning(object):
@@ -254,28 +307,30 @@ class TransferFunctionReinforcementLearning(object):
         self.fake = None
         self.real = None
         self.env = None
-    
+
     def orig(self):
         return playable(self.real, samplerate)
-    
+
     def real_spec(self):
         return np.abs(zounds.spectral.stft(self.orig()))
-    
+
     def listen(self):
         return playable(self.fake, samplerate)
-    
+
     def fake_spec(self):
         return np.abs(zounds.spectral.stft(self.listen()))
 
     def e(self):
-        return self.env.data.cpu().numpy().squeeze()
-    
+        return self.env.data.cpu().numpy().squeeze().sum(axis=1)
+
     def run(self):
         for i, item in enumerate(self.stream):
             item = item.view(-1, 1, n_samples)
             self.real = item
 
+            # if i % 2 == 0:
             self.env, loss, self.fake = train_model(item)
             print('GEN', loss.item())
-            
-            
+            # else:
+            # disc_loss = train_disc(item)
+            # print('DISC', disc_loss.item())

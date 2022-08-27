@@ -69,11 +69,11 @@ def mag_phase_decomposition(spec, freqs):
         phase,
         dim=1,
         prepend=torch.zeros(batch_size, 1, spec.shape[-1]).to(spec.device))
-    phase = phase % (2 * np.pi)
+    # phase = phase % (2 * np.pi)
 
-    freqs = freqs * 2 * np.pi
+    # freqs = freqs * 2 * np.pi
     # subtract the expected value
-    phase = phase - freqs[None, None, :]
+    # phase = phase - freqs[None, None, :]
 
     return torch.cat([mag[..., None], phase[..., None]], dim=-1)
 
