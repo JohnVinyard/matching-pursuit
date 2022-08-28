@@ -24,19 +24,6 @@ class DelayLine(object):
         # self.buffer.append(x)
         return output
 
-class Filter(object):
-    def __init__(self, n_samples):
-        super().__init__()
-        self.buffer = []
-    
-    def append(self, x):
-        self.buffer.append(x)
-    
-    def forward(self, x):
-        output = 0
-        if len(self.buffer) > self.n_samples:
-            output = sum(self.buffer) / n_samples
-        return output
 
 if __name__ == '__main__':
 
@@ -48,8 +35,7 @@ if __name__ == '__main__':
 
     o = []
     n = np.random.uniform(-1, 1, 32)
-    delay = DelayLine(450, decay=0.95)
-    filt = Filter(4)
+    delay = DelayLine(512, decay=0.95)
 
     for i in range(n_samples):
         s = 0
@@ -57,7 +43,6 @@ if __name__ == '__main__':
             s += n[i]
         
         d = delay.forward(s)
-        d = filt.forward(d)
         s += d
         delay.append(s)
         o.append(s)

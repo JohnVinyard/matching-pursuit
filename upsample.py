@@ -165,7 +165,8 @@ class ConvUpsample(nn.Module):
             end_size,
             mode,
             out_channels,
-            from_latent=True):
+            from_latent=True,
+            batch_norm=False):
 
         super().__init__()
         self.latent_dim = latent_dim
@@ -196,8 +197,8 @@ class ConvUpsample(nn.Module):
 
         self.net = nn.Sequential(*[nn.Sequential(
             layer(channels, size),
-            nn.LeakyReLU(0.2)
-
+            nn.BatchNorm1d(channels) if batch_norm else nn.Identity(),
+            nn.LeakyReLU(0.2),
         ) for _, size in iter_layers(start_size, end_size)])
 
         self.final = nn.Conv1d(channels, self.out_channels, 3, 1, 1)

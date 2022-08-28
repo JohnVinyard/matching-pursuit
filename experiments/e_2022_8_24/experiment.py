@@ -54,13 +54,13 @@ mel_scale = MelScale()
 codec = AudioCodec(mel_scale)
 
 def perceptual_feature(x):
-    # bands = pif.compute_feature_dict(x)
-    # return torch.cat(list(bands.values()), dim=-1)
+    bands = pif.compute_feature_dict(x)
+    return torch.cat(list(bands.values()), dim=-1)
     # return stft(
-    #     x, window_size, step_size, pad=True, log_amplitude=True)
+        # x, window_size, step_size, pad=True, log_amplitude=True)
 
-    spec = codec.to_frequency_domain(x.view(-1, n_samples))
-    return torch.abs(spec)
+    # spec = codec.to_frequency_domain(x.view(-1, n_samples))
+    # return torch.abs(spec)
 
 
 def perceptual_loss(a, b):
@@ -97,14 +97,14 @@ class EventRenderer(object):
         real = coeffs[:, :n_coeffs, :]
         imag = coeffs[:, n_coeffs:, :]
 
-        real = torch.norm(transfer.view(batch, n_coeffs, 2, n_frames), dim=2)
+        # real = torch.norm(transfer.view(batch, n_coeffs, 2, n_frames), dim=2)
 
-        r = real.view(batch, -1)
-        mx, _ = torch.max(r, dim=-1,keepdim=True)
-        r = r / (mx + 1e-8)
-        real = r.view(batch, n_coeffs, n_frames) * 0.9999
+        # r = real.view(batch, -1)
+        # mx, _ = torch.max(r, dim=-1,keepdim=True)
+        # r = r / (mx + 1e-8)
+        # real = 0.8 + (r.view(batch, n_coeffs, n_frames) * 0.1999)
 
-        imag = torch.angle(torch.complex(real, imag)) * np.pi
+        # imag = torch.angle(torch.complex(real, imag)) * np.pi
         tf = real * torch.exp(1j * imag)
 
         output_frames = []
@@ -197,9 +197,9 @@ class Summarizer(nn.Module):
 
         self.env_factor = 32
         self.to_env = ConvUpsample(
-            event_dim, model_dim, 8, n_frames * self.env_factor, mode='learned', out_channels=1)
+            event_dim, model_dim, 8, n_frames * self.env_factor, mode='learned', out_channels=1, batch_norm=True)
         self.to_coeffs = ConvUpsample(
-            event_dim, model_dim, 8, n_frames, mode='learned', out_channels=n_coeffs * 2)
+            event_dim, model_dim, 8, n_frames, mode='learned', out_channels=n_coeffs * 2, batch_norm=True)
 
         self.judge = nn.Linear(model_dim, 1)
 
@@ -224,6 +224,11 @@ class Summarizer(nn.Module):
         x = x.permute(0, 2, 1)
         x, indices = sparsify_vectors(x, attn, n_events, normalize=True)
         x = self.to_events(x)
+
+        # print('STD', x.std())
+        # norms = torch.norm(x, dim=-1, keepdim=True)
+        # x = (x / (norms + 1e-8)) * 10
+
 
         x = x.view(-1, event_dim)
         env = self.to_env.forward(x).view(
@@ -309,13 +314,13 @@ class TransferFunctionReinforcementLearning(object):
         self.env = None
 
     def orig(self):
-        return playable(self.real, samplerate)
+        return playable(self.real, samplerate, normalize=True)
 
     def real_spec(self):
         return np.abs(zounds.spectral.stft(self.orig()))
 
     def listen(self):
-        return playable(self.fake, samplerate)
+        return playable(self.fake, samplerate, normalize=True)
 
     def fake_spec(self):
         return np.abs(zounds.spectral.stft(self.listen()))
@@ -326,6 +331,9 @@ class TransferFunctionReinforcementLearning(object):
     def run(self):
         for i, item in enumerate(self.stream):
             item = item.view(-1, 1, n_samples)
+            std = item.std(axis=-1, keepdim=True)
+            item = item / (std + 1e-4)
+
             self.real = item
 
             # if i % 2 == 0:
