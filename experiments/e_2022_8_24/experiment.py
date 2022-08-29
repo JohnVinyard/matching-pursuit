@@ -4,6 +4,7 @@ import zounds
 from torch.nn import functional as F
 from modules.phase import AudioCodec, MelScale, overlap_add
 from modules.psychoacoustic import PsychoacousticFeature
+from modules.scattering import MoreCorrectScattering
 from modules.stft import stft
 from modules.pos_encode import pos_encoded
 from modules.sparse import sparsify_vectors
@@ -53,14 +54,23 @@ pif = PsychoacousticFeature().to(device)
 mel_scale = MelScale()
 codec = AudioCodec(mel_scale)
 
+long_window = 4096
+long_step = long_window // 2
+long_coeffs = long_window // 2 + 1
+long_frames = n_samples // long_step
+
+scatter_scale = zounds.MelScale(band, 32)
+scatter = MoreCorrectScattering(samplerate, scatter_scale, 512, 0.1).to(device)
+
 def perceptual_feature(x):
-    bands = pif.compute_feature_dict(x)
-    return torch.cat(list(bands.values()), dim=-1)
-    # return stft(
-        # x, window_size, step_size, pad=True, log_amplitude=True)
+    # bands = pif.compute_feature_dict(x)
+    # return torch.cat(list(bands.values()), dim=-1)
+    return stft(
+        x, window_size, step_size, pad=True, log_amplitude=True)
+    # return scatter.forward(x)
 
     # spec = codec.to_frequency_domain(x.view(-1, n_samples))
-    # return torch.abs(spec)
+    # return spec[..., 0]
 
 
 def perceptual_loss(a, b):
@@ -83,32 +93,34 @@ class EventRenderer(object):
 
         # TODO: This could be sparse interpolation for much finer control
         # TODO: Energy gets harder and harder to apply?
-        env = env.view(batch, -1, n_frames)
+        env = env.view(batch, -1, long_frames)
 
         amp = env
-        noise = torch.zeros(batch, window_size, n_frames,
+        noise = torch.zeros(batch, long_window, long_frames,
                             device=env.device).uniform_(-1, 1)
         energy = amp * noise
 
-        transfer = transfer.view(batch, n_coeffs * 2, n_frames)
+        transfer = transfer.view(batch, long_coeffs * 2, long_frames)
         coeffs = transfer
 
         # TODO: Figure out magnitude
-        real = coeffs[:, :n_coeffs, :]
-        imag = coeffs[:, n_coeffs:, :]
+        real = coeffs[:, :long_coeffs, :]
+        imag = coeffs[:, long_coeffs:, :]
 
-        # real = torch.norm(transfer.view(batch, n_coeffs, 2, n_frames), dim=2)
+        real = torch.norm(transfer.view(batch, long_coeffs, 2, long_frames), dim=2)
 
-        # r = real.view(batch, -1)
-        # mx, _ = torch.max(r, dim=-1,keepdim=True)
-        # r = r / (mx + 1e-8)
-        # real = 0.8 + (r.view(batch, n_coeffs, n_frames) * 0.1999)
+        # ensure the transfer function is stable by 
+        r = real.view(batch, -1)
+        mx, _ = torch.max(r, dim=-1,keepdim=True)
+        r = r / (mx + 1e-8)
+        # real = 0.8 + (r.view(batch, long_coeffs, long_frames) * 0.1999)
+        real = r.view(batch, long_coeffs, long_frames)
 
-        # imag = torch.angle(torch.complex(real, imag)) * np.pi
+        imag = torch.angle(torch.complex(real, imag)) * np.pi
         tf = real * torch.exp(1j * imag)
 
         output_frames = []
-        for i in range(n_frames):
+        for i in range(long_frames):
 
             if len(output_frames):
                 local_energy = output_frames[-1] + energy[:, :, i: i + 1]
@@ -117,15 +129,13 @@ class EventRenderer(object):
 
             spec = torch.fft.rfft(local_energy, dim=1, norm='ortho')
             spec = spec * tf[:, :, i: i + 1]
-            new_frame = \
-                torch.fft.irfft(spec, dim=1, norm='ortho') \
-                * torch.hamming_window(window_size, device=env.device)[None, :, None]
+            new_frame = torch.fft.irfft(spec, dim=1, norm='ortho')
 
             output_frames.append(new_frame)
 
         output_frames = torch.cat(output_frames, dim=-1)
         output_frames = output_frames.view(
-            batch, 1, window_size, n_frames).permute(0, 1, 3, 2)
+            batch, 1, long_window, long_frames).permute(0, 1, 3, 2)
         output = overlap_add(output_frames)[..., :n_samples]
         output = output.view(batch, 1, n_samples)
         return output
@@ -197,9 +207,9 @@ class Summarizer(nn.Module):
 
         self.env_factor = 32
         self.to_env = ConvUpsample(
-            event_dim, model_dim, 8, n_frames * self.env_factor, mode='learned', out_channels=1, batch_norm=True)
+            event_dim, model_dim, 8, n_frames * self.env_factor, mode='learned', out_channels=1)
         self.to_coeffs = ConvUpsample(
-            event_dim, model_dim, 8, n_frames, mode='learned', out_channels=n_coeffs * 2, batch_norm=True)
+            event_dim, model_dim, 8, long_frames, mode='learned', out_channels=long_coeffs * 2)
 
         self.judge = nn.Linear(model_dim, 1)
 
@@ -234,12 +244,18 @@ class Summarizer(nn.Module):
         env = self.to_env.forward(x).view(
             batch * n_events, 1, n_frames * self.env_factor) ** 2
         env = F.interpolate(env, size=n_samples, mode='linear')
-        env = F.pad(env, (0, step_size))
-        env = env.unfold(-1, window_size, step_size) * torch.hamming_window(
-            window_size, device=env.device)[None, None, None, :]
-        env = env.view(batch * n_events, 1, n_frames, window_size).permute(0,3, 1, 2).view(batch * n_events, window_size, n_frames)
+    
+        env = F.pad(env, (0, long_step))
+        env = env\
+            .unfold(-1, long_window, long_step) \
+            * torch.hamming_window(long_window, device=env.device)[None, None, None, :]
+        
+        env = env\
+            .view(batch * n_events, 1, long_frames, long_window)\
+            .permute(0,3, 1, 2)\
+            .view(batch * n_events, long_window, long_frames)
 
-        tf = self.to_coeffs(x).view(batch * n_events, n_coeffs * 2, n_frames)
+        tf = self.to_coeffs(x).view(batch * n_events, long_coeffs * 2, long_frames)
 
         return x, env, tf, indices
 

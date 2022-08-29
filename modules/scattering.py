@@ -1,4 +1,3 @@
-from curses import window
 import torch
 import numpy as np
 from torch.nn import functional as F
@@ -9,6 +8,7 @@ from torch import nn
 import zounds
 
 from scratch import filter_bank
+from util import device
 
 
 class MoreCorrectScattering(ScriptModule):
@@ -27,7 +27,7 @@ class MoreCorrectScattering(ScriptModule):
             scale,
             scaling_factors,
             normalize_filters=True,
-            a_weighting=False)
+            a_weighting=False).to(device)
 
         self.filter_bank = filter_bank.filter_bank
         self.window_size = kernel_size

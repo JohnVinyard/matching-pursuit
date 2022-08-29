@@ -35,7 +35,7 @@ if __name__ == '__main__':
 
     o = []
     n = np.random.uniform(-1, 1, 32)
-    delay = DelayLine(512, decay=0.95)
+    delay = DelayLine(240, decay=0.95)
 
     for i in range(n_samples):
         s = 0
