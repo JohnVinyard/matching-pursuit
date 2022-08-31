@@ -90,7 +90,7 @@ class PsychoacousticFeature(nn.Module):
             return x
 
         batch_size = x.shape[0]
-        x = x.view(batch_size, 1, -1)
+        x = x.reshape(batch_size, 1, -1)
         x = self.decompose(x)
         return x
 

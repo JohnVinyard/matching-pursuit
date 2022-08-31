@@ -138,13 +138,21 @@ class PosEncodedUpsample(nn.Module):
             channels, size, 16, latent_dim, multiply, learnable_encodings, concat=concat)
 
         if self.transformer:
+            encoder = nn.TransformerEncoderLayer(channels, 4, channels, batch_first=True)
             self.net = nn.Sequential(
-                Transformer(channels, layers),
-                nn.Linear(channels, out_channels)
-            )
+                    nn.TransformerEncoder(encoder, layers, norm=None),
+                    nn.Linear(channels, 1)
+                )
+            
+            # self.net = nn.Sequential(
+            #     Transformer(channels, layers),
+            #     nn.Linear(channels, out_channels)
+            # )
         else:
             self.net = LinearOutputStack(
-                channels, layers, out_channels=out_channels)
+                channels, layers, out_channels=1)
+
+            
 
         self.apply(init_weights)
 

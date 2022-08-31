@@ -1,6 +1,8 @@
 import torch
 from torch import nn
+import zounds
 
+from modules.stft import morlet_filter_bank
 
 def pos_encode_feature(x, domain, n_samples, n_freqs):
     # batch, time, _ = x.shape
@@ -63,7 +65,8 @@ class ExpandUsingPosEncodings(nn.Module):
         self.n_freqs = n_freqs
         self.latent_dim = latent_dim
         self.channels = channels
-        n_freqs = n_features_for_freq(n_freqs)
+        # n_freqs = n_features_for_freq(n_freqs)
+        n_freqs = 256
         self.embed_pos = nn.Linear(n_freqs, channels)
         self.embed_latent = nn.Linear(latent_dim, channels)
         self.multiply = multiply
@@ -75,8 +78,19 @@ class ExpandUsingPosEncodings(nn.Module):
             self.cat = nn.Linear(channels * 2, channels)
     
     def _get_pos_encodings(self, batch_size, device):
+        samplerate = zounds.SR22050()
+        band = zounds.FrequencyBand(0.001, samplerate.nyquist)
+        scale = zounds.MelScale(band, 128)
+        bank = torch.from_numpy(morlet_filter_bank(samplerate, 2**15, scale, 0.25, normalize=False).real)\
+            .float().view(1, 128, 2**15).permute(0, 2, 1).repeat(batch_size, 1, 1)
+        
+        bank = bank * (torch.linspace(1, 0, 128)[None, None, :]  ** 2)
+        bank = torch.cat([bank, -bank], dim=-1)
+        return bank
+        
         if not self.learnable_encodings:
-            return pos_encoded(batch_size, self.time_dim, self.n_freqs, device)
+            self.pos_encodings = pos_encoded(batch_size, self.time_dim, self.n_freqs, device)
+            return self.pos_encodings
         
         if self.pos_encodings is None:
             self.pos_encodings = nn.Parameter(

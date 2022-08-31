@@ -25,11 +25,11 @@ samplerate = zounds.SR22050()
 
 piano_samples = None
 
-pif = PsychoacousticFeature([128] * 6).to(device)
+pif = PsychoacousticFeature().to(device)
 print(pif.band_sizes)
 
-scale = MelScale()
-codec = AudioCodec(scale)
+mel_scale = MelScale()
+codec = AudioCodec(mel_scale)
 
 n_bands = 512
 kernel_size = 512
@@ -48,7 +48,9 @@ aim = AuditoryImage(512, 128, do_windowing=False, check_cola=False).to(device)
 
 
 def perceptual_feature(x):
-    spec = stft(x, 512, 256)
+    # x = x.view(1, 1, 2**15)
+    # spec = stft(x, 512, 256, log_amplitude=True)
+    # return spec
 
     # x = torch.abs(fb.convolve(x))
     # x = fb.temporal_pooling(x, 512, 256)
@@ -57,17 +59,19 @@ def perceptual_feature(x):
     # x = aim.forward(x)
 
     bands = pif.compute_feature_dict(x.view(1, 1, -1))
-    bands = torch.cat(list(bands.values()), dim=-2)
+    bands = torch.cat(list(bands.values()), dim=-1)
+    return bands
 
-    env = torch.abs(x).view(1, 1, -1)
-    env = F.avg_pool1d(env, 64, 32)
+    # env = torch.abs(x).view(1, 1, -1)
+    # env = F.avg_pool1d(env, 64, 32)
 
     # x = codec.to_frequency_domain(x.view(1, -1))
-    x = torch.cat([
-        spec.view(-1), 
-        bands.view(-1), 
-        env.view(-1)
-    ])
+    # x = torch.abs(mel_scale.to_frequency_domain(x.view(1, -1)))
+    # x = torch.cat([
+    #     # spec.view(-1),
+    #     bands.view(-1),
+    #     # env.view(-1)
+    # ])
     return x
 
 
@@ -77,6 +81,94 @@ def perceptual_loss(a, b):
     loss = F.mse_loss(a, b)
     # loss = torch.abs(a - b).sum() / a.shape[0]
     return loss
+
+
+class LayeredTransferFunctionModel(nn.Module):
+    def __init__(self, n_samples):
+        super().__init__()
+        self.n_samples = n_samples
+
+        self.n_frames = 128
+        self.n_coeffs = n_samples // 2 + 1
+
+        self.register_buffer('env', torch.linspace(1, 0, 128).view(1, 1, 128) ** 20)
+
+        self.transfer = nn.Parameter(
+            torch.zeros(1, 1, self.n_frames, self.n_samples).uniform_(-0.01, 0.01),
+        )
+
+        self.transfer = nn.Parameter(
+            torch.complex(
+                torch.zeros(1, 1, self.n_frames, self.n_samples // 2 + 1).uniform_(-0.01, 0.01),
+                torch.zeros(1, 1, self.n_frames, self.n_samples // 2 + 1).uniform_(-0.01, 0.01),
+            )
+        )
+
+    def forward(self, x):
+
+        # get the impulses at the correct sample rate
+        noise = torch.zeros(self.n_samples).uniform_(-1, 1)
+        env = F.interpolate(self.env, size=self.n_samples, mode='linear')
+        env = torch.abs(env)
+        env = env * noise
+
+        # window and pad the envelope
+        env = F.pad(env, (0, 256))
+        env = env.unfold(-1, 512, 256)
+        env = env * torch.hamming_window(512)[None, None, None:]
+
+        remaining = torch.zeros(1, 1, 128, self.n_samples - 512)
+        env = torch.cat([env, remaining], dim=-1)
+        env = torch.fft.rfft(env, dim=-1, norm='ortho')
+
+        # tf = torch.fft.rfft(self.transfer, dim=-1, norm='ortho')
+        tf = self.transfer
+
+        # r = torch.clamp(self.transfer.real, 0, 1)
+        # a = self.transfer.imag
+
+        # tf = torch.complex(
+        #     r * torch.cos(a),
+        #     r * torch.sin(a)
+        # )
+
+        spec = env * tf
+        long_frames = torch.fft.irfft(spec, dim=-1, norm='ortho')
+
+        final = torch.zeros(1, 1, self.n_samples * 2)
+
+        for i in range(128):
+            start = i * 256
+            stop = start + self.n_samples
+            final[:, :, start: stop] += long_frames[:, :, i, :]
+
+        final = final[..., :self.n_samples]
+        return final
+
+
+class SuperSimpleSourceExcitationModel(nn.Module):
+    def __init__(self, n_samples):
+        super().__init__()
+
+        # self.env = nn.Parameter(torch.zeros(1, 1, 128).uniform_(-0.01, 0.01))
+        self.register_buffer('env', torch.hamming_window(128).view(1, 1, 128))
+        self.transfer = nn.Parameter(torch.complex(
+            torch.zeros(1, 1, n_samples // 2 + 1).uniform_(-0.01, 0.01),
+            torch.zeros(1, 1, n_samples // 2 + 1).uniform_(-0.01, 0.01)
+        ))
+        self.n_samples = n_samples
+
+    def forward(self, x):
+        noise = torch.zeros(self.n_samples).uniform_(-1, 1)
+        env = F.interpolate(self.env, size=self.n_samples, mode='linear')
+        env = torch.abs(env)
+        env = env * noise
+
+        env = torch.fft.rfft(env, dim=-1, norm='ortho')
+        spec = env * self.transfer
+        final = torch.fft.irfft(spec, dim=-1, norm='ortho')
+        return final.view(1, 1, self.n_samples)
+
 
 class KarplusStrong(nn.Module):
     def __init__(self, memory_size, n_samples):
@@ -88,20 +180,20 @@ class KarplusStrong(nn.Module):
 
         n_frames = (piano_samples // 256) + 2
 
-        self.excitation_env = nn.Parameter(torch.zeros(n_frames * 32).uniform_(0, 0.01))
+        self.excitation_env = nn.Parameter(
+            torch.zeros(n_frames * 32).uniform_(0, 0.01))
 
         transfer_functions = torch.zeros(2, n_frames, 257).fill_(0.2)
         self.transfer_functions = nn.Parameter(torch.complex(
             transfer_functions[0, ...], transfer_functions[1, ...]))
 
-        
         excitation_transfer_function = torch.zeros(2, 257).fill_(0.2)
         self.excitation_transfer_functions = nn.Parameter(torch.complex(
             excitation_transfer_function[0, ...], excitation_transfer_function[1, ...]))
 
         self.learned_impulse = False
 
-        # it's a bit choppy, but it's possible to learn the appropiate 
+        # it's a bit choppy, but it's possible to learn the appropiate
         # impulse for the piano signal
         self.continuous_excitation = True
 
@@ -118,18 +210,16 @@ class KarplusStrong(nn.Module):
         # for i in range((self.n_samples // 256) - 1):
         i = 0
 
-
         excitation = (self.excitation_env ** 2).view(1, 1, -1)
-        excitation = F.upsample(excitation, scale_factor=256 // 32, mode='linear')
-
+        excitation = F.upsample(
+            excitation, scale_factor=256 // 32, mode='linear')
 
         while (i * 256) < piano_samples:
-            
+
             # excitation = self.excitation_env[i * 8: i * 8 + 8].view(1, 1, -1) ** 2
             # excitation = F.upsample(excitation, size=512)
             exc = excitation[:, :, i * 256: i * 256 + 512]
-            
-            
+
             impulse = (torch.zeros(512).uniform_(-1, 1).to(device) * exc)
             spec = torch.fft.rfft(impulse, norm='ortho')
             spec = spec * self.excitation_transfer_functions
@@ -144,7 +234,8 @@ class KarplusStrong(nn.Module):
                 output[-1] = output[-1] + impulse
 
             spec = torch.fft.rfft(output[-1], dim=-1, norm='ortho')
-            filtered = spec * self.transfer_functions[i if self.dynamic_transfer else 0]
+            filtered = spec * \
+                self.transfer_functions[i if self.dynamic_transfer else 0]
             new_block = torch.fft.irfft(filtered, dim=-1, norm='ortho')
 
             new_block = new_block * torch.hamming_window(512).to(device)
@@ -255,7 +346,7 @@ def simulate(entry_coord, entry_block, sampling_coord, width, height):
     return samples, all_states
 
 
-samples, _ = load('/home/user/workspace/audio-data/piano.wav')
+samples, _ = load('/home/john/workspace/audio-data/piano.wav')
 
 if samples.shape[0] < 2**15:
     samples = np.pad(samples, [(0, 2**15 - len(samples))])
@@ -266,7 +357,10 @@ samples = zounds.AudioSamples(samples, zounds.SR22050())
 piano_samples = samples.shape[0]
 print(samples.shape)
 
-model = KarplusStrong(256, 2**15).to(device)
+# model = KarplusStrong(256, 2**15).to(device)
+# model = SuperSimpleSourceExcitationModel(2**15)
+
+model = LayeredTransferFunctionModel(2**15)
 optim = optimizer(model, lr=1e-2)
 
 if __name__ == '__main__':
@@ -296,7 +390,10 @@ if __name__ == '__main__':
 
     def excitation():
         return np.abs(model.excitation_env.data.cpu().numpy().squeeze())[:-2]
-    
+
+    def env():
+        return np.abs(model.env.data.cpu().numpy().squeeze())
+
     def impulse():
         return model.impulse.data.cpu().numpy().squeeze()
 
