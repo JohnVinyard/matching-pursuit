@@ -57,7 +57,8 @@ class ExpandUsingPosEncodings(nn.Module):
             latent_dim,
             multiply=False,
             learnable_encodings=False,
-            concat=False):
+            concat=False,
+            filter_bank=False):
 
         super().__init__()
         self.learnable_encodings = learnable_encodings
@@ -65,28 +66,38 @@ class ExpandUsingPosEncodings(nn.Module):
         self.n_freqs = n_freqs
         self.latent_dim = latent_dim
         self.channels = channels
-        # n_freqs = n_features_for_freq(n_freqs)
-        n_freqs = 256
+        if filter_bank:
+            n_freqs = 256
+        else:
+            n_freqs = n_features_for_freq(n_freqs)
         self.embed_pos = nn.Linear(n_freqs, channels)
         self.embed_latent = nn.Linear(latent_dim, channels)
         self.multiply = multiply
         self.pos_encodings = None
         self.concat = concat
 
+        self.filter_bank = filter_bank
 
         if self.concat:
             self.cat = nn.Linear(channels * 2, channels)
+        
+        self.samplerate = zounds.SR22050()
+        band = zounds.FrequencyBand(0.001, self.samplerate.nyquist)
+        self.scale = zounds.MelScale(band, 128)
     
     def _get_pos_encodings(self, batch_size, device):
-        samplerate = zounds.SR22050()
-        band = zounds.FrequencyBand(0.001, samplerate.nyquist)
-        scale = zounds.MelScale(band, 128)
-        bank = torch.from_numpy(morlet_filter_bank(samplerate, 2**15, scale, 0.25, normalize=False).real)\
-            .float().view(1, 128, 2**15).permute(0, 2, 1).repeat(batch_size, 1, 1)
-        
-        bank = bank * (torch.linspace(1, 0, 128)[None, None, :]  ** 2)
-        bank = torch.cat([bank, -bank], dim=-1)
-        return bank
+        if self.filter_bank:
+            bank = torch.from_numpy(
+                morlet_filter_bank(self.samplerate, 2**15, self.scale, 0.25, normalize=False).real)\
+                .to(device)\
+                .float()\
+                .view(1, 128, 2**15)\
+                .permute(0, 2, 1)\
+                .repeat(batch_size, 1, 1)
+            
+            bank = bank * (torch.linspace(1, 0, 128, device=device)[None, None, :]  ** 2)
+            bank = torch.cat([bank, -bank], dim=-1)
+            return bank
         
         if not self.learnable_encodings:
             self.pos_encodings = pos_encoded(batch_size, self.time_dim, self.n_freqs, device)

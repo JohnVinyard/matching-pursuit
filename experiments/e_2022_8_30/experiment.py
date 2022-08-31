@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 import zounds
+from modules.ddsp import overlap_add
 from modules.phase import MelScale
 from modules.psychoacoustic import PsychoacousticFeature
 from modules.sparse import sparsify_vectors
@@ -23,13 +24,13 @@ window_size = 512
 step_size = window_size // 2
 n_frames = n_samples // step_size
 
-n_bands = 128
-kernel_size = 512
+n_bands = 64
+kernel_size = 256
 
-n_events = 16
+n_events = 8
 
-model_dim = 128
-event_dim = 128
+model_dim = 64
+event_dim = model_dim
 
 band = zounds.FrequencyBand(40, samplerate.nyquist)
 scale = zounds.MelScale(band, n_bands)
@@ -44,20 +45,14 @@ fb = zounds.learn.FilterBank(
 
 init_weights = make_initializer(0.1)
 
-pif = PsychoacousticFeature().to(device)
+pif = PsychoacousticFeature([128] * 6).to(device)
 
 mel_scale = MelScale()
 
 def perceptual_feature(x):
-    # return stft(x, 512, 256, log_amplitude=True)
     bands = pif.compute_feature_dict(x)
-    return torch.cat(list(bands.values()), dim=-1)
-
-    # x = torch.abs(mel_scale.to_frequency_domain(x))
-    # x = fb.forward(x, normalize=False)
-    # x = fb.temporal_pooling(x, 512, 256)
-    # return x
-
+    return torch.cat(list(bands.values()), dim=-2)
+    
 
 def perceptual_loss(a, b):
     a = perceptual_feature(a)
@@ -69,7 +64,7 @@ class AudioSegmentRenderer(object):
     def __init__(self):
         super().__init__()
 
-    def render(self, x, params, indices):
+    def render(self, x, indices):
         x = x.view(-1, n_events, n_samples)
         batch = x.shape[0]
 
@@ -86,6 +81,15 @@ class AudioSegmentRenderer(object):
         return output
 
 
+class UnitNorm(nn.Module):
+    def __init__(self):
+        super().__init__()
+    
+    def forward(self, x):
+        norms = torch.norm(x, dim=-1, keepdim=True)
+        x = x / (norms + 1e-8)
+        return x
+
 class Summarizer(nn.Module):
     """
     Summarize a batch of audio samples into a set of sparse
@@ -99,86 +103,109 @@ class Summarizer(nn.Module):
         super().__init__()
 
         encoder = nn.TransformerEncoderLayer(
-            model_dim, 4, model_dim, batch_first=True, activation=F.gelu)
+            model_dim, 4, model_dim, batch_first=True)
         self.context = nn.TransformerEncoder(
-            encoder, 6, norm=None)
-
+            encoder, 4, norm=UnitNorm())
         self.reduce = nn.Conv1d(model_dim + 33, model_dim, 1, 1, 0)
-
         self.attend = nn.Linear(model_dim, 1)
         self.to_events = nn.Linear(model_dim, event_dim)
-
         self.env_factor = 32
 
-    def forward(self, x, add_noise=False):
+    def forward(self, x):
         batch = x.shape[0]
         x = x.view(-1, 1, n_samples)
         x = torch.abs(fb.convolve(x))
         x = fb.temporal_pooling(x, window_size, step_size)[..., :n_frames]
-        pos = pos_encoded(batch, n_frames, 16,
-                          device=x.device).permute(0, 2, 1)
+        
+        pos = pos_encoded(
+            batch, n_frames, 16, device=x.device).permute(0, 2, 1)
         x = torch.cat([x, pos], dim=1)
         x = self.reduce(x)
 
         x = x.permute(0, 2, 1)
         x = self.context(x)
-        if self.disc:
-            x = self.judge(x)
-            x = torch.sigmoid(x)
-            return x
 
         attn = torch.softmax(self.attend(x).view(batch, n_frames), dim=-1)
         x = x.permute(0, 2, 1)
         x, indices = sparsify_vectors(x, attn, n_events, normalize=True)
-        x = self.to_events(x)  # (batch, n_events, event_dim)
+        x = self.to_events(x) 
 
-        # => (batch, n_events, n_frames, n_samples)
+        x = x.view(batch * n_events, model_dim)
 
-        return x
+        return x, indices
 
 
-class Model(nn.Module):
-    def __init__(self, disc=False):
+class SequenceGenerator(nn.Module):
+    def __init__(self):
         super().__init__()
-        self.summary = Summarizer()
-        self.audio_renderer = AudioSegmentRenderer()
-        self.disc = disc
+        # self.env = PosEncodedUpsample(
+        #     latent_dim=model_dim,
+        #     channels=model_dim,
+        #     size=n_frames * 16,
+        #     out_channels=1,
+        #     layers=5,
+        #     concat=False,
+        #     learnable_encodings=False,
+        #     multiply=False,
+        #     transformer=False)
 
-        self.encode = nn.Sequential(
-            nn.Conv1d(1, 8, 11, 4, 5),  # 8192
-            nn.LeakyReLU(0.2),
-            nn.Conv1d(8, 16, 11, 4, 5),  # 2048
-            nn.LeakyReLU(0.2),
-            nn.Conv1d(16, 32, 11, 4, 5),  # 512
-            nn.LeakyReLU(0.2),
-            nn.Conv1d(32, 64, 11, 4, 5),  # 128
-            nn.LeakyReLU(0.2),
-            nn.Conv1d(64, 128, 11, 4, 5),  # 32
-            nn.LeakyReLU(0.2),
-            nn.Conv1d(128, 256, 11, 4, 5),  # 8
-            nn.LeakyReLU(0.2),
-            nn.Conv1d(256, 512, 3, 2, 1),  # 4
-            nn.LeakyReLU(0.2),
-            nn.Conv1d(512, 512, 4, 4, 0)
-        )
+        self.env = ConvUpsample(
+            model_dim, model_dim, 4, n_frames, mode='learned', out_channels=1)
 
-        self.up = PosEncodedUpsample(
-            latent_dim=512,
+        n_coeffs = window_size // 2 + 1
+        self.n_coeffs = n_coeffs
+        self.transfer = PosEncodedUpsample(
+            latent_dim=model_dim,
             channels=model_dim,
             size=n_samples,
             out_channels=1,
-            layers=5,
+            layers=2,
             concat=False,
-            learnable_encodings=False,
+            learnable_encodings=True,
             multiply=False,
-            transformer=False)
+            transformer=False,
+            filter_bank=True)
 
-        self.apply(init_weights)
+        
+        # self.transfer = ConvUpsample(
+        #     model_dim, model_dim, 4, n_samples, mode='learned', out_channels=1
+        # )
 
+        
 
     def forward(self, x):
-        x = self.encode(x)
-        x = self.up(x)
+        x = x.view(-1, model_dim)
+
+        env = self.env(x) ** 2
+        env = F.interpolate(env, size=n_samples, mode='linear')
+        noise = torch.zeros(1, 1, n_samples, device=env.device).uniform_(-1, 1)
+        env = env * noise
+        tf = self.transfer(x)
+
+
+        env_spec = torch.fft.rfft(env, dim=-1, norm='ortho')
+        tf_spec = torch.fft.rfft(tf, dim=-1, norm='ortho')
+        spec = env_spec * tf_spec
+        final = torch.fft.irfft(spec, dim=-1, norm='ortho')
+        return final
+
+
+class Model(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.summary = Summarizer()
+        self.audio_renderer = AudioSegmentRenderer()
+        self.gen = SequenceGenerator()
+        self.apply(init_weights)
+
+    def forward(self, x):
+        x, indices = self.summary(x)
+        x = self.gen(x)
+        x = self.audio_renderer.render(x, indices)
+
+        mx, _ = torch.max(x, dim=-1, keepdim=True)
+        x = x / (mx + 1e-8)
+
         return x
 
 
@@ -189,8 +216,7 @@ optim = optimizer(model, lr=1e-3)
 def train_model(batch):
     optim.zero_grad()
     recon = model.forward(batch)
-    recon_loss = perceptual_loss(recon, batch)
-    loss = recon_loss
+    loss = perceptual_loss(recon, batch)
     loss.backward()
     optim.step()
     return loss, recon
@@ -220,7 +246,7 @@ class TransferFunctionExperiment(object):
     def run(self):
         for i, item in enumerate(self.stream):
             item = item.view(-1, 1, n_samples)
-            
+
             self.real = item
             loss, self.fake = train_model(item)
             print('GEN', loss.item())
