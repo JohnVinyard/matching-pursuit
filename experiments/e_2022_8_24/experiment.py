@@ -42,7 +42,7 @@ fb = zounds.learn.FilterBank(
     samplerate,
     kernel_size,
     scale,
-    0.1,
+    0.25,
     normalize_filters=True,
     a_weighting=False).to(device)
 
@@ -65,12 +65,20 @@ scatter = MoreCorrectScattering(samplerate, scatter_scale, 512, 0.1).to(device)
 def perceptual_feature(x):
     # bands = pif.compute_feature_dict(x)
     # return torch.cat(list(bands.values()), dim=-1)
-    return stft(
-        x, window_size, step_size, pad=True, log_amplitude=True)
+    # x = fb.forward(x, normalize=False)
+    # x = fb.temporal_pooling(x, window_size, step_size)
+    # return x
+
+    # return stft(
+    #     x, window_size, step_size, pad=True, log_amplitude=True)
+    
     # return scatter.forward(x)
 
     # spec = codec.to_frequency_domain(x.view(-1, n_samples))
     # return spec[..., 0]
+
+    spec = mel_scale.to_frequency_domain(x.view(-1, n_samples))
+    return torch.abs(spec)
 
 
 def perceptual_loss(a, b):
@@ -104,19 +112,28 @@ class EventRenderer(object):
         coeffs = transfer
 
         # TODO: Figure out magnitude
-        real = coeffs[:, :long_coeffs, :]
+        real = torch.sigmoid(coeffs[:, :long_coeffs, :])
         imag = coeffs[:, long_coeffs:, :]
 
-        real = torch.norm(transfer.view(batch, long_coeffs, 2, long_frames), dim=2)
+        # real = torch.norm(transfer.view(batch, long_coeffs, 2, long_frames), dim=2)
 
         # ensure the transfer function is stable by 
-        r = real.view(batch, -1)
-        mx, _ = torch.max(r, dim=-1,keepdim=True)
-        r = r / (mx + 1e-8)
+        # r = real.view(batch, -1)
+        # r = torch.clamp(r, 0, 0.9999)
+        # mx, _ = torch.max(r, dim=-1,keepdim=True)
+        # r = (r / (mx + 1e-8))
         # real = 0.8 + (r.view(batch, long_coeffs, long_frames) * 0.1999)
-        real = r.view(batch, long_coeffs, long_frames)
+        # real = r.view(batch, long_coeffs, long_frames)
 
-        imag = torch.angle(torch.complex(real, imag)) * np.pi
+        # imag = torch.angle(torch.complex(real, imag)) * np.pi
+
+        real = real * torch.cos(imag)
+        imag = real * torch.sin(imag)
+
+        '''
+        x = r × cos( θ )
+        y = r × sin( θ )
+        '''
         tf = real * torch.exp(1j * imag)
 
         output_frames = []
@@ -283,7 +300,7 @@ class Model(nn.Module):
 
 
 model = Model().to(device)
-optim = optimizer(model, lr=1e-3)
+optim = optimizer(model, lr=1e-4)
 
 # disc = Model(disc=True).to(device)
 # disc_optim = optimizer(disc, lr=1e-4)
