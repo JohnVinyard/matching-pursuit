@@ -5,7 +5,7 @@ from modules.ddsp import overlap_add
 from modules.phase import MelScale
 from modules.psychoacoustic import PsychoacousticFeature
 from modules.sparse import sparsify_vectors
-from modules.stft import stft
+from modules.stft import morlet_filter_bank, stft
 from train.optim import optimizer
 from upsample import ConvUpsample, PosEncodedUpsample
 
@@ -25,7 +25,7 @@ step_size = window_size // 2
 n_frames = n_samples // step_size
 
 n_bands = 64
-kernel_size = 256
+kernel_size = 512
 
 n_events = 8
 
@@ -47,7 +47,9 @@ init_weights = make_initializer(0.1)
 
 pif = PsychoacousticFeature([128] * 6).to(device)
 
-mel_scale = MelScale()
+# mel_scale = MelScale()
+
+filt = torch.from_numpy(morlet_filter_bank(samplerate, n_samples, scale, 0.1).real).float().to(device)
 
 def perceptual_feature(x):
     bands = pif.compute_feature_dict(x)
@@ -154,39 +156,46 @@ class SequenceGenerator(nn.Module):
 
         n_coeffs = window_size // 2 + 1
         self.n_coeffs = n_coeffs
-        self.transfer = PosEncodedUpsample(
-            latent_dim=model_dim,
-            channels=model_dim,
-            size=n_samples,
-            out_channels=1,
-            layers=2,
-            concat=False,
-            learnable_encodings=True,
-            multiply=False,
-            transformer=False,
-            filter_bank=True)
+
+        # self.transfer = PosEncodedUpsample(
+        #     latent_dim=model_dim,
+        #     channels=model_dim,
+        #     size=n_samples,
+        #     out_channels=1,
+        #     layers=1,
+        #     concat=False,
+        #     learnable_encodings=True,
+        #     multiply=False,
+        #     transformer=False,
+        #     filter_bank=True)
 
         
-        # self.transfer = ConvUpsample(
-        #     model_dim, model_dim, 4, n_samples, mode='learned', out_channels=1
-        # )
+        self.transfer = ConvUpsample(
+            model_dim, model_dim, 4, n_samples, mode='learned', out_channels=1, batch_norm=True
+        )
 
         
 
     def forward(self, x):
         x = x.view(-1, model_dim)
 
-        env = self.env(x) ** 2
-        env = F.interpolate(env, size=n_samples, mode='linear')
-        noise = torch.zeros(1, 1, n_samples, device=env.device).uniform_(-1, 1)
-        env = env * noise
-        tf = self.transfer(x)
+        # env = self.env(x) ** 2
+        # env = F.interpolate(env, size=n_samples, mode='linear')
+        # noise = torch.zeros(1, 1, n_samples, device=env.device).uniform_(-1, 1)
+        # env = env * noise
+
+        # tf = self.transfer(x) ** 2
+        # tf = F.interpolate(tf, size=n_samples, mode='linear')
+        # tf = tf * filt
+        # tf = torch.sum(tf, dim=1, keepdim=True)
 
 
-        env_spec = torch.fft.rfft(env, dim=-1, norm='ortho')
-        tf_spec = torch.fft.rfft(tf, dim=-1, norm='ortho')
-        spec = env_spec * tf_spec
-        final = torch.fft.irfft(spec, dim=-1, norm='ortho')
+        # env_spec = torch.fft.rfft(env, dim=-1, norm='ortho')
+        # tf_spec = torch.fft.rfft(tf, dim=-1, norm='ortho')
+        # spec = env_spec * tf_spec
+        # final = torch.fft.irfft(spec, dim=-1, norm='ortho')
+
+        final = self.transfer(x)
         return final
 
 
