@@ -15,6 +15,7 @@ from util import device, playable, readme
 exp = Experiment(
     samplerate=zounds.SR22050(),
     n_samples=2**15,
+    weight_init=0.02
 )
 
 
@@ -118,7 +119,10 @@ class Model(nn.Module):
                 end = start + exp.n_samples
                 output[b, :, start: end] += events[b, i]
 
-        return output[..., :exp.n_samples]
+        x = output[..., :exp.n_samples]
+        mx, _ = torch.max(x, dim=-1, keepdim=True)
+        x = x / (mx + 1e-8)
+        return x
 
 
 model = Model().to(device)
