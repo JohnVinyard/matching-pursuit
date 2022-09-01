@@ -162,7 +162,6 @@ class Model(nn.Module):
         )
 
         self.verb = NeuralReverb.from_directory(Config.impulse_response_path(), samplerate, n_samples)
-
         self.to_rooms = LinearOutputStack(model_dim, 3, out_channels=self.verb.n_rooms)
         self.to_mix = LinearOutputStack(model_dim, 3, out_channels=1)
         self.apply(init_weights)

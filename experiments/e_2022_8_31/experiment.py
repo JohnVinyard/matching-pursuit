@@ -1,13 +1,16 @@
 import torch
 from torch import nn
 import zounds
+from config.dotenv import Config
 from modules.ddsp import overlap_add
 from modules.phase import MelScale
 from modules.psychoacoustic import PsychoacousticFeature
+from modules.reverb import NeuralReverb
 from modules.sparse import sparsify_vectors
 from modules.stft import stft
+from modules.waveguide import waveguide_synth
 from train.optim import optimizer
-from upsample import ConvUpsample, PosEncodedUpsample
+from upsample import ConvUpsample, Linear, PosEncodedUpsample
 from modules.linear import LinearOutputStack
 
 from util import device, playable
@@ -29,6 +32,8 @@ n_bands = 128
 kernel_size = 512
 model_dim = 128
 
+n_events = 4
+
 band = zounds.FrequencyBand(40, samplerate.nyquist)
 scale = zounds.MelScale(band, n_bands)
 fb = zounds.learn.FilterBank(
@@ -44,7 +49,10 @@ init_weights = make_initializer(0.1)
 
 pif = PsychoacousticFeature([128] * 6).to(device)
 
-mel_scale = MelScale()
+
+event_resolution = 8
+max_delay = 128
+max_filter_size = 10
 
 
 def perceptual_feature(x):
@@ -68,6 +76,25 @@ class UnitNorm(nn.Module):
         return x
 
 
+class SynthParamGenerator(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        self.event_dim = event_resolution * 4
+        self.net = LinearOutputStack(model_dim, 5, out_channels=event_resolution * 4)
+    
+    def forward(self, x):
+        x = self.net(x)
+
+        x = torch.sigmoid(x)
+
+        delays = x[:, :, :event_resolution]
+        dampings = x[:, :, event_resolution: event_resolution * 2]
+        filter_sizes = x[:, :, event_resolution * 2: event_resolution * 3]
+        impulse = x[:, :, event_resolution * 3:]
+
+        return delays, dampings, filter_sizes, impulse
+
 class Summarizer(nn.Module):
     """
     Summarize a batch of audio samples into a set of sparse
@@ -86,17 +113,9 @@ class Summarizer(nn.Module):
             encoder, 4, norm=UnitNorm())
         self.reduce = nn.Linear(33 + model_dim, model_dim)
         self.to_latent = LinearOutputStack(model_dim, 3)
-        self.decoder = PosEncodedUpsample(
-            latent_dim=model_dim,
-            channels=model_dim,
-            size=n_samples,
-            out_channels=1,
-            layers=4,
-            concat=False,
-            learnable_encodings=False,
-            multiply=False,
-            transformer=False,
-            filter_bank=True)
+        self.attend = nn.Linear(model_dim, 1)
+        self.param_gen = SynthParamGenerator()
+
 
     def forward(self, x):
         batch = x.shape[0]
@@ -108,11 +127,94 @@ class Summarizer(nn.Module):
         x = torch.cat([x, pos], dim=-1)
         x = self.reduce(x)
         x = self.context(x)
-        # x, _ = torch.max(x, dim=-1)
-        x = x[:, -1, :]
-        x = self.to_latent(x)
-        x = self.decoder(x)
-        return x
+
+        attn = torch.softmax(self.attend(x).view(batch, n_frames), dim=-1)
+        x = x.permute(0, 2, 1)
+        x, indices = sparsify_vectors(x, attn, n_events, normalize=True)
+
+        delays, dampings, filter_sizes, impulse = self.param_gen(x)
+
+        return x, delays, dampings, filter_sizes, impulse, indices
+
+
+class LossFunction(nn.Module):
+    def __init__(self):
+        super().__init__()
+        encoder = nn.TransformerEncoderLayer(
+            model_dim, 4, model_dim, batch_first=True)
+        self.context = nn.TransformerEncoder(
+            encoder, 4, norm=UnitNorm())
+        self.reduce = nn.Linear(33 + (model_dim * 2), model_dim)
+
+        self.to_loss = LinearOutputStack(model_dim, 3, out_channels=257)
+        self.apply(init_weights)
+    
+    def forward(self, params, indices, audio):
+        batch = params.shape[0]
+
+        audio = audio.view(-1, 1, n_samples)
+        spec = torch.abs(fb.convolve(audio))
+        spec = fb.temporal_pooling(spec, window_size, step_size)[..., :n_frames]
+        spec = spec.permute(0, 2, 1)
+
+        x = torch.zeros(batch, n_frames, model_dim)
+        for b in range(batch):
+            for i in range(n_events):
+                index = indices[b, i]
+                x[b, index] = params[b, i]
+        
+        pos = pos_encoded(
+            batch, n_frames, 16, device=x.device)
+        x = torch.cat([x, pos, spec], dim=-1)
+        x = self.reduce(x)
+        x = self.context(x)
+        l = self.to_loss(x)
+        return l
+
+
+class NonDifferentiableSynth(object):
+    def __init__(self):
+        super().__init__()
+    
+    def render(self, delays, dampings, filter_sizes, impulse, indices):
+        
+
+        delays = delays.reshape((-1, 1, event_resolution))
+        dampings = dampings.reshape((-1, 1, event_resolution))
+        filter_sizes = filter_sizes.reshape((-1, 1, event_resolution))
+        impulse = impulse.reshape((-1, 1, event_resolution))
+
+        delays = F.interpolate(delays, size=n_samples, mode='linear').view(-1, n_events, n_samples)
+        dampings = F.interpolate(dampings, size=n_samples, mode='linear').view(-1, n_events, n_samples)
+        filter_sizes = F.interpolate(filter_sizes, size=n_samples, mode='linear').view(-1, n_events, n_samples)
+        impulse = F.interpolate(impulse, size=n_samples, mode='linear').view(-1, n_events, n_samples)
+
+        noise = torch.zeros_like(impulse).uniform_(-1, 1)
+        impulse = impulse * noise
+
+        delays = 1 + (delays * max_delay).long()
+        filter_sizes = 1 + (filter_sizes * max_filter_size).long()
+
+        delays = delays.data.cpu().numpy()
+        dampings = dampings.data.cpu().numpy()
+        filter_sizes = filter_sizes.data.cpu().numpy()
+        impulse = impulse.data.cpu().numpy()
+
+        batch = delays.shape[0]
+
+        output = np.zeros((batch, n_samples * 2))
+
+        for b in range(batch):
+            for i in range(n_events):
+                signal = waveguide_synth(impulse[b, i], delays[b, i], dampings[b, i], filter_sizes[b, i])
+                start = indices[b, i].item() * 256
+                end = start + n_samples
+                output[b, start: end] += signal
+        
+        return output[:, :n_samples]
+        
+
+
 
 
 class Model(nn.Module):
@@ -125,18 +227,44 @@ class Model(nn.Module):
         x = self.summary(x)
         return x
 
+renderer = NonDifferentiableSynth()
 
 model = Model().to(device)
 optim = optimizer(model, lr=1e-3)
 
+loss_func = LossFunction().to(device)
+loss_optim = optimizer(loss_func, lr=1e-3)
+
 
 def train_model(batch):
     optim.zero_grad()
-    recon = model.forward(batch)
-    loss = perceptual_loss(recon, batch)
+    params, delays, dampings, filter_sizes, impulse, indices = model.forward(batch)
+    loss = loss_func.forward(params, indices, batch)
+    loss = (loss ** 2).mean()
+
     loss.backward()
     optim.step()
+    recon = renderer.render(delays, dampings, filter_sizes, impulse, indices)
     return loss, recon
+
+
+def train_loss_func(batch):
+    loss_optim.zero_grad()
+    params, delays, dampings, filter_sizes, impulse, indices = model.forward(batch)
+    recon = renderer.render(delays, dampings, filter_sizes, impulse, indices)
+
+    recon = torch.from_numpy(recon).float().to(device).view(-1, 1, n_samples)
+
+    pred_loss = loss_func.forward(params, indices, batch)
+
+    real_spec = stft(batch, 512, 256, pad=True)
+    fake_spec = stft(recon, 512, 256, pad=True)
+    real_loss = fake_spec - real_spec
+
+    loss = torch.abs(pred_loss - real_loss).sum()
+    loss.backward()
+    loss_optim.step()
+    return loss
 
 
 @readme
@@ -164,6 +292,10 @@ class NerfExperiment(object):
         for i, item in enumerate(self.stream):
             item = item.view(-1, 1, n_samples)
 
-            self.real = item
-            loss, self.fake = train_model(item)
-            print('GEN', loss.item())
+            if i % 2 == 0:
+                self.real = item
+                loss, self.fake = train_model(item)
+                print('GEN', loss.item())
+            else:
+                loss = train_loss_func(item)
+                print('LOSS', loss.item())

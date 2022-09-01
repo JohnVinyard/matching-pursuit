@@ -1,9 +1,12 @@
 import zounds
 import numpy as np
-from time import perf_counter
+import torch
+from modules.waveguide import waveguide_synth
+from torch.nn import functional as F
 
 n_samples = 2 ** 15
 samplerate = zounds.SR22050()
+
 
 class DelayLine(object):
 
@@ -12,10 +15,10 @@ class DelayLine(object):
         self.n_samples = n_samples
         self.decay = decay
         self.buffer = []
-    
+
     def append(self, x):
         self.buffer.append(x)
-    
+
     def forward(self, x):
         output = 0
         if len(self.buffer) > self.n_samples:
@@ -25,33 +28,26 @@ class DelayLine(object):
         return output
 
 
+
+
+
 if __name__ == '__main__':
 
     app = zounds.ZoundsApp(locals=locals(), globals=globals())
     app.start_in_thread(8888)
 
+    delay = torch.from_numpy(np.array([128, 130, 132, 130])).float().view(1, 1, -1)
+    damping = torch.from_numpy(np.array([0.99, 0.99, 0.99, 0.99])).float().view(1, 1, -1)
+    filter_size = torch.from_numpy(np.array([2, 10, 10, 3])).float().view(1, 1, -1)
 
-    start = perf_counter()
+    delay = F.interpolate(delay, size=n_samples, mode='linear').squeeze().long().data.cpu().numpy()
+    damping = F.interpolate(damping, size=n_samples, mode='linear').squeeze().data.cpu().numpy()
+    filter_size = F.interpolate(filter_size, size=n_samples, mode='linear').squeeze().long().data.cpu().numpy()
 
-    o = []
-    n = np.random.uniform(-1, 1, 32)
-    delay = DelayLine(240, decay=0.95)
+    impulse = np.zeros(n_samples)
+    impulse[:32] = np.random.uniform(-1, 1, 32)
 
-    for i in range(n_samples):
-        s = 0
-        if i < len(n):
-            s += n[i]
-        
-        d = delay.forward(s)
-        s += d
-        delay.append(s)
-        o.append(s)
-    
-    
-    samples = np.array(o)
-    end = perf_counter()
-
+    samples = waveguide_synth(impulse, delay, damping, filter_size)
     samples = zounds.AudioSamples(samples, samplerate).pad_with_silence()
 
-    input(f'{end - start} seconds to generate {n_samples / int(samplerate)} seconds of audio')
-
+    input('Whatever...')
