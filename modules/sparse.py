@@ -5,15 +5,15 @@ from torch import nn
 
 def sparsify(x, n_to_keep):
     orig_shape = x.shape
-    x = x.view(x.shape[0], -1)
+    x = x.reshape(x.shape[0], -1)
     values, indices = torch.topk(x, n_to_keep, dim=-1)
     out = torch.zeros_like(x)
     out = torch.scatter(out, dim=-1, index=indices, src=values)
-    out = out.view(*orig_shape)
+    out = out.reshape(*orig_shape)
     return out
 
 
-def sparsify_vectors(x, attn, n_to_keep, normalize=True):
+def sparsify_vectors(x, attn, n_to_keep, normalize=True, dense=False):
     batch, channels, time = x.shape
 
     attn = attn.view(batch, time)
@@ -22,15 +22,24 @@ def sparsify_vectors(x, attn, n_to_keep, normalize=True):
     if normalize:
         values = values + (1 - values)
 
+    if dense:
+        output = torch.zeros_like(x)
+
     latents = []
     for b in range(batch):
         for i in range(n_to_keep):
             latent = x[b, :, indices[b, i]][None, :]
             v = values[b, i]
-            latents.append(latent * v.view(1, 1, 1))
-
-    latents = torch.cat(latents, dim=0).view(batch, n_to_keep, channels)
-    return latents, indices
+            if dense:
+                output[b, indices[b, i]] = latent
+            else:
+                latents.append(latent * v.view(1, 1, 1))
+    
+    if dense:
+        return output
+    else:
+        latents = torch.cat(latents, dim=0).view(batch, n_to_keep, channels)
+        return latents, indices
 
 
 class AtomPlacement(jit.ScriptModule):

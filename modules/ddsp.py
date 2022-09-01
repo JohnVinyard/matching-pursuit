@@ -4,6 +4,9 @@ from torch import nn
 import numpy as np
 from scipy.signal import hann
 from torchvision.transforms.functional import adjust_sharpness
+from config.dotenv import Config
+from modules.linear import LinearOutputStack
+from modules.reverb import NeuralReverb
 
 from upsample import FFTUpsampleBlock
 
@@ -543,4 +546,52 @@ class HarmonicModel(nn.Module):
 
         signal = torch.sum(signal, dim=(1, 2)).view(batch, 1, self.n_samples)
 
+        return signal
+
+
+class AudioModel(nn.Module):
+    def __init__(self, n_samples, model_dim, samplerate, n_frames, n_noise_frames):
+        super().__init__()
+        self.n_samples = n_samples
+        self.model_dim = model_dim
+        self.n_frames = n_frames
+
+        self.osc = OscillatorBank(
+            model_dim, 
+            model_dim, 
+            n_samples, 
+            constrain=True, 
+            lowest_freq=40 / samplerate.nyquist,
+            amp_activation=lambda x: x ** 2,
+            complex_valued=False)
+        
+        self.noise = NoiseModel(
+            model_dim,
+            n_frames,
+            n_noise_frames,
+            n_samples,
+            model_dim,
+            squared=True,
+            mask_after=1)
+        
+        self.verb = NeuralReverb.from_directory(
+            Config.impulse_response_path(), samplerate, n_samples)
+
+        self.to_rooms = LinearOutputStack(model_dim, 3, out_channels=self.verb.n_rooms)
+        self.to_mix = LinearOutputStack(model_dim, 3, out_channels=1)
+
+    
+    def forward(self, x):
+        x = x.view(-1, self.model_dim, self.n_frames)
+
+        agg = x.mean(dim=-1)
+        room = torch.softmax(self.to_rooms(agg), dim=-1)
+        mix = torch.sigmoid(self.to_mix(agg)).view(-1, 1, 1)
+
+        harm = self.osc.forward(x)
+        noise = self.noise.forward(x)
+
+        dry = harm + noise
+        wet = self.verb(dry, room)
+        signal = (dry * mix) + (wet * (1 - mix))
         return signal

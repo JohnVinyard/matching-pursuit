@@ -59,8 +59,8 @@ class PsychoacousticFeature(nn.Module):
                 sr,
                 size,
                 scale,
-                # np.geomspace(0.25, 0.9, num=64),
-                0.01,
+                np.geomspace(0.25, 0.9, num=64),
+                # 0.01,
                 normalize_filters=True,
                 a_weighting=False).to(device)
             bank_dict[key] = (fb, span, size)
