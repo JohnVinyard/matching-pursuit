@@ -34,7 +34,7 @@ def sparsify_vectors(x, attn, n_to_keep, normalize=True, dense=False):
                 output[b, indices[b, i]] = latent
             else:
                 latents.append(latent * v.view(1, 1, 1))
-    
+
     if dense:
         return output
     else:
@@ -96,4 +96,43 @@ class SparseAudioModel(nn.Module):
     def forward(self, x):
         a = self.atoms.repeat(x.shape[0], 1, 1)
         x = self.placement.forward(x, a)
+        return x
+
+
+class ElementwiseSparsity(nn.Module):
+    def __init__(self, model_dim, high_dim=2048, keep=64):
+        super().__init__()
+        self.expand = nn.Conv1d(model_dim, high_dim, 1, 1, 0)
+        self.contract = nn.Conv1d(high_dim, model_dim, 1, 1, 0)
+        self.keep = keep
+
+    def forward(self, x):
+        x = self.expand(x)
+        x = sparsify(x, self.keep)
+        x = self.contract(x)
+        return x
+
+
+class VectorwiseSparsity(nn.Module):
+    def __init__(self, model_dim, keep=16, channels_last=True):
+        super().__init__()
+        self.channels_last = channels_last
+        self.attn = nn.Linear(model_dim, 1)
+        self.keep = keep
+
+    def forward(self, x):
+        if not self.channels_last:
+            x = x.permute(0, 2, 1)
+
+        batch, time, channels = x.shape
+
+        attn = self.attn(x).view(batch, time)
+        attn = torch.softmax(attn, dim=1)
+
+        x = sparsify_vectors(
+            x, attn, n_to_keep=self.keep, dense=True, normalize=False)
+
+        if not self.channels_last:
+            x = x.permute(0, 2, 1)
+
         return x
