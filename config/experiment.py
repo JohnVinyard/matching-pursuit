@@ -5,7 +5,7 @@ from util import device
 from util.weight_init import make_initializer
 import torch
 from torch.nn import functional as F
-
+from modules import AuditoryImage
 
 
 class Experiment(object):
@@ -35,11 +35,15 @@ class Experiment(object):
         self.init_weights = make_initializer(weight_init)
 
         self.pif = PsychoacousticFeature().to(device)
+        self.aim = AuditoryImage(128, 64, do_windowing=False, check_cola=False).to(device)
 
 
     def perceptual_feature(self, x):
-        bands = self.pif.compute_feature_dict(x)
-        return torch.cat(list(bands.values()), dim=-1)
+        # bands = self.pif.compute_feature_dict(x)
+        # return torch.cat(list(bands.values()), dim=-1)
+        x = self.fb.forward(x, normalize=False)
+        x = self.aim.forward(x)
+        return x
 
 
     def perceptual_loss(self, a, b):

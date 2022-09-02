@@ -10,24 +10,43 @@ from modules.sparse import ElementwiseSparsity, VectorwiseSparsity, sparsify_vec
 from modules.stft import stft
 from train.optim import optimizer
 from util import device, playable, readme
-
+import numpy as np
+from scipy.signal import square, sawtooth
 
 exp = Experiment(
     samplerate=zounds.SR22050(),
     n_samples=2**15,
-    weight_init=0.02
+    weight_init=0.1
 )
 
 
 class WavetableSynth(nn.Module):
-    def __init__(self, n_tables=8, table_size=512):
+    def __init__(self, n_tables=4, table_size=512):
         super().__init__()
+
+        sine = torch.sin(torch.linspace(-np.pi, np.pi, table_size))[None, :]
+        st = torch.from_numpy(sawtooth(np.linspace(-np.pi, np.pi, table_size))).float()[None, :]
+        sq = torch.from_numpy(square(np.linspace(-np.pi, np.pi, table_size))).float()[None, :]
+        tri = torch.from_numpy(
+            np.concatenate([
+                np.linspace(-1, 1, table_size // 2),
+                np.linspace(1, -1, table_size // 2)
+            ])
+        ).float()[None, :]
+
 
         self.n_tables = n_tables
         self.table_size = table_size
 
-        self.wavetables = nn.Parameter(torch.zeros(
-            n_tables, table_size).uniform_(-1, 1))
+        # self.wavetables = nn.Parameter(torch.zeros(
+        #     n_tables, table_size).uniform_(-1, 1))
+        
+
+        self.register_buffer('wavetables', torch.cat([
+            sine, st, sq, tri
+        ], dim=0))
+
+
         self.table_choice = LinearOutputStack(
             exp.model_dim, 3, out_channels=n_tables)
         self.to_env = LinearOutputStack(
@@ -66,11 +85,12 @@ class WavetableSynth(nn.Module):
         pos = pos + x[:, None, :]
         sampling_kernel = self.to_sampling_kernel(pos)
         sampling_kernel = torch.softmax(sampling_kernel, dim=-1)
+        sampling_kernel = make_sparse(sampling_kernel, 3, dim=-1)
 
         sampled = (selected_tables @ sampling_kernel.permute(0, 2, 1))
 
         sampled = sampled * env[:, None, :] * values[:, None, None]
-        return sampled
+        return sampled, sampling_kernel
 
 
 class Summarizer(nn.Module):
@@ -94,6 +114,8 @@ class Summarizer(nn.Module):
         attn = torch.softmax(self.attend(x).view(batch, exp.n_frames), dim=-1)
         x = x.permute(0, 2, 1)
         x, indices = sparsify_vectors(x, attn, 16, normalize=False)
+        norms = torch.norm(x, dim=-1, keepdim=True)
+        x = x / (norms + 1e-8)
 
         return x, indices
 
@@ -108,7 +130,8 @@ class Model(nn.Module):
     def forward(self, x):
         batch = x.shape[0]
         x, indices = self.summary(x)
-        events = self.wt.forward(x).view(-1, 16, exp.n_samples)
+        events, sk = self.wt.forward(x)
+        events = events.view(-1, 16, exp.n_samples)
 
         output = torch.zeros(events.shape[0], 1, exp.n_samples * 2, device=x.device)
 
@@ -122,7 +145,7 @@ class Model(nn.Module):
         x = output[..., :exp.n_samples]
         mx, _ = torch.max(x, dim=-1, keepdim=True)
         x = x / (mx + 1e-8)
-        return x
+        return x, sk
 
 
 model = Model().to(device)
@@ -133,17 +156,32 @@ optim = optimizer(model)
 
 def train(batch):
     optim.zero_grad()
-    recon = model.forward(batch)
-    print(batch.shape, recon.shape)
+    recon, sk = model.forward(batch)
+
+    # spec = torch.abs(torch.fft.rfft(sk, dim=1, norm='ortho'))
+    # full_mean = torch.mean(spec, dim=(1, 2), keepdim=True)
+    # featurewise_mean = torch.mean(spec, dim=1, keepdim=True)
+    # sk_loss = torch.abs(full_mean - featurewise_mean).sum()
+    # full_mean = torch.mean(sk, dim=(1, 2), keepdim=True)
+    # featurewise_mean = torch.mean(sk, dim=1, keepdim=True)
+    # sk_loss + sk_loss + torch.abs(full_mean - featurewise_mean).sum()
+    
+
     real_spec = stft(batch.view(-1, 1, exp.n_samples))
     fake_spec = stft(recon.view(-1, 1, exp.n_samples))
     loss = F.mse_loss(fake_spec, real_spec)
     loss.backward()
     optim.step()
-    return recon, loss
+    return recon, loss, sk
 
 # TODO: Common base class
 
+
+def make_sparse(x, to_keep, dim=-1):
+    values, indices = torch.topk(x, to_keep, dim=dim)
+    n = torch.zeros_like(x)
+    n = torch.scatter(n, dim=-1, index=indices, src=values)
+    return n
 
 @readme
 class WavetableSynthExperiment(object):
@@ -152,13 +190,17 @@ class WavetableSynthExperiment(object):
         self.stream = stream
 
         self.fake = None
+        self.sk = None
 
     def listen(self):
         return playable(self.fake, exp.samplerate)
+    
+    def kernel(self):
+        return self.sk.data.cpu().numpy()
 
     def run(self):
         for i, item in enumerate(self.stream):
             item = item.view(-1, 1, exp.n_samples)
 
-            self.fake, loss = train(item)
+            self.fake, loss, self.sk = train(item)
             print(loss.item())
