@@ -1,8 +1,11 @@
 import torch
 from torch import nn
 import zounds
+from modules.atoms import unit_norm
 from modules.ddsp import overlap_add
+from modules.dilated import DilatedStack
 from modules.phase import MelScale
+from modules.pif import AuditoryImage
 from modules.psychoacoustic import PsychoacousticFeature
 from modules.sparse import sparsify_vectors
 from modules.stft import morlet_filter_bank, stft
@@ -24,12 +27,12 @@ window_size = 512
 step_size = window_size // 2
 n_frames = n_samples // step_size
 
-n_bands = 64
+n_bands = 128
 kernel_size = 512
 
-n_events = 8
+n_events = 16
 
-model_dim = 64
+model_dim = 128
 event_dim = model_dim
 
 band = zounds.FrequencyBand(40, samplerate.nyquist)
@@ -45,15 +48,19 @@ fb = zounds.learn.FilterBank(
 
 init_weights = make_initializer(0.1)
 
-pif = PsychoacousticFeature([128] * 6).to(device)
+# pif = PsychoacousticFeature([128] * 6).to(device)
+
+aim = AuditoryImage(128, 64, do_windowing=False, check_cola=False)
 
 # mel_scale = MelScale()
 
-filt = torch.from_numpy(morlet_filter_bank(samplerate, n_samples, scale, 0.1).real).float().to(device)
 
 def perceptual_feature(x):
-    bands = pif.compute_feature_dict(x)
-    return torch.cat(list(bands.values()), dim=-2)
+    # bands = pif.compute_feature_dict(x)
+    # return torch.cat(list(bands.values()), dim=-2)
+    x = fb.forward(x, normalize=False)
+    x = aim.forward(x)
+    return x
     
 
 def perceptual_loss(a, b):
@@ -104,10 +111,11 @@ class Summarizer(nn.Module):
     def __init__(self):
         super().__init__()
 
-        encoder = nn.TransformerEncoderLayer(
-            model_dim, 4, model_dim, batch_first=True)
-        self.context = nn.TransformerEncoder(
-            encoder, 4, norm=UnitNorm())
+        # encoder = nn.TransformerEncoderLayer(
+        #     model_dim, 4, model_dim, batch_first=True)
+        # self.context = nn.TransformerEncoder(
+        #     encoder, 4, norm=UnitNorm())
+        self.context = DilatedStack(model_dim, [1, 3, 9, 27, 1])
         self.reduce = nn.Conv1d(model_dim + 33, model_dim, 1, 1, 0)
         self.attend = nn.Linear(model_dim, 1)
         self.to_events = nn.Linear(model_dim, event_dim)
@@ -124,15 +132,22 @@ class Summarizer(nn.Module):
         x = torch.cat([x, pos], dim=1)
         x = self.reduce(x)
 
-        x = x.permute(0, 2, 1)
+        # Transformer version
+        # x = x.permute(0, 2, 1)
+        # x = self.context(x)
+
+        # Conv version
         x = self.context(x)
+        x = x.permute(0, 2, 1)
 
         attn = torch.softmax(self.attend(x).view(batch, n_frames), dim=-1)
         x = x.permute(0, 2, 1)
-        x, indices = sparsify_vectors(x, attn, n_events, normalize=True)
+        x, indices = sparsify_vectors(x, attn, n_events, normalize=False)
         x = self.to_events(x) 
 
         x = x.view(batch * n_events, model_dim)
+
+        x = unit_norm(x, axis=-1)
 
         return x, indices
 
@@ -143,7 +158,7 @@ class SequenceGenerator(nn.Module):
         # self.env = PosEncodedUpsample(
         #     latent_dim=model_dim,
         #     channels=model_dim,
-        #     size=n_frames * 16,
+        #     size=n_frames,
         #     out_channels=1,
         #     layers=5,
         #     concat=False,
@@ -152,7 +167,7 @@ class SequenceGenerator(nn.Module):
         #     transformer=False)
 
         self.env = ConvUpsample(
-            model_dim, model_dim, 4, n_frames, mode='learned', out_channels=1)
+            model_dim, model_dim, 4, n_frames, mode='nearest', out_channels=1, batch_norm=True)
 
         n_coeffs = window_size // 2 + 1
         self.n_coeffs = n_coeffs
@@ -171,7 +186,7 @@ class SequenceGenerator(nn.Module):
 
         
         self.transfer = ConvUpsample(
-            model_dim, model_dim, 4, n_samples, mode='learned', out_channels=1, batch_norm=True
+            model_dim, model_dim, 4, n_frames, mode='nearest', out_channels=n_coeffs * 2, batch_norm=True
         )
 
         
@@ -179,23 +194,34 @@ class SequenceGenerator(nn.Module):
     def forward(self, x):
         x = x.view(-1, model_dim)
 
-        # env = self.env(x) ** 2
-        # env = F.interpolate(env, size=n_samples, mode='linear')
-        # noise = torch.zeros(1, 1, n_samples, device=env.device).uniform_(-1, 1)
-        # env = env * noise
-
-        # tf = self.transfer(x) ** 2
-        # tf = F.interpolate(tf, size=n_samples, mode='linear')
-        # tf = tf * filt
-        # tf = torch.sum(tf, dim=1, keepdim=True)
+        # TODO: envelope generator
+        env = self.env(x) ** 2
+        env = F.interpolate(env, size=n_samples, mode='linear')
+        noise = torch.zeros(1, 1, n_samples, device=env.device).uniform_(-1, 1)
+        env = env * noise
 
 
-        # env_spec = torch.fft.rfft(env, dim=-1, norm='ortho')
-        # tf_spec = torch.fft.rfft(tf, dim=-1, norm='ortho')
-        # spec = env_spec * tf_spec
-        # final = torch.fft.irfft(spec, dim=-1, norm='ortho')
+        tf = self.transfer(x)
+        real = tf[:, :self.n_coeffs, :]
+        imag = tf[:, self.n_coeffs:, :]
 
-        final = self.transfer(x)
+        real = real * torch.cos(imag)
+        imag = real * torch.sin(imag)
+
+        tf = torch.complex(real, imag)
+        tf = torch.fft.irfft(tf, dim=1, norm='ortho')
+        tf = tf.permute(0, 2, 1).view(-1, 1, n_frames, window_size) * torch.hamming_window(window_size, device=tf.device)[None, None, None, :]
+
+        # TODO: Option to cut off
+        tf = overlap_add(tf)[..., :n_samples]
+        
+        
+
+        env_spec = torch.fft.rfft(env, dim=-1, norm='ortho')
+        tf_spec = torch.fft.rfft(tf, dim=-1, norm='ortho')
+        spec = env_spec * tf_spec
+        final = torch.fft.irfft(spec, dim=-1, norm='ortho')
+
         return final
 
 
@@ -212,14 +238,14 @@ class Model(nn.Module):
         x = self.gen(x)
         x = self.audio_renderer.render(x, indices)
 
-        mx, _ = torch.max(x, dim=-1, keepdim=True)
-        x = x / (mx + 1e-8)
+        # mx, _ = torch.max(x, dim=-1, keepdim=True)
+        # x = x / (mx + 1e-8)
 
         return x
 
 
 model = Model().to(device)
-optim = optimizer(model, lr=1e-3)
+optim = optimizer(model, lr=1e-4)
 
 
 def train_model(batch):
