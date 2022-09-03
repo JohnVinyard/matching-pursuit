@@ -20,3 +20,4 @@ from .diffindex import diff_index
 from .scattering import MoreCorrectScattering
 from .normalization import UnitNorm
 from .sparse import VectorwiseSparsity, ElementwiseSparsity
+from .normal_pdf import pdf
