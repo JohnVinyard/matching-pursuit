@@ -265,6 +265,7 @@ class TransferFunctionExperiment(object):
 
         self.fake = None
         self.real = None
+        self.model = model
 
     def orig(self):
         return playable(self.real, samplerate, normalize=True)
