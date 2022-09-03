@@ -21,30 +21,30 @@ exp = Experiment(
 )
 
 class WavetableSynth(nn.Module):
-    def __init__(self, n_tables=16, table_size=512):
+    def __init__(self, n_tables=4, table_size=512):
         super().__init__()
 
-        # sine = torch.sin(torch.linspace(-np.pi, np.pi, table_size))[None, :]
-        # st = torch.from_numpy(sawtooth(np.linspace(-np.pi, np.pi, table_size))).float()[None, :]
-        # sq = torch.from_numpy(square(np.linspace(-np.pi, np.pi, table_size))).float()[None, :]
-        # tri = torch.from_numpy(
-        #     np.concatenate([
-        #         np.linspace(-1, 1, table_size // 2),
-        #         np.linspace(1, -1, table_size // 2)
-        #     ])
-        # ).float()[None, :]
+        sine = torch.sin(torch.linspace(-np.pi, np.pi, table_size))[None, :]
+        st = torch.from_numpy(sawtooth(np.linspace(-np.pi, np.pi, table_size))).float()[None, :]
+        sq = torch.from_numpy(square(np.linspace(-np.pi, np.pi, table_size))).float()[None, :]
+        tri = torch.from_numpy(
+            np.concatenate([
+                np.linspace(-1, 1, table_size // 2),
+                np.linspace(1, -1, table_size // 2)
+            ])
+        ).float()[None, :]
 
         self.n_tables = n_tables
         self.table_size = table_size
 
-        # self.register_buffer('wavetables', torch.cat([
-        #     sine, st, sq, tri
-        # ], dim=0))
+        self.register_buffer('wavetables', torch.cat([
+            sine, st, sq, tri
+        ], dim=0))
 
-        self.wavetables = nn.Parameter(torch.zeros(n_tables, table_size).uniform_(-1, 1))
+        # self.wavetables = nn.Parameter(torch.zeros(n_tables, table_size).uniform_(-1, 1))
 
         self.table_choice = LinearOutputStack(
-            exp.model_dim, 3, out_channels=n_tables * 16)
+            exp.model_dim, 3, out_channels=n_tables)
         self.to_env = LinearOutputStack(
             exp.model_dim, 3, out_channels=exp.n_frames)
         self.embed_pos = LinearOutputStack(exp.model_dim, 3, in_channels=33)
@@ -57,36 +57,42 @@ class WavetableSynth(nn.Module):
         return wt
 
     def forward(self, x):
-        batch = x.shape[0]
 
         # each vector should be turned into a full-length "event"
         x = x.view(-1, exp.model_dim)
+        batch = x.shape[0]
+
 
         # TODO: Mixture of tables over time
-        # c = self.table_choice(x)
-        # c = torch.softmax(c, dim=-1)
-        # values, indices = torch.max(c, dim=-1, keepdim=False)
-        tc = self.table_choice(x).view(batch, self.n_tables, 16)
+        # I should end up with (batch, table_size, low_hz_frames), which
+        # I then interpolate up to n_samples.  Table size dimension represents
+        # a mixture of all tables for that time chunk
+        c = self.table_choice(x)
+        c = torch.softmax(c, dim=-1)
+        values, indices = torch.max(c, dim=-1, keepdim=False)
 
         wt = self.get_tables()
 
-        # Selected tables should be (n_tables, n_samples)
         selected_tables = wt[indices][:, None, :]
 
+        # This determines the event's envelope
         env = self.to_env(x).view(-1, 1, exp.n_frames)
-        env = env ** 2
+        env = torch.abs(env)
         env = F.interpolate(env, size=exp.n_samples, mode='linear')
         env = env.view(-1, exp.n_samples)
 
+        # This determines each events read head position over time
         freq = self.to_frequency.forward(x).view(batch, 1, -1)
-        freq = freq ** 2
+        freq = torch.abs(freq)
         freq = F.interpolate(freq, size=exp.n_samples, mode='linear')
         freq = torch.cumsum(freq, dim=-1) % 1
         stds = torch.zeros(1).fill_(0.01)
         
         sampling_kernel = pdf(torch.linspace(0, 1, self.table_size)[None, :, None], freq, stds).permute(0, 2, 1)
-        print(sampling_kernel.shape) 
-
+        print(sampling_kernel.shape)
+        print(selected_tables.shape)
+        # sampling_kernel is (batch, 32768, 512)
+        # selected_tables is (batch, n_samples)
         sampled = (selected_tables @ sampling_kernel.permute(0, 2, 1))
 
         sampled = sampled * env[:, None, :] * values[:, None, None]
@@ -114,7 +120,7 @@ class Summarizer(nn.Module):
         x = x.permute(0, 2, 1)
         
         attn = torch.softmax(self.attend(x).view(batch, exp.n_frames), dim=-1)
-        x, indices = sparsify_vectors(x, attn, 16, normalize=False)
+        x, indices = sparsify_vectors(x, attn, 8, normalize=False)
         norms = torch.norm(x, dim=-1, keepdim=True)
         x = x / (norms + 1e-8)
 
@@ -132,13 +138,13 @@ class Model(nn.Module):
         batch = x.shape[0]
         x, indices = self.summary(x)
         events, sk = self.wt.forward(x)
-        events = events.view(-1, 16, exp.n_samples)
+        events = events.view(-1, 8, exp.n_samples)
 
         output = torch.zeros(events.shape[0], 1, exp.n_samples * 2, device=x.device)
 
         for b in range(batch):
-            for i in range(16):
-                start = indices[b, i]
+            for i in range(8):
+                start = indices[b, i] * 256
                 end = start + exp.n_samples
                 output[b, :, start: end] += events[b, i]
 
@@ -149,7 +155,7 @@ class Model(nn.Module):
 
 
 model = Model().to(device)
-optim = optimizer(model)
+optim = optimizer(model, lr=1e-3)
 
 # TODO: common base class, maybe?
 
@@ -191,6 +197,7 @@ class WavetableSynthExperiment(object):
 
         self.fake = None
         self.sk = None
+        self.real = None
 
     def listen(self):
         return playable(self.fake, exp.samplerate)
@@ -198,9 +205,12 @@ class WavetableSynthExperiment(object):
     def kernel(self):
         return self.sk.data.cpu().numpy()
 
+    def orig(self):
+        return playable(self.real, exp.samplerate)
+    
     def run(self):
         for i, item in enumerate(self.stream):
             item = item.view(-1, 1, exp.n_samples)
-
+            self.real = item
             self.fake, loss, self.sk = train(item)
             print(loss.item())
