@@ -40,7 +40,7 @@ class Experiment(object):
 
         self.pif = PsychoacousticFeature().to(device)
 
-        self.aim = AuditoryImage(self.window_size, 64, do_windowing=False, check_cola=False)
+        self.aim = AuditoryImage(512, 128, do_windowing=True, check_cola=True).to(device)
 
 
 

@@ -6,6 +6,7 @@ from modules.ddsp import AudioModel
 from modules.dilated import DilatedStack
 from modules.sparse import sparsify, sparsify_vectors
 from train.optim import optimizer
+from upsample import PosEncodedUpsample
 
 from util import device, playable
 from modules import pos_encoded
@@ -22,7 +23,7 @@ class ElementwiseSparsity(nn.Module):
         self.expand = nn.Conv1d(exp.model_dim, high_dim, 1, 1, 0)
         self.contract = nn.Conv1d(high_dim, exp.model_dim, 1, 1, 0)
         self.keep = keep
-    
+
     def forward(self, x):
         x = self.expand(x)
         x = sparsify(x, self.keep)
@@ -36,7 +37,7 @@ class VectorwiseSparsity(nn.Module):
         self.channels_last = channels_last
         self.attn = nn.Linear(exp.model_dim, 1)
         self.keep = keep
-    
+
     def forward(self, x):
         if not self.channels_last:
             x = x.permute(0, 2, 1)
@@ -51,9 +52,10 @@ class VectorwiseSparsity(nn.Module):
 
         if not self.channels_last:
             x = x.permute(0, 2, 1)
-        
+
         return x
-    
+
+
 class Summarizer(nn.Module):
     """
     Summarize a batch of audio samples into a set of sparse
@@ -67,26 +69,40 @@ class Summarizer(nn.Module):
         super().__init__()
 
         self.context = DilatedStack(exp.model_dim, [1, 3, 9, 27, 1])
-        
+
         self.reduce = nn.Conv1d(exp.model_dim + 33, exp.model_dim, 1, 1, 0)
 
-        self.sparse = ElementwiseSparsity(high_dim=2048, keep=64)
+        self.sparse = ElementwiseSparsity(high_dim=2048, keep=32)
         # self.sparse = VectorwiseSparsity(keep=16, channels_last=False)
 
-        self.decode = DilatedStack(exp.model_dim, [1, 3, 9, 27, 1])
+        self.decode = nn.Sequential(
+            DilatedStack(exp.model_dim, [1, 3, 9, 27, 1]),
+            AudioModel(
+                exp.n_samples,
+                exp.model_dim,
+                exp.samplerate,
+                exp.n_frames,
+                exp.n_frames * 8)
+        )
 
-        self.audio_model = AudioModel(
-            exp.n_samples, 
-            exp.model_dim, 
-            exp.samplerate, 
-            exp.n_frames, 
-            exp.n_frames * 8)
+        # self.decode = PosEncodedUpsample(
+        #     latent_dim=exp.model_dim,
+        #     channels=exp.model_dim,
+        #     size=exp.n_samples,
+        #     out_channels=1,
+        #     layers=1,
+        #     concat=False,
+        #     learnable_encodings=True,
+        #     multiply=False,
+        #     transformer=False,
+        #     filter_bank=True)
 
     def forward(self, x):
         batch = x.shape[0]
         x = x.view(-1, 1, exp.n_samples)
         x = torch.abs(exp.fb.convolve(x))
-        x = exp.fb.temporal_pooling(x, exp.window_size, exp.step_size)[..., :exp.n_frames]
+        x = exp.fb.temporal_pooling(
+            x, exp.window_size, exp.step_size)[..., :exp.n_frames]
         pos = pos_encoded(
             batch, exp.n_frames, 16, device=x.device).permute(0, 2, 1)
         x = torch.cat([x, pos], dim=1)
@@ -94,8 +110,6 @@ class Summarizer(nn.Module):
         x = self.context(x)
         x = self.sparse(x)
         x = self.decode(x)
-
-        x = self.audio_model.forward(x)
         return x
 
 
