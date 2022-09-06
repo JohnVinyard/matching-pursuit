@@ -1,5 +1,65 @@
 from cmath import isnan
 import numpy as np
+from torch import nn
+import torch
+from torch.nn import functional as F
+
+class WaveguideSynth(nn.Module):
+    def __init__(self, max_delay=512, n_samples=2**15, filter_kernel_size=512):
+        super().__init__()
+
+        self.n_delays = max_delay
+        self.n_samples = n_samples
+        self.filter_kernel_size = filter_kernel_size
+
+        delays = torch.zeros(max_delay, n_samples)
+        for i in range(max_delay):
+            delays[i, ::(i + 1)] = 1
+        
+        self.register_buffer('delays', delays)
+    
+    def forward(self, impulse, delay_selection, damping, filt):
+        batch = delay_selection.shape[0]
+        n_frames = filt.shape[-1]
+
+        # filter (TODO: Should I allow a time-dependent transfer function?)
+        filt = filt.view(batch, self.filter_kernel_size)
+        diff = self.n_samples - self.filter_kernel_size
+        filt = torch.cat([filt, torch.zeros(batch, diff)], dim=-1).view(batch, 1, self.n_samples)
+        print('FILTER', filt.shape)
+
+        # Impulse / energy
+        impulse = impulse.view(batch, 1, -1) ** 2
+        impulse = F.interpolate(impulse, size=self.n_samples, mode='linear')
+        noise = torch.zeros(batch, 1, self.n_samples).uniform_(-1, 1)
+        impulse = impulse * noise
+        print('IMPULSE', impulse.shape)
+
+        # Damping for delay (single value per batch member/item)
+        damping = torch.sigmoid(damping.view(batch, 1)) * 0.9999
+        powers = torch.linspace(1, damping.shape[-1], steps=n_frames)
+        damping = damping[:, :, None] ** powers[None, None, :]
+        damping = F.interpolate(damping, size=self.n_samples, mode='nearest')
+        print('DAMPING', damping.shape)
+
+        # delay count (TODO: should this be sparsified?)
+        delay_selection = delay_selection.view(batch, self.n_delays, -1)
+        delay_selection = torch.softmax(delay_selection, dim=1)
+        delay_selection = F.interpolate(delay_selection, size=self.n_samples, mode='nearest')
+
+        d = (delay_selection * self.delays).sum(dim=1, keepdim=True) * damping
+        print('DELAY', d.shape)
+
+
+        delay_spec = torch.fft.rfft(d, dim=-1, norm='ortho')
+        impulse_spec = torch.fft.rfft(impulse, dim=-1, norm='ortho')
+        filt_spec = torch.fft.rfft(filt, dim=-1, norm='ortho')
+
+        # TODO: Filter
+        spec = delay_spec * impulse_spec * filt_spec
+
+        final = torch.fft.irfft(spec, dim=-1, norm='ortho')
+        return final
 
 
 def waveguide_synth(

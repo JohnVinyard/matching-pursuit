@@ -114,11 +114,12 @@ class ElementwiseSparsity(nn.Module):
 
 
 class VectorwiseSparsity(nn.Module):
-    def __init__(self, model_dim, keep=16, channels_last=True):
+    def __init__(self, model_dim, keep=16, channels_last=True, dense=True):
         super().__init__()
         self.channels_last = channels_last
         self.attn = nn.Linear(model_dim, 1)
         self.keep = keep
+        self.dense = dense
 
     def forward(self, x):
         if not self.channels_last:
@@ -130,7 +131,10 @@ class VectorwiseSparsity(nn.Module):
         attn = torch.softmax(attn, dim=1)
 
         x = sparsify_vectors(
-            x, attn, n_to_keep=self.keep, dense=True, normalize=False)
+            x, attn, n_to_keep=self.keep, dense=self.dense, normalize=False)
+        
+        if not self.dense:
+            return x
 
         if not self.channels_last:
             x = x.permute(0, 2, 1)
