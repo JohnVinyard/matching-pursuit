@@ -6,6 +6,7 @@ import zounds
 from modules import LinearOutputStack
 from modules.dilated import DilatedStack
 from modules.normal_pdf import pdf
+from modules.normalization import ExampleNorm
 from modules.pos_encode import pos_encoded
 from modules.sparse import ElementwiseSparsity, VectorwiseSparsity, sparsify_vectors
 from modules.stft import stft
@@ -21,30 +22,31 @@ exp = Experiment(
 )
 
 class WavetableSynth(nn.Module):
-    def __init__(self, n_tables=4, table_size=512):
+    def __init__(self, n_tables=16, table_size=512):
         super().__init__()
 
-        sine = torch.sin(torch.linspace(-np.pi, np.pi, table_size))[None, :]
-        st = torch.from_numpy(sawtooth(np.linspace(-np.pi, np.pi, table_size))).float()[None, :]
-        sq = torch.from_numpy(square(np.linspace(-np.pi, np.pi, table_size))).float()[None, :]
-        tri = torch.from_numpy(
-            np.concatenate([
-                np.linspace(-1, 1, table_size // 2),
-                np.linspace(1, -1, table_size // 2)
-            ])
-        ).float()[None, :]
+        # sine = torch.sin(torch.linspace(-np.pi, np.pi, table_size))[None, :]
+        # st = torch.from_numpy(sawtooth(np.linspace(-np.pi, np.pi, table_size))).float()[None, :]
+        # sq = torch.from_numpy(square(np.linspace(-np.pi, np.pi, table_size))).float()[None, :]
+        # tri = torch.from_numpy(
+        #     np.concatenate([
+        #         np.linspace(-1, 1, table_size // 2),
+        #         np.linspace(1, -1, table_size // 2)
+        #     ])
+        # ).float()[None, :]
 
         self.n_tables = n_tables
         self.table_size = table_size
 
-        self.register_buffer('wavetables', torch.cat([
-            sine, st, sq, tri
-        ], dim=0))
+        # self.register_buffer('wavetables', torch.cat([
+        #     sine, st, sq, tri
+        # ], dim=0))
 
-        # self.wavetables = nn.Parameter(torch.zeros(n_tables, table_size).uniform_(-1, 1))
+        self.wavetables = nn.Parameter(torch.zeros(n_tables, table_size).uniform_(-1, 1))
 
         self.table_choice = LinearOutputStack(
-            exp.model_dim, 3, out_channels=n_tables)
+            exp.model_dim, 3, out_channels=n_tables * 16)
+        
         self.to_env = LinearOutputStack(
             exp.model_dim, 3, out_channels=exp.n_frames)
         self.embed_pos = LinearOutputStack(exp.model_dim, 3, in_channels=33)
@@ -67,13 +69,26 @@ class WavetableSynth(nn.Module):
         # I should end up with (batch, table_size, low_hz_frames), which
         # I then interpolate up to n_samples.  Table size dimension represents
         # a mixture of all tables for that time chunk
-        c = self.table_choice(x)
-        c = torch.softmax(c, dim=-1)
-        values, indices = torch.max(c, dim=-1, keepdim=False)
+        c = self.table_choice(x).view(batch, self.n_tables, 16)
+        c = torch.softmax(c, dim=1)
+        c = F.interpolate(c, size=exp.n_samples, mode='linear') # mix of tables for every sample (batch, n_tables, n_samples)
 
-        wt = self.get_tables()
+        # c = torch.softmax(c, dim=-1)
+        # values, indices = torch.max(c, dim=-1, keepdim=False)
 
-        selected_tables = wt[indices][:, None, :]
+        wt = self.get_tables() # (n_tables, table_size)
+
+        mixed_tables = wt.T @ c # (batch, table_size, n_samples)
+        mixed_tables = mixed_tables.permute(0, 2, 1)
+
+        '''
+        Now, I need a table for each sample, (batch, table_size, n_samples)
+        This can be multiplied wit the sampling kernels
+        '''
+
+        # selected_tables is (batch, n_samples)
+        # tsk, tsk, indexing the old-fashioned way
+        # selected_tables = wt[indices][:, None, :]
 
         # This determines the event's envelope
         env = self.to_env(x).view(-1, 1, exp.n_frames)
@@ -83,19 +98,20 @@ class WavetableSynth(nn.Module):
 
         # This determines each events read head position over time
         freq = self.to_frequency.forward(x).view(batch, 1, -1)
-        freq = torch.abs(freq)
+        freq = 0.0009070294784580499 + (torch.sigmoid(freq) * 0.2)
         freq = F.interpolate(freq, size=exp.n_samples, mode='linear')
         freq = torch.cumsum(freq, dim=-1) % 1
         stds = torch.zeros(1).fill_(0.01)
         
         sampling_kernel = pdf(torch.linspace(0, 1, self.table_size)[None, :, None], freq, stds).permute(0, 2, 1)
-        print(sampling_kernel.shape)
-        print(selected_tables.shape)
+        # print(sampling_kernel.shape)
+        # print(selected_tables.shape)
         # sampling_kernel is (batch, 32768, 512)
-        # selected_tables is (batch, n_samples)
-        sampled = (selected_tables @ sampling_kernel.permute(0, 2, 1))
+        # sampled = (selected_tables @ sampling_kernel.permute(0, 2, 1))
+        sampled = (sampling_kernel * mixed_tables).permute(0, 2, 1)
+        sampled = sampled.sum(dim=1, keepdim=True)
 
-        sampled = sampled * env[:, None, :] * values[:, None, None]
+        sampled = sampled * env[:, None, :] #* values[:, None, None]
         return sampled, sampling_kernel
 
 
@@ -105,6 +121,7 @@ class Summarizer(nn.Module):
         self.context = DilatedStack(exp.model_dim, [1, 3, 9, 27, 1])
         self.reduce = nn.Conv1d(exp.model_dim + 33, exp.model_dim, 1, 1, 0)
         self.attend = nn.Linear(exp.model_dim, 1)
+        self.norm = ExampleNorm(axis=(1, 2))
 
     def forward(self, x):
         batch = x.shape[0]
@@ -112,6 +129,8 @@ class Summarizer(nn.Module):
         x = torch.abs(exp.fb.convolve(x))
         x = exp.fb.temporal_pooling(
             x, exp.window_size, exp.step_size)[..., :exp.n_frames]
+        
+        x = self.norm(x)
         pos = pos_encoded(
             batch, exp.n_frames, 16, device=x.device).permute(0, 2, 1)
         x = torch.cat([x, pos], dim=1)
@@ -121,8 +140,10 @@ class Summarizer(nn.Module):
         
         attn = torch.softmax(self.attend(x).view(batch, exp.n_frames), dim=-1)
         x, indices = sparsify_vectors(x, attn, 8, normalize=False)
-        norms = torch.norm(x, dim=-1, keepdim=True)
-        x = x / (norms + 1e-8)
+        # norms = torch.norm(x, dim=-1, keepdim=True)
+        # x = x / (norms + 1e-8)
+
+        x = self.norm(x)
 
         return x, indices
 

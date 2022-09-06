@@ -3,7 +3,6 @@ from torch.nn import functional as F
 from torch import nn
 import numpy as np
 from scipy.signal import hann
-from torchvision.transforms.functional import adjust_sharpness
 from config.dotenv import Config
 from modules.linear import LinearOutputStack
 from modules.reverb import NeuralReverb
