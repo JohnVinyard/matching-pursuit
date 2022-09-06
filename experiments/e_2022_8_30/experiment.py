@@ -152,6 +152,15 @@ class Summarizer(nn.Module):
         return x, indices
 
 
+class ExampleNorm(nn.Module):
+    def __init__(self):
+        super().__init__()
+    
+    def forward(self, x):
+        batch, channels, time = x.shape
+        stds = torch.std(x, dim=(1, 2), keepdim=True)
+        return x / (stds + 1e-8)
+
 class SequenceGenerator(nn.Module):
     def __init__(self):
         super().__init__()
@@ -167,7 +176,7 @@ class SequenceGenerator(nn.Module):
         #     transformer=False)
 
         self.env = ConvUpsample(
-            model_dim, model_dim, 4, n_frames, mode='nearest', out_channels=1)
+            model_dim, model_dim, 4, n_frames, mode='nearest', out_channels=1, norm=ExampleNorm())
 
         n_coeffs = window_size // 2 + 1
         self.n_coeffs = n_coeffs
@@ -186,7 +195,7 @@ class SequenceGenerator(nn.Module):
 
         
         self.transfer = ConvUpsample(
-            model_dim, model_dim, 4, n_samples, mode='nearest', out_channels=1
+            model_dim, model_dim, 4, n_samples, mode='learned', out_channels=1, norm=ExampleNorm()
         )
 
         
