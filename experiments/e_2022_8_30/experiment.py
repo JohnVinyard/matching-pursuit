@@ -27,12 +27,12 @@ window_size = 512
 step_size = window_size // 2
 n_frames = n_samples // step_size
 
-n_bands = 64
+n_bands = 128
 kernel_size = 512
 
-n_events = 8
+n_events = 16
 
-model_dim = 64
+model_dim = 128
 event_dim = model_dim
 
 band = zounds.FrequencyBand(40, samplerate.nyquist)
@@ -152,15 +152,6 @@ class Summarizer(nn.Module):
         return x, indices
 
 
-class ExampleNorm(nn.Module):
-    def __init__(self):
-        super().__init__()
-    
-    def forward(self, x):
-        batch, channels, time = x.shape
-        stds = torch.std(x, dim=(1, 2), keepdim=True)
-        return x / (stds + 1e-8)
-
 class SequenceGenerator(nn.Module):
     def __init__(self):
         super().__init__()
@@ -176,7 +167,7 @@ class SequenceGenerator(nn.Module):
         #     transformer=False)
 
         self.env = ConvUpsample(
-            model_dim, model_dim, 4, n_frames, mode='nearest', out_channels=1, norm=ExampleNorm())
+            model_dim, model_dim, 4, n_frames, mode='nearest', out_channels=1, batch_norm=True)
 
         n_coeffs = window_size // 2 + 1
         self.n_coeffs = n_coeffs
@@ -195,7 +186,7 @@ class SequenceGenerator(nn.Module):
 
         
         self.transfer = ConvUpsample(
-            model_dim, model_dim, 4, n_samples, mode='learned', out_channels=1, norm=ExampleNorm()
+            model_dim, model_dim, 4, n_frames, mode='nearest', out_channels=n_coeffs * 2, batch_norm=True
         )
 
         
@@ -211,19 +202,18 @@ class SequenceGenerator(nn.Module):
 
 
         tf = self.transfer(x)
-        tf = torch.tanh(tf)
-        # real = tf[:, :self.n_coeffs, :]
-        # imag = tf[:, self.n_coeffs:, :]
+        real = tf[:, :self.n_coeffs, :]
+        imag = tf[:, self.n_coeffs:, :]
 
-        # real = real * torch.cos(imag)
-        # imag = real * torch.sin(imag)
+        real = real * torch.cos(imag)
+        imag = real * torch.sin(imag)
 
-        # tf = torch.complex(real, imag)
-        # tf = torch.fft.irfft(tf, dim=1, norm='ortho')
-        # tf = tf.permute(0, 2, 1).view(-1, 1, n_frames, window_size) * torch.hamming_window(window_size, device=tf.device)[None, None, None, :]
+        tf = torch.complex(real, imag)
+        tf = torch.fft.irfft(tf, dim=1, norm='ortho')
+        tf = tf.permute(0, 2, 1).view(-1, 1, n_frames, window_size) * torch.hamming_window(window_size, device=tf.device)[None, None, None, :]
 
-        # # TODO: Option to cut off
-        # tf = overlap_add(tf)[..., :n_samples]
+        # TODO: Option to cut off
+        tf = overlap_add(tf)[..., :n_samples]
         
         
 
