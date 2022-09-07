@@ -37,12 +37,12 @@ class WaveguideSynth(nn.Module):
         # Impulse / energy
         impulse = impulse.view(batch, 1, -1) ** 2
         impulse = F.interpolate(impulse, size=self.n_samples, mode='linear')
-        noise = torch.zeros(batch, 1, self.n_samples).uniform_(-1, 1)
+        noise = torch.zeros(batch, 1, self.n_samples, device=impulse.device).uniform_(-1, 1)
         impulse = impulse * noise
 
         # Damping for delay (single value per batch member/item)
         damping = torch.sigmoid(damping.view(batch, 1)) * 0.9999
-        powers = torch.linspace(1, damping.shape[-1], steps=n_frames)
+        powers = torch.linspace(1, damping.shape[-1], steps=n_frames, device=impulse.device)
         damping = damping[:, :, None] ** powers[None, None, :]
         damping = F.interpolate(damping, size=self.n_samples, mode='nearest')
 

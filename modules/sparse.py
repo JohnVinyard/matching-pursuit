@@ -122,12 +122,13 @@ class VectorwiseSparsity(nn.Module):
         self.dense = dense
 
     def forward(self, x):
-        if not self.channels_last:
+        if self.channels_last:
             x = x.permute(0, 2, 1)
 
-        batch, time, channels = x.shape
+        batch, channels, time = x.shape
 
-        attn = self.attn(x).view(batch, time)
+        attn = self.attn(x.permute(0, 2, 1))
+        attn = attn.view(batch, time)
         attn = torch.softmax(attn, dim=1)
 
         x = sparsify_vectors(
@@ -136,7 +137,7 @@ class VectorwiseSparsity(nn.Module):
         if not self.dense:
             return x
 
-        if not self.channels_last:
+        if self.channels_last:
             x = x.permute(0, 2, 1)
 
         return x

@@ -1,13 +1,10 @@
 import torch
 from torch import nn
 import zounds
-from config.dotenv import Config
 from config.experiment import Experiment
 from experiments.e_2022_8_30.experiment import ExampleNorm
-from modules.ddsp import AudioModel
 from modules.dilated import DilatedStack
 from modules.linear import LinearOutputStack
-from modules.reverb import NeuralReverb
 from modules.sparse import VectorwiseSparsity
 from modules.waveguide import WaveguideSynth
 from train.optim import optimizer
@@ -19,10 +16,15 @@ from modules import pos_encoded
 from util.readmedocs import readme
 import numpy as np
 
-exp = Experiment(zounds.SR22050(), 2**15, weight_init=0.05)
+exp = Experiment(
+    samplerate=zounds.SR22050(), 
+    n_samples=2**15, 
+    weight_init=0.05,
+    model_dim=128,
+    kernel_size=512)
 
 
-n_events = 8
+n_events = 4
 
 class Summarizer(nn.Module):
     """
@@ -44,18 +46,16 @@ class Summarizer(nn.Module):
             exp.model_dim, keep=n_events, channels_last=False, dense=False)
         
 
-        self.impulse = ConvUpsample(exp.model_dim, exp.model_dim, 4, exp.n_frames * 8, 'nearest', out_channels=1, norm=ExampleNorm())
-        self.delay_selection = ConvUpsample(exp.model_dim, exp.model_dim, 4, exp.n_frames, 'nearest', out_channels=512, norm=ExampleNorm())
-        self.damping = LinearOutputStack(exp.model_dim, 2, out_channels=1)
+        n_frames = 16
+
+        self.impulse = ConvUpsample(
+            exp.model_dim, exp.model_dim, 4, n_frames, 'learned', out_channels=1, norm=ExampleNorm())
+        self.delay_selection = ConvUpsample(
+            exp.model_dim, exp.model_dim, 4, n_frames, 'learned', out_channels=512, norm=ExampleNorm())
+        self.damping = LinearOutputStack(exp.model_dim, 1, out_channels=1)
 
         self.filt = LinearOutputStack(exp.model_dim, 1, out_channels=16)
 
-        self.verb = NeuralReverb.from_directory(
-            Config.impulse_response_path(), exp.samplerate, exp.n_samples)
-
-        self.to_room = LinearOutputStack(
-            exp.model_dim, 3, out_channels=self.verb.n_rooms)
-        self.to_mix = LinearOutputStack(exp.model_dim, 3, out_channels=1)
 
         self.decode = WaveguideSynth(
             max_delay=512, 
@@ -76,14 +76,10 @@ class Summarizer(nn.Module):
         x = torch.cat([x, pos], dim=1)
         x = self.reduce(x)
         x = self.context(x)
-        x, indices = self.sparse(x)
 
+        x, indices = self.sparse(x)
         
         x = x.view(-1, exp.model_dim)
-
-        # global parameters to compute reverb
-        g = torch.mean(x.view(batch, n_events, exp.model_dim), dim=1)
-
 
         impulse = self.impulse(x)
         delay_selection = self.delay_selection(x)
@@ -93,7 +89,7 @@ class Summarizer(nn.Module):
         x = self.decode.forward(impulse, delay_selection, damping, filt)
         x = x.view(batch, n_events, exp.n_samples)
 
-        output = torch.zeros(batch, 1, exp.n_samples * 2)
+        output = torch.zeros(batch, 1, exp.n_samples * 2, device=x.device)
         for b in range(batch):
             for i in range(n_events):
                 start = indices[b, i] * 256
@@ -102,11 +98,6 @@ class Summarizer(nn.Module):
         
         output = output[..., :exp.n_samples]
 
-
-        room = torch.softmax(self.to_room(g), dim=-1)
-        mix = torch.sigmoid(self.to_mix(g).view(-1, 1, 1))
-        wet = self.verb.forward(output, room)
-        output = (mix * wet) + (output * (1 - mix))
 
         mx, _ = torch.max(output, dim=-1, keepdim=True)
         output = output / (mx + 1e-8)

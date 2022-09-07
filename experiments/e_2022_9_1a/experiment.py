@@ -18,11 +18,17 @@ from scipy.signal import square, sawtooth
 exp = Experiment(
     samplerate=zounds.SR22050(),
     n_samples=2**15,
-    weight_init=0.1
+    weight_init=0.1,
+    model_dim=16,
+    kernel_size=64
 )
 
+n_events = 2
+
+n_tables = 4
+
 class WavetableSynth(nn.Module):
-    def __init__(self, n_tables=16, table_size=512):
+    def __init__(self, n_tables=n_tables, table_size=512):
         super().__init__()
 
         # sine = torch.sin(torch.linspace(-np.pi, np.pi, table_size))[None, :]
@@ -45,12 +51,12 @@ class WavetableSynth(nn.Module):
         self.wavetables = nn.Parameter(torch.zeros(n_tables, table_size).uniform_(-1, 1))
 
         self.table_choice = LinearOutputStack(
-            exp.model_dim, 3, out_channels=n_tables * 16)
+            exp.model_dim, 1, out_channels=n_tables * 16)
         
         self.to_env = LinearOutputStack(
-            exp.model_dim, 3, out_channels=exp.n_frames)
-        self.embed_pos = LinearOutputStack(exp.model_dim, 3, in_channels=33)
-        self.to_frequency = LinearOutputStack(exp.model_dim, 3, out_channels=exp.n_frames)
+            exp.model_dim, 1, out_channels=exp.n_frames)
+        self.embed_pos = LinearOutputStack(exp.model_dim, 1, in_channels=33)
+        self.to_frequency = LinearOutputStack(exp.model_dim, 1, out_channels=exp.n_frames)
 
     def get_tables(self):
         wt = self.wavetables
@@ -101,9 +107,9 @@ class WavetableSynth(nn.Module):
         freq = 0.0009070294784580499 + (torch.sigmoid(freq) * 0.2)
         freq = F.interpolate(freq, size=exp.n_samples, mode='linear')
         freq = torch.cumsum(freq, dim=-1) % 1
-        stds = torch.zeros(1).fill_(0.01)
+        stds = torch.zeros(1, device=freq.device).fill_(0.01)
         
-        sampling_kernel = pdf(torch.linspace(0, 1, self.table_size)[None, :, None], freq, stds).permute(0, 2, 1)
+        sampling_kernel = pdf(torch.linspace(0, 1, self.table_size, device=freq.device)[None, :, None], freq, stds).permute(0, 2, 1)
         # print(sampling_kernel.shape)
         # print(selected_tables.shape)
         # sampling_kernel is (batch, 32768, 512)
@@ -139,7 +145,7 @@ class Summarizer(nn.Module):
         x = x.permute(0, 2, 1)
         
         attn = torch.softmax(self.attend(x).view(batch, exp.n_frames), dim=-1)
-        x, indices = sparsify_vectors(x, attn, 8, normalize=False)
+        x, indices = sparsify_vectors(x.permute(0, 2, 1), attn, n_events, normalize=False)
         # norms = torch.norm(x, dim=-1, keepdim=True)
         # x = x / (norms + 1e-8)
 
@@ -159,12 +165,12 @@ class Model(nn.Module):
         batch = x.shape[0]
         x, indices = self.summary(x)
         events, sk = self.wt.forward(x)
-        events = events.view(-1, 8, exp.n_samples)
+        events = events.view(-1, n_events, exp.n_samples)
 
         output = torch.zeros(events.shape[0], 1, exp.n_samples * 2, device=x.device)
 
         for b in range(batch):
-            for i in range(8):
+            for i in range(n_events):
                 start = indices[b, i] * 256
                 end = start + exp.n_samples
                 output[b, :, start: end] += events[b, i]
