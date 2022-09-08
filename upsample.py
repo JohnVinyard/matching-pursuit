@@ -159,7 +159,7 @@ class PosEncodedUpsample(nn.Module):
         self.apply(init_weights)
 
     def forward(self, x):
-        x = x.view(x.shape[0], 1, -1)
+        x = x.view(x.shape[0], -1, self.latent_dim)
         x = self.expand(x)
         x = self.net(x)
         x = x.permute(0, 2, 1)

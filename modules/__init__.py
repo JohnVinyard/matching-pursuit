@@ -20,5 +20,9 @@ from .diffusion import DiffusionProcess
 from .diffindex import diff_index
 from .scattering import MoreCorrectScattering
 from .normalization import UnitNorm, ExampleNorm
-from .sparse import VectorwiseSparsity, ElementwiseSparsity
+from .sparse import \
+    VectorwiseSparsity, ElementwiseSparsity, AtomPlacement, \
+    to_sparse_vectors_with_context, sparsify, sparsify_vectors
 from .normal_pdf import pdf
+from .waveguide import TransferFunctionSegmentGenerator
+from .shape import Reshape

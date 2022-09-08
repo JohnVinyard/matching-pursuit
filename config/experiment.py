@@ -39,7 +39,7 @@ class Experiment(object):
         self.pif = PsychoacousticFeature().to(device)
 
         self.aim = AuditoryImage(
-            512, 128, do_windowing=True, check_cola=True).to(device)
+            512, 128, do_windowing=False, check_cola=False).to(device)
 
     def perceptual_feature(self, x):
         # bands = self.pif.compute_feature_dict(x)

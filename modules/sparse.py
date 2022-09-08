@@ -13,6 +13,28 @@ def sparsify(x, n_to_keep):
     return out
 
 
+def to_sparse_vectors_with_context(x, n_elements):
+    batch, channels, time = x.shape
+
+
+    one_hot = torch.zeros(batch, n_elements, channels, device=x.device)
+    indices = torch.nonzero(x)
+
+    # time positions at which non-zero elements occur
+    positions = [idx[-1] for idx in indices]
+
+    for i in range(indices.shape[0]):
+        batch = i // n_elements
+        el = i % n_elements
+        index = indices[i]
+        val = x[tuple(index)]
+        one_hot[batch, el, index[1]] = val
+
+    context = torch.sum(x, dim=-1, keepdim=True).repeat(1, 1, n_elements).permute(0, 2, 1)
+
+    return one_hot, context, positions
+
+
 def sparsify_vectors(x, attn, n_to_keep, normalize=True, dense=False):
     batch, channels, time = x.shape
 
@@ -43,41 +65,29 @@ def sparsify_vectors(x, attn, n_to_keep, normalize=True, dense=False):
 
 
 class AtomPlacement(jit.ScriptModule):
-    def __init__(self, n_samples, n_atoms, atom_size, to_keep):
+    def __init__(self, n_samples, n_events, step_size):
         super().__init__()
         self.n_samples = n_samples
-        self.n_atoms = n_atoms
-        self.atom_size = atom_size
-        self.to_keep = to_keep
+        self.n_events = n_events
+        self.step_size = step_size
+        
 
     @jit.script_method
-    def forward(self, features, atoms):
-        batch = features.shape[0]
-        features = features.view(-1, self.n_atoms, self.n_samples)
-        atoms = atoms.view(batch, self.n_atoms, self.atom_size)
+    def render(self, x, indices):
+        x = x.view(-1, self.n_events, self.n_samples)
+        batch = x.shape[0]
 
-        features = features.view(batch, -1)
-        values, indices = torch.topk(features, self.to_keep, dim=-1)
+        times = indices * self.step_size
 
-        output = torch.zeros(
-            batch, 1, self.n_samples + self.atom_size).to(features.device)
+        output = torch.zeros(batch, 1, self.n_samples * 2, device=x.device)
 
         for b in range(batch):
-            for j in range(self.to_keep):
-                index = indices[b, j]
+            for i in range(self.n_events):
+                time = times[b, i]
+                output[b, :, time: time + self.n_samples] += x[b, i][None, :]
 
-                atom_index = index // self.n_samples
-                sample_index = index % self.n_samples
-
-                atom = atoms[b, atom_index]
-                factor = values[b, j]
-
-                start = sample_index
-                stop = start + self.atom_size
-
-                output[b, 0, start: stop] += atom * factor
-
-        return output[..., :self.n_samples]
+        output = output[..., :self.n_samples]
+        return output
 
 
 class SparseAudioModel(nn.Module):
@@ -100,17 +110,26 @@ class SparseAudioModel(nn.Module):
 
 
 class ElementwiseSparsity(nn.Module):
-    def __init__(self, model_dim, high_dim=2048, keep=64):
+    def __init__(self, model_dim, high_dim=2048, keep=64, dropout=None, softmax=False):
         super().__init__()
         self.expand = nn.Conv1d(model_dim, high_dim, 1, 1, 0)
         self.contract = nn.Conv1d(high_dim, model_dim, 1, 1, 0)
         self.keep = keep
+        self.dropout = dropout
+        self.softmax = softmax
 
     def forward(self, x):
+        if self.dropout is not None:
+            x = torch.dropout(x, self.dropout, self.training)
+        
         x = self.expand(x)
-        x = sparsify(x, self.keep)
-        x = self.contract(x)
-        return x
+        
+        if self.softmax:
+            x = torch.softmax(x, dim=1)
+        
+        sparse = sparsify(x, self.keep)
+        x = self.contract(sparse)
+        return x, sparse
 
 
 class VectorwiseSparsity(nn.Module):

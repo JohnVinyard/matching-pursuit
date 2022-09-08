@@ -3,6 +3,13 @@ import numpy as np
 from torch import nn
 import torch
 from torch.nn import functional as F
+from fft_basis import morlet_filter_bank
+from modules.ddsp import overlap_add
+from modules.normalization import ExampleNorm
+from modules.shape import Reshape
+import zounds
+
+from upsample import ConvUpsample, PosEncodedUpsample
 
 class WaveguideSynth(nn.Module):
     def __init__(self, max_delay=512, n_samples=2**15, filter_kernel_size=512):
@@ -61,6 +68,75 @@ class WaveguideSynth(nn.Module):
 
         final = torch.fft.irfft(spec, dim=-1, norm='ortho')
         return final
+
+
+
+class TransferFunctionSegmentGenerator(nn.Module):
+    def __init__(self, model_dim, n_frames, window_size, n_samples):
+        super().__init__()
+        
+        self.model_dim = model_dim
+        self.n_frames = n_frames
+        self.window_size = window_size
+        self.n_samples = n_samples
+
+        self.to_damping = nn.Linear(model_dim, 1)
+
+        self.env = ConvUpsample(
+            model_dim, model_dim, 4, n_frames * 4, mode='nearest', out_channels=1, norm=ExampleNorm())
+
+        # n_coeffs = window_size // 2 + 1
+        # self.n_coeffs = n_coeffs
+        self.n_bands = 128
+
+
+        self.transfer = ConvUpsample(
+            model_dim, model_dim, 4, 8, mode='nearest', out_channels=self.n_bands, norm=ExampleNorm()
+        )
+
+        samplerate = zounds.SR22050()
+        band = zounds.FrequencyBand(40, samplerate.nyquist)
+        scale = zounds.MelScale(band, self.n_bands)
+        bank = morlet_filter_bank(samplerate, 2**15, scale, 0.1).real
+        mx = np.max(bank, axis=-1, keepdims=True)
+        bank = bank / mx
+
+        self.register_buffer('bank', torch.from_numpy(bank).float()[None, :, :])
+
+        
+        
+
+    def forward(self, x):
+        x = x.view(-1, self.model_dim)
+
+        # damping
+        d = 0.5 + (torch.sigmoid(self.to_damping(x)) * 0.4999)
+        d = d\
+            .view(-1, 1, 1)\
+            .repeat(1, 1, self.n_frames)
+        # pow = torch.arange(1, self.n_frames + 1, device=x.device)[None, None, :]
+        d = torch.cumprod(d, dim=-1)
+        # d = d ** pow
+        d = F.interpolate(d, size=self.n_samples, mode='linear')
+
+        # TODO: envelope generator
+        env = self.env(x) ** 2
+        env = F.interpolate(env, size=self.n_samples, mode='linear')
+        noise = torch.zeros(1, 1, self.n_samples, device=env.device).uniform_(-1, 1)
+        env = env * noise
+
+        tf = torch.clamp(self.transfer(x), 0, 1)
+        tf = F.interpolate(tf, size=self.n_samples, mode='linear')
+        tf = (tf * self.bank).sum(dim=1, keepdim=True) * d
+
+        
+        # TODO: FFT convolve, if it doesn't already exist
+        env_spec = torch.fft.rfft(env, dim=-1, norm='ortho')
+        tf_spec = torch.fft.rfft(tf, dim=-1, norm='ortho')
+        spec = env_spec * tf_spec
+        final = torch.fft.irfft(spec, dim=-1, norm='ortho')
+
+        return final, None
 
 
 def waveguide_synth(
