@@ -5,10 +5,11 @@ from config.experiment import Experiment
 from modules.dilated import DilatedStack
 from modules.linear import LinearOutputStack
 from modules.sparse import VectorwiseSparsity
-from modules.waveguide import WaveguideSynth
+from modules.waveguide import TransferFunctionSegmentGenerator, WaveguideSynth
 from train.optim import optimizer
 from upsample import ConvUpsample
 from modules.normalization import ExampleNorm
+from torch.nn.utils.clip_grad import clip_grad_norm_, clip_grad_value_
 
 from util import device, playable
 from modules import pos_encoded
@@ -19,7 +20,7 @@ import numpy as np
 exp = Experiment(
     samplerate=zounds.SR22050(), 
     n_samples=2**15, 
-    weight_init=0.1,
+    weight_init=0.05,
     model_dim=128,
     kernel_size=512)
 
@@ -46,23 +47,27 @@ class Summarizer(nn.Module):
             exp.model_dim, keep=n_events, channels_last=False, dense=False)
         
 
-        n_frames = 16
+        # n_frames = 16
 
-        self.impulse = ConvUpsample(
-            exp.model_dim, exp.model_dim, 4, n_frames, 'learned', out_channels=1, norm=ExampleNorm())
-        self.delay_selection = ConvUpsample(
-            exp.model_dim, exp.model_dim, 4, n_frames, 'learned', out_channels=512, norm=ExampleNorm())
+        # self.impulse = ConvUpsample(
+        #     exp.model_dim, exp.model_dim, 4, n_frames, 'learned', out_channels=1, norm=ExampleNorm())
+        # self.delay_selection = ConvUpsample(
+        #     exp.model_dim, exp.model_dim, 4, n_frames, 'learned', out_channels=512, norm=ExampleNorm())
         
 
-        self.damping = LinearOutputStack(exp.model_dim, 1, out_channels=1)
+        # self.damping = LinearOutputStack(exp.model_dim, 1, out_channels=1)
 
-        self.filt = LinearOutputStack(exp.model_dim, 1, out_channels=16)
+        # self.filt = LinearOutputStack(exp.model_dim, 1, out_channels=16)
 
 
-        self.decode = WaveguideSynth(
-            max_delay=512, 
-            n_samples=exp.n_samples, 
-            filter_kernel_size=512)
+        # self.decode = WaveguideSynth(
+        #     max_delay=512, 
+        #     n_samples=exp.n_samples, 
+        #     filter_kernel_size=512)
+
+
+        self.decode = TransferFunctionSegmentGenerator(
+            exp.model_dim, exp.n_frames, 512, exp.n_samples, cumulative=True)
         
         self.norm = ExampleNorm()
 
@@ -85,13 +90,15 @@ class Summarizer(nn.Module):
         
         x = x.view(-1, exp.model_dim)
 
-        impulse = self.impulse(x)
-        delay_selection = self.delay_selection(x)
-        damping = self.damping(x)
-        filt = self.filt(x)
+        # impulse = self.impulse(x)
+        # delay_selection = self.delay_selection(x)
+        # damping = self.damping(x)
+        # filt = self.filt(x)
 
-        x = self.decode.forward(impulse, delay_selection, damping, filt)
-        x = x.view(batch, n_events, exp.n_samples)
+        # x = self.decode.forward(impulse, delay_selection, damping, filt)
+        # x = x.view(batch, n_events, exp.n_samples)
+
+        x = self.decode(x).view(batch, n_events, exp.n_samples)
 
         output = torch.zeros(batch, 1, exp.n_samples * 2, device=x.device)
         for b in range(batch):
@@ -121,7 +128,7 @@ class Model(nn.Module):
 
 
 model = Model().to(device)
-optim = optimizer(model, lr=1e-4)
+optim = optimizer(model, lr=1e-3)
 
 
 def train_model(batch):

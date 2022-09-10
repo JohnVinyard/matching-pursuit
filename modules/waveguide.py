@@ -3,6 +3,8 @@ from torch import nn
 import torch
 from torch.nn import functional as F
 from modules.ddsp import overlap_add
+from modules.linear import LinearOutputStack
+from modules.normalization import ExampleNorm
 
 from upsample import ConvUpsample
 
@@ -67,24 +69,27 @@ class WaveguideSynth(nn.Module):
 
 
 class TransferFunctionSegmentGenerator(nn.Module):
-    def __init__(self, model_dim, n_frames, window_size, n_samples):
+    def __init__(self, model_dim, n_frames, window_size, n_samples, cumulative=False):
         super().__init__()
         self.model_dim = model_dim
         self.n_frames = n_frames
         self.window_size = window_size
         self.n_samples = n_samples
+        self.cumulative = cumulative
         
         self.env = ConvUpsample(
-            model_dim, model_dim, 4, n_frames, mode='nearest', out_channels=1, batch_norm=True)
+            model_dim, model_dim, 4, n_frames, mode='learned', out_channels=1, norm=ExampleNorm())
 
         n_coeffs = window_size // 2 + 1
         self.n_coeffs = n_coeffs
 
 
-        
-        self.transfer = ConvUpsample(
-            model_dim, model_dim, 4, n_frames, mode='nearest', out_channels=n_coeffs * 2, batch_norm=True
-        )
+        if self.cumulative:
+            self.transfer = LinearOutputStack(model_dim, 3, out_channels=n_coeffs * 2)
+        else:
+            self.transfer = ConvUpsample(
+                model_dim, model_dim, 4, n_frames, mode='nearest', out_channels=n_coeffs * 2, batch_norm=True
+            )
         
         
 
@@ -97,19 +102,35 @@ class TransferFunctionSegmentGenerator(nn.Module):
         noise = torch.zeros(1, 1, self.n_samples, device=env.device).uniform_(-1, 1)
         env = env * noise
 
-
         tf = self.transfer(x)
+        if self.cumulative:
+            tf = tf.view(-1, self.n_coeffs * 2, 1).repeat(1, 1, self.n_frames)
+
+        tf = tf.view(-1, self.n_coeffs, 2, self.n_frames)
+        norm = torch.norm(tf, dim=2, keepdim=True)
+
+        unit_norm = tf / (norm + 1e-8)
+        clamped_norm = torch.clamp(norm, 0, 0.9999)
+        tf = unit_norm * clamped_norm
+
+        tf = tf.view(-1, self.n_coeffs * 2, self.n_frames)
+        
         real = tf[:, :self.n_coeffs, :]
         imag = tf[:, self.n_coeffs:, :]
 
-        real = real * torch.cos(imag)
-        imag = real * torch.sin(imag)
+        # real = real * torch.cos(imag)
+        # imag = real * torch.sin(imag)
 
         tf = torch.complex(real, imag)
+
+        
+        if self.cumulative:
+            tf = torch.cumprod(tf, dim=-1)
+        
         tf = torch.fft.irfft(tf, dim=1, norm='ortho')
         tf = tf.permute(0, 2, 1).view(-1, 1, self.n_frames, self.window_size) * torch.hamming_window(self.window_size, device=tf.device)[None, None, None, :]
 
-        # TODO: Option to cut off
+        # TODO: Option to cut off in overlap add
         tf = overlap_add(tf)[..., :self.n_samples]
         
         
