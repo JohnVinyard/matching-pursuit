@@ -2,13 +2,13 @@ import torch
 from torch import nn
 import zounds
 from config.experiment import Experiment
-from experiments.e_2022_8_30.experiment import ExampleNorm
 from modules.dilated import DilatedStack
 from modules.linear import LinearOutputStack
 from modules.sparse import VectorwiseSparsity
 from modules.waveguide import WaveguideSynth
 from train.optim import optimizer
 from upsample import ConvUpsample
+from modules.normalization import ExampleNorm
 
 from util import device, playable
 from modules import pos_encoded
@@ -19,12 +19,12 @@ import numpy as np
 exp = Experiment(
     samplerate=zounds.SR22050(), 
     n_samples=2**15, 
-    weight_init=0.05,
+    weight_init=0.1,
     model_dim=128,
     kernel_size=512)
 
 
-n_events = 4
+n_events = 8
 
 class Summarizer(nn.Module):
     """
@@ -52,6 +52,8 @@ class Summarizer(nn.Module):
             exp.model_dim, exp.model_dim, 4, n_frames, 'learned', out_channels=1, norm=ExampleNorm())
         self.delay_selection = ConvUpsample(
             exp.model_dim, exp.model_dim, 4, n_frames, 'learned', out_channels=512, norm=ExampleNorm())
+        
+
         self.damping = LinearOutputStack(exp.model_dim, 1, out_channels=1)
 
         self.filt = LinearOutputStack(exp.model_dim, 1, out_channels=16)
@@ -67,7 +69,7 @@ class Summarizer(nn.Module):
     def forward(self, x):
         batch = x.shape[0]
         x = x.view(-1, 1, exp.n_samples)
-        x = torch.abs(exp.fb.convolve(x))
+        x = exp.fb.forward(x, normalize=False)
         x = exp.fb.temporal_pooling(
             x, exp.window_size, exp.step_size)[..., :exp.n_frames]
         x = self.norm(x)
@@ -78,6 +80,8 @@ class Summarizer(nn.Module):
         x = self.context(x)
 
         x, indices = self.sparse(x)
+        x = self.norm(x)
+        encoded = x
         
         x = x.view(-1, exp.model_dim)
 
@@ -99,10 +103,10 @@ class Summarizer(nn.Module):
         output = output[..., :exp.n_samples]
 
 
-        mx, _ = torch.max(output, dim=-1, keepdim=True)
-        output = output / (mx + 1e-8)
+        # mx, _ = torch.max(output, dim=-1, keepdim=True)
+        # output = output / (mx + 1e-8)
 
-        return output
+        return output, indices, encoded
 
 
 class Model(nn.Module):
@@ -112,8 +116,8 @@ class Model(nn.Module):
         self.apply(lambda p: exp.init_weights(p))
 
     def forward(self, x):
-        x = self.summary(x)
-        return x
+        x, indices, encoded = self.summary(x)
+        return x, indices, encoded
 
 
 model = Model().to(device)
@@ -122,11 +126,11 @@ optim = optimizer(model, lr=1e-4)
 
 def train_model(batch):
     optim.zero_grad()
-    recon = model.forward(batch)
+    recon, indices, encoded = model.forward(batch)
     loss = exp.perceptual_loss(recon, batch)
     loss.backward()
     optim.step()
-    return loss, recon
+    return loss, recon, indices, encoded
 
 
 @readme
@@ -137,6 +141,8 @@ class WaveguideSynthesisExperiment(object):
 
         self.fake = None
         self.real = None
+        self.indices = None
+        self.encoded = None
 
     def orig(self):
         return playable(self.real, exp.samplerate, normalize=True)
@@ -149,11 +155,20 @@ class WaveguideSynthesisExperiment(object):
 
     def fake_spec(self):
         return np.abs(zounds.spectral.stft(self.listen()))
+    
+    def positions(self):
+        indices = self.indices.data.cpu().numpy()[0]
+        canvas = np.zeros((exp.n_frames, 16))
+        canvas[indices] = 1
+        return canvas
+    
+    def encoding(self):
+        return self.encoded.data.cpu().numpy().reshape((-1, exp.model_dim))
 
     def run(self):
         for i, item in enumerate(self.stream):
             item = item.view(-1, 1, exp.n_samples)
 
             self.real = item
-            loss, self.fake = train_model(item)
+            loss, self.fake, self.indices, self.encoded = train_model(item)
             print('GEN', i, loss.item())
