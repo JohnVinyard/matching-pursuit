@@ -19,7 +19,7 @@ from .diffusion import DiffusionProcess
 # from .atoms import AudioEvent
 from .diffindex import diff_index
 from .scattering import MoreCorrectScattering
-from .normalization import UnitNorm, ExampleNorm
+from .normalization import UnitNorm, ExampleNorm, limit_norm
 from .sparse import \
     VectorwiseSparsity, ElementwiseSparsity, AtomPlacement, \
     to_sparse_vectors_with_context, sparsify, sparsify_vectors

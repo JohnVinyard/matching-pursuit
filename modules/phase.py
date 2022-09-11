@@ -221,9 +221,11 @@ class MelScale(object):
         return n_samples // (self.fft_size // 2)
 
     def to_time_domain(self, spec):
-        spec = spec.data.cpu().numpy()
-        windowed = (spec @ self.basis.data.cpu().numpy()).real[..., ::-1]
-        windowed = torch.from_numpy(windowed.copy())
+        # spec = spec.data.cpu().numpy()
+        # windowed = (spec @ self.basis.data.cpu().numpy()).real[..., ::-1]
+        # windowed = torch.from_numpy(windowed.copy())
+
+        windowed = torch.flip((spec @ self.basis).real, dims=(-1,))
         td = overlap_add(windowed[:, None, :, :], apply_window=False)
         return td
 
