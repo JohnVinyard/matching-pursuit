@@ -1,5 +1,3 @@
-from select import select
-from turtle import forward
 import torch
 from torch import nn
 import zounds
@@ -12,16 +10,13 @@ from modules.sparse import VectorwiseSparsity
 from train.optim import optimizer
 from upsample import ConvUpsample
 from modules.normalization import ExampleNorm, limit_norm
-from torch.nn.utils.clip_grad import clip_grad_norm_, clip_grad_value_
 from torch.nn import functional as F
-from modules.stft import stft
 
 from util import device, playable
 from modules import pos_encoded
 
 from util.readmedocs import readme
 import numpy as np
-from torch.nn import functional as F
 
 exp = Experiment(
     samplerate=zounds.SR22050(),
@@ -43,7 +38,7 @@ class SegmentGenerator(nn.Module):
             4,
             exp.n_frames,
             out_channels=1,
-            mode='nearest',
+            mode='learned',
             norm=ExampleNorm())
 
         self.n_coeffs = 257
@@ -76,8 +71,7 @@ class SegmentGenerator(nn.Module):
 
         env = self.env(x) ** 2
         env = F.interpolate(env, size=self.n_samples, mode='linear')
-        noise = torch.zeros(1, 1, self.n_samples,
-                            device=env.device).uniform_(-1, 1)
+        noise = torch.zeros(1, 1, self.n_samples, device=env.device).uniform_(-1, 1)
         env = env * noise
 
         env_selections = env * selections
@@ -90,6 +84,7 @@ class SegmentGenerator(nn.Module):
         # ensure that the norm of the coefficients does not exceed one
         # to avoid feedback
         tf = limit_norm(tf, dim=3)
+
         tf = tf.view(-1, self.n_inflections, self.n_coeffs * 2, self.n_frames)
 
         real = tf[:, :, :self.n_coeffs, :]
@@ -131,12 +126,7 @@ class Summarizer(nn.Module):
     def __init__(self):
         super().__init__()
 
-        # self.context = DilatedStack(exp.model_dim, [1, 3, 9, 27, 1])
-
-        encoded = nn.TransformerEncoderLayer(exp.model_dim, 4, exp.model_dim, batch_first=True)
-        encoded.norm1 = ExampleNorm()
-        encoded.norm2 = ExampleNorm()
-        self.context = nn.TransformerEncoder(encoded, 4, norm=None)
+        self.context = DilatedStack(exp.model_dim, [1, 3, 9, 27, 1])
 
         self.reduce = nn.Conv1d(exp.model_dim + 33, exp.model_dim, 1, 1, 0)
 
@@ -159,10 +149,7 @@ class Summarizer(nn.Module):
         x = torch.cat([x, pos], dim=1)
         x = self.reduce(x)
 
-        # x = self.context(x)
-        x = x.permute(0, 2, 1)
         x = self.context(x)
-        x = x.permute(0, 2, 1)
 
         x, indices = self.sparse(x)
         x = self.norm(x)
@@ -202,15 +189,7 @@ optim = optimizer(model, lr=1e-4)
 def train_model(batch):
     optim.zero_grad()
     recon, indices, encoded = model.forward(batch)
-
-    # r_spec = torch.abs(torch.fft.rfft(recon, dim=-1, norm='ortho'))
-    # f_spec = torch.abs(torch.fft.rfft(batch, dim=-1, norm='ortho'))
-    # spec_loss = F.mse_loss(f_spec, r_spec)
-
-    # r_spec = stft(batch.view(-1, exp.n_samples), 512, 256, pad=True)
-    # f_spec = stft(recon.view(-1, exp.n_samples), 512, 256, pad=True)
-
-    loss = exp.perceptual_loss(recon, batch) #+ spec_loss
+    loss = exp.perceptual_loss(recon, batch)
     loss.backward()
     optim.step()
     return loss, recon, indices, encoded
