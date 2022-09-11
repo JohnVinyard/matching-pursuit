@@ -78,7 +78,7 @@ class TransferFunctionSegmentGenerator(nn.Module):
         self.cumulative = cumulative
         
         self.env = ConvUpsample(
-            model_dim, model_dim, 4, n_frames, mode='learned', out_channels=1, norm=ExampleNorm())
+            model_dim, model_dim, 4, n_frames, mode='nearest', out_channels=1, norm=ExampleNorm())
 
         n_coeffs = window_size // 2 + 1
         self.n_coeffs = n_coeffs
@@ -125,6 +125,9 @@ class TransferFunctionSegmentGenerator(nn.Module):
 
         
         if self.cumulative:
+            # tf = torch.exp(torch.cumsum(torch.log(tf + 1e-4), dim=-1))
+            # pow = torch.linspace(1, self.n_frames + 1, self.n_frames, device=tf.device)[None, None, :]
+            # tf = tf ** pow
             tf = torch.cumprod(tf, dim=-1)
         
         tf = torch.fft.irfft(tf, dim=1, norm='ortho')

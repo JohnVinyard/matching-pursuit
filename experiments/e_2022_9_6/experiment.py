@@ -12,6 +12,9 @@ from modules.sparse import VectorwiseSparsity
 from train.optim import optimizer
 from upsample import ConvUpsample
 from modules.normalization import ExampleNorm, limit_norm
+from torch.nn.utils.clip_grad import clip_grad_norm_, clip_grad_value_
+from torch.nn import functional as F
+from modules.stft import stft
 
 from util import device, playable
 from modules import pos_encoded
@@ -199,7 +202,15 @@ optim = optimizer(model, lr=1e-4)
 def train_model(batch):
     optim.zero_grad()
     recon, indices, encoded = model.forward(batch)
-    loss = exp.perceptual_loss(recon, batch)
+
+    # r_spec = torch.abs(torch.fft.rfft(recon, dim=-1, norm='ortho'))
+    # f_spec = torch.abs(torch.fft.rfft(batch, dim=-1, norm='ortho'))
+    # spec_loss = F.mse_loss(f_spec, r_spec)
+
+    # r_spec = stft(batch.view(-1, exp.n_samples), 512, 256, pad=True)
+    # f_spec = stft(recon.view(-1, exp.n_samples), 512, 256, pad=True)
+
+    loss = exp.perceptual_loss(recon, batch) #+ spec_loss
     loss.backward()
     optim.step()
     return loss, recon, indices, encoded
