@@ -11,6 +11,7 @@ from train.optim import optimizer
 from upsample import ConvUpsample
 from modules.normalization import ExampleNorm, limit_norm
 from torch.nn import functional as F
+from modules.phase import MelScale
 
 from util import device, playable
 from modules import pos_encoded
@@ -25,8 +26,9 @@ exp = Experiment(
     model_dim=128,
     kernel_size=512)
 
-n_events = 8
+n_events = 16
 
+mel_scale = MelScale()
 
 class SegmentGenerator(nn.Module):
     def __init__(self):
@@ -41,6 +43,8 @@ class SegmentGenerator(nn.Module):
             mode='learned',
             norm=ExampleNorm())
 
+        # self.env = LinearOutputStack(exp.model_dim, 3, out_channels=exp.n_frames)
+
         self.n_coeffs = 257
 
         self.model_dim = exp.model_dim
@@ -48,8 +52,9 @@ class SegmentGenerator(nn.Module):
         self.n_frames = exp.n_frames
         self.window_size = 512
 
-        self.n_inflections = 4
+        self.n_inflections = 1
 
+        self.amplitude = LinearOutputStack(exp.model_dim, 3, out_channels=1)
         self.transfer = LinearOutputStack(
             exp.model_dim, 3, out_channels=self.n_coeffs * 2 * self.n_inflections)
         self.means = LinearOutputStack(
@@ -62,15 +67,15 @@ class SegmentGenerator(nn.Module):
         x = x.view(-1, self.model_dim)
 
         means = torch.sigmoid(self.means(x))
-        stds = torch.sigmoid(self.stds(x)) * 0.25
+        stds = torch.sigmoid(self.stds(x))
 
         rng = torch.linspace(0, 1, self.n_samples, device=means.device)
         selections = pdf(rng[None, None, :],
                          means[:, :, None], stds[:, :, None])
         selections = selections / (selections.max() + 1e-8)
 
-        env = self.env(x) ** 2
-        env = F.interpolate(env, size=self.n_samples, mode='linear')
+        env = self.env(x).view(-1, 1, self.n_frames)
+        env = F.interpolate(env, size=self.n_samples, mode='linear') ** 2
         noise = torch.zeros(1, 1, self.n_samples, device=env.device).uniform_(-1, 1)
         env = env * noise
 
@@ -83,7 +88,7 @@ class SegmentGenerator(nn.Module):
 
         # ensure that the norm of the coefficients does not exceed one
         # to avoid feedback
-        tf = limit_norm(tf, dim=3)
+        tf = limit_norm(tf, dim=3, max_norm=0.9999)
 
         tf = tf.view(-1, self.n_inflections, self.n_coeffs * 2, self.n_frames)
 
@@ -93,12 +98,15 @@ class SegmentGenerator(nn.Module):
         tf = torch.complex(real, imag)
 
         tf = torch.cumprod(tf, dim=-1)
+        # transfer function expressed in log space so we can sum instead of multiply
+        # tf = torch.exp(torch.cumsum(tf, dim=-1))
 
         tf = tf.view(-1, self.n_coeffs, self.n_frames)
+        # tf = mel_scale.to_time_domain(tf.permute(0, 2, 1))[..., :self.n_samples]
         tf = torch.fft.irfft(tf, dim=1, norm='ortho')
         tf = \
-            tf.permute(0, 2, 1).view(-1, 1, self.n_frames, self.window_size) \
-            * torch.hamming_window(self.window_size, device=tf.device)[None, None, None, :]
+            tf.permute(0, 2, 1).view(-1, 1, self.n_frames, self.window_size) #\
+            #* torch.hamming_window(self.window_size, device=tf.device)[None, None, None, :]
 
         tf = overlap_add(tf, trim=self.n_samples)
 
@@ -110,6 +118,10 @@ class SegmentGenerator(nn.Module):
         final = torch.fft.irfft(spec, dim=-1, norm='ortho')
 
         final = torch.mean(final, dim=1, keepdim=True)
+
+        amp = torch.sigmoid(self.amplitude(x)).view(-1, 1, 1)
+
+        final = final * amp
 
         return final
 

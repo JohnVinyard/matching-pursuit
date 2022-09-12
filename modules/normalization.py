@@ -25,9 +25,9 @@ class ExampleNorm(nn.Module):
         return x / (stds + self.epsilon)
 
 
-def limit_norm(x, dim=2):
+def limit_norm(x, dim=2, max_norm=0.9999):
     norm = torch.norm(x, dim=dim, keepdim=True)
     unit_norm = x / (norm + 1e-8)
-    clamped_norm = torch.clamp(norm, 0, 0.9999)
+    clamped_norm = torch.clamp(norm, 0, max_norm)
     x = unit_norm * clamped_norm
     return x
