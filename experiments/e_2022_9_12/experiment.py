@@ -11,6 +11,7 @@ from train.optim import optimizer
 from upsample import ConvUpsample
 from modules.normalization import ExampleNorm, limit_norm
 from torch.nn import functional as F
+from modules.phase import MelScale
 
 from util import device, playable
 from modules import pos_encoded
@@ -27,6 +28,7 @@ exp = Experiment(
 
 n_events = 16
 
+mel_scale = MelScale()
 
 class SegmentGenerator(nn.Module):
     def __init__(self):
@@ -36,12 +38,12 @@ class SegmentGenerator(nn.Module):
             exp.model_dim,
             exp.model_dim,
             4,
-            exp.n_frames,
+            exp.n_frames * 8,
             out_channels=1,
-            mode='learned',
+            mode='nearest',
             norm=ExampleNorm())
 
-        self.n_coeffs = 257
+        self.n_coeffs = 256
 
         self.model_dim = exp.model_dim
         self.n_samples = exp.n_samples
@@ -59,6 +61,7 @@ class SegmentGenerator(nn.Module):
         
         self.absolute_position = LinearOutputStack(exp.model_dim, 3, out_channels=1)
         self.absolute_std = LinearOutputStack(exp.model_dim, 3, out_channels=1)
+        self.amp = LinearOutputStack(exp.model_dim, 3, out_channels=1)
 
     def forward(self, x):
         x = x.view(-1, self.model_dim)
@@ -66,22 +69,25 @@ class SegmentGenerator(nn.Module):
 
 
         # create envelope selections
-        means = torch.sigmoid(self.means(x))
-        stds = torch.sigmoid(self.stds(x)) * 0.25
-        rng = torch.linspace(0, 1, self.n_samples, device=means.device)
-        selections = pdf(rng[None, None, :],
-                         means[:, :, None], stds[:, :, None])
-        selections = selections / (selections.max() + 1e-8)
+        # means = torch.sigmoid(self.means(x))
+        # stds = torch.sigmoid(self.stds(x)) * 0.25
+        # rng = torch.linspace(0, 1, self.n_samples, device=means.device)
+        # selections = pdf(rng[None, None, :],
+        #                  means[:, :, None], stds[:, :, None])
+        # selections = selections / (selections.max() + 1e-8)
 
         # create envelope
         env = self.env(x) ** 2
+        orig_env = env
         env = F.interpolate(env, size=self.n_samples, mode='linear')
         noise = torch.zeros(1, 1, self.n_samples, device=env.device).uniform_(-1, 1)
         env = env * noise
 
-        env_selections = env * selections
+        env_selections = env #* selections
 
         
+        # TODO: Vector-quantized transfer functions to encourage
+        # generality
         # create transfer function
         tf = self.transfer(x)
         tf = tf.view(-1, self.n_inflections, self.n_coeffs *
@@ -90,7 +96,7 @@ class SegmentGenerator(nn.Module):
 
         # ensure that the norm of the coefficients does not exceed one
         # to avoid feedback
-        tf = limit_norm(tf, dim=3)
+        tf = limit_norm(tf, dim=3, max_norm=0.9999)
 
         tf = tf.view(-1, self.n_inflections, self.n_coeffs * 2, self.n_frames)
 
@@ -102,12 +108,13 @@ class SegmentGenerator(nn.Module):
         tf = torch.cumprod(tf, dim=-1)
 
         tf = tf.view(-1, self.n_coeffs, self.n_frames)
-        tf = torch.fft.irfft(tf, dim=1, norm='ortho')
-        tf = \
-            tf.permute(0, 2, 1).view(-1, 1, self.n_frames, self.window_size) \
-            * torch.hamming_window(self.window_size, device=tf.device)[None, None, None, :]
+        tf = mel_scale.to_time_domain(tf.permute(0, 2, 1))[..., :self.n_samples]
+        # tf = torch.fft.irfft(tf, dim=1, norm='ortho')
+        # tf = \
+        #     tf.permute(0, 2, 1).view(-1, 1, self.n_frames, self.window_size) \
+        #     * torch.hamming_window(self.window_size, device=tf.device)[None, None, None, :]
 
-        tf = overlap_add(tf, trim=self.n_samples)
+        # tf = overlap_add(tf, trim=self.n_samples)
 
         tf = tf.view(batch, self.n_inflections, self.n_samples)
 
@@ -120,25 +127,29 @@ class SegmentGenerator(nn.Module):
         final = torch.mean(final, dim=1, keepdim=True)
 
         # Compute position
-        pos = torch.sigmoid(self.absolute_position(x).view(-1, 1, 1))
-        stds = torch.sigmoid(self.absolute_std(x).view(-1, 1, 1)) * 1e-4
+        # pos = torch.sigmoid(self.absolute_position(x).view(-1, 1, 1))
+        # stds = torch.sigmoid(self.absolute_std(x).view(-1, 1, 1)) * 1e-4
 
-        rng = torch.linspace(0, 1, self.n_samples * 2, device=pos.device)
+        # rng = torch.linspace(0, 1, self.n_samples * 2, device=pos.device)
 
-        loc = pdf(rng[None, None, :], pos, stds)
-        mx, _ = torch.max(loc, dim=-1, keepdim=True)
-        loc = loc / (mx + 1e-8)
+        # loc = pdf(rng[None, None, :], pos, stds)
+        # mx, _ = torch.max(loc, dim=-1, keepdim=True)
+        # loc = loc / (mx + 1e-8)
 
-        loc_spec = torch.fft.rfft(loc, dim=-1, norm='ortho')
+        # loc_spec = torch.fft.rfft(loc, dim=-1, norm='ortho')
 
-        final = F.pad(final, (0, self.n_samples))
-        final_spec = torch.fft.rfft(final, dim=-1, norm='ortho')
+        # final = F.pad(final, (0, self.n_samples))
+        # final_spec = torch.fft.rfft(final, dim=-1, norm='ortho')
 
-        spec = loc_spec * final_spec
+        # spec = loc_spec * final_spec
 
-        final = torch.fft.irfft(spec, dim=-1, norm='ortho')[..., :self.n_samples]
+        # final = torch.fft.irfft(spec, dim=-1, norm='ortho')[..., :self.n_samples]
 
-        return final
+        # amp = torch.sigmoid(self.amp(x).view(-1, 1, 1))
+
+        # final = final * amp
+
+        return final, orig_env
 
 
 class Summarizer(nn.Module):
@@ -185,13 +196,15 @@ class Summarizer(nn.Module):
         # expanding back out to events
         # x, indices = self.sparse(x)
         # x = self.norm(x)
-        encoded = x
 
         x, _ = torch.max(x, dim=-1)
         x = self.expand(x)
         x = x.view(-1, n_events, exp.model_dim)
+        encoded = x
 
-        x = self.decode(x).view(batch, n_events, exp.n_samples)
+
+        x, env = self.decode(x)
+        x = x.view(batch, n_events, exp.n_samples)
 
         output = torch.sum(x, dim=1, keepdim=True)
 
@@ -204,7 +217,7 @@ class Summarizer(nn.Module):
 
         # output = output[..., :exp.n_samples]
 
-        return output, None, encoded
+        return output, None, encoded, env.view(batch, n_events, -1)
 
 
 class Model(nn.Module):
@@ -214,8 +227,8 @@ class Model(nn.Module):
         self.apply(lambda p: exp.init_weights(p))
 
     def forward(self, x):
-        x, indices, encoded = self.summary(x)
-        return x, indices, encoded
+        x, indices, encoded, env = self.summary(x)
+        return x, indices, encoded, env
 
 
 model = Model().to(device)
@@ -224,17 +237,18 @@ optim = optimizer(model, lr=1e-4)
 
 def train_model(batch):
     optim.zero_grad()
-    recon, indices, encoded = model.forward(batch)
+    recon, indices, encoded, env = model.forward(batch)
 
     # real_spec = torch.abs(torch.fft.rfft(batch, dim=-1, norm='ortho'))
     # fake_spec = torch.abs(torch.fft.rfft(recon, dim=-1, norm='ortho'))
 
     # spec_loss = F.mse_loss(fake_spec, real_spec)
 
-    loss = exp.perceptual_loss(recon, batch) #+ spec_loss
+    # TODO: energy based loss to encourage reliance on resonance
+    loss = exp.perceptual_loss(recon, batch) #+ (env).sum() #+ spec_loss
     loss.backward()
     optim.step()
-    return loss, recon, indices, encoded
+    return loss, recon, indices, encoded, env
 
 
 @readme
@@ -247,6 +261,7 @@ class WaveguideSynthesisExperiment2(object):
         self.real = None
         self.indices = None
         self.encoded = None
+        self.env = None
 
     def orig(self):
         return playable(self.real, exp.samplerate, normalize=True)
@@ -268,11 +283,14 @@ class WaveguideSynthesisExperiment2(object):
 
     def encoding(self):
         return self.encoded.data.cpu().numpy().reshape((-1, exp.model_dim))
+    
+    def e(self):
+        return self.env.data.cpu().numpy()[0].T
 
     def run(self):
         for i, item in enumerate(self.stream):
             item = item.view(-1, 1, exp.n_samples)
 
             self.real = item
-            loss, self.fake, self.indices, self.encoded = train_model(item)
+            loss, self.fake, self.indices, self.encoded, self.env = train_model(item)
             print('GEN', i, loss.item())
