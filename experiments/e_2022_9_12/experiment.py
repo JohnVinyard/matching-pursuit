@@ -12,6 +12,8 @@ from upsample import ConvUpsample
 from modules.normalization import ExampleNorm, limit_norm
 from torch.nn import functional as F
 from modules.phase import MelScale
+from vector_quantize_pytorch import VectorQuantize
+from torch.nn.utils.clip_grad import clip_grad_norm_, clip_grad_value_
 
 from util import device, playable
 from modules import pos_encoded
@@ -22,7 +24,7 @@ import numpy as np
 exp = Experiment(
     samplerate=zounds.SR22050(),
     n_samples=2**15,
-    weight_init=0.05,
+    weight_init=0.1,
     model_dim=128,
     kernel_size=512)
 
@@ -43,7 +45,7 @@ class SegmentGenerator(nn.Module):
             mode='nearest',
             norm=ExampleNorm())
 
-        self.n_coeffs = 256
+        self.n_coeffs = 257
 
         self.model_dim = exp.model_dim
         self.n_samples = exp.n_samples
@@ -62,6 +64,8 @@ class SegmentGenerator(nn.Module):
         self.absolute_position = LinearOutputStack(exp.model_dim, 3, out_channels=1)
         self.absolute_std = LinearOutputStack(exp.model_dim, 3, out_channels=1)
         self.amp = LinearOutputStack(exp.model_dim, 3, out_channels=1)
+
+        self.vq = VectorQuantize(self.n_coeffs * 2 * self.n_inflections, 512)
 
     def forward(self, x):
         x = x.view(-1, self.model_dim)
@@ -90,6 +94,10 @@ class SegmentGenerator(nn.Module):
         # generality
         # create transfer function
         tf = self.transfer(x)
+
+        # tf, _, loss = self.vq.forward(tf.view(-1, self.n_coeffs * 2 * self.n_inflections))
+        loss = 0
+
         tf = tf.view(-1, self.n_inflections, self.n_coeffs *
                      2, 1).repeat(1, 1, 1, self.n_frames)
         tf = tf.view(-1, self.n_inflections, self.n_coeffs, 2, self.n_frames)
@@ -97,6 +105,13 @@ class SegmentGenerator(nn.Module):
         # ensure that the norm of the coefficients does not exceed one
         # to avoid feedback
         tf = limit_norm(tf, dim=3, max_norm=0.9999)
+        # norms = torch.norm(tf, dim=3, keepdim=True)
+        # unit_norm = tf / (norms + 1e-8)
+
+        # epsilon = torch.zeros(1, device=tf.device).fill_(1e-4)
+        # log_norms = (torch.log(norms + epsilon) + torch.log(epsilon)) / (-torch.log(epsilon))
+        # tf = unit_norm / log_norms
+
 
         tf = tf.view(-1, self.n_inflections, self.n_coeffs * 2, self.n_frames)
 
@@ -105,16 +120,19 @@ class SegmentGenerator(nn.Module):
 
         tf = torch.complex(real, imag)
 
+        # rng = torch.arange(1, self.n_frames + 1, self.n_frames, device = tf.device)
+        # tf = tf ** rng[None, None, :]
         tf = torch.cumprod(tf, dim=-1)
+        # tf = torch.exp(torch.cumsum(tf, dim=-1))
 
         tf = tf.view(-1, self.n_coeffs, self.n_frames)
-        tf = mel_scale.to_time_domain(tf.permute(0, 2, 1))[..., :self.n_samples]
-        # tf = torch.fft.irfft(tf, dim=1, norm='ortho')
-        # tf = \
-        #     tf.permute(0, 2, 1).view(-1, 1, self.n_frames, self.window_size) \
-        #     * torch.hamming_window(self.window_size, device=tf.device)[None, None, None, :]
+        # tf = mel_scale.to_time_domain(tf.permute(0, 2, 1))[..., :self.n_samples]
+        tf = torch.fft.irfft(tf, dim=1, norm='ortho')
+        tf = \
+            tf.permute(0, 2, 1).view(-1, 1, self.n_frames, self.window_size) \
+            * torch.hamming_window(self.window_size, device=tf.device)[None, None, None, :]
 
-        # tf = overlap_add(tf, trim=self.n_samples)
+        tf = overlap_add(tf, trim=self.n_samples)
 
         tf = tf.view(batch, self.n_inflections, self.n_samples)
 
@@ -149,7 +167,7 @@ class SegmentGenerator(nn.Module):
 
         # final = final * amp
 
-        return final, orig_env
+        return final, orig_env, loss
 
 
 class Summarizer(nn.Module):
@@ -194,16 +212,16 @@ class Summarizer(nn.Module):
 
         # TODO: Consider aggregating into a single vector and then 
         # expanding back out to events
-        # x, indices = self.sparse(x)
-        # x = self.norm(x)
+        x, indices = self.sparse(x)
+        x = self.norm(x)
 
-        x, _ = torch.max(x, dim=-1)
-        x = self.expand(x)
-        x = x.view(-1, n_events, exp.model_dim)
+        # x, _ = torch.max(x, dim=-1)
+        # x = self.expand(x)
+        # x = x.view(-1, n_events, exp.model_dim)
         encoded = x
 
 
-        x, env = self.decode(x)
+        x, env, loss = self.decode(x)
         x = x.view(batch, n_events, exp.n_samples)
 
         output = torch.sum(x, dim=1, keepdim=True)
@@ -217,7 +235,7 @@ class Summarizer(nn.Module):
 
         # output = output[..., :exp.n_samples]
 
-        return output, None, encoded, env.view(batch, n_events, -1)
+        return output, indices, encoded, env.view(batch, n_events, -1), loss
 
 
 class Model(nn.Module):
@@ -227,8 +245,8 @@ class Model(nn.Module):
         self.apply(lambda p: exp.init_weights(p))
 
     def forward(self, x):
-        x, indices, encoded, env = self.summary(x)
-        return x, indices, encoded, env
+        x, indices, encoded, env, loss = self.summary(x)
+        return x, indices, encoded, env, loss
 
 
 model = Model().to(device)
@@ -237,16 +255,16 @@ optim = optimizer(model, lr=1e-4)
 
 def train_model(batch):
     optim.zero_grad()
-    recon, indices, encoded, env = model.forward(batch)
+    recon, indices, encoded, env, vq_loss = model.forward(batch)
 
-    # real_spec = torch.abs(torch.fft.rfft(batch, dim=-1, norm='ortho'))
-    # fake_spec = torch.abs(torch.fft.rfft(recon, dim=-1, norm='ortho'))
+    # energy = env.sum()
 
-    # spec_loss = F.mse_loss(fake_spec, real_spec)
+    
 
     # TODO: energy based loss to encourage reliance on resonance
-    loss = exp.perceptual_loss(recon, batch) #+ (env).sum() #+ spec_loss
+    loss = exp.perceptual_loss(recon, batch) + vq_loss #+ (energy * 0.01)
     loss.backward()
+    clip_grad_norm_(model.parameters(), 1)
     optim.step()
     return loss, recon, indices, encoded, env
 
