@@ -7,10 +7,10 @@ from modules.dilated import DilatedStack
 from modules.linear import LinearOutputStack
 from modules.normal_pdf import pdf
 from modules.shape import Reshape
-from modules.sparse import VectorwiseSparsity
+from modules.sparse import VectorwiseSparsity, sparsify, to_sparse_vectors_with_context
 from train.optim import optimizer
 from upsample import ConvUpsample
-from modules.normalization import ExampleNorm, limit_norm
+from modules.normalization import ExampleNorm, UnitNorm, limit_norm
 from torch.nn import functional as F
 from modules.phase import MelScale
 from vector_quantize_pytorch import VectorQuantize
@@ -25,7 +25,7 @@ import numpy as np
 exp = Experiment(
     samplerate=zounds.SR22050(),
     n_samples=2**15,
-    weight_init=0.05,
+    weight_init=0.1,
     model_dim=128,
     kernel_size=512)
 
@@ -33,51 +33,13 @@ n_events = 16
 
 mel_scale = MelScale()
 
+
+
 class SegmentGenerator(nn.Module):
     def __init__(self):
         super().__init__()
 
-        self.env = ConvUpsample(
-            exp.model_dim,
-            exp.model_dim,
-            4,
-            exp.n_frames,
-            out_channels=1,
-            mode='nearest',
-            norm=ExampleNorm())
-
-        # self.env = nn.Sequential(
-        #     nn.Linear(exp.model_dim, exp.model_dim * 4),
-        #     Reshape((exp.model_dim, 4)),
-
-        #     nn.Conv1d(exp.model_dim, 64, 3, 1, 1),
-        #     nn.Upsample(scale_factor=2, mode='nearest'),
-        #     nn.LeakyReLU(0.2),
-        #     ExampleNorm(),
-
-        #     nn.Conv1d(64, 32, 3, 1, 1),
-        #     nn.Upsample(scale_factor=2, mode='nearest'),
-        #     nn.LeakyReLU(0.2),
-        #     ExampleNorm(),
-
-        #     nn.Conv1d(32, 16, 3, 1, 1),
-        #     nn.Upsample(scale_factor=2, mode='nearest'),
-        #     nn.LeakyReLU(0.2),
-        #     ExampleNorm(),
-
-        #     nn.Conv1d(16, 8, 3, 1, 1),
-        #     nn.Upsample(scale_factor=2, mode='nearest'),
-        #     nn.LeakyReLU(0.2),
-        #     ExampleNorm(),
-
-        #     nn.Conv1d(8, 4, 3, 1, 1),
-        #     nn.Upsample(scale_factor=2, mode='nearest'),
-        #     nn.LeakyReLU(0.2),
-        #     ExampleNorm(),
-
-        #     nn.Conv1d(4, 1, 3, 1, 1),
-
-        # )
+        self.env = LinearOutputStack(exp.model_dim, 3, out_channels=exp.n_frames)
 
         self.n_coeffs = 256
 
@@ -88,58 +50,32 @@ class SegmentGenerator(nn.Module):
 
         self.n_inflections = 1
 
-        
         self.transfer = LinearOutputStack(
             exp.model_dim, 3, out_channels=self.n_coeffs * 2 * self.n_inflections)
-        # self.means = LinearOutputStack(
-        #     exp.model_dim, 3, out_channels=self.n_inflections)
-        # self.stds = LinearOutputStack(
-        #     exp.model_dim, 3, out_channels=self.n_inflections)
         
-        # self.absolute_position = LinearOutputStack(exp.model_dim, 3, out_channels=1)
-        # self.absolute_std = LinearOutputStack(exp.model_dim, 3, out_channels=1)
-        # self.amp = LinearOutputStack(exp.model_dim, 3, out_channels=1)
-
-        # self.vq = VectorQuantize(self.n_coeffs * 2 * self.n_inflections, 512)
 
     def forward(self, x):
         x = x.view(-1, self.model_dim)
         batch = x.shape[0]
 
 
-        # create envelope selections
-        # means = torch.sigmoid(self.means(x))
-        # stds = torch.sigmoid(self.stds(x)) * 0.25
-        # rng = torch.linspace(0, 1, self.n_samples, device=means.device)
-        # selections = pdf(rng[None, None, :],
-        #                  means[:, :, None], stds[:, :, None])
-        # selections = selections / (selections.max() + 1e-8)
-
         # create envelope
         env = self.env(x) ** 2
+        env = env.view(batch, 1, -1)
         orig_env = env
         env = F.interpolate(env, size=self.n_samples, mode='linear')
         noise = torch.zeros(1, 1, self.n_samples, device=env.device).uniform_(-1, 1)
         env = env * noise
 
         env_selections = env #* selections
-
         
-        # TODO: Vector-quantized transfer functions to encourage
-        # generality
-        # create transfer function
         tf = self.transfer(x)
 
-        # tf, _, loss = self.vq.forward(tf.view(-1, self.n_coeffs * 2 * self.n_inflections))
         loss = 0
 
         tf = tf.view(-1, self.n_inflections, self.n_coeffs *
                      2, 1).repeat(1, 1, 1, self.n_frames)
         tf = tf.view(-1, self.n_inflections, self.n_coeffs, 2, self.n_frames)
-
-        # ensure that the norm of the coefficients does not exceed one
-        # to avoid feedback
-        # tf = limit_norm(tf, dim=3, max_norm=0.9999)
 
 
         tf = tf.view(-1, self.n_inflections, self.n_coeffs * 2, self.n_frames)
@@ -153,19 +89,11 @@ class SegmentGenerator(nn.Module):
 
         tf = torch.complex(real, imag)
 
-        # rng = torch.arange(1, self.n_frames + 1, self.n_frames, device = tf.device)
         tf = torch.cumprod(tf, dim=-1)
 
         tf = tf.view(-1, self.n_coeffs, self.n_frames)
 
         tf = mel_scale.to_time_domain(tf.permute(0, 2, 1))[..., :self.n_samples]
-
-        # tf = torch.fft.irfft(tf, dim=1, norm='ortho')
-        # tf = \
-        #     tf.permute(0, 2, 1).view(-1, 1, self.n_frames, self.window_size) \
-        #     * torch.hamming_window(self.window_size, device=tf.device)[None, None, None, :]
-
-        # tf = overlap_add(tf, trim=self.n_samples)
 
         tf = tf.view(batch, self.n_inflections, self.n_samples)
 
@@ -176,30 +104,6 @@ class SegmentGenerator(nn.Module):
         final = torch.fft.irfft(spec, dim=-1, norm='ortho')
 
         final = torch.mean(final, dim=1, keepdim=True)
-
-        # Compute position
-        # pos = torch.sigmoid(self.absolute_position(x).view(-1, 1, 1))
-        # stds = torch.sigmoid(self.absolute_std(x).view(-1, 1, 1)) * 1e-4
-
-        # rng = torch.linspace(0, 1, self.n_samples * 2, device=pos.device)
-
-        # loc = pdf(rng[None, None, :], pos, stds)
-        # mx, _ = torch.max(loc, dim=-1, keepdim=True)
-        # loc = loc / (mx + 1e-8)
-
-        # loc_spec = torch.fft.rfft(loc, dim=-1, norm='ortho')
-
-        # final = F.pad(final, (0, self.n_samples))
-        # final_spec = torch.fft.rfft(final, dim=-1, norm='ortho')
-
-        # spec = loc_spec * final_spec
-
-        # final = torch.fft.irfft(spec, dim=-1, norm='ortho')[..., :self.n_samples]
-
-        # amp = torch.sigmoid(self.amp(x).view(-1, 1, 1))
-
-        # final = final * amp
-
         return final, orig_env, loss, orig_tf
 
 
@@ -220,13 +124,19 @@ class Summarizer(nn.Module):
         self.reduce = nn.Conv1d(exp.model_dim + 33, exp.model_dim, 1, 1, 0)
 
         self.sparse = VectorwiseSparsity(
-            exp.model_dim, keep=n_events, channels_last=False, dense=False)
+            exp.model_dim, keep=n_events, channels_last=False, dense=False, normalize=True)
 
         self.decode = SegmentGenerator()
 
-        self.expand = LinearOutputStack(exp.model_dim, 3, out_channels=n_events * exp.model_dim)
+        self.vq = VectorQuantize(
+            exp.model_dim, 
+            2048, 
+            commitment_weight=1, 
+            channel_last=True)
+
 
         self.norm = ExampleNorm()
+        self.unit_norm = UnitNorm(axis=-1)
 
     def forward(self, x):
         batch = x.shape[0]
@@ -243,32 +153,26 @@ class Summarizer(nn.Module):
         x = self.context(x)
         x = self.norm(x)
 
-        # TODO: Consider aggregating into a single vector and then 
-        # expanding back out to events
         x, indices = self.sparse(x)
-        # x = self.norm(x)
-
-        # x, _ = torch.max(x, dim=-1)
-        # x = self.expand(x)
-        # x = x.view(-1, n_events, exp.model_dim)
+        x, _, vq_loss = self.vq(x.view(-1, exp.model_dim))
+        x = x.view(batch, n_events, exp.model_dim)
+        # vq_loss = 0
+        
         encoded = x
 
-
-        x, env, loss, tf = self.decode(x)
+        x, env, _, tf = self.decode(x)
         x = x.view(batch, n_events, exp.n_samples)
 
-        output = torch.sum(x, dim=1, keepdim=True)
+        output = torch.zeros(batch, 1, exp.n_samples * 2, device=x.device)
+        for b in range(batch):
+            for i in range(n_events):
+                start = indices[b, i] * 256
+                end = start + exp.n_samples
+                output[b, :, start: end] += x[b, i]
 
-        # output = torch.zeros(batch, 1, exp.n_samples * 2, device=x.device)
-        # for b in range(batch):
-        #     for i in range(n_events):
-        #         start = indices[b, i] * 256
-        #         end = start + exp.n_samples
-        #         output[b, :, start: end] += x[b, i]
+        output = output[..., :exp.n_samples]
 
-        # output = output[..., :exp.n_samples]
-
-        return output, indices, encoded, env.view(batch, n_events, -1), loss, tf
+        return output, indices, encoded, env.view(batch, n_events, -1), vq_loss, tf
 
 
 class Model(nn.Module):
@@ -290,10 +194,9 @@ def train_model(batch):
     optim.zero_grad()
     recon, indices, encoded, env, vq_loss, tf = model.forward(batch)
 
-    diff = torch.diff(tf, dim=-1)
-    diff_norms = torch.norm(diff, dim=1).mean() * 0.1
+    env_diff = (torch.diff(env, dim=-1) ** 2).sum()
 
-    loss = exp.perceptual_loss(recon, batch) + diff_norms 
+    loss = exp.perceptual_loss(recon, batch) + vq_loss + env_diff
     loss.backward()
     clip_grad_norm_(model.parameters(), 1)
     optim.step()
@@ -337,9 +240,16 @@ class WaveguideSynthesisExperiment2(object):
     
     def e(self):
         return self.env.data.cpu().numpy()[0].T
+    
+    def codebook(self):
+        return self.model.summary.vq.codebook.data.cpu().numpy().T
 
     def run(self):
+
+
         for i, item in enumerate(self.stream):
+            print('CODEBOOK', self.codebook().std())
+
             item = item.view(-1, 1, exp.n_samples)
 
             self.real = item
