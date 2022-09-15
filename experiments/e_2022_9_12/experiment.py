@@ -24,7 +24,7 @@ import numpy as np
 exp = Experiment(
     samplerate=zounds.SR22050(),
     n_samples=2**15,
-    weight_init=0.1,
+    weight_init=0.08,
     model_dim=128,
     kernel_size=512)
 
@@ -40,7 +40,7 @@ class SegmentGenerator(nn.Module):
             exp.model_dim,
             exp.model_dim,
             4,
-            exp.n_frames * 8,
+            exp.n_frames,
             out_channels=1,
             mode='nearest',
             norm=ExampleNorm())
@@ -54,18 +54,19 @@ class SegmentGenerator(nn.Module):
 
         self.n_inflections = 1
 
+        
         self.transfer = LinearOutputStack(
             exp.model_dim, 3, out_channels=self.n_coeffs * 2 * self.n_inflections)
-        self.means = LinearOutputStack(
-            exp.model_dim, 3, out_channels=self.n_inflections)
-        self.stds = LinearOutputStack(
-            exp.model_dim, 3, out_channels=self.n_inflections)
+        # self.means = LinearOutputStack(
+        #     exp.model_dim, 3, out_channels=self.n_inflections)
+        # self.stds = LinearOutputStack(
+        #     exp.model_dim, 3, out_channels=self.n_inflections)
         
-        self.absolute_position = LinearOutputStack(exp.model_dim, 3, out_channels=1)
-        self.absolute_std = LinearOutputStack(exp.model_dim, 3, out_channels=1)
-        self.amp = LinearOutputStack(exp.model_dim, 3, out_channels=1)
+        # self.absolute_position = LinearOutputStack(exp.model_dim, 3, out_channels=1)
+        # self.absolute_std = LinearOutputStack(exp.model_dim, 3, out_channels=1)
+        # self.amp = LinearOutputStack(exp.model_dim, 3, out_channels=1)
 
-        self.vq = VectorQuantize(self.n_coeffs * 2 * self.n_inflections, 512)
+        # self.vq = VectorQuantize(self.n_coeffs * 2 * self.n_inflections, 512)
 
     def forward(self, x):
         x = x.view(-1, self.model_dim)
@@ -104,26 +105,22 @@ class SegmentGenerator(nn.Module):
 
         # ensure that the norm of the coefficients does not exceed one
         # to avoid feedback
-        tf = limit_norm(tf, dim=3, max_norm=0.9999)
-        # norms = torch.norm(tf, dim=3, keepdim=True)
-        # unit_norm = tf / (norms + 1e-8)
-
-        # epsilon = torch.zeros(1, device=tf.device).fill_(1e-4)
-        # log_norms = (torch.log(norms + epsilon) + torch.log(epsilon)) / (-torch.log(epsilon))
-        # tf = unit_norm / log_norms
+        # tf = limit_norm(tf, dim=3, max_norm=0.9999)
 
 
         tf = tf.view(-1, self.n_inflections, self.n_coeffs * 2, self.n_frames)
+        orig_tf = tf.view(-1, self.n_coeffs * 2, self.n_frames)
 
-        real = tf[:, :, :self.n_coeffs, :]
-        imag = tf[:, :, self.n_coeffs:, :]
+        real = torch.clamp(tf[:, :, :self.n_coeffs, :], 0, 1) * 0.9999
+        imag = torch.clamp(tf[:, :, self.n_coeffs:, :], -1, 1) * np.pi
+
+        real = real * torch.cos(imag)
+        imag = real * torch.sin(imag)
 
         tf = torch.complex(real, imag)
 
         # rng = torch.arange(1, self.n_frames + 1, self.n_frames, device = tf.device)
-        # tf = tf ** rng[None, None, :]
         tf = torch.cumprod(tf, dim=-1)
-        # tf = torch.exp(torch.cumsum(tf, dim=-1))
 
         tf = tf.view(-1, self.n_coeffs, self.n_frames)
         # tf = mel_scale.to_time_domain(tf.permute(0, 2, 1))[..., :self.n_samples]
@@ -167,7 +164,7 @@ class SegmentGenerator(nn.Module):
 
         # final = final * amp
 
-        return final, orig_env, loss
+        return final, orig_env, loss, orig_tf
 
 
 class Summarizer(nn.Module):
@@ -221,7 +218,7 @@ class Summarizer(nn.Module):
         encoded = x
 
 
-        x, env, loss = self.decode(x)
+        x, env, loss, tf = self.decode(x)
         x = x.view(batch, n_events, exp.n_samples)
 
         output = torch.sum(x, dim=1, keepdim=True)
@@ -235,7 +232,7 @@ class Summarizer(nn.Module):
 
         # output = output[..., :exp.n_samples]
 
-        return output, indices, encoded, env.view(batch, n_events, -1), loss
+        return output, indices, encoded, env.view(batch, n_events, -1), loss, tf
 
 
 class Model(nn.Module):
@@ -245,8 +242,8 @@ class Model(nn.Module):
         self.apply(lambda p: exp.init_weights(p))
 
     def forward(self, x):
-        x, indices, encoded, env, loss = self.summary(x)
-        return x, indices, encoded, env, loss
+        x, indices, encoded, env, loss, tf = self.summary(x)
+        return x, indices, encoded, env, loss, tf
 
 
 model = Model().to(device)
@@ -255,14 +252,12 @@ optim = optimizer(model, lr=1e-4)
 
 def train_model(batch):
     optim.zero_grad()
-    recon, indices, encoded, env, vq_loss = model.forward(batch)
+    recon, indices, encoded, env, vq_loss, tf = model.forward(batch)
 
-    # energy = env.sum()
+    diff = torch.diff(tf, dim=-1)
+    diff_norms = torch.norm(diff, dim=1).mean() * 0.1
 
-    
-
-    # TODO: energy based loss to encourage reliance on resonance
-    loss = exp.perceptual_loss(recon, batch) + vq_loss #+ (energy * 0.01)
+    loss = exp.perceptual_loss(recon, batch) + diff_norms 
     loss.backward()
     clip_grad_norm_(model.parameters(), 1)
     optim.step()
