@@ -6,6 +6,7 @@ from modules.ddsp import overlap_add
 from modules.dilated import DilatedStack
 from modules.linear import LinearOutputStack
 from modules.normal_pdf import pdf
+from modules.shape import Reshape
 from modules.sparse import VectorwiseSparsity
 from train.optim import optimizer
 from upsample import ConvUpsample
@@ -24,7 +25,7 @@ import numpy as np
 exp = Experiment(
     samplerate=zounds.SR22050(),
     n_samples=2**15,
-    weight_init=0.08,
+    weight_init=0.05,
     model_dim=128,
     kernel_size=512)
 
@@ -45,7 +46,40 @@ class SegmentGenerator(nn.Module):
             mode='nearest',
             norm=ExampleNorm())
 
-        self.n_coeffs = 257
+        # self.env = nn.Sequential(
+        #     nn.Linear(exp.model_dim, exp.model_dim * 4),
+        #     Reshape((exp.model_dim, 4)),
+
+        #     nn.Conv1d(exp.model_dim, 64, 3, 1, 1),
+        #     nn.Upsample(scale_factor=2, mode='nearest'),
+        #     nn.LeakyReLU(0.2),
+        #     ExampleNorm(),
+
+        #     nn.Conv1d(64, 32, 3, 1, 1),
+        #     nn.Upsample(scale_factor=2, mode='nearest'),
+        #     nn.LeakyReLU(0.2),
+        #     ExampleNorm(),
+
+        #     nn.Conv1d(32, 16, 3, 1, 1),
+        #     nn.Upsample(scale_factor=2, mode='nearest'),
+        #     nn.LeakyReLU(0.2),
+        #     ExampleNorm(),
+
+        #     nn.Conv1d(16, 8, 3, 1, 1),
+        #     nn.Upsample(scale_factor=2, mode='nearest'),
+        #     nn.LeakyReLU(0.2),
+        #     ExampleNorm(),
+
+        #     nn.Conv1d(8, 4, 3, 1, 1),
+        #     nn.Upsample(scale_factor=2, mode='nearest'),
+        #     nn.LeakyReLU(0.2),
+        #     ExampleNorm(),
+
+        #     nn.Conv1d(4, 1, 3, 1, 1),
+
+        # )
+
+        self.n_coeffs = 256
 
         self.model_dim = exp.model_dim
         self.n_samples = exp.n_samples
@@ -123,13 +157,15 @@ class SegmentGenerator(nn.Module):
         tf = torch.cumprod(tf, dim=-1)
 
         tf = tf.view(-1, self.n_coeffs, self.n_frames)
-        # tf = mel_scale.to_time_domain(tf.permute(0, 2, 1))[..., :self.n_samples]
-        tf = torch.fft.irfft(tf, dim=1, norm='ortho')
-        tf = \
-            tf.permute(0, 2, 1).view(-1, 1, self.n_frames, self.window_size) \
-            * torch.hamming_window(self.window_size, device=tf.device)[None, None, None, :]
 
-        tf = overlap_add(tf, trim=self.n_samples)
+        tf = mel_scale.to_time_domain(tf.permute(0, 2, 1))[..., :self.n_samples]
+
+        # tf = torch.fft.irfft(tf, dim=1, norm='ortho')
+        # tf = \
+        #     tf.permute(0, 2, 1).view(-1, 1, self.n_frames, self.window_size) \
+        #     * torch.hamming_window(self.window_size, device=tf.device)[None, None, None, :]
+
+        # tf = overlap_add(tf, trim=self.n_samples)
 
         tf = tf.view(batch, self.n_inflections, self.n_samples)
 
@@ -210,7 +246,7 @@ class Summarizer(nn.Module):
         # TODO: Consider aggregating into a single vector and then 
         # expanding back out to events
         x, indices = self.sparse(x)
-        x = self.norm(x)
+        # x = self.norm(x)
 
         # x, _ = torch.max(x, dim=-1)
         # x = self.expand(x)
@@ -275,6 +311,8 @@ class WaveguideSynthesisExperiment2(object):
         self.indices = None
         self.encoded = None
         self.env = None
+
+        self.model = model
 
     def orig(self):
         return playable(self.real, exp.samplerate, normalize=True)
