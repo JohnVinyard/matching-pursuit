@@ -26,14 +26,41 @@ import numpy as np
 exp = Experiment(
     samplerate=zounds.SR22050(),
     n_samples=2**15,
-    weight_init=0.05,
+    weight_init=0.1,
     model_dim=128,
     kernel_size=512)
 
 n_events = 16
-event_latent_dim = 16
+event_latent_dim = exp.model_dim
 
 mel_scale = MelScale()
+
+'''
+The current model separates time and transfer function (good), but conflates time and envelope (bad)
+
+The ideal is a discrete representation of envelope and transfer function (all-in-one or separate) and a 
+differentiable (and preferably interpretible) representation of time-of-event
+
+Modules
+--------------
+- AudioSegmentContext 
+    dense representation via convolutions, transformer, etc.
+- EventExtractor 
+    vectors representing independent musical events
+- EnvelopeGenerator
+- TransferFunctionGenerator
+- EventScheduler 
+    using some combination of the indices of events and the event vectors themselves
+
+Issues to resolve
+------------------
+ - ENVELOPES: convolution-created envelopes struggle/are incapable of sharp attacks
+    - why doesn't a FC model work here, since it needn't be translation invariant?
+    - try pos-encoded upsample
+    - try vector-quantized approach
+- SCHEDULER: ideal scheduler is differentiable AND interpretible
+- SCHEDULER: indices-based scheduler tends toward evenly-spaced events
+'''
 
 class SegmentGenerator(nn.Module):
     def __init__(self):
@@ -48,6 +75,8 @@ class SegmentGenerator(nn.Module):
             mode='learned',
             norm=ExampleNorm())
 
+        # self.env = LinearOutputStack(
+            # exp.model_dim, 3, out_channels=exp.n_frames, in_channels=event_latent_dim)
 
         self.n_coeffs = 256
 
@@ -68,7 +97,6 @@ class SegmentGenerator(nn.Module):
     def forward(self, time, transfer):
         time = time.view(-1, self.model_dim)
         transfer = transfer.view(-1, event_latent_dim)
-        time = time.view(-1, event_latent_dim)
 
         # x = x.view(-1, self.model_dim)
         batch = time.shape[0]
@@ -76,6 +104,7 @@ class SegmentGenerator(nn.Module):
 
         # create envelope
         env = self.env(time) ** 2
+        env = env.view(-1, 1, exp.n_frames)
         orig_env = env
         env = F.interpolate(env, size=self.n_samples, mode='linear')
         noise = torch.zeros(1, 1, self.n_samples, device=env.device).uniform_(-1, 1)
@@ -136,10 +165,9 @@ class Summarizer(nn.Module):
 
         self.decode = SegmentGenerator()
 
-        self.to_time = LinearOutputStack(exp.model_dim, 3, out_channels=event_latent_dim)
-        self.to_transfer = LinearOutputStack(exp.model_dim, 3, out_channels=event_latent_dim)
 
         self.norm = ExampleNorm()
+
 
     def forward(self, x):
         batch = x.shape[0]
@@ -159,25 +187,21 @@ class Summarizer(nn.Module):
         x, indices = self.sparse(x)
         encoded = x
 
-        # split into independent time and transfer function representations
-        time = self.to_time(x).view(-1, event_latent_dim)
-        transfer = self.to_transfer(x).view(-1, event_latent_dim)
-
-        x, env, loss, tf = self.decode.forward(time, transfer)
+        x, env, loss, tf = self.decode.forward(x, x)
         x = x.view(batch, n_events, exp.n_samples)
 
-        output = torch.sum(x, dim=1, keepdim=True)
+        # output = torch.sum(x, dim=1, keepdim=True)
 
-        # output = torch.zeros(batch, 1, exp.n_samples * 2, device=x.device)
-        # for b in range(batch):
-        #     for i in range(n_events):
-        #         start = indices[b, i] * 256
-        #         end = start + exp.n_samples
-        #         output[b, :, start: end] += x[b, i]
+        output = torch.zeros(batch, 1, exp.n_samples * 2, device=x.device)
+        for b in range(batch):
+            for i in range(n_events):
+                start = indices[b, i] * 256
+                end = start + exp.n_samples
+                output[b, :, start: end] += x[b, i]
 
-        # output = output[..., :exp.n_samples]
+        output = output[..., :exp.n_samples]
 
-        return output, indices, encoded, env.view(batch, n_events, -1), loss, tf, time, transfer
+        return output, indices, encoded, env.view(batch, n_events, -1), loss, tf, None, None
 
 
 class Model(nn.Module):
@@ -202,10 +226,10 @@ def train_model(batch):
     # diff = torch.diff(tf, dim=-1)
     # diff_norms = torch.norm(diff, dim=1).mean() * 0.1
 
-    time_loss = latent_loss(time) * 0.1
-    tf_loss = latent_loss(transfer) * 0.1
+    # time_loss = latent_loss(time) * 0.1
+    # tf_loss = latent_loss(transfer) * 0.1
 
-    loss = exp.perceptual_loss(recon, batch) + time_loss + tf_loss 
+    loss = exp.perceptual_loss(recon, batch) #+ time_loss + tf_loss 
     loss.backward()
     clip_grad_norm_(model.parameters(), 1)
     optim.step()
