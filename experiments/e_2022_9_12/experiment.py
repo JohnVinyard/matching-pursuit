@@ -31,7 +31,7 @@ exp = Experiment(
     kernel_size=512)
 
 n_events = 16
-event_latent_dim = 8
+event_latent_dim = 16
 
 mel_scale = MelScale()
 
@@ -43,9 +43,9 @@ class SegmentGenerator(nn.Module):
             event_latent_dim,
             exp.model_dim,
             4,
-            exp.n_frames,
+            exp.n_frames * 2,
             out_channels=1,
-            mode='nearest',
+            mode='learned',
             norm=ExampleNorm())
 
 
