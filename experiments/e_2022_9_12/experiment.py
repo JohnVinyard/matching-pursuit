@@ -1,3 +1,4 @@
+from random import sample
 import torch
 from torch import nn
 import zounds
@@ -12,7 +13,7 @@ from train.optim import optimizer
 from upsample import ConvUpsample
 from modules.normalization import ExampleNorm, limit_norm
 from torch.nn import functional as F
-from modules.phase import MelScale
+from modules.phase import MelScale, morlet_filter_bank
 from vector_quantize_pytorch import VectorQuantize
 from torch.nn.utils.clip_grad import clip_grad_norm_, clip_grad_value_
 from modules.latent_loss import latent_loss
@@ -26,7 +27,7 @@ import numpy as np
 exp = Experiment(
     samplerate=zounds.SR22050(),
     n_samples=2**15,
-    weight_init=0.1,
+    weight_init=0.05,
     model_dim=128,
     kernel_size=512)
 
@@ -62,6 +63,13 @@ Issues to resolve
 - SCHEDULER: indices-based scheduler tends toward evenly-spaced events
 '''
 
+
+band = zounds.FrequencyBand(30, exp.samplerate.nyquist)
+scale = zounds.MelScale(band, 512)
+filter_bank = torch.from_numpy(
+    morlet_filter_bank(exp.samplerate, exp.n_samples, scale, 0.01, normalize=False).real).float().to(device)
+
+
 class SegmentGenerator(nn.Module):
     def __init__(self):
         super().__init__()
@@ -72,7 +80,7 @@ class SegmentGenerator(nn.Module):
             4,
             exp.n_frames * 2,
             out_channels=1,
-            mode='learned',
+            mode='nearest',
             norm=ExampleNorm())
 
         # self.env = LinearOutputStack(
@@ -91,7 +99,8 @@ class SegmentGenerator(nn.Module):
         self.transfer = LinearOutputStack(
             exp.model_dim, 
             3, 
-            out_channels=self.n_coeffs * 2 * self.n_inflections, 
+            # out_channels=self.n_coeffs * 2 * self.n_inflections, 
+            out_channels=512,
             in_channels=event_latent_dim)
 
     def forward(self, time, transfer):
@@ -104,34 +113,43 @@ class SegmentGenerator(nn.Module):
 
         # create envelope
         env = self.env(time) ** 2
-        env = env.view(-1, 1, exp.n_frames)
+        env = env.view(batch, 1, -1)
         orig_env = env
         env = F.interpolate(env, size=self.n_samples, mode='linear')
         noise = torch.zeros(1, 1, self.n_samples, device=env.device).uniform_(-1, 1)
         env = env * noise
 
+
         
         tf = self.transfer(transfer)
+        tf = torch.sigmoid(tf) ** 2
+        orig_tf = tf
+        tf = tf.view(batch, 512, 1).repeat(1, 1, exp.n_frames)
+        tf = torch.cumprod(tf, dim=-1)
+        tf = F.interpolate(tf, size=exp.n_samples, mode='linear')
+        tf = tf * filter_bank[None, :, :]
+        tf = torch.mean(tf, dim=1, keepdim=True)
+
         loss = 0
 
-        tf = tf.view(-1, self.n_inflections, self.n_coeffs *
-                     2, 1).repeat(1, 1, 1, self.n_frames)
-        tf = tf.view(-1, self.n_inflections, self.n_coeffs, 2, self.n_frames)
+        # tf = tf.view(-1, self.n_inflections, self.n_coeffs *
+        #              2, 1).repeat(1, 1, 1, self.n_frames)
+        # tf = tf.view(-1, self.n_inflections, self.n_coeffs, 2, self.n_frames)
 
 
-        tf = tf.view(-1, self.n_inflections, self.n_coeffs * 2, self.n_frames)
-        orig_tf = tf.view(-1, self.n_coeffs * 2, self.n_frames)
+        # tf = tf.view(-1, self.n_inflections, self.n_coeffs * 2, self.n_frames)
+        # orig_tf = tf.view(-1, self.n_coeffs * 2, self.n_frames)
 
-        real = torch.clamp(tf[:, :, :self.n_coeffs, :], 0, 1) * 0.9999
-        imag = torch.clamp(tf[:, :, self.n_coeffs:, :], -1, 1) * np.pi
+        # real = torch.clamp(tf[:, :, :self.n_coeffs, :], 0, 1) * 0.9999
+        # imag = torch.clamp(tf[:, :, self.n_coeffs:, :], -1, 1) * np.pi
 
-        real = real * torch.cos(imag)
-        imag = real * torch.sin(imag)
-        tf = torch.complex(real, imag)
-        tf = torch.cumprod(tf, dim=-1)
-        tf = tf.view(-1, self.n_coeffs, self.n_frames)
-        tf = mel_scale.to_time_domain(tf.permute(0, 2, 1))[..., :self.n_samples]
-        tf = tf.view(batch, self.n_inflections, self.n_samples)
+        # real = real * torch.cos(imag)
+        # imag = real * torch.sin(imag)
+        # tf = torch.complex(real, imag)
+        # tf = torch.cumprod(tf, dim=-1)
+        # tf = tf.view(-1, self.n_coeffs, self.n_frames)
+        # tf = mel_scale.to_time_domain(tf.permute(0, 2, 1))[..., :self.n_samples]
+        # tf = tf.view(batch, self.n_inflections, self.n_samples)
 
         # convolve impulse with transfer function
         env_spec = torch.fft.rfft(env, dim=-1, norm='ortho')
@@ -190,16 +208,16 @@ class Summarizer(nn.Module):
         x, env, loss, tf = self.decode.forward(x, x)
         x = x.view(batch, n_events, exp.n_samples)
 
-        # output = torch.sum(x, dim=1, keepdim=True)
+        output = torch.sum(x, dim=1, keepdim=True)
 
-        output = torch.zeros(batch, 1, exp.n_samples * 2, device=x.device)
-        for b in range(batch):
-            for i in range(n_events):
-                start = indices[b, i] * 256
-                end = start + exp.n_samples
-                output[b, :, start: end] += x[b, i]
+        # output = torch.zeros(batch, 1, exp.n_samples * 2, device=x.device)
+        # for b in range(batch):
+        #     for i in range(n_events):
+        #         start = indices[b, i] * 256
+        #         end = start + exp.n_samples
+        #         output[b, :, start: end] += x[b, i]
 
-        output = output[..., :exp.n_samples]
+        # output = output[..., :exp.n_samples]
 
         return output, indices, encoded, env.view(batch, n_events, -1), loss, tf, None, None
 
