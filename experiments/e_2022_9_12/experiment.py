@@ -1,3 +1,4 @@
+from pathlib import Path
 import torch
 from torch import nn
 import zounds
@@ -9,7 +10,7 @@ from modules.normal_pdf import pdf
 from modules.shape import Reshape
 from modules.sparse import VectorwiseSparsity
 from train.optim import optimizer
-from upsample import ConvUpsample
+from upsample import ConvUpsample, PosEncodedUpsample
 from modules.normalization import ExampleNorm, limit_norm
 from torch.nn import functional as F
 from modules.phase import MelScale
@@ -26,12 +27,12 @@ import numpy as np
 exp = Experiment(
     samplerate=zounds.SR22050(),
     n_samples=2**15,
-    weight_init=0.05,
+    weight_init=0.1,
     model_dim=128,
     kernel_size=512)
 
 n_events = 16
-event_latent_dim = 16
+event_latent_dim = exp.model_dim
 
 mel_scale = MelScale()
 
@@ -45,11 +46,10 @@ class SegmentGenerator(nn.Module):
             4,
             exp.n_frames * 2,
             out_channels=1,
-            mode='learned',
-            norm=ExampleNorm())
+            mode='nearest')
 
 
-        self.n_coeffs = 256
+        self.n_coeffs = 257
 
         self.model_dim = exp.model_dim
         self.n_samples = exp.n_samples
@@ -61,12 +61,11 @@ class SegmentGenerator(nn.Module):
         
         self.transfer = LinearOutputStack(
             exp.model_dim, 
-            3, 
+            2, 
             out_channels=self.n_coeffs * 2 * self.n_inflections, 
             in_channels=event_latent_dim)
 
     def forward(self, time, transfer):
-        time = time.view(-1, self.model_dim)
         transfer = transfer.view(-1, event_latent_dim)
         time = time.view(-1, event_latent_dim)
 
@@ -81,7 +80,6 @@ class SegmentGenerator(nn.Module):
         noise = torch.zeros(1, 1, self.n_samples, device=env.device).uniform_(-1, 1)
         env = env * noise
 
-        
         tf = self.transfer(transfer)
         loss = 0
 
@@ -93,15 +91,21 @@ class SegmentGenerator(nn.Module):
         tf = tf.view(-1, self.n_inflections, self.n_coeffs * 2, self.n_frames)
         orig_tf = tf.view(-1, self.n_coeffs * 2, self.n_frames)
 
+
         real = torch.clamp(tf[:, :, :self.n_coeffs, :], 0, 1) * 0.9999
+        
         imag = torch.clamp(tf[:, :, self.n_coeffs:, :], -1, 1) * np.pi
 
         real = real * torch.cos(imag)
         imag = real * torch.sin(imag)
         tf = torch.complex(real, imag)
         tf = torch.cumprod(tf, dim=-1)
+
         tf = tf.view(-1, self.n_coeffs, self.n_frames)
-        tf = mel_scale.to_time_domain(tf.permute(0, 2, 1))[..., :self.n_samples]
+        tf = torch.fft.irfft(tf, dim=1, norm='ortho').permute(0, 2, 1).view(batch, 1, exp.n_frames, self.window_size)
+        tf = overlap_add(tf, trim=exp.n_samples)
+
+        # tf = mel_scale.to_time_domain(tf.permute(0, 2, 1))[..., :self.n_samples]
         tf = tf.view(batch, self.n_inflections, self.n_samples)
 
         # convolve impulse with transfer function
@@ -132,14 +136,21 @@ class Summarizer(nn.Module):
         self.reduce = nn.Conv1d(exp.model_dim + 33, exp.model_dim, 1, 1, 0)
 
         self.sparse = VectorwiseSparsity(
-            exp.model_dim, keep=n_events, channels_last=False, dense=False)
+            exp.model_dim, keep=n_events, channels_last=False, dense=False, normalize=True)
 
         self.decode = SegmentGenerator()
 
-        self.to_time = LinearOutputStack(exp.model_dim, 3, out_channels=event_latent_dim)
-        self.to_transfer = LinearOutputStack(exp.model_dim, 3, out_channels=event_latent_dim)
+        self.to_time = LinearOutputStack(exp.model_dim, 1, out_channels=event_latent_dim)
+        self.to_transfer = LinearOutputStack(exp.model_dim, 1, out_channels=event_latent_dim)
 
         self.norm = ExampleNorm()
+    
+
+    def generate(self, time, transfer):
+        x, env, loss, tf = self.decode.forward(time, transfer)
+        x = x.view(-1, n_events, exp.n_samples)
+        output = torch.sum(x, dim=1, keepdim=True)
+        return output
 
     def forward(self, x):
         batch = x.shape[0]
@@ -163,6 +174,9 @@ class Summarizer(nn.Module):
         time = self.to_time(x).view(-1, event_latent_dim)
         transfer = self.to_transfer(x).view(-1, event_latent_dim)
 
+        # time = self.norm(time.view(-1, n_events, event_latent_dim)).view(-1, event_latent_dim)
+        # transfer = self.norm(transfer.view(-1, n_events, event_latent_dim)).view(-1, event_latent_dim)
+
         x, env, loss, tf = self.decode.forward(time, transfer)
         x = x.view(batch, n_events, exp.n_samples)
 
@@ -185,6 +199,9 @@ class Model(nn.Module):
         super().__init__()
         self.summary = Summarizer()
         self.apply(lambda p: exp.init_weights(p))
+    
+    def generate(self, time, transfer):
+        return self.summary.generate(time, transfer)
 
     def forward(self, x):
         x, indices, encoded, env, loss, tf, time, transfer = self.summary(x)
@@ -192,6 +209,11 @@ class Model(nn.Module):
 
 
 model = Model().to(device)
+# try:
+#     model.load_state_dict(torch.load(Path(__file__).parent.joinpath('model.dat')))
+#     print('loaded model')
+# except IOError:
+#     print('Could not load weights')
 optim = optimizer(model, lr=1e-4)
 
 
@@ -202,12 +224,15 @@ def train_model(batch):
     # diff = torch.diff(tf, dim=-1)
     # diff_norms = torch.norm(diff, dim=1).mean() * 0.1
 
-    time_loss = latent_loss(time) * 0.1
-    tf_loss = latent_loss(transfer) * 0.1
+    # time_loss = latent_loss(time) * 0.1
+    # tf_loss = latent_loss(transfer) * 0.1
 
-    loss = exp.perceptual_loss(recon, batch) + time_loss + tf_loss 
+    # encourage envelope to stay in the range [0-1]
+    # env_loss = torch.relu(env - 1).mean()
+
+    loss = exp.perceptual_loss(recon, batch) #+ env_loss
     loss.backward()
-    clip_grad_norm_(model.parameters(), 1)
+    # clip_grad_norm_(model.parameters(), 1)
     optim.step()
     return loss, recon, indices, encoded, env, time, transfer
 
@@ -258,6 +283,13 @@ class WaveguideSynthesisExperiment2(object):
     
     def tf_latent(self):
         return self.transfer_latent.data.cpu().numpy().squeeze().reshape((-1, event_latent_dim))
+    
+    def random(self, n_events=16, t_std=0.05, tf_std=0.05):
+        with torch.no_grad():
+            t = torch.zeros(1, n_events, event_latent_dim, device=device).normal_(0, t_std)
+            tf = torch.zeros(1, n_events, event_latent_dim, device=device).normal_(0, tf_std)
+            audio = model.generate(t, tf)
+            return playable(audio, exp.samplerate)
 
     def run(self):
         for i, item in enumerate(self.stream):
