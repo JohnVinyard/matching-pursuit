@@ -14,6 +14,7 @@ from upsample import ConvUpsample, PosEncodedUpsample
 from modules.normalization import ExampleNorm, limit_norm
 from torch.nn import functional as F
 from modules.phase import MelScale
+from modules.stft import stft
 from vector_quantize_pytorch import VectorQuantize
 from torch.nn.utils.clip_grad import clip_grad_norm_, clip_grad_value_
 from modules.latent_loss import latent_loss
@@ -64,6 +65,8 @@ class SegmentGenerator(nn.Module):
             2, 
             out_channels=self.n_coeffs * 2 * self.n_inflections, 
             in_channels=event_latent_dim)
+        
+        
 
     def forward(self, time, transfer):
         transfer = transfer.view(-1, event_latent_dim)
@@ -83,8 +86,8 @@ class SegmentGenerator(nn.Module):
         tf = self.transfer(transfer)
         loss = 0
 
-        tf = tf.view(-1, self.n_inflections, self.n_coeffs *
-                     2, 1).repeat(1, 1, 1, self.n_frames)
+        tf = tf.view(-1, self.n_inflections, self.n_coeffs * 2, 1)
+        tf = tf.repeat(1, 1, 1, self.n_frames)
         tf = tf.view(-1, self.n_inflections, self.n_coeffs, 2, self.n_frames)
 
 
@@ -221,16 +224,12 @@ def train_model(batch):
     optim.zero_grad()
     recon, indices, encoded, env, vq_loss, tf, time, transfer = model.forward(batch)
 
-    # diff = torch.diff(tf, dim=-1)
-    # diff_norms = torch.norm(diff, dim=1).mean() * 0.1
 
-    # time_loss = latent_loss(time) * 0.1
-    # tf_loss = latent_loss(transfer) * 0.1
-
-    # encourage envelope to stay in the range [0-1]
-    # env_loss = torch.relu(env - 1).mean()
-
-    loss = exp.perceptual_loss(recon, batch) #+ env_loss
+    # loss = exp.perceptual_loss(recon, batch)
+    real_spec = stft(batch, 512, 256, pad=True)
+    fake_spec = stft(recon, 512, 256, pad=True)
+    loss = F.mse_loss(fake_spec, real_spec)
+    
     loss.backward()
     # clip_grad_norm_(model.parameters(), 1)
     optim.step()
