@@ -28,7 +28,7 @@ import numpy as np
 exp = Experiment(
     samplerate=zounds.SR22050(),
     n_samples=2**15,
-    weight_init=0.1,
+    weight_init=0.05,
     model_dim=128,
     kernel_size=512)
 
@@ -77,7 +77,7 @@ class SegmentGenerator(nn.Module):
 
 
         # create envelope
-        env = self.env(time) ** 2
+        env = torch.clamp(self.env(time), 0, 1) ** 2
         orig_env = env
         env = F.interpolate(env, size=self.n_samples, mode='linear')
         noise = torch.zeros(1, 1, self.n_samples, device=env.device).uniform_(-1, 1)
@@ -225,10 +225,7 @@ def train_model(batch):
     recon, indices, encoded, env, vq_loss, tf, time, transfer = model.forward(batch)
 
 
-    # loss = exp.perceptual_loss(recon, batch)
-    real_spec = stft(batch, 512, 256, pad=True)
-    fake_spec = stft(recon, 512, 256, pad=True)
-    loss = F.mse_loss(fake_spec, real_spec)
+    loss = exp.perceptual_loss(recon, batch)
     
     loss.backward()
     # clip_grad_norm_(model.parameters(), 1)
