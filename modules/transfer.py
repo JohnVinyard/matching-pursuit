@@ -1,3 +1,4 @@
+from typing import Any
 import torch
 from torch import nn
 import zounds
@@ -13,7 +14,8 @@ class TransferFunction(nn.Module):
             scale: zounds.FrequencyScale, 
             n_frames: int, 
             resolution: int,
-            n_samples: int):
+            n_samples: int,
+            softmax_func: Any):
 
         super().__init__()
         self.samplerate = samplerate
@@ -21,6 +23,7 @@ class TransferFunction(nn.Module):
         self.n_frames = n_frames
         self.resolution = resolution
         self.n_samples = n_samples
+        self.softmax_func = softmax_func
 
         bank = morlet_filter_bank(
             samplerate, n_samples, scale, 0.1, normalize=False)\
@@ -42,7 +45,11 @@ class TransferFunction(nn.Module):
         if bands != self.n_bands or resolution != self.resolution:
             raise ValueError(
                 f'Expecting tensor with shape (*, {self.n_bands}, {self.resolution})')
-        x = F.gumbel_softmax(x, dim=-1)
+        
+        # x = F.gumbel_softmax(x, dim=-1, hard=True)
+        # x = F.softmax(x, dim=-1)
+        x = self.softmax_func(x)
+    
         x = x @ self.resonance
         x = F.interpolate(x, size=self.n_samples, mode='linear')
         x = x * self.filter_bank

@@ -12,6 +12,7 @@ from modules.psychoacoustic import PsychoacousticFeature
 from modules.scattering import MoreCorrectScattering
 from modules.shape import Reshape
 from modules.sparse import VectorwiseSparsity
+from modules.transfer import TransferFunction
 from train.optim import optimizer
 from upsample import ConvUpsample, PosEncodedUpsample
 from modules.normalization import ExampleNorm, limit_norm
@@ -41,17 +42,26 @@ event_latent_dim = exp.model_dim
 mel_scale = MelScale()
 
 
-scattering = MoreCorrectScattering(
-    exp.samplerate, 
-    zounds.MelScale(
-        zounds.FrequencyBand(30, exp.samplerate.nyquist), 16),
-    512,
-    0.1)
+# scattering = MoreCorrectScattering(
+#     exp.samplerate, 
+#     zounds.MelScale(
+#         zounds.FrequencyBand(30, exp.samplerate.nyquist), 16),
+#     512,
+#     0.1)
 
 band = zounds.FrequencyBand(30, exp.samplerate.nyquist)
 scale = zounds.MelScale(band, 128)
-filter_bank = torch.from_numpy(
-    morlet_filter_bank(exp.samplerate, exp.n_samples, scale, 0.25, normalize=False).real).to(device).float()
+# filter_bank = torch.from_numpy(
+    # morlet_filter_bank(exp.samplerate, exp.n_samples, scale, 0.25, normalize=False).real).to(device).float()
+
+
+
+def fft_convolve(env, tf):
+    env_spec = torch.fft.rfft(env, dim=-1, norm='ortho')
+    tf_spec = torch.fft.rfft(tf, dim=-1, norm='ortho')
+    spec = env_spec * tf_spec
+    final = torch.fft.irfft(spec, dim=-1, norm='ortho')
+    return final
 
 class SegmentGenerator(nn.Module):
     def __init__(self):
@@ -80,12 +90,27 @@ class SegmentGenerator(nn.Module):
         #     out_channels=self.n_coeffs * 2 * self.n_inflections,
         #     in_channels=event_latent_dim)
 
+        
+        self.resolution = 32
+
+
+        # I need to produce an n_bands * resolution thingy
+        # With geometric spacing, this could be convolutional, maybe?
+
         self.transfer = LinearOutputStack(
             exp.model_dim,
             2,
-            out_channels=128,
+            out_channels=scale.n_bands * self.resolution,
             in_channels=event_latent_dim
         )
+
+        self.tf = TransferFunction(
+            exp.samplerate, 
+            scale, 
+            exp.n_frames, 
+            self.resolution, 
+            exp.n_samples, 
+            softmax_func=lambda x: F.gumbel_softmax(x, dim=-1, hard=True))
 
 
     def forward(self, time, transfer):
@@ -105,8 +130,12 @@ class SegmentGenerator(nn.Module):
 
         # Theory: having trouble not relying on energy/noise because the
         # gradients here are just too small
-        tf = self.transfer(transfer)
+        # tf = self.transfer(transfer)
         loss = 0
+        tf = self.transfer.forward(transfer).view(batch, scale.n_bands, self.resolution)
+        tf = self.tf.forward(tf)
+        orig_tf = None
+
 
         # tf = tf.view(-1, self.n_inflections, self.n_coeffs * 2, 1)
         # tf = tf.repeat(1, 1, 1, self.n_frames)
@@ -131,22 +160,24 @@ class SegmentGenerator(nn.Module):
 
         # # tf = mel_scale.to_time_domain(tf.permute(0, 2, 1))[..., :self.n_samples]
 
-        tf = torch.clamp(tf.view(batch, -1, 1).repeat(1, 1, self.n_frames), 0, 0.98) ** 2
-        orig_tf = tf
-        tf = torch.cumprod(tf, dim=-1)
+        # tf = torch.clamp(tf.view(batch, -1, 1).repeat(1, 1, self.n_frames), 0, 0.98) ** 2
+        # orig_tf = tf
+        # tf = torch.cumprod(tf, dim=-1)
 
-        tf = F.interpolate(tf, size=self.n_samples, mode='linear')
-        tf = filter_bank[None, :, :] * tf
-        tf = tf.mean(dim=1, keepdim=True)
+        # tf = F.interpolate(tf, size=self.n_samples, mode='linear')
+        # tf = filter_bank[None, :, :] * tf
+        # tf = tf.mean(dim=1, keepdim=True)
 
-        tf = tf.view(batch, self.n_inflections, self.n_samples)
+        # tf = tf.view(batch, self.n_inflections, self.n_samples)
 
 
         # convolve impulse with transfer function
-        env_spec = torch.fft.rfft(env, dim=-1, norm='ortho')
-        tf_spec = torch.fft.rfft(tf, dim=-1, norm='ortho')
-        spec = env_spec * tf_spec
-        final = torch.fft.irfft(spec, dim=-1, norm='ortho')
+        # env_spec = torch.fft.rfft(env, dim=-1, norm='ortho')
+        # tf_spec = torch.fft.rfft(tf, dim=-1, norm='ortho')
+        # spec = env_spec * tf_spec
+        # final = torch.fft.irfft(spec, dim=-1, norm='ortho')
+
+        final = fft_convolve(env, tf)
 
 
         final = torch.mean(final, dim=1, keepdim=True)
@@ -258,15 +289,15 @@ def train_model(batch):
     recon, indices, encoded, env, vq_loss, tf, time, transfer = model.forward(
         batch)
 
-    # loss = exp.perceptual_loss(recon, batch)
+    loss = exp.perceptual_loss(recon, batch)
     # r = scattering.forward(batch)
     # f = scattering.forward(recon)
-    r = stft(batch, 512, 256, pad=True)
-    f = stft(recon, 512, 256, pad=True)
-    loss = F.mse_loss(f, r)
+    # r = stft(batch, 512, 256, pad=True)
+    # f = stft(recon, 512, 256, pad=True)
+    # loss = F.mse_loss(f, r)
 
     loss.backward()
-    clip_grad_norm_(model.parameters(), 1)
+    # clip_grad_norm_(model.parameters(), 1)
     optim.step()
     return loss, recon, indices, encoded, env, time, transfer
 
