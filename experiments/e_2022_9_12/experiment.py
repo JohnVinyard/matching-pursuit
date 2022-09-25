@@ -97,12 +97,20 @@ class SegmentGenerator(nn.Module):
         # I need to produce an n_bands * resolution thingy
         # With geometric spacing, this could be convolutional, maybe?
 
-        self.transfer = LinearOutputStack(
-            exp.model_dim,
-            2,
-            out_channels=scale.n_bands * self.resolution,
-            in_channels=event_latent_dim
-        )
+        # self.transfer = LinearOutputStack(
+        #     exp.model_dim,
+        #     2,
+        #     out_channels=scale.n_bands * self.resolution,
+        #     in_channels=event_latent_dim
+        # )
+
+        self.transfer = ConvUpsample(
+            exp.model_dim, 
+            exp.model_dim, 
+            8, 
+            scale.n_bands, 
+            mode='nearest', 
+            out_channels=self.resolution)
 
         self.tf = TransferFunction(
             exp.samplerate, 
@@ -132,7 +140,8 @@ class SegmentGenerator(nn.Module):
         # gradients here are just too small
         # tf = self.transfer(transfer)
         loss = 0
-        tf = self.transfer.forward(transfer).view(batch, scale.n_bands, self.resolution)
+        tf = self.transfer.forward(transfer)
+        tf = tf.permute(0, 2, 1).view(batch, scale.n_bands, self.resolution)
         tf = self.tf.forward(tf)
         orig_tf = None
 
