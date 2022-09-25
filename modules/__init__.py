@@ -26,4 +26,4 @@ from .sparse import \
 from .normal_pdf import pdf
 from .waveguide import TransferFunctionSegmentGenerator
 from .shape import Reshape
-from .transfer import TransferFunction
+from .transfer import TransferFunction, STFTTransferFunction

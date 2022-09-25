@@ -2,9 +2,48 @@ from typing import Any
 import torch
 from torch import nn
 import zounds
+
+from modules.ddsp import overlap_add
 from .phase import morlet_filter_bank
 import numpy as np
 from torch.nn import functional as F
+
+class STFTTransferFunction(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.window_size = 512
+        self.n_coeffs = self.window_size // 2 + 1
+        self.n_samples = 2 ** 15
+        self.step_size = self.window_size // 2
+        self.n_frames = self.n_samples // self.step_size
+    
+    def forward(self, tf):
+        batch, n_coeffs = tf.shape
+        if n_coeffs != self.n_coeffs:
+            raise ValueError(f'Expected (*, {self.n_coeffs}) but got {tf.shape}')
+        
+        tf = tf.view(-1, self.n_coeffs * 2, 1)
+        tf = tf.repeat(1, 1, self.n_frames)
+        tf = tf.view(-1, self.n_coeffs, 2, self.n_frames)
+
+        tf = tf.view(-1, self.n_coeffs * 2, self.n_frames)
+
+        real = torch.clamp(tf[:, :, :self.n_coeffs, :], 0, 1) * 0.9999
+        imag = torch.clamp(tf[:, :, self.n_coeffs:, :], -1, 1) * np.pi
+
+        real = real * torch.cos(imag)
+        imag = real * torch.sin(imag)
+        tf = torch.complex(real, imag)
+        tf = torch.cumprod(tf, dim=-1)
+
+        tf = tf.view(-1, self.n_coeffs, self.n_frames)
+        tf = torch.fft.irfft(tf, dim=1, norm='ortho')\
+            .permute(0, 2, 1)\
+            .view(batch, 1, self.n_frames, self.window_size)
+        tf = overlap_add(tf, trim=self.n_samples)
+        return tf
+
+
 
 class TransferFunction(nn.Module):
 
