@@ -16,11 +16,13 @@ class STFTTransferFunction(nn.Module):
         self.n_samples = 2 ** 15
         self.step_size = self.window_size // 2
         self.n_frames = self.n_samples // self.step_size
+
+        self.dim = self.n_coeffs * 2
     
     def forward(self, tf):
         batch, n_coeffs = tf.shape
-        if n_coeffs != self.n_coeffs:
-            raise ValueError(f'Expected (*, {self.n_coeffs}) but got {tf.shape}')
+        if n_coeffs != self.dim:
+            raise ValueError(f'Expected (*, {self.dim}) but got {tf.shape}')
         
         tf = tf.view(-1, self.n_coeffs * 2, 1)
         tf = tf.repeat(1, 1, self.n_frames)
@@ -28,8 +30,9 @@ class STFTTransferFunction(nn.Module):
 
         tf = tf.view(-1, self.n_coeffs * 2, self.n_frames)
 
-        real = torch.clamp(tf[:, :, :self.n_coeffs, :], 0, 1) * 0.9999
-        imag = torch.clamp(tf[:, :, self.n_coeffs:, :], -1, 1) * np.pi
+        real = torch.clamp(tf[:, :self.n_coeffs, :], 0, 1) * 0.9999
+        imag = torch.clamp(tf[:, self.n_coeffs:, :], -1, 1) * np.pi
+
 
         real = real * torch.cos(imag)
         imag = real * torch.sin(imag)
