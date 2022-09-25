@@ -4,9 +4,51 @@ from torch import nn
 import zounds
 
 from modules.ddsp import overlap_add
+from modules.pos_encode import pos_encoded
 from .phase import morlet_filter_bank
 import numpy as np
 from torch.nn import functional as F
+
+
+class PosEncodedImpulseGenerator(nn.Module):
+    def __init__(self, n_frames, final_size, softmax=lambda x: torch.softmax(x, dim=-1)):
+        super().__init__()
+        self.n_frames = n_frames
+        self.final_size = final_size
+        self.softmax = softmax
+    
+    def forward(self, p):
+        batch, _ = p.shape
+
+        norms = torch.norm(p, dim=-1, keepdim=True)
+        p = p / (norms + 1e-8)
+
+        pos = pos_encoded(batch, self.n_frames, 16, device=p.device)
+        norms = torch.norm(pos, dim=-1, keepdim=True)
+        pos = pos / (norms + 1e-8)
+
+        sim = (pos @ p[:, :, None]).view(batch, 1, self.n_frames)
+        orig_sim = sim
+        sim = F.interpolate(sim, size=self.final_size, mode='linear')
+        sim = self.softmax(sim)
+        return sim, orig_sim
+
+class ImpulseGenerator(nn.Module):
+    def __init__(self, final_size, softmax=lambda x: torch.softmax(x, dim=-1)):
+        super().__init__()
+        self.final_size = final_size
+        self.softmax = softmax
+    
+    def forward(self, x):
+        batch, time = x.shape
+
+        x = x.view(batch, 1, time)
+        step = self.final_size // time
+
+        output = torch.zeros(batch, 1, self.final_size, device=x.device)
+        output[:, :, ::step] = x
+        output = self.softmax(output)
+        return output
 
 class STFTTransferFunction(nn.Module):
     def __init__(self):
