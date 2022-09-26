@@ -21,7 +21,9 @@ class AuditoryImage(nn.Module):
             do_windowing=True,
             check_cola=True,
             causal=False,
-            exp_decay=False):
+            exp_decay=False,
+            residual=False,
+            twod=False):
 
         super().__init__()
         self.window_size = window_size
@@ -35,12 +37,13 @@ class AuditoryImage(nn.Module):
         self.check_cola = check_cola
         self.causal = causal
         self.exp_decay = exp_decay
+        self.residual = residual
+        self.twod = twod
 
     def forward(self, x):
         batch, channels, time = x.shape
         padding = self.window_size // 2
 
-        
 
         pad = (padding, 0) if self.causal else (0, padding)
 
@@ -56,10 +59,23 @@ class AuditoryImage(nn.Module):
 
         if self.do_windowing or self.exp_decay:
             x = x * self.window[None, None, None, :]
+        
+        if self.residual:
+            mean = torch.mean(x, dim=-1, keepdim=True)
+            residual = x - mean
+            r = torch.fft.rfft(residual, dim=-1, norm='ortho')
+            r = torch.abs(r)
+            return torch.cat([mean.view(batch, -1), r.view(batch, -1)], dim=-1)
+        elif self.twod:
+            x = x.permute(0, 2, 1, 3)
+            r = torch.fft.rfft2(x, dim=(-1, -2), norm='ortho')
+            r = torch.abs(r)
+            return r
+        else:
+            x = torch.fft.rfft(x, dim=-1, norm='ortho')
+            x = torch.abs(x)
 
-        x = torch.fft.rfft(x, dim=-1, norm='ortho')
-        x = torch.abs(x)
-
+        
         return x
 
 

@@ -14,3 +14,8 @@ def playable(x, samplerate, normalize=False):
         mx = samples.max()
         samples = samples / (mx + 1e-8)
     return samples
+
+
+def viewable(x, samplerate, normalize=False):
+    p = playable(x, samplerate)
+    return np.abs(zounds.spectral.stft(p))
