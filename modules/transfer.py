@@ -1,3 +1,4 @@
+from functools import reduce
 from typing import Any
 import torch
 from torch import nn
@@ -9,6 +10,19 @@ from .phase import morlet_filter_bank
 import numpy as np
 from torch.nn import functional as F
 
+
+def fft_convolve(*args):
+    n_samples = args[0].shape[-1]
+
+    # pad to avoid wraparound artifacts
+    padded = [F.pad(x, (0, x.shape[-1])) for x in args]
+    
+    specs = [torch.fft.rfft(x, dim=-1, norm='ortho') for x in padded]
+    spec = reduce(lambda accum, current: accum * current, specs[1:], specs[0])
+    final = torch.fft.irfft(spec, dim=-1, norm='ortho')
+
+    # remove padding
+    return final[..., :n_samples]
 
 class PosEncodedImpulseGenerator(nn.Module):
     def __init__(self, n_frames, final_size, softmax=lambda x: torch.softmax(x, dim=-1)):
@@ -29,9 +43,17 @@ class PosEncodedImpulseGenerator(nn.Module):
 
         sim = (pos @ p[:, :, None]).view(batch, 1, self.n_frames)
         orig_sim = sim
-        sim = F.interpolate(sim, size=self.final_size, mode='linear')
+
         sim = self.softmax(sim)
-        return sim, orig_sim
+
+        # sim = F.interpolate(sim, size=self.final_size, mode='linear')
+
+        output = torch.zeros(batch, 1, self.final_size, device=sim.device)
+        step = self.final_size // self.n_frames
+        output[:, :, ::step] = sim
+        
+        
+        return output, orig_sim
 
 class ImpulseGenerator(nn.Module):
     def __init__(self, final_size, softmax=lambda x: torch.softmax(x, dim=-1)):
@@ -41,13 +63,11 @@ class ImpulseGenerator(nn.Module):
     
     def forward(self, x):
         batch, time = x.shape
-
         x = x.view(batch, 1, time)
+        x = self.softmax(x)
         step = self.final_size // time
-
         output = torch.zeros(batch, 1, self.final_size, device=x.device)
         output[:, :, ::step] = x
-        output = self.softmax(output)
         return output
 
 class STFTTransferFunction(nn.Module):

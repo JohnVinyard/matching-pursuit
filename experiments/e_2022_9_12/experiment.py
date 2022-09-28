@@ -12,14 +12,13 @@ from modules.psychoacoustic import PsychoacousticFeature
 from modules.scattering import MoreCorrectScattering
 from modules.shape import Reshape
 from modules.sparse import VectorwiseSparsity
-from modules.transfer import TransferFunction
+from modules.transfer import ImpulseGenerator, PosEncodedImpulseGenerator, TransferFunction, fft_convolve
 from train.optim import optimizer
 from upsample import ConvUpsample, PosEncodedUpsample
 from modules.normalization import ExampleNorm, limit_norm
 from torch.nn import functional as F
 from modules.phase import MelScale
 from modules.stft import stft
-from vector_quantize_pytorch import VectorQuantize
 from torch.nn.utils.clip_grad import clip_grad_norm_, clip_grad_value_
 from modules.latent_loss import latent_loss
 
@@ -55,13 +54,58 @@ scale = zounds.MelScale(band, 128)
     # morlet_filter_bank(exp.samplerate, exp.n_samples, scale, 0.25, normalize=False).real).to(device).float()
 
 
+# TODO: What about discretization is causing issues?
+class VQ(nn.Module):
+    def __init__(self, code_dim, n_codes, commitment_weight=1, one_hot=False, passthrough=False):
+        super().__init__()
+        self.code_dim = code_dim
+        self.n_codes = n_codes
+        self.codebook = nn.Parameter(torch.zeros(n_codes, code_dim).normal_(0, 1))
+        self.commitment_cost = commitment_weight
+
+        self.one_hot = one_hot
+
+        self.passthrough = passthrough
+
+        if self.one_hot:
+            self.up = nn.Linear(code_dim, n_codes)
+            self.down = nn.Linear(n_codes, code_dim)
+    
+    def forward(self, x):
+
+        if self.passthrough:
+            return x, None, 0
+
+        if self.one_hot:
+            x = self.up(x)
+            x = F.gumbel_softmax(x, dim=-1, hard=True)
+            x = self.down(x)
+            return x, None, 0
+
+        dist = torch.cdist(x, self.codebook)
+        mn, indices = torch.min(dist, dim=-1)
+        codes = self.codebook[indices]
+
+        # bring codes closer to embeddings
+        code_loss = ((codes - x.detach()) ** 2).mean()
+
+        # bring embeddings closter to codes
+        embedding_loss = (((x - codes.detach()) ** 2).mean() * self.commitment_cost)
+
+        loss = code_loss + embedding_loss
+
+        quantized = x + (codes - x).detach()
+        return quantized, indices, loss
 
 def fft_convolve(env, tf):
+    env = F.pad(env, (0, env.shape[-1]))
+    tf = F.pad(tf, (0, tf.shape[-1]))
+
     env_spec = torch.fft.rfft(env, dim=-1, norm='ortho')
     tf_spec = torch.fft.rfft(tf, dim=-1, norm='ortho')
     spec = env_spec * tf_spec
     final = torch.fft.irfft(spec, dim=-1, norm='ortho')
-    return final
+    return final[..., :exp.n_samples]
 
 class SegmentGenerator(nn.Module):
     def __init__(self):
@@ -104,6 +148,14 @@ class SegmentGenerator(nn.Module):
         #     in_channels=event_latent_dim
         # )
 
+        # self.imp = LinearOutputStack(exp.model_dim, 2, out_channels=33, in_channels=event_latent_dim)
+        # self.imp = ConvUpsample(
+        #     event_latent_dim, exp.model_dim, 8, exp.n_frames, out_channels=33, mode='learned')
+        # self.impulse = ImpulseGenerator(
+        #     exp.n_samples, softmax=lambda x: F.gumbel_softmax(x, dim=-1, hard=True))
+        # self.impulse = PosEncodedImpulseGenerator(
+        #     exp.n_frames * 2, exp.n_samples, softmax=lambda x: F.gumbel_softmax(x, dim=-1, hard=True))
+
         self.transfer = ConvUpsample(
             exp.model_dim, 
             exp.model_dim, 
@@ -132,8 +184,7 @@ class SegmentGenerator(nn.Module):
         env = self.env(time) ** 2
         orig_env = env
         env = F.interpolate(env, size=self.n_samples, mode='linear')
-        noise = torch.zeros(1, 1, self.n_samples,
-                            device=env.device).uniform_(-1, 1)
+        noise = torch.zeros(1, 1, self.n_samples, device=env.device).uniform_(-1, 1)
         env = env * noise
 
         # Theory: having trouble not relying on energy/noise because the
@@ -145,6 +196,9 @@ class SegmentGenerator(nn.Module):
         tf = self.tf.forward(tf)
         orig_tf = None
 
+
+        # imp = self.imp(time)
+        # imp, _ = self.impulse.forward(imp)
 
         # tf = tf.view(-1, self.n_inflections, self.n_coeffs * 2, 1)
         # tf = tf.repeat(1, 1, 1, self.n_frames)
@@ -187,7 +241,7 @@ class SegmentGenerator(nn.Module):
         # final = torch.fft.irfft(spec, dim=-1, norm='ortho')
 
         final = fft_convolve(env, tf)
-
+        # final = fft_convolve(env, tf, imp)
 
         final = torch.mean(final, dim=1, keepdim=True)
 
@@ -217,8 +271,11 @@ class Summarizer(nn.Module):
 
         self.to_time = LinearOutputStack(
             exp.model_dim, 1, out_channels=event_latent_dim)
+        self.time_vq = VQ(exp.model_dim, 2048, 1, one_hot=True, passthrough=True)
+
         self.to_transfer = LinearOutputStack(
             exp.model_dim, 1, out_channels=event_latent_dim)
+        self.transfer_vq = VQ(exp.model_dim, 2048, 1, one_hot=True, passthrough=True)
 
         self.norm = ExampleNorm()
 
@@ -248,7 +305,10 @@ class Summarizer(nn.Module):
 
         # split into independent time and transfer function representations
         time = self.to_time(x).view(-1, event_latent_dim)
+        time, t_indices, t_loss = self.time_vq(time)
+
         transfer = self.to_transfer(x).view(-1, event_latent_dim)
+        transfer, tf_indices, tf_loss = self.transfer_vq(transfer)
 
         # time = self.norm(time.view(-1, n_events, event_latent_dim)).view(-1, event_latent_dim)
         # transfer = self.norm(transfer.view(-1, n_events, event_latent_dim)).view(-1, event_latent_dim)
@@ -267,6 +327,7 @@ class Summarizer(nn.Module):
 
         # output = output[..., :exp.n_samples]
 
+        loss = t_loss + tf_loss
         return output, indices, encoded, env.view(batch, n_events, -1), loss, tf, time, transfer
 
 
@@ -297,13 +358,11 @@ def train_model(batch):
     optim.zero_grad()
     recon, indices, encoded, env, vq_loss, tf, time, transfer = model.forward(
         batch)
+    
+    ll = (latent_loss(time) + latent_loss(transfer)) * 0.25
 
-    loss = exp.perceptual_loss(recon, batch)
-    # r = scattering.forward(batch)
-    # f = scattering.forward(recon)
-    # r = stft(batch, 512, 256, pad=True)
-    # f = stft(recon, 512, 256, pad=True)
-    # loss = F.mse_loss(f, r)
+    loss = exp.perceptual_loss(recon, batch) + vq_loss + ll
+
 
     loss.backward()
     # clip_grad_norm_(model.parameters(), 1)

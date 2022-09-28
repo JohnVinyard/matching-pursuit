@@ -6,6 +6,8 @@ import zounds
 import numpy as np
 from librosa import load, to_mono
 
+from modules.transfer import fft_convolve
+
 class NeuralReverb(nn.Module):
     def __init__(self, size, n_rooms, impulses=None):
         super().__init__()
@@ -51,13 +53,15 @@ class NeuralReverb(nn.Module):
         # choose a linear mixture of "rooms"
         mix = (reverb_mix[:, None, :] @ self.rooms)
 
-        reverb_spec = torch.fft.rfft(mix, dim=-1, norm='ortho')
-        signal_spec = torch.fft.rfft(x, dim=-1, norm='ortho')
+        x = fft_convolve(mix, x)
 
-        # convolution in the frequency domain
-        x = reverb_spec * signal_spec
+        # reverb_spec = torch.fft.rfft(mix, dim=-1, norm='ortho')
+        # signal_spec = torch.fft.rfft(x, dim=-1, norm='ortho')
 
-        x = torch.fft.irfft(x, dim=-1, n=self.size, norm='ortho')
+        # # convolution in the frequency domain
+        # x = reverb_spec * signal_spec
+
+        # x = torch.fft.irfft(x, dim=-1, n=self.size, norm='ortho')
 
         return x
 
