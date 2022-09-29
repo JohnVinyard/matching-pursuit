@@ -12,7 +12,8 @@ from modules.psychoacoustic import PsychoacousticFeature
 from modules.scattering import MoreCorrectScattering
 from modules.shape import Reshape
 from modules.sparse import VectorwiseSparsity
-from modules.transfer import ImpulseGenerator, PosEncodedImpulseGenerator, TransferFunction, fft_convolve
+from modules.transfer import ImpulseGenerator, PosEncodedImpulseGenerator, TransferFunction
+from modules.fft import fft_convolve
 from train.optim import optimizer
 from upsample import ConvUpsample, PosEncodedUpsample
 from modules.normalization import ExampleNorm, limit_norm

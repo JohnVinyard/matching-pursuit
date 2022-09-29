@@ -1,0 +1,434 @@
+import torch
+from torch import nn
+from torch.nn import functional as F
+import numpy as np
+from torch.distributions.normal import Normal
+from matplotlib import pyplot as plt
+from functools import reduce
+from scipy.signal import stft
+from torch.optim import Adam
+
+'''
+The main insights here are that sub-20-hz losses
+become jagged and unstable near the event due to phase
+issues, making them very hard to train.
+
+STFT, which ignores phase issues below 20-hz is smooth
+and convex, but begins to fall again *AT THE BOUNDARIES*
+since the positioned clip begins to disappear
+
+That said, choosing a domain that avoids boundary issues
+and guarantees a convex loss landscape
+
+
+
+class DifferentiableIndex(torch.autograd.Function):
+
+    def forward(self, pallette, indices):
+        """
+        indices => pallette @ sampling_kernel[indices] => values => ||target - values||
+        """
+        orig_shape = indices.shape
+        p = pallette.view(-1)
+        p_size = p.shape[0]
+        hard_indices = to_hard_indices(indices, p_size)
+        sampled = pallette[hard_indices]
+
+        self.save_for_backward(pallette, indices, hard_indices, sampled)
+
+        return sampled.reshape(*orig_shape)
+
+    def backward(self, *grad_outputs):
+
+        grad_output, = grad_outputs
+        pallette, indices, hard_indices, sampled = self.saved_tensors
+
+        # get neighboring indices (only look at the nearest neighbor)
+        # TODO: make this adjustable, with the option to take more
+        # neighbors into account using different windows
+        left = torch.clamp(hard_indices - 1, 0, pallette.shape[0] - 1)
+        right = torch.clamp(hard_indices + 1, 0, pallette.shape[0] - 1)
+
+        # sample neighboring values
+        left_samples = pallette[left]
+        right_samples = pallette[right]
+
+        error = grad_output.view(-1)
+
+        # which direction better matches the error gradient?
+        left_grad = torch.abs(error - (sampled - left_samples) - error)
+        right_grad = torch.abs(error - (sampled - right_samples))
+
+        # set grad in that direction, scaled to our [-1, 1] indexing space
+        step = 2 / pallette.shape[0]
+        grad = torch.sign(right_grad - left_grad) * step
+        grad = grad.reshape(*grad_output.shape)
+
+        return None, grad
+
+'''
+
+def fft_convolve(*args):
+    n_samples = args[0].shape[-1]
+
+    # pad to avoid wraparound artifacts
+    padded = [F.pad(x, (0, x.shape[-1])) for x in args]
+    
+    specs = [torch.fft.rfft(x, dim=-1, norm='ortho') for x in padded]
+    
+    spec = reduce(lambda accum, current: accum * current, specs[1:], specs[0])
+    final = torch.fft.irfft(spec, dim=-1, norm='ortho')
+
+    # remove padding
+    final = final[..., :n_samples]
+    final = normalize(final)
+    return final
+
+
+class Position(torch.autograd.Function):
+
+    def forward(self, items, positions):
+        x = fft_shift(items, positions)
+        return x
+
+    def backward(self, *grad_outputs):
+        x, = grad_outputs
+        # x = normalize(x)
+        return None, x
+
+fft_placement = Position.apply
+
+def init_weights(p):
+    with torch.no_grad():
+        try:
+            p.weight.uniform_(-0.1, 0.1)
+        except AttributeError:
+            pass
+
+        try:
+            p.bias.fill_(0)
+        except AttributeError:
+            pass
+
+def pos_encode_feature(x, domain, n_samples, n_freqs):
+    x = torch.clamp(x, -domain, domain)
+    output = [x]
+    for i in range(n_freqs):
+        output.extend([
+            torch.sin((2 ** i) * x),
+            torch.cos((2 ** i) * x)
+        ])
+
+    x = torch.cat(output, dim=-1)
+    return x
+
+def n_features_for_freq(n_freqs):
+    return n_freqs * 2 + 1
+
+
+def pos_encoded(batch_size, time_dim, n_freqs, device=None):
+    """
+    Return positional encodings with shape (batch_size, time_dim, n_features)
+    """
+    n_features = n_features_for_freq(n_freqs)
+    pos = pos_encode_feature(torch.linspace(-1, 1, time_dim).view(-1, 1), 1, time_dim, n_freqs)\
+        .view(1, time_dim, n_features)\
+        .repeat(batch_size, 1, 1)\
+        .view(batch_size, time_dim, n_features)\
+
+    if device:
+        pos = pos.to(device)
+    return pos
+
+
+
+def stft(x, ws=512, step=256, pad=False, log_amplitude=False, log_epsilon=1e-4):
+    if pad:
+        x = F.pad(x, (0, step))
+    
+    x = x.unfold(-1, ws, step)
+    win = torch.hann_window(ws).to(x.device)
+    x = x * win[None, None, :]
+    x = torch.fft.rfft(x, norm='ortho')
+    x = torch.abs(x)
+
+    if log_amplitude:
+        x = torch.log(x + log_epsilon)
+    
+    return x
+
+
+
+def generate_tones(n_samples, samplerate, hz, amps):
+    nyquist = samplerate // 2
+    radians = hz / nyquist
+    phase_accum = radians.reshape((-1, 1))
+    phase_accum = np.repeat(phase_accum, n_samples, -1)
+    phase_accum = np.cumsum(phase_accum, axis=-1)
+    tones = np.sin(phase_accum * np.pi) * amps[:, None]
+    tones = tones.sum(axis=0)
+    return tones
+
+def generate_clip(n_samples, samplerate=22050):
+    output = np.zeros(n_samples)
+    output[:64] = np.random.uniform(-1, 1, 64) * np.hamming(64)
+    output = torch.from_numpy(output).float()
+
+    tones = generate_tones(
+        n_samples, 
+        samplerate, 
+        np.array([110, 220, 440, 880]), 
+        np.array([1, 1, 1, 1])) * (np.linspace(1, 0, n_samples) ** 10)
+    
+    tones = torch.from_numpy(tones).float()
+
+    final = fft_convolve(output, tones)
+
+    final = normalize(final)
+    return final
+
+
+def fft_shift(a, shift):
+    n_samples = a.shape[-1]
+    a = F.pad(a, (0, n_samples))
+    shift_samples = (shift * 0.5) * n_samples
+    spec = torch.fft.rfft(a, dim=-1, norm='ortho')
+    
+    n_coeffs = spec.shape[-1]
+    shift = (torch.arange(0, n_coeffs) * 2j * np.pi) / n_coeffs
+    shift = torch.exp(-shift * shift_samples)
+    spec = spec * shift
+    samples = torch.fft.irfft(spec, dim=-1, norm='ortho')
+    samples = samples[..., :n_samples]
+    return samples
+
+
+def normalize(x):
+    mx, _ = torch.max(torch.abs(x), dim=-1, keepdim=True)
+    return x / (mx + 1e-8)
+
+
+class NormalPDFScheduler(nn.Module):
+    def __init__(self, n_samples):
+        super().__init__()
+        self.n_samples = n_samples
+        self.register_buffer('rng', torch.linspace(0, 1, n_samples))
+        self.register_buffer('scale', torch.zeros(1).fill_(1 / (n_samples * 2)))
+    
+    def forward(self, x, clips):
+        x = x.view(-1, 1)
+        normal = Normal(x, self.scale[None, :])
+        pdf = torch.exp(normal.log_prob(self.rng[None:]))
+        pdf = fft_convolve(pdf, clips)
+        pdf = normalize(pdf)
+        return pdf
+
+
+class FFTShiftScheduler(nn.Module):
+    def __init__(self, n_samples):
+        super().__init__()
+        self.n_samples = n_samples
+    
+    def forward(self, x, clips):
+        x = x.view(-1, 1)
+        # impulses = fft_shift(clips, x)
+        impulses = fft_placement(clips, x)
+        impulses = normalize(impulses)
+        return impulses
+
+
+class MSELoss(nn.Module):
+    def __init__(self, n_samples):
+        super().__init__()
+        self.n_samples = n_samples
+    
+    def forward(self, input, target):
+        return ((input - target) ** 2).mean(dim=-1)
+
+
+class STFTLoss(nn.Module):
+    def __init__(self, n_samples, log_amp=False):
+        super().__init__()
+        self.n_samples = n_samples
+        self.log_amp = log_amp
+    
+    def forward(self, input, target):
+        input = stft(input.view(-1, self.n_samples), log_amplitude=self.log_amp)
+        target = stft(target.view(-1, self.n_samples), log_amplitude=self.log_amp)
+        return ((input - target.detach()) ** 2).mean(dim=(1, 2))
+
+
+class FFTLoss(nn.Module):
+    def __init__(self, n_samples):
+        super().__init__()
+        self.n_samples = n_samples
+    
+    def forward(self, input, target):
+        input_coeffs = torch.fft.rfft(input, dim=-1, norm='ortho')
+        target_coeffs = torch.fft.rfft(target, dim=-1, norm='ortho')
+
+        input_coeffs = torch.cat([input_coeffs.real, input_coeffs.imag], dim=-1)
+        target_coeffs = torch.cat([target_coeffs.real, target_coeffs.imag], dim=-1)
+        return ((input_coeffs - target_coeffs) ** 2).mean(dim=-1)
+
+
+class SelfSimilarityLoss(nn.Module):
+    def __init__(self, n_samples):
+        super().__init__()
+        self.n_samples = n_samples
+    
+    def _self_sim(self, x):
+        spec = stft(x.view(-1, self.n_samples), 512, 256, pad=True)
+        sim = spec @ spec.permute(0, 2, 1)
+        return sim
+
+    def forward(self, input, target):
+        input_sim = self._self_sim(input)
+        target_sim = self._self_sim(target)
+        return ((input_sim - target_sim) ** 2).mean(dim=(1, 2))
+
+
+class CompositeLoss(nn.Module):
+    def __init__(self, *args):
+        super().__init__()
+        self.losses = args
+    
+    def forward(self, input, target):
+        return sum([l(input, target) for l in self.losses])
+
+
+class Model(nn.Module):
+    def __init__(self, n_samples, clip, scheduler):
+        super().__init__()
+        self.n_samples = n_samples
+        self.embed_spec = nn.Linear(257, 33)
+        self.embed = nn.Linear(66, 128)
+
+        # layer = nn.TransformerEncoderLayer(128, 4, 128 ,batch_first=True)
+        # self.net = nn.TransformerEncoder(layer, 3)
+
+        self.net = nn.Sequential(
+            nn.Conv1d(128, 128, 3, 1, dilation=1, padding=1),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(128, 128, 3, 1, dilation=3, padding=3),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(128, 128, 3, 1, dilation=9, padding=9),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(128, 128, 3, 1, dilation=27, padding=27),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(128, 128, 3, 1, dilation=1, padding=1),
+        )
+
+        self.to_pos = nn.Linear(128, 1)
+        self.clip = clip
+
+        self.scheduler = scheduler
+
+        self.apply(init_weights)
+    
+    def forward(self, x):
+        x = x.view(-1, self.n_samples)
+        spec = stft(x, 512, 256, pad=True, log_amplitude=True)
+        spec = self.embed_spec(spec)
+        pos = pos_encoded(x.shape[0], spec.shape[1], 16, device=spec.device)
+        x = torch.cat([spec, pos], dim=-1)
+        x = self.embed(x)
+
+        x = x.permute(0, 2, 1)
+        x = self.net(x)
+        x = x.permute(0, 2, 1)
+
+        x, _ = torch.max(x, dim=1)
+        # x = x[:, -1, :]
+        x = self.to_pos(x)
+        
+        locations = torch.sigmoid(x)
+
+        x = self.scheduler.forward(locations, self.clip)
+        return x, locations
+
+
+class DataSet(object):
+    def __init__(
+        self, 
+        batch_size, 
+        clip, 
+        scheduler, 
+        n_samples=2**15, 
+        samplerate=22050,
+        range_low = 0,
+        range_high = 1):
+        
+        super().__init__()
+        self.batch_size = batch_size
+        self.clip = clip
+        self.scheduler = scheduler
+        self.n_samples = n_samples
+        self.samplerate = samplerate
+        self.range_low = range_low
+        self.range_high = range_high
+    
+    def ordered_batch(self, n_positions):
+        locations = torch.linspace(self.range_low, self.range_high, n_positions)
+        return self.scheduler.forward(locations, self.clip)
+    
+    def __iter__(self):
+        while True:
+            locations = torch.zeros(self.batch_size, 1).uniform_(self.range_low, self.range_high)
+            examples = self.scheduler.forward(locations, self.clip)
+            yield examples, locations
+
+
+if __name__ == '__main__':
+    n_samples = 2**15
+    batch_size = 4
+    samplerate = 22050
+
+    clip = generate_clip(n_samples, samplerate)
+
+    # scheduler = NormalPDFScheduler(n_samples)
+    scheduler = FFTShiftScheduler(n_samples)
+
+    dataset = DataSet(
+        batch_size, 
+        clip, 
+        scheduler, 
+        n_samples, 
+        samplerate, 
+        range_low=0, 
+        range_high=1)
+    
+    model = Model(n_samples, clip, scheduler)
+    optim = Adam(model.parameters(), lr=1e-4, betas=(0, 0.9))
+
+    loss = CompositeLoss(
+        STFTLoss(n_samples),
+    )
+
+    # target_loc = torch.zeros(1).fill_(0.75)
+    # target = scheduler.forward(target_loc, clip)
+
+    # ob = dataset.ordered_batch(128)
+
+    # l = loss.forward(ob, target)
+    # plt.plot(l)
+    # plt.show()
+
+    for item, real_loc in dataset:
+        optim.zero_grad()
+        recon, fake_loc = model.forward(item)
+        l = loss.forward(recon, item).mean()
+
+        # This works.  The network is able to predict
+        # ths position perfectly.  That said, I won't have
+        # positions in the real world.  The network's job
+        # is to extract them.  That's *probably* because the
+        # loss landscape is equal to abs() centered on the
+        # target value.
+        # l = F.mse_loss(fake_loc, real_loc)
+
+        # print(real_loc.data.cpu().numpy().squeeze())
+        # print(fake_loc.data.cpu().numpy().squeeze())
+        l.backward()
+        optim.step()
+        print(l.item())

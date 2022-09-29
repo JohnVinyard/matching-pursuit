@@ -1,5 +1,11 @@
 import torch
 from torch import nn
+import numpy as np
+
+def unit_norm(x, dim=-1, epsilon=1e-8):
+    n = torch.norm(x, dim=dim, keepdim=True)
+    return x / (n + epsilon)
+
 
 class UnitNorm(nn.Module):
     def __init__(self, axis=-1, epsilon=1e-8):
@@ -8,10 +14,7 @@ class UnitNorm(nn.Module):
         self.epsilon = epsilon
     
     def forward(self, x):
-        norms = torch.norm(x, dim=self.axis, keepdim=True)
-        x = x / (norms + self.epsilon)
-        return x
-
+        return unit_norm(x, dim=self.axis, epsilon=self.epsilon)
 
 
 class ExampleNorm(nn.Module):

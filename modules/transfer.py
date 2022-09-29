@@ -11,18 +11,6 @@ import numpy as np
 from torch.nn import functional as F
 
 
-def fft_convolve(*args):
-    n_samples = args[0].shape[-1]
-
-    # pad to avoid wraparound artifacts
-    padded = [F.pad(x, (0, x.shape[-1])) for x in args]
-    
-    specs = [torch.fft.rfft(x, dim=-1, norm='ortho') for x in padded]
-    spec = reduce(lambda accum, current: accum * current, specs[1:], specs[0])
-    final = torch.fft.irfft(spec, dim=-1, norm='ortho')
-
-    # remove padding
-    return final[..., :n_samples]
 
 class PosEncodedImpulseGenerator(nn.Module):
     def __init__(self, n_frames, final_size, softmax=lambda x: torch.softmax(x, dim=-1)):

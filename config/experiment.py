@@ -12,13 +12,22 @@ from modules import AuditoryImage
 
 
 class Experiment(object):
-    def __init__(self, samplerate, n_samples, model_dim=128, weight_init=0.1, kernel_size=512):
+    def __init__(
+        self, 
+        samplerate, 
+        n_samples, 
+        model_dim=128, 
+        weight_init=0.1, 
+        kernel_size=512, 
+        residual_loss=False):
+
         super().__init__()
         self.samplerate = samplerate
         self.n_samples = n_samples
         self.window_size = 512
         self.step_size = self.window_size // 2
         self.n_frames = n_samples // self.step_size
+        self.residual_loss = residual_loss
 
         self.n_bands = model_dim
         self.model_dim = model_dim
@@ -39,7 +48,11 @@ class Experiment(object):
         self.pif = PsychoacousticFeature().to(device)
 
         self.aim = AuditoryImage(
-            512, 128, do_windowing=False, check_cola=False).to(device)
+            512, 
+            128, 
+            do_windowing=False, 
+            check_cola=False, 
+            residual=self.residual_loss).to(device)
 
     def perceptual_feature(self, x):
         # bands = self.pif.compute_feature_dict(x)

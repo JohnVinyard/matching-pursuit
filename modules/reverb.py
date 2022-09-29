@@ -6,7 +6,8 @@ import zounds
 import numpy as np
 from librosa import load, to_mono
 
-from modules.transfer import fft_convolve
+from modules.fft import fft_convolve
+
 
 class NeuralReverb(nn.Module):
     def __init__(self, size, n_rooms, impulses=None):

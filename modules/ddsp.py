@@ -575,6 +575,7 @@ class AudioModel(nn.Module):
 
         agg = x.mean(dim=-1)
         room = torch.softmax(self.to_rooms(agg), dim=-1)
+        # TODO: Support gumbel softmax option
         mix = torch.sigmoid(self.to_mix(agg)).view(-1, 1, 1)
 
         harm = self.osc.forward(x)

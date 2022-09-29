@@ -77,6 +77,9 @@ def does_this_work():
     final = np.fft.irfft(spec, axis=-1, norm='ortho')
     final = final[:2**15]
     return zounds.AudioSamples(final, samplerate).pad_with_silence()
+
+
+
     
 
 def train(batch, a, b):
@@ -153,38 +156,38 @@ if __name__ == '__main__':
     app = zounds.ZoundsApp(locals=locals(), globals=globals())
     app.start_in_thread(8888)
 
-    x = does_this_work()
+    # x = does_this_work()
 
-    # synth = zounds.SineSynthesizer(samplerate)
+    synth = zounds.SineSynthesizer(samplerate)
 
-    # a = synth.synthesize(samplerate.duration * 8192, [440])
-    # b = synth.synthesize(samplerate.duration * 8192, [210])
+    a = synth.synthesize(samplerate.duration * 8192, [440])
+    b = synth.synthesize(samplerate.duration * 8192, [210])
 
-    # canvas = np.zeros(n_samples)
-    # start_a = 10
-    # start_b = 16444
+    canvas = np.zeros(n_samples)
+    start_a = 10
+    start_b = 16444
 
-    # canvas[start_a: start_a + 8192] = a * np.hamming(8192)
-    # canvas[start_b: start_b + 8192] = b * np.hamming(8192)
+    canvas[start_a: start_a + 8192] = a * np.hamming(8192)
+    canvas[start_b: start_b + 8192] = b * np.hamming(8192)
 
 
-    # samples = zounds.AudioSamples(canvas, samplerate).pad_with_silence()
+    samples = zounds.AudioSamples(canvas, samplerate).pad_with_silence()
 
-    # t_samples = torch.from_numpy(canvas).float()
+    t_samples = torch.from_numpy(canvas).float()
 
-    # # rng = torch.linspace(0, 1, 128)
-    # # means = torch.zeros(16).uniform_(0, 1)
-    # # stds = torch.zeros(16).uniform_(0, 0.1)
+    # rng = torch.linspace(0, 1, 128)
+    # means = torch.zeros(16).uniform_(0, 1)
+    # stds = torch.zeros(16).uniform_(0, 0.1)
 
-    # # pdf_example = pdf(rng[None, :], means[:, None], stds[:, None])
-    # # mx, _ = torch.max(pdf_example, dim=-1, keepdim=True)
-    # # pdf_example = pdf_example / (mx + 1e-8)
-    # # pdf_example = pdf_example.data.cpu().numpy()
+    # pdf_example = pdf(rng[None, :], means[:, None], stds[:, None])
+    # mx, _ = torch.max(pdf_example, dim=-1, keepdim=True)
+    # pdf_example = pdf_example / (mx + 1e-8)
+    # pdf_example = pdf_example.data.cpu().numpy()
 
-    # while True:
-    #     result = train(t_samples, a, b)
-    #     r = result.data.cpu().numpy().squeeze()
-    #     rr = zounds.AudioSamples(r, samplerate).pad_with_silence()
+    while True:
+        result = train(t_samples, a, b)
+        r = result.data.cpu().numpy().squeeze()
+        rr = zounds.AudioSamples(r, samplerate).pad_with_silence()
 
     input('waiting')
 
