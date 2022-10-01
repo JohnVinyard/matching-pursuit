@@ -1,3 +1,4 @@
+from typing import Collection
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -19,67 +20,25 @@ since the positioned clip begins to disappear
 
 That said, choosing a domain that avoids boundary issues
 and guarantees a convex loss landscape
-
-
-
-class DifferentiableIndex(torch.autograd.Function):
-
-    def forward(self, pallette, indices):
-        """
-        indices => pallette @ sampling_kernel[indices] => values => ||target - values||
-        """
-        orig_shape = indices.shape
-        p = pallette.view(-1)
-        p_size = p.shape[0]
-        hard_indices = to_hard_indices(indices, p_size)
-        sampled = pallette[hard_indices]
-
-        self.save_for_backward(pallette, indices, hard_indices, sampled)
-
-        return sampled.reshape(*orig_shape)
-
-    def backward(self, *grad_outputs):
-
-        grad_output, = grad_outputs
-        pallette, indices, hard_indices, sampled = self.saved_tensors
-
-        # get neighboring indices (only look at the nearest neighbor)
-        # TODO: make this adjustable, with the option to take more
-        # neighbors into account using different windows
-        left = torch.clamp(hard_indices - 1, 0, pallette.shape[0] - 1)
-        right = torch.clamp(hard_indices + 1, 0, pallette.shape[0] - 1)
-
-        # sample neighboring values
-        left_samples = pallette[left]
-        right_samples = pallette[right]
-
-        error = grad_output.view(-1)
-
-        # which direction better matches the error gradient?
-        left_grad = torch.abs(error - (sampled - left_samples) - error)
-        right_grad = torch.abs(error - (sampled - right_samples))
-
-        # set grad in that direction, scaled to our [-1, 1] indexing space
-        step = 2 / pallette.shape[0]
-        grad = torch.sign(right_grad - left_grad) * step
-        grad = grad.reshape(*grad_output.shape)
-
-        return None, grad
-
 '''
 
-def fft_convolve(*args):
+def fft_convolve(*args, correlation=False):
+    args = list(args)
+
     n_samples = args[0].shape[-1]
 
     # pad to avoid wraparound artifacts
     padded = [F.pad(x, (0, x.shape[-1])) for x in args]
     
-    specs = [torch.fft.rfft(x, dim=-1, norm='ortho') for x in padded]
+    specs = [torch.fft.rfft(x, dim=-1) for x in padded]
+    if correlation:
+        specs[1] = torch.conj(specs[1])
     
     spec = reduce(lambda accum, current: accum * current, specs[1:], specs[0])
-    final = torch.fft.irfft(spec, dim=-1, norm='ortho')
+    final = torch.fft.irfft(spec, dim=-1)
 
     # remove padding
+
     final = final[..., :n_samples]
     final = normalize(final)
     return final
@@ -87,14 +46,38 @@ def fft_convolve(*args):
 
 class Position(torch.autograd.Function):
 
-    def forward(self, items, positions):
-        x = fft_shift(items, positions)
+    def forward(self, items, positions, targets):
+        # x = fft_shift(items, positions)
+
+        x = position(positions, items, items.shape[-1])
+        self.save_for_backward(positions, targets, x, items)
         return x
 
-    def backward(self, *grad_outputs):
+    def backward(self, *grad_outputs: Collection[torch.Tensor]):
         x, = grad_outputs
-        # x = normalize(x)
-        return None, x
+
+        pos, targets, recon, clips = self.saved_tensors
+
+        conv = fft_convolve(targets, clips, correlation=True)
+        real_best = torch.argmax(torch.abs(conv), dim=-1, keepdim=True) / recon.shape[-1]
+
+        # print(pos.shape, real_best.shape)
+        # rng = torch.linspace(0, 1, x.shape[-1])
+        # centroid = \
+        #     torch.sum(rng[None, :] * clips, dim=-1, keepdim=True) \
+        #     / (torch.sum(clips, dim=-1, keepdim=True) + 1e-12)
+
+        # print('CENTROIDS', centroid.squeeze())
+
+        # print(pos.shape, centroid.shape)
+        # plt.plot(pos.squeeze())
+        # plt.plot(centroid.squeeze())
+        # plt.show()
+
+
+        # grad = (pos - centroid)
+        grad = (pos - real_best)
+        return None, grad, None
 
 fft_placement = Position.apply
 
@@ -203,6 +186,7 @@ def fft_shift(a, shift):
     return samples
 
 
+
 def normalize(x):
     mx, _ = torch.max(torch.abs(x), dim=-1, keepdim=True)
     return x / (mx + 1e-8)
@@ -224,6 +208,34 @@ class NormalPDFScheduler(nn.Module):
         return pdf
 
 
+def position(x, clips, n_samples):
+    clips = clips.view(-1, n_samples)
+    if clips.shape[0] == 1:
+        clips = clips.repeat(x.shape[0], 1)
+
+    output = []
+    for pos, clip in zip(x, clips):
+        pos_index = (pos * n_samples).long()
+        duration = n_samples - pos_index
+        canvas = torch.zeros(n_samples)
+
+        if duration > 0:
+            canvas[pos_index: pos_index + duration] = clip[:duration]
+        
+        canvas.requires_grad = True
+        output.append(canvas[None, ...])
+    x = torch.cat(output, dim=0)
+    x = normalize(x)
+    return x
+
+class RollScheduler(nn.Module):
+    def __init__(self, n_samples):
+        super().__init__()
+        self.n_samples = n_samples
+    
+    def forward(self, x, clips, actual):
+        return fft_placement(clips, x, actual)
+        
 class FFTShiftScheduler(nn.Module):
     def __init__(self, n_samples):
         super().__init__()
@@ -231,8 +243,8 @@ class FFTShiftScheduler(nn.Module):
     
     def forward(self, x, clips):
         x = x.view(-1, 1)
-        # impulses = fft_shift(clips, x)
-        impulses = fft_placement(clips, x)
+        impulses = fft_shift(clips, x)
+        # impulses = fft_placement(clips, x)
         impulses = normalize(impulses)
         return impulses
 
@@ -328,6 +340,8 @@ class Model(nn.Module):
     
     def forward(self, x):
         x = x.view(-1, self.n_samples)
+        target = x
+
         spec = stft(x, 512, 256, pad=True, log_amplitude=True)
         spec = self.embed_spec(spec)
         pos = pos_encoded(x.shape[0], spec.shape[1], 16, device=spec.device)
@@ -344,7 +358,7 @@ class Model(nn.Module):
         
         locations = torch.sigmoid(x)
 
-        x = self.scheduler.forward(locations, self.clip)
+        x = self.scheduler.forward(locations, self.clip, target)
         return x, locations
 
 
@@ -370,16 +384,52 @@ class DataSet(object):
     
     def ordered_batch(self, n_positions):
         locations = torch.linspace(self.range_low, self.range_high, n_positions)
-        return self.scheduler.forward(locations, self.clip)
+        return self.scheduler.forward(locations.view(-1, 1), self.clip[None, :], None)
     
     def __iter__(self):
         while True:
             locations = torch.zeros(self.batch_size, 1).uniform_(self.range_low, self.range_high)
-            examples = self.scheduler.forward(locations, self.clip)
+            examples = self.scheduler.forward(locations, self.clip[None, :], None)
             yield examples, locations
 
 
+def match_conv(signal, stem):
+    '''
+    input – input tensor of shape (\text{minibatch} , \text{in\_channels} , iW)(minibatch,in_channels,iW)
+
+    weight – filters of shape (\text{out\_channels} , \frac{\text{in\_channels}}{\text{groups}} , kW)(out_channels, 
+        groups
+        in_channels
+​
+        ,kW)
+    '''
+    # signal = torch.zeros(8192)
+    # signal[4096] = 1
+    signal = signal.view(1, 1, -1)
+
+    # stem = torch.zeros(8192)
+    # stem[0] = 1
+    stem = stem.view(1, 1, -1)
+
+    padded_signal = F.pad(signal, (0, signal.shape[-1]))
+    a = F.conv1d(padded_signal, stem)
+
+    print(a.shape)
+    mx = torch.argmax(torch.abs(a), dim=-1)
+    print(mx)
+    
+    b = fft_convolve(signal, stem, correlation=True)
+    mx = torch.argmax(torch.abs(b), dim=-1)
+    print(b.shape)
+    print(mx)
+
+    a = torch.abs(a)
+    b = torch.abs(b)
+
+    return a, b
+
 if __name__ == '__main__':
+
     n_samples = 2**15
     batch_size = 4
     samplerate = 22050
@@ -387,7 +437,8 @@ if __name__ == '__main__':
     clip = generate_clip(n_samples, samplerate)
 
     # scheduler = NormalPDFScheduler(n_samples)
-    scheduler = FFTShiftScheduler(n_samples)
+    # scheduler = FFTShiftScheduler(n_samples)
+    scheduler = RollScheduler(n_samples)
 
     dataset = DataSet(
         batch_size, 
@@ -399,21 +450,71 @@ if __name__ == '__main__':
         range_high=1)
     
     model = Model(n_samples, clip, scheduler)
-    optim = Adam(model.parameters(), lr=1e-4, betas=(0, 0.9))
+    optim = Adam(model.parameters(), lr=1e-5, betas=(0, 0.9))
 
     loss = CompositeLoss(
         STFTLoss(n_samples),
     )
 
-    # target_loc = torch.zeros(1).fill_(0.75)
-    # target = scheduler.forward(target_loc, clip)
+    # in_the_middle = position(torch.zeros(1, 1).fill_(0.5), clip, n_samples)
 
-    # ob = dataset.ordered_batch(128)
-
-    # l = loss.forward(ob, target)
-    # plt.plot(l)
+    # plt.plot(in_the_middle.detach().squeeze())
     # plt.show()
 
+    # plt.plot(clip.detach().squeeze())
+    # plt.show()
+
+    # a, b = match_conv(in_the_middle, clip)
+
+    # # a is torch conv
+    # # b is my conv
+    # plt.plot(a.squeeze().detach())
+    # # plt.plot(b.squeeze().detach())
+    # plt.show()
+
+
+    # # Convolution position
+    # batch = dataset.ordered_batch(100)
+    # pos = torch.linspace(0, 1, 100)
+
+    # best = fft_convolve(clip, batch, pad_start=False)
+    # best_pos = torch.argmax(best, dim=-1) / n_samples
+
+    # print(pos - best_pos)
+
+    # plt.plot(pos)
+    # plt.plot(best_pos)
+    # plt.show()
+
+
+    # True vs. computed gradient
+    # pos = torch.linspace(0, 1, 100)
+    # true_grad = torch.flip(pos, (-1,)) - pos
+
+    # reversed_pos = torch.flip(pos, (-1,))
+    # reversed_pos.requires_grad = True
+
+    # data = dataset.ordered_batch(100)
+
+    # gen = fft_placement(clip[None, :], reversed_pos[:, None], data)
+
+    # l = loss.forward(gen, data).mean()
+    # l.backward()
+
+    # computed_grad = reversed_pos.grad
+
+    # plt.plot(true_grad)
+    # plt.plot(computed_grad)
+
+    # print(true_grad - computed_grad)
+    # plt.show()
+
+
+    i = 0
+    losses = []
+
+
+    # train network
     for item, real_loc in dataset:
         optim.zero_grad()
         recon, fake_loc = model.forward(item)
@@ -427,8 +528,24 @@ if __name__ == '__main__':
         # target value.
         # l = F.mse_loss(fake_loc, real_loc)
 
-        # print(real_loc.data.cpu().numpy().squeeze())
-        # print(fake_loc.data.cpu().numpy().squeeze())
+        print('==================================================')
+        orig = real_loc.data.cpu().numpy().squeeze()
+        fake = fake_loc.data.cpu().numpy().squeeze()
+        print('ORIG', orig)
+        print('FAKE', fake)
+        print('DIFF', orig - fake)
         l.backward()
         optim.step()
+        # input('waiting...')
         print(l.item())
+        losses.append(l.item())
+
+        i +=1
+
+        if i % 100 == 0:
+            arr = np.array(losses)
+            arr = torch.from_numpy(arr).view(1, 1, -1)
+            window_size = arr.shape[-1] // 100
+            arr = F.avg_pool1d(arr, window_size, max(1, window_size // 2), max(0, window_size // 2))
+            plt.plot(arr.squeeze())
+            plt.show()
