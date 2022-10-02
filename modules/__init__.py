@@ -28,5 +28,5 @@ from .waveguide import TransferFunctionSegmentGenerator
 from .shape import Reshape
 from .transfer import \
     TransferFunction, STFTTransferFunction, ImpulseGenerator, \
-    PosEncodedImpulseGenerator
-from .fft import fft_convolve, fft_shift
+    PosEncodedImpulseGenerator, schedule_atoms, Position, fft_convolve
+from .fft import fft_shift

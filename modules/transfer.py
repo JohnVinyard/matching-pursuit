@@ -1,5 +1,5 @@
 from functools import reduce
-from typing import Any
+from typing import Any, Collection
 import torch
 from torch import nn
 import zounds
@@ -10,6 +10,110 @@ from .phase import morlet_filter_bank
 import numpy as np
 from torch.nn import functional as F
 
+
+def fft_convolve(*args, correlation=False):
+    args = list(args)
+
+    n_samples = args[0].shape[-1]
+
+    # pad to avoid wraparound artifacts
+    padded = [F.pad(x, (0, x.shape[-1])) for x in args]
+    
+    specs = [torch.fft.rfft(x, dim=-1) for x in padded]
+
+    if correlation:
+        # perform the cross-correlation instead of convolution.
+        # this is what torch's convolution functions and modules 
+        # perform
+        specs[1] = torch.conj(specs[1])
+    
+    spec = reduce(lambda accum, current: accum * current, specs[1:], specs[0])
+    final = torch.fft.irfft(spec, dim=-1)
+
+    # remove padding
+
+    final = final[..., :n_samples]
+    return final
+
+
+# TODO: torch script
+def position(x, clips, n_samples, sum_channels=False):
+    
+    if len(x.shape) != 2:
+        raise ValueError('positions shoud be (batch, n_clips)')
+
+    batch_size, n_clips = x.shape
+
+    n_clips = clips.shape[1]
+
+    # we'd like positions to be (batch, positions)
+    x = x.view(-1, n_clips)
+
+    # we'd like clips to be (batch, n_clips, n_samples)
+    clips = clips.view(-1, n_clips, n_samples)
+
+    if clips.shape[0] == 1:
+        # we're using the same set of stems for every
+        # batch
+        clips = clips.repeat(batch_size, 1, 1)
+
+    outer = []
+
+    for i in range(batch_size):
+        inner = []
+        for j in range(n_clips):
+            canvas = torch.zeros(n_samples)
+            current_index = (x[i, j] * n_samples).long()
+            current_stem = clips[i, j]
+            duration = n_samples - current_index
+            canvas[current_index: current_index + duration] = current_stem[:duration]
+            canvas.requires_grad = True
+            inner.append(canvas)
+        canvas = torch.stack(inner)
+        outer.append(canvas)
+    
+    outer = torch.stack(outer)
+    if sum_channels:
+        outer = torch.sum(outer, dim=1, keepdim=True)
+    return outer
+
+
+
+class Position(torch.autograd.Function):
+
+    def forward(self, items, positions, targets):
+        x = position(positions, items, items.shape[-1])
+        self.save_for_backward(positions, targets, x, items)
+        return x
+
+    def backward(self, *grad_outputs: Collection[torch.Tensor]):
+        x, = grad_outputs
+        pos, targets, recon, clips = self.saved_tensors
+
+        batch = x.shape[0]
+        n_samples = x.shape[-1]
+        n_clips = recon.shape[1]
+
+        targets = targets.view(batch, 1, n_samples)
+        clips = clips.view(-1, n_clips, n_samples)
+
+        conv = fft_convolve(targets, clips, correlation=True)
+        conv = torch.abs(conv)
+        real_best = torch.argmax(conv, dim=-1) / recon.shape[-1]
+
+        grad = (pos - real_best)
+
+        return None, grad, None
+
+
+schedule_atoms = Position.apply
+
+class AtomScheduler(nn.Module):
+    def __init__(self):
+        super().__init__()
+    
+    def forward(self, items, positions, targets):
+        return schedule_atoms(items, positions, targets)
 
 
 class PosEncodedImpulseGenerator(nn.Module):

@@ -16,7 +16,7 @@ class DilatedBlock(nn.Module):
         skip = x
         scale = self.scale(x)
         gate = self.gate(x)
-        x = torch.tanh(scale) * F.sigmoid(gate)
+        x = torch.tanh(scale) * torch.sigmoid(gate)
         out = self.out(x)
         next = self.next(x) + skip
         return next, out

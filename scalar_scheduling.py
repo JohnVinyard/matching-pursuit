@@ -51,18 +51,14 @@ def fft_convolve(*args, correlation=False):
     # remove padding
 
     final = final[..., :n_samples]
-    # final = normalize(final)
     return final
 
 
 class Position(torch.autograd.Function):
 
     def forward(self, items, positions, targets):
-        # x = fft_shift(items, positions)
-
         x = position(positions, items, items.shape[-1])
         self.save_for_backward(positions, targets, x, items)
-        # print('FORWARD', x.shape)
         return x
 
     def backward(self, *grad_outputs: Collection[torch.Tensor]):
@@ -74,11 +70,12 @@ class Position(torch.autograd.Function):
         n_clips = recon.shape[1]
         
         targets = targets.view(batch, 1, n_samples)
-        # TODO: How do I get the number of clips here?
         clips = clips.view(-1, n_clips, n_samples)
 
         conv = fft_convolve(targets, clips, correlation=True)
-        real_best = torch.argmax(torch.abs(conv), dim=-1) / recon.shape[-1]
+        conv = torch.abs(conv)
+        conv = F.avg_pool1d(conv, 128, 1, padding=64)[..., :n_samples]
+        real_best = torch.argmax(conv, dim=-1) / recon.shape[-1]
 
         grad = (pos - real_best)
 
@@ -480,6 +477,8 @@ if __name__ == '__main__':
 
     scheduler = RollScheduler(n_samples)
 
+    # TODO: Instead of synthetic examples, these will be
+    # normal batches of (batch, 1, n_samples)
     def random_arrangement():
         positions = torch.zeros(1, 8).uniform_(0, 1)
         result = position(positions, stems, n_samples, sum_channels=True)
@@ -518,29 +517,23 @@ if __name__ == '__main__':
     i = 0
     losses = []
 
-
     # # train network
     for item in iter_random_arrangement_batches(batch_size):
-
         optim.zero_grad()
         recon, fake_loc, final = model.forward(item)
         l = loss.forward(recon, item).mean()
-
         l.backward()
         optim.step()
-        print(l.item())
+        print(i, l.item())
         losses.append(l.item())
 
-        i +=1
+        i += 1
 
         if i % 1000 == 0:
-            arr = np.array(losses)
-            arr = torch.from_numpy(arr).view(1, 1, -1)
-            window_size = arr.shape[-1] // 100
-            arr = F.avg_pool1d(arr, window_size, max(1, window_size // 2), max(0, window_size // 2))
-            plt.plot(arr.squeeze())
+
+            plt.plot(losses)
             plt.show()
 
-            plt.plot(item[0].view(-1).detach())
-            plt.plot(recon[0].sum(dim=0).view(-1).detach())
+            plt.plot(-np.abs(recon[0].data.cpu().numpy().squeeze().sum(axis=0)))
+            plt.plot(np.abs(item[0].data.cpu().numpy().squeeze()))
             plt.show()

@@ -33,7 +33,7 @@ class UpsampleBlock(nn.Module):
         self.mode = mode
 
     def forward(self, x):
-        x = F.upsample(x, scale_factor=2, mode=self.mode)
+        x = F.interpolate(x, scale_factor=2, mode=self.mode)
         x = self.conv(x)
         return x
 
