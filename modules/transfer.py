@@ -36,8 +36,8 @@ def fft_convolve(*args, correlation=False):
     return final
 
 
-# TODO: torch script
 def position(x, clips, n_samples, sum_channels=False):
+    
     
     if len(x.shape) != 2:
         raise ValueError('positions shoud be (batch, n_clips)')
@@ -62,12 +62,11 @@ def position(x, clips, n_samples, sum_channels=False):
     for i in range(batch_size):
         inner = []
         for j in range(n_clips):
-            canvas = torch.zeros(n_samples)
+            canvas = torch.zeros(n_samples, device=clips.device)
             current_index = (x[i, j] * n_samples).long()
             current_stem = clips[i, j]
             duration = n_samples - current_index
-            canvas[current_index: current_index + duration] = current_stem[:duration]
-            canvas.requires_grad = True
+            canvas[current_index: current_index + duration] += current_stem[:duration]
             inner.append(canvas)
         canvas = torch.stack(inner)
         outer.append(canvas)
@@ -82,28 +81,30 @@ def position(x, clips, n_samples, sum_channels=False):
 class Position(torch.autograd.Function):
 
     def forward(self, items, positions, targets):
-        x = position(positions, items, items.shape[-1])
-        self.save_for_backward(positions, targets, x, items)
-        return x
+        # x = position(positions, items, items.shape[-1])
+        self.save_for_backward(positions, targets, items)
+        return positions
 
     def backward(self, *grad_outputs: Collection[torch.Tensor]):
         x, = grad_outputs
-        pos, targets, recon, clips = self.saved_tensors
+        pos, targets, clips = self.saved_tensors
 
         batch = x.shape[0]
         n_samples = x.shape[-1]
-        n_clips = recon.shape[1]
+        # n_clips = recon.shape[1]
 
         targets = targets.view(batch, 1, n_samples)
-        clips = clips.view(-1, n_clips, n_samples)
+        clips = clips.view(-1, pos.shape[1], n_samples)
 
         conv = fft_convolve(targets, clips, correlation=True)
         conv = torch.abs(conv)
-        real_best = torch.argmax(conv, dim=-1) / recon.shape[-1]
+        real_best = torch.argmax(conv, dim=-1) / n_samples
 
-        grad = (pos - real_best)
+        # what's the difference between the scalar location
+        # and the actual best position for this clip?
+        pos_grad = (pos - real_best)
 
-        return None, grad, None
+        return None, pos_grad, None
 
 
 schedule_atoms = Position.apply

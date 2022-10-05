@@ -24,11 +24,11 @@ def fft_shift(a, shift):
     spec = torch.fft.rfft(a, dim=-1, norm='ortho')
 
     n_coeffs = spec.shape[-1]
-    shift = (torch.arange(0, n_coeffs) * 2j * np.pi) / n_coeffs
+    shift = (torch.arange(0, n_coeffs, device=a.device) * 2j * np.pi) / n_coeffs
     shift = torch.exp(-shift * shift_samples)
 
     spec = spec * shift
 
     samples = torch.fft.irfft(spec, dim=-1, norm='ortho')
-    # samples = samples[..., :n_samples]
+    samples = samples[..., :n_samples]
     return samples

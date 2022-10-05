@@ -6,8 +6,8 @@ from config.experiment import Experiment
 from modules.dilated import DilatedStack
 from modules.linear import LinearOutputStack
 from modules.sparse import VectorwiseSparsity
-from modules.transfer import TransferFunction, schedule_atoms
-from modules.fft import fft_convolve
+from modules.transfer import ImpulseGenerator, PosEncodedImpulseGenerator, TransferFunction, position, schedule_atoms
+from modules.fft import fft_convolve, fft_shift
 from train.optim import optimizer
 from upsample import ConvUpsample
 from modules.normalization import ExampleNorm
@@ -38,49 +38,6 @@ band = zounds.FrequencyBand(30, exp.samplerate.nyquist)
 scale = zounds.MelScale(band, 128)
 
 
-# TODO: What about discretization is causing issues?
-class VQ(nn.Module):
-    def __init__(self, code_dim, n_codes, commitment_weight=1, one_hot=False, passthrough=False):
-        super().__init__()
-        self.code_dim = code_dim
-        self.n_codes = n_codes
-        self.codebook = nn.Parameter(torch.zeros(n_codes, code_dim).normal_(0, 1))
-        self.commitment_cost = commitment_weight
-
-        self.one_hot = one_hot
-
-        self.passthrough = passthrough
-
-        if self.one_hot:
-            self.up = nn.Linear(code_dim, n_codes)
-            self.down = nn.Linear(n_codes, code_dim)
-    
-    def forward(self, x):
-
-        if self.passthrough:
-            return x, None, 0
-
-        if self.one_hot:
-            x = self.up(x)
-            x = F.gumbel_softmax(x, dim=-1, hard=True)
-            x = self.down(x)
-            return x, None, 0
-
-        dist = torch.cdist(x, self.codebook)
-        mn, indices = torch.min(dist, dim=-1)
-        codes = self.codebook[indices]
-
-        # bring codes closer to embeddings
-        code_loss = ((codes - x.detach()) ** 2).mean()
-
-        # bring embeddings closter to codes
-        embedding_loss = (((x - codes.detach()) ** 2).mean() * self.commitment_cost)
-
-        loss = code_loss + embedding_loss
-
-        quantized = x + (codes - x).detach()
-        return quantized, indices, loss
-
 
 class SegmentGenerator(nn.Module):
     def __init__(self):
@@ -93,6 +50,8 @@ class SegmentGenerator(nn.Module):
             exp.n_frames * 2,
             out_channels=1,
             mode='nearest')
+
+        # self.env = LinearOutputStack(exp.model_dim, 2, out_channels=exp.n_frames, in_channels=event_latent_dim)
 
         self.n_coeffs = 257
 
@@ -120,9 +79,10 @@ class SegmentGenerator(nn.Module):
             self.resolution, 
             exp.n_samples, 
             softmax_func=lambda x: F.gumbel_softmax(x, dim=-1, hard=True))
+        
 
 
-    def forward(self, time, transfer):
+    def forward(self, transfer):
         transfer = transfer.view(-1, event_latent_dim)
         # time = time.view(-1, event_latent_dim)
 
@@ -130,8 +90,11 @@ class SegmentGenerator(nn.Module):
         # batch = time.shape[0]
         batch = transfer.shape[0]
 
-        # create envelope
-        env = self.env(transfer) ** 2
+        # create envelope, normalized to one
+        # attack, irrespective of amplitude
+        env = self.env(transfer)
+        env = env ** 2
+        env = env.view(batch, 1, -1)
         orig_env = env
         env = F.interpolate(env, size=self.n_samples, mode='linear')
         noise = torch.zeros(1, 1, self.n_samples, device=env.device).uniform_(-1, 1)
@@ -172,11 +135,14 @@ class Summarizer(nn.Module):
         self.decode = SegmentGenerator()
 
         self.to_time = LinearOutputStack(
-            exp.model_dim, 1, out_channels=1)
+            exp.model_dim, 1, out_channels=exp.n_frames)
+        self.impulse = ImpulseGenerator(exp.n_samples, softmax=lambda x: F.gumbel_softmax(x, dim=-1, hard=True))
+
+        # self.impulse = PosEncodedImpulseGenerator(
+        #     exp.n_frames, exp.n_samples, softmax=lambda x: F.softmax(x, dim=-1))
 
         self.to_transfer = LinearOutputStack(
             exp.model_dim, 1, out_channels=event_latent_dim)
-        self.transfer_vq = VQ(exp.model_dim, 2048, 1, one_hot=True, passthrough=True)
 
         self.norm = ExampleNorm()
 
@@ -207,21 +173,24 @@ class Summarizer(nn.Module):
         encoded = x
 
         # split into independent time and transfer function representations
-        time = torch.clamp(self.to_time(x).view(-1, n_events), 0, 1)
+        time = self.to_time(x).view(-1, exp.n_frames)
+        impulse = self.impulse(time)
+        impulse = impulse.view(-1, n_events, exp.n_samples)
 
         transfer = self.to_transfer(x).view(-1, event_latent_dim)
-        transfer, tf_indices, tf_loss = self.transfer_vq(transfer)
 
-
-        x, env, loss, tf = self.decode.forward(time, transfer)
+        x, env, loss, tf = self.decode.forward(transfer)
 
         x = x.view(batch, n_events, exp.n_samples)
 
-        x = schedule_atoms(x, time, orig)
+        # time = schedule_atoms(x, time, orig)
+        # x = position(time, x, exp.n_samples, sum_channels=False)
+        # x = fft_shift(x, time.view(batch, n_events, 1))
+        x = fft_convolve(x, impulse)
 
         output = torch.sum(x, dim=1, keepdim=True)
 
-        loss = tf_loss
+        loss = 0
         return output, indices, encoded, env.view(batch, n_events, -1), loss, tf, time, transfer
 
 
@@ -240,11 +209,6 @@ class Model(nn.Module):
 
 
 model = Model().to(device)
-# try:
-#     model.load_state_dict(torch.load(Path(__file__).parent.joinpath('model.dat')))
-#     print('loaded model')
-# except IOError:
-#     print('Could not load weights')
 optim = optimizer(model, lr=1e-4)
 
 
@@ -255,10 +219,21 @@ def train_model(batch):
     
     ll = latent_loss(transfer) * 0.5
 
-    # the assumption is that events should be uniformly distributed
-    time_loss = torch.abs(time.mean() - 0.5) + torch.abs(time.std() - 0.25)
 
-    loss = exp.perceptual_loss(recon, batch) + vq_loss + ll + time_loss
+    # e = env.view(-1, exp.n_frames * 2)
+
+    # e = torch.softmax(e, dim=-1)
+
+    # env_centroids = \
+    #     torch.sum(torch.linspace(0, 1, e.shape[-1], device=e.device)[None, :] * e, dim=-1) \
+    #     / torch.sum(e, dim=-1, keepdim=True)
+
+    # the assumption is that events should be uniformly distributed
+    # time_loss = torch.abs(time.mean() - 0.5) + torch.abs(time.std() - 0.25) * 0.5
+
+    # env_loss = env_centroids.mean() * 0.01
+
+    loss = exp.perceptual_loss(recon, batch) + ll #+ env_loss
 
 
     loss.backward()
@@ -308,7 +283,9 @@ class PlacementExperiment2(object):
         return self.env.data.cpu().numpy()[0].T
 
     def t_latent(self):
-        return self.time_latent.data.cpu().numpy().squeeze().reshape((-1, event_latent_dim))
+        x = self.time_latent.data.cpu().numpy().squeeze().reshape((-1, n_events))
+        x = np.argmax(x, axis=0)
+        return x
 
     def tf_latent(self):
         return self.transfer_latent.data.cpu().numpy().squeeze().reshape((-1, event_latent_dim))

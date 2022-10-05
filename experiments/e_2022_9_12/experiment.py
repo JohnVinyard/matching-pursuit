@@ -347,11 +347,11 @@ class Model(nn.Module):
 
 
 model = Model().to(device)
-# try:
-#     model.load_state_dict(torch.load(Path(__file__).parent.joinpath('model.dat')))
-#     print('loaded model')
-# except IOError:
-#     print('Could not load weights')
+try:
+    model.load_state_dict(torch.load(Path(__file__).parent.joinpath('model.dat')))
+    print('loaded model')
+except IOError:
+    print('Could not load weights')
 optim = optimizer(model, lr=1e-4)
 
 
