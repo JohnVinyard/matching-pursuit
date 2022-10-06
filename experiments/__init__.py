@@ -1,1 +1,1 @@
-from .e_2022_9_12 import WaveguideSynthesisExperiment2 as Current
+from .e_2022_10_6 import SequeceGan as Current

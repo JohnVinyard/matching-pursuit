@@ -3,23 +3,17 @@ import torch
 from torch import nn
 import zounds
 from config.experiment import Experiment
-from modules.dilated import DilatedStack
-from modules.linear import LinearOutputStack
-from modules.shape import Reshape
-from modules.sparse import VectorwiseSparsity
-from modules.fft import fft_convolve, fft_shift
+from experiments.e_2022_9_12 import autoencoder
+from scalar_scheduling import init_weights
 from train.optim import optimizer
-from upsample import ConvUpsample
-from modules.normalization import ExampleNorm
-from torch.nn import functional as F
-from modules.phase import MelScale
-from modules.latent_loss import latent_loss
+from upsample import PosEncodedUpsample
 
 from util import device, playable
-from modules import pos_encoded, stft
 
 from util.readmedocs import readme
 import numpy as np
+
+init = init_weights(0.05)
 
 exp = Experiment(
     samplerate=zounds.SR22050(),
@@ -28,272 +22,127 @@ exp = Experiment(
     model_dim=128,
     kernel_size=512)
 
-n_events = 16
-event_latent_dim = exp.model_dim
 
-mel_scale = MelScale()
-
-
-
-band = zounds.FrequencyBand(30, exp.samplerate.nyquist)
-scale = zounds.MelScale(band, 128)
-
-
-
-class SegmentGenerator(nn.Module):
+class Critic(nn.Module):
     def __init__(self):
         super().__init__()
-
-        self.env = ConvUpsample(
-            event_latent_dim,
-            exp.model_dim,
-            4,
-            exp.n_frames * 2,
-            out_channels=1,
-            mode='nearest')
-
-        self.n_coeffs = 257
-
-        self.model_dim = exp.model_dim
-        self.n_samples = exp.n_samples
-        self.n_frames = exp.n_frames
-        self.window_size = 512
-
-        self.n_inflections = 1
-
-        
-        self.resolution = 32
-
-        self.transfer = ConvUpsample(
-            event_latent_dim, 
-            exp.model_dim, 
-            8, 
-            exp.n_samples, 
-            out_channels=1, 
-            mode='learned')
-
-        
-        self.transfer = nn.Sequential(
-            nn.Linear(128, 1024),
-            Reshape((128, 8)),
-            nn.ConvTranspose1d(128, 64, 8, 4, 2),
-            nn.LeakyReLU(0.2),
-            nn.ConvTranspose1d(64, 32, 8, 4, 2),
-            nn.LeakyReLU(0.2),
-            nn.ConvTranspose1d(32, 16, 8, 4, 2),
-            nn.LeakyReLU(0.2),
-            nn.ConvTranspose1d(16, 8, 8, 4, 2),
-            nn.LeakyReLU(0.2),
-            nn.ConvTranspose1d(8, 4, 8, 4, 2),
-            nn.LeakyReLU(0.2),
-            nn.ConvTranspose1d(4, 1, 8, 4, 2),
-        )
-
-
-
-    def forward(self, time, transfer):
-        transfer = transfer.view(-1, event_latent_dim)
-        # time = time.view(-1, event_latent_dim)
-
-        # x = x.view(-1, self.model_dim)
-        batch = transfer.shape[0]
-
-        # create envelope
-        env = self.env(transfer) ** 2
-        orig_env = env
-        env = F.interpolate(env, size=self.n_samples, mode='linear')
-        noise = torch.zeros(1, 1, self.n_samples, device=env.device).uniform_(-1, 1)
-        env = env * noise
-
-        # Theory: having trouble not relying on energy/noise because the
-        # gradients here are just too small
-        # tf = self.transfer(transfer)
-        loss = 0
-        tf = self.transfer.forward(transfer)
-        orig_tf = tf
-
-        
-        final = fft_convolve(env, tf)
-        # final = tf
-
-        final = torch.mean(final, dim=1, keepdim=True)
-
-        return final, orig_env, loss, orig_tf
-
-
-class Summarizer(nn.Module):
-    """
-    Summarize a batch of audio samples into a set of sparse
-    events, with each event described by a single vector.
-
-    Output will be (batch, n_events, event_vector_size)
-
-    """
-
-    def __init__(self):
-        super().__init__()
-
-        self.context = DilatedStack(exp.model_dim, [1, 3, 9, 27, 1])
-
-        self.reduce = nn.Conv1d(exp.model_dim + 33, exp.model_dim, 1, 1, 0)
-
-        self.sparse = VectorwiseSparsity(
-            exp.model_dim, keep=n_events, channels_last=False, dense=False, normalize=True)
-
-        self.decode = SegmentGenerator()
-
-        self.to_time = LinearOutputStack(
-            exp.model_dim, 1, out_channels=1)
-
-        self.to_transfer = LinearOutputStack(
-            exp.model_dim, 1, out_channels=event_latent_dim)
-
-        self.norm = ExampleNorm()
-
-    def generate(self, time, transfer):
-        x, env, loss, tf = self.decode.forward(time, transfer)
-        x = x.view(-1, n_events, exp.n_samples)
-        output = torch.sum(x, dim=1, keepdim=True)
-        return output
-
-    def forward(self, x):
-        batch = x.shape[0]
-        x = x.view(-1, 1, exp.n_samples)
-        x = exp.fb.forward(x, normalize=False)
-        x = exp.fb.temporal_pooling(
-            x, exp.window_size, exp.step_size)[..., :exp.n_frames]
-        x = self.norm(x)
-        pos = pos_encoded(
-            batch, exp.n_frames, 16, device=x.device).permute(0, 2, 1)
-        x = torch.cat([x, pos], dim=1)
-        x = self.reduce(x)
-
-        x = self.context(x)
-        x = self.norm(x)
-
-        x, indices = self.sparse(x)
-        encoded = x
-
-        # split into independent time and transfer function representations
-        time = torch.sigmoid(self.to_time(x).view(-1, n_events))
-
-        transfer = self.to_transfer(x).view(-1, event_latent_dim)
-
-
-        x, env, loss, tf = self.decode.forward(time, transfer)
-        x = x.view(batch, n_events, exp.n_samples)
-
-        output = fft_shift(x, time[..., None])
-
-        output = torch.sum(x, dim=1, keepdim=True)
-
-
-        loss = 0
-        return output, indices, encoded, env.view(batch, n_events, -1), loss, tf, time, transfer
-
-
-class Model(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.summary = Summarizer()
-        self.apply(lambda p: exp.init_weights(p))
-
-    def generate(self, time, transfer):
-        return self.summary.generate(time, transfer)
-
-    def forward(self, x):
-        x, indices, encoded, env, loss, tf, time, transfer = self.summary(x)
-        return x, indices, encoded, env, loss, tf, time, transfer
-
-
-model = Model().to(device)
-optim = optimizer(model, lr=1e-4)
-
-
-def train_model(batch):
-    optim.zero_grad()
-    recon, indices, encoded, env, vq_loss, tf, time, transfer = model.forward(
-        batch)
+        self.embed = nn.Linear(256, 128)
+        layer = nn.TransformerEncoderLayer(128, 4, 128, batch_first=True)
+        self.net = nn.TransformerEncoder(layer, 4)
+        self.judge = nn.Linear(128, 1)
+        self.apply(init_weights)
     
-    # ll = (latent_loss(time) + latent_loss(transfer)) * 0.25
-    ll = latent_loss(transfer)
+    def forward(self, time, transfer):
+        # (batch, channels, n_events)
+        time = time.view(-1, 16, 128)
+        transfer = transfer.view(-1, 16, 128)
+        x = torch.cat([time, transfer], dim=-1)
+        x = self.embed(x)
+        x = self.net(x)
+        x = torch.mean(x, dim=1)
+        x = self.judge(x)
+        return x
 
-    time_loss = torch.abs(time.mean() - 0.5) + torch.abs(time.std() - 0.25)
+class Generator(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.up = PosEncodedUpsample(128, 128, 16, 128, 2)
+        layer = nn.TransformerEncoderLayer(128, 4, 128, batch_first=True)
+        self.net = nn.TransformerEncoder(layer, 4)
+        self.to_time = nn.Linear(128, 128)
+        self.to_transfer = nn.Linear(128, 128)
+        self.apply(init_weights)
+    
+    def forward(self, x):
+        # (batch, channels, n_events)
+        x = self.up(x).permute(0, 2, 1)
+        x = self.net(x)
+        time = self.to_time(x)
+        tf = self.to_transfer(x)
+        return time, tf
 
-    tf_spec = stft(tf, 512, 256, pad=True)
-    norms = torch.norm(tf_spec, dim=-1, keepdim=True)
-    normed = tf_spec / (norms + 1e-8)
-    diff = torch.diff(normed, dim=-2)
-    diff_norms = torch.norm(diff, dim=-1)
-    tf_loss = diff_norms.mean()
 
-    loss = exp.perceptual_loss(recon, batch) + ll + time_loss + tf_loss
+critic = Critic().to(device)
+critic_optim = optimizer(critic, lr=1e-4)
 
 
+gen = Generator().to(device)
+gen_optim = optimizer(gen, lr=1e-4)
+
+def get_latent(batch_size):
+    return torch.zeros(batch_size, 128, device=device).normal_(0, 1)
+
+def train_critic(batch):
+    real_time, real_transfer = batch
+
+
+    critic_optim.zero_grad()
+    latent = get_latent(real_time.shape[0])
+    time, transfer = gen.forward(latent)
+    fj = critic.forward(time, transfer)
+
+    rj = critic.forward(real_time, real_transfer)
+
+    loss = torch.abs(1 - rj.mean()) + torch.abs(0 - fj.mean())
     loss.backward()
-    optim.step()
-    return loss, recon, indices, encoded, env, time, transfer
+    
+    critic_optim.step()
+    return loss
 
+
+def train_generator(batch):
+    real_time, real_transfer = batch
+    gen_optim.zero_grad()
+
+    latent = get_latent(real_time.shape[0])
+    time, transfer = gen.forward(latent)
+    fj = critic.forward(time, transfer)
+
+    loss = torch.abs(1 - fj.mean())
+    loss.backward()
+
+    gen_optim.step()
+    return loss, (time, transfer)
 
 @readme
-class LastTry(object):
+class SequeceGan(object):
     def __init__(self, stream):
         super().__init__()
         self.stream = stream
-
-        self.fake = None
+        self.autoencoder = autoencoder
         self.real = None
-        self.indices = None
-        self.encoded = None
-        self.env = None
-
-        self.time_latent = None
-        self.transfer_latent = None
-
-        self.model = model
+        self.fake = None
 
     def orig(self):
-        return playable(self.real, exp.samplerate, normalize=True)
-
+        real_time, real_transfer = self.real
+        real_time = real_time[:16]
+        real_transfer = real_transfer[:16]
+        with torch.no_grad():
+            output = self.autoencoder.decode(*self.real)
+        return playable(output, exp.samplerate)
+    
     def real_spec(self):
         return np.abs(zounds.spectral.stft(self.orig()))
-
+        
     def listen(self):
-        return playable(self.fake, exp.samplerate, normalize=True)
-
+        fake_time, fake_transfer = self.fake
+        with torch.no_grad():
+            output = self.autoencoder.decode(fake_time[0], fake_transfer[0])
+        return playable(output, exp.samplerate)
+    
     def fake_spec(self):
         return np.abs(zounds.spectral.stft(self.listen()))
-
-    def positions(self):
-        indices = self.indices.data.cpu().numpy()[0]
-        canvas = np.zeros((exp.n_frames, 16))
-        canvas[indices] = 1
-        return canvas
-
-
-    def e(self):
-        return self.env.data.cpu().numpy()[0].T
-
-    def t_latent(self):
-        return self.time_latent.data.cpu().numpy().squeeze()
-
-    def tf_latent(self):
-        return self.transfer_latent.data.cpu().numpy().squeeze().reshape((-1, event_latent_dim))
-
-    def random(self, n_events=16, t_std=0.05, tf_std=0.05):
-        with torch.no_grad():
-            t = torch.zeros(1, n_events, event_latent_dim,
-                            device=device).normal_(0, t_std)
-            tf = torch.zeros(1, n_events, event_latent_dim,
-                             device=device).normal_(0, tf_std)
-            audio = model.generate(t, tf)
-            return playable(audio, exp.samplerate)
-
+    
     def run(self):
         for i, item in enumerate(self.stream):
             item = item.view(-1, 1, exp.n_samples)
+            with torch.no_grad():
+                self.real = self.autoencoder.encode(item)
+            
+            if i % 2 == 0:
+                loss = train_critic(self.real)
+                print('D', loss.item())
+            else:
+                loss, self.fake = train_generator(self.real)
+                print('G', loss.item()) 
 
-            self.real = item
-            loss, self.fake, self.indices, self.encoded, self.env, self.time_latent, self.transfer_latent = train_model(
-                item)
-            print('GEN', i, loss.item())

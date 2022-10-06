@@ -171,7 +171,7 @@ class SegmentGenerator(nn.Module):
             exp.n_frames, 
             self.resolution, 
             exp.n_samples, 
-            softmax_func=lambda x: F.softmax(x, dim=-1))
+            softmax_func=lambda x: F.gumbel_softmax(x, dim=-1, hard=True))
 
 
     def forward(self, time, transfer):
@@ -286,6 +286,35 @@ class Summarizer(nn.Module):
         output = torch.sum(x, dim=1, keepdim=True)
         return output
 
+    
+    def encode(self, x):
+        batch = x.shape[0]
+        x = x.view(-1, 1, exp.n_samples)
+        x = exp.fb.forward(x, normalize=False)
+        x = exp.fb.temporal_pooling(
+            x, exp.window_size, exp.step_size)[..., :exp.n_frames]
+        x = self.norm(x)
+        pos = pos_encoded(
+            batch, exp.n_frames, 16, device=x.device).permute(0, 2, 1)
+        x = torch.cat([x, pos], dim=1)
+        x = self.reduce(x)
+
+        x = self.context(x)
+        x = self.norm(x)
+
+        x, indices = self.sparse(x)
+        encoded = x
+
+        # split into independent time and transfer function representations
+        time = self.to_time(x).view(-1, event_latent_dim)
+        time, t_indices, t_loss = self.time_vq(time)
+
+        transfer = self.to_transfer(x).view(-1, event_latent_dim)
+        transfer, tf_indices, tf_loss = self.transfer_vq(transfer)
+
+        return time, transfer
+    
+
     def forward(self, x):
         batch = x.shape[0]
         x = x.view(-1, 1, exp.n_samples)
@@ -337,6 +366,12 @@ class Model(nn.Module):
         super().__init__()
         self.summary = Summarizer()
         self.apply(lambda p: exp.init_weights(p))
+    
+    def encode(self, x):
+        return self.summary.encode(x)
+    
+    def decode(self, time, transfer):
+        return self.generate(time, transfer)
 
     def generate(self, time, transfer):
         return self.summary.generate(time, transfer)
@@ -347,11 +382,11 @@ class Model(nn.Module):
 
 
 model = Model().to(device)
-# try:
-#     model.load_state_dict(torch.load(Path(__file__).parent.joinpath('model.dat')))
-#     print('loaded model')
-# except IOError:
-#     print('Could not load weights')
+try:
+    model.load_state_dict(torch.load(Path(__file__).parent.joinpath('model.dat'), map_location=device))
+    print('loaded model')
+except IOError:
+    print('Could not load weights')
 optim = optimizer(model, lr=1e-4)
 
 

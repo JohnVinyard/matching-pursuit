@@ -1,1 +1,1 @@
-from .experiment import LastTry
+from .experiment import SequeceGan
