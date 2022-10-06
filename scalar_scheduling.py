@@ -54,6 +54,28 @@ def fft_convolve(*args, correlation=False):
     return final
 
 
+class ScalarPositioning(torch.autograd.Function):
+    def forward(self, positions: torch.Tensor, n_samples: int):
+        batch, _ = positions.shape
+        positions = (positions.view(batch, 1) * n_samples * 0.9999).long()
+        impulses = torch.zeros(batch, n_samples)
+        impulses = torch.scatter(impulses, -1, positions, torch.ones(positions.shape))
+        return impulses
+    
+    def backward(self, *grad_outputs):
+        x, = grad_outputs
+
+        rng = torch.linspace(0, 1, n_samples)[None, ...]
+
+        x = torch.abs(x)
+        grad = torch.sum(rng * x, dim=-1) / torch.sum(x, dim=-1)
+        grad = grad[..., None]
+        return grad, None
+
+
+scalar_position = ScalarPositioning.apply
+
+
 class Position(torch.autograd.Function):
 
     def forward(self, items, positions, targets):
@@ -141,35 +163,6 @@ def stft(x, ws=512, step=256, pad=False, log_amplitude=False, log_epsilon=1e-4):
         x = torch.log(x + log_epsilon)
     
     return x
-
-
-# def generate_tones(n_samples, samplerate, hz, amps):
-#     nyquist = samplerate // 2
-#     radians = hz / nyquist
-#     phase_accum = radians.reshape((-1, 1))
-#     phase_accum = np.repeat(phase_accum, n_samples, -1)
-#     phase_accum = np.cumsum(phase_accum, axis=-1)
-#     tones = np.sin(phase_accum * np.pi) * amps[:, None]
-#     tones = tones.sum(axis=0)
-#     return tones
-
-# def generate_clip(n_samples, samplerate=22050):
-#     output = np.zeros(n_samples)
-#     output[:64] = np.random.uniform(-1, 1, 64) * np.hamming(64)
-#     output = torch.from_numpy(output).float()
-
-#     tones = generate_tones(
-#         n_samples, 
-#         samplerate, 
-#         np.array([110, 220, 440, 880]), 
-#         np.array([1, 1, 1, 1])) * (np.linspace(1, 0, n_samples) ** 10)
-    
-#     tones = torch.from_numpy(tones).float()
-
-#     final = fft_convolve(output, tones)
-
-#     # final = normalize(final)
-#     return final
 
 
 def fft_shift(a, shift):
@@ -388,8 +381,13 @@ class Model(nn.Module):
         x = self.to_pos(x)
         
         locations = torch.sigmoid(x)
+        locations = locations.view(-1, 1)
 
-        x = self.scheduler.forward(locations, self.stems, target)
+        pos = scalar_position(locations, n_samples)
+        pos = pos.view(-1, 8, n_samples)
+        
+        x = fft_convolve(pos, self.stems.view(1, 8, n_samples))
+        # x = self.scheduler.forward(locations, self.stems, target)
 
         final = torch.sum(x, dim=1, keepdim=True)
         return x, locations, final
