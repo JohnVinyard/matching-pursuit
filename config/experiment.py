@@ -53,6 +53,13 @@ class Experiment(object):
             do_windowing=False, 
             check_cola=False, 
             residual=self.residual_loss).to(device)
+    
+    def pooled_filter_bank(self, x):
+        orig_shape = x.shape[-1]
+        x = self.fb.forward(x, normalize=False)
+        x = self.fb.temporal_pooling(x, 512, 256)
+        x = x[..., :orig_shape // 256]
+        return x
 
     def perceptual_feature(self, x):
         # bands = self.pif.compute_feature_dict(x)

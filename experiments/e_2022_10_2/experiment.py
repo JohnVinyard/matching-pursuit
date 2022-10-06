@@ -51,7 +51,6 @@ class SegmentGenerator(nn.Module):
             out_channels=1,
             mode='nearest')
 
-        # self.env = LinearOutputStack(exp.model_dim, 2, out_channels=exp.n_frames, in_channels=event_latent_dim)
 
         self.n_coeffs = 257
 
@@ -136,10 +135,8 @@ class Summarizer(nn.Module):
 
         self.to_time = LinearOutputStack(
             exp.model_dim, 1, out_channels=exp.n_frames)
-        self.impulse = ImpulseGenerator(exp.n_samples, softmax=lambda x: F.gumbel_softmax(x, dim=-1, hard=True))
+        self.impulse = ImpulseGenerator(exp.n_samples, softmax=lambda x: F.softmax(x, dim=-1))
 
-        # self.impulse = PosEncodedImpulseGenerator(
-        #     exp.n_frames, exp.n_samples, softmax=lambda x: F.softmax(x, dim=-1))
 
         self.to_transfer = LinearOutputStack(
             exp.model_dim, 1, out_channels=event_latent_dim)
@@ -219,21 +216,7 @@ def train_model(batch):
     
     ll = latent_loss(transfer) * 0.5
 
-
-    # e = env.view(-1, exp.n_frames * 2)
-
-    # e = torch.softmax(e, dim=-1)
-
-    # env_centroids = \
-    #     torch.sum(torch.linspace(0, 1, e.shape[-1], device=e.device)[None, :] * e, dim=-1) \
-    #     / torch.sum(e, dim=-1, keepdim=True)
-
-    # the assumption is that events should be uniformly distributed
-    # time_loss = torch.abs(time.mean() - 0.5) + torch.abs(time.std() - 0.25) * 0.5
-
-    # env_loss = env_centroids.mean() * 0.01
-
-    loss = exp.perceptual_loss(recon, batch) + ll #+ env_loss
+    loss = exp.perceptual_loss(recon, batch) + ll 
 
 
     loss.backward()
