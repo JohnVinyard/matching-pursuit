@@ -1,1 +1,1 @@
-from .e_2022_10_6 import SequeceGan as Current
+from .e_2022_10_7 import GraphRepresentationExperiment as Current

@@ -31,7 +31,7 @@ class Critic(nn.Module):
         self.net = nn.TransformerEncoder(layer, 4)
         self.judge = nn.Linear(128, 1)
         self.apply(init_weights)
-    
+
     def forward(self, time, transfer):
         # (batch, channels, n_events)
         time = time.view(-1, 16, 128)
@@ -43,6 +43,7 @@ class Critic(nn.Module):
         x = self.judge(x)
         return x
 
+
 class Generator(nn.Module):
     def __init__(self):
         super().__init__()
@@ -52,7 +53,7 @@ class Generator(nn.Module):
         self.to_time = nn.Linear(128, 128)
         self.to_transfer = nn.Linear(128, 128)
         self.apply(init_weights)
-    
+
     def forward(self, x):
         # (batch, channels, n_events)
         x = self.up(x).permute(0, 2, 1)
@@ -69,12 +70,13 @@ critic_optim = optimizer(critic, lr=1e-4)
 gen = Generator().to(device)
 gen_optim = optimizer(gen, lr=1e-4)
 
+
 def get_latent(batch_size):
     return torch.zeros(batch_size, 128, device=device).normal_(0, 1)
 
+
 def train_critic(batch):
     real_time, real_transfer = batch
-
 
     critic_optim.zero_grad()
     latent = get_latent(real_time.shape[0])
@@ -85,7 +87,7 @@ def train_critic(batch):
 
     loss = torch.abs(1 - rj.mean()) + torch.abs(0 - fj.mean())
     loss.backward()
-    
+
     critic_optim.step()
     return loss
 
@@ -104,6 +106,7 @@ def train_generator(batch):
     gen_optim.step()
     return loss, (time, transfer)
 
+
 @readme
 class SequeceGan(object):
     def __init__(self, stream):
@@ -120,29 +123,28 @@ class SequeceGan(object):
         with torch.no_grad():
             output = self.autoencoder.decode(*self.real)
         return playable(output, exp.samplerate)
-    
+
     def real_spec(self):
         return np.abs(zounds.spectral.stft(self.orig()))
-        
+
     def listen(self):
         fake_time, fake_transfer = self.fake
         with torch.no_grad():
             output = self.autoencoder.decode(fake_time[0], fake_transfer[0])
         return playable(output, exp.samplerate)
-    
+
     def fake_spec(self):
         return np.abs(zounds.spectral.stft(self.listen()))
-    
+
     def run(self):
         for i, item in enumerate(self.stream):
             item = item.view(-1, 1, exp.n_samples)
             with torch.no_grad():
                 self.real = self.autoencoder.encode(item)
-            
+
             if i % 2 == 0:
                 loss = train_critic(self.real)
                 print('D', loss.item())
             else:
                 loss, self.fake = train_generator(self.real)
-                print('G', loss.item()) 
-
+                print('G', loss.item())
