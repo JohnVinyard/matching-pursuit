@@ -3,7 +3,7 @@ import torch
 from torch import nn
 import zounds
 from config.experiment import Experiment
-from experiments.e_2022_9_12 import autoencoder
+from experiments.e_2022_10_7 import autoencoder
 from modules.dilated import DilatedStack
 from scalar_scheduling import init_weights
 from train.optim import optimizer

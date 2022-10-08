@@ -1,1 +1,1 @@
-from .experiment import WaveguideSynthesisExperiment3
+from .experiment import WaveguideSynthesisExperiment3, model as autoencoder
