@@ -11,10 +11,18 @@ def midi_to_hz(n: int):
 
 
 def musical_scale(start_midi=1, stop_midi=129):
-    x = midi_to_hz(np.arange(start_midi, stop_midi))
+    x = midi_to_hz(stop_midi - start_midi)
     for freq in x:
         yield zounds.FrequencyBand(freq - 1, freq + 1)
 
+
+class MusicalScale(zounds.FrequencyScale):
+    def __init__(self, start_midi=1, stop_midi=129):
+        x = list(musical_scale(start_midi, stop_midi))
+        band = zounds.FrequencyBand(x[0].center_frequency, x[-1].center_frequency)
+        super().__init__(band, x.shape[0])
+        self._bands = x
+    
 
 if __name__ == '__main__':
     x = midi_to_hz(np.arange(1, 128))

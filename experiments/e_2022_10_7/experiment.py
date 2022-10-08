@@ -25,6 +25,7 @@ from modules.latent_loss import latent_loss
 
 from util import device, playable
 from modules import pos_encoded
+from util.music import MusicalScale
 
 from util.readmedocs import readme
 import numpy as np
@@ -39,13 +40,13 @@ exp = Experiment(
 n_events = 16
 event_latent_dim = exp.model_dim
 
-mel_scale = MelScale()
+# mel_scale = MelScale()
 
 
+# band = zounds.FrequencyBand(30, exp.samplerate.nyquist)
+# scale = zounds.MelScale(band, 128)
 
-band = zounds.FrequencyBand(30, exp.samplerate.nyquist)
-scale = zounds.MelScale(band, 128)
-
+scale = MusicalScale()
 
 # TODO: What about discretization is causing issues?
 class VQ(nn.Module):
