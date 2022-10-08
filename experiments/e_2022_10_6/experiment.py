@@ -4,9 +4,10 @@ from torch import nn
 import zounds
 from config.experiment import Experiment
 from experiments.e_2022_9_12 import autoencoder
+from modules.dilated import DilatedStack
 from scalar_scheduling import init_weights
 from train.optim import optimizer
-from upsample import PosEncodedUpsample
+from upsample import ConvUpsample, PosEncodedUpsample
 
 from util import device, playable
 
@@ -27,8 +28,7 @@ class Critic(nn.Module):
     def __init__(self):
         super().__init__()
         self.embed = nn.Linear(256, 128)
-        layer = nn.TransformerEncoderLayer(128, 4, 128, batch_first=True)
-        self.net = nn.TransformerEncoder(layer, 4)
+        self.net = DilatedStack(128, [1, 3, 9, 1])
         self.judge = nn.Linear(128, 1)
         self.apply(init_weights)
 
@@ -38,7 +38,9 @@ class Critic(nn.Module):
         transfer = transfer.view(-1, 16, 128)
         x = torch.cat([time, transfer], dim=-1)
         x = self.embed(x)
+        x = x.permute(0, 2, 1)
         x = self.net(x)
+        x = x.permute(0, 2, 1)
         x = torch.mean(x, dim=1)
         x = self.judge(x)
         return x
@@ -47,9 +49,7 @@ class Critic(nn.Module):
 class Generator(nn.Module):
     def __init__(self):
         super().__init__()
-        self.up = PosEncodedUpsample(128, 128, 16, 128, 2)
-        layer = nn.TransformerEncoderLayer(128, 4, 128, batch_first=True)
-        self.net = nn.TransformerEncoder(layer, 4)
+        self.up = ConvUpsample(128, 128, 4, 16, mode='learned', out_channels=128)
         self.to_time = nn.Linear(128, 128)
         self.to_transfer = nn.Linear(128, 128)
         self.apply(init_weights)
@@ -57,18 +57,18 @@ class Generator(nn.Module):
     def forward(self, x):
         # (batch, channels, n_events)
         x = self.up(x).permute(0, 2, 1)
-        x = self.net(x)
+        # x = self.net(x)
         time = self.to_time(x)
         tf = self.to_transfer(x)
         return time, tf
 
 
 critic = Critic().to(device)
-critic_optim = optimizer(critic, lr=1e-4)
+critic_optim = optimizer(critic, lr=1e-3)
 
 
 gen = Generator().to(device)
-gen_optim = optimizer(gen, lr=1e-4)
+gen_optim = optimizer(gen, lr=1e-3)
 
 
 def get_latent(batch_size):
@@ -89,6 +89,10 @@ def train_critic(batch):
     loss.backward()
 
     critic_optim.step()
+
+    for p in critic.parameters():
+        p.data.clamp_(-0.01, 0.01)
+    
     return loss
 
 
@@ -121,7 +125,7 @@ class SequeceGan(object):
         real_time = real_time[:16]
         real_transfer = real_transfer[:16]
         with torch.no_grad():
-            output = self.autoencoder.decode(*self.real)
+            output = self.autoencoder.decode(real_time, real_transfer)
         return playable(output, exp.samplerate)
 
     def real_spec(self):
