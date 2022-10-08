@@ -1,11 +1,10 @@
 
-from sympy import Line
 from config.experiment import Experiment
 from modules.dilated import DilatedStack
 from modules.linear import LinearOutputStack
 from modules.normalization import ExampleNorm
 from train.optim import optimizer
-from util import playable
+from util import device, playable
 from util.readmedocs import readme
 import zounds
 from torch import nn
@@ -108,7 +107,7 @@ class Model(nn.Module):
         x = self.encoder(x)
         x, _ = torch.max(x, dim=-1)
 
-        times = torch.zeros(batch, 1)
+        times = torch.zeros(batch, 1, device=x.device)
         vectors = x
 
         for level in self.levels:
@@ -118,7 +117,7 @@ class Model(nn.Module):
         return x
 
 
-model = Model()
+model = Model().to(device)
 optim = optimizer(model, lr=1e-3)
 
 
