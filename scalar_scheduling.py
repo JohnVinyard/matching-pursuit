@@ -9,12 +9,23 @@ from functools import reduce
 from scipy.signal import stft
 from torch.optim import Adam
 from modules.transfer import schedule_atoms
-
+from util import device
 from data.audioiter import AudioIterator
 
 import matplotlib
 matplotlib.use('qt5agg', force=True)
 import matplotlib.pyplot as plt
+
+class FFTShifter(torch.autograd.Function):
+
+    def forward(self, items, pos):
+        return fft_shift(items, pos)
+    
+    def backward(self, *grad_outputs):
+        a, b = grad_outputs.shape
+        return a, b
+
+differentiable_fft_shift = FFTShifter.apply
 
 
 '''
@@ -146,7 +157,7 @@ def fft_shift(a, shift):
     spec = torch.fft.rfft(a, dim=-1, norm='ortho')
     
     n_coeffs = spec.shape[-1]
-    shift = (torch.arange(0, n_coeffs) * 2j * np.pi) / n_coeffs
+    shift = (torch.arange(0, n_coeffs) * 2j * np.pi).to(device) / n_coeffs
     shift = torch.exp(-shift * shift_samples)
     spec = spec * shift
     samples = torch.fft.irfft(spec, dim=-1, norm='ortho')
@@ -285,8 +296,8 @@ class Model(nn.Module):
         locations = torch.sigmoid(x)
         pos = locations.view(batch_size, 8, 1)
 
-        x = schedule_atoms(self.stems.view(1, -1, n_samples), locations, target)
-        # x = fft_shift(self.stems.view(1, 8, -1), pos)
+        # x = schedule_atoms(self.stems.view(1, -1, n_samples), locations, target)
+        x = differentiable_fft_shift(self.stems.view(1, 8, -1), pos)
 
         x = torch.sum(x, dim=1, keepdim=True)
 

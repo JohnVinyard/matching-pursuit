@@ -3,8 +3,10 @@ from typing import Any, Collection
 import torch
 from torch import nn
 import zounds
+from modules import stft
 
 from modules.ddsp import overlap_add
+from modules.normalization import unit_norm
 from modules.pos_encode import pos_encoded
 from .phase import morlet_filter_bank
 import numpy as np
@@ -92,6 +94,7 @@ def position(x, clips, n_samples, sum_channels=False):
 
 
 
+
 class Position(torch.autograd.Function):
 
     def forward(self, items, positions, targets):
@@ -110,8 +113,16 @@ class Position(torch.autograd.Function):
         targets = targets.view(batch, 1, n_samples)
         clips = clips.view(-1, pos.shape[1], n_samples)
 
-        conv = fft_convolve(targets, clips, correlation=True)
-        real_best = torch.argmax(conv, dim=-1) / n_samples
+        t = stft(targets, 512, 256, 256)
+        t = unit_norm(t, dim=-1).permute(0, 1, 3, 2)
+
+        c = stft(clips, 512, 256, 256)
+        c = unit_norm(c, dim=-1).permute(0, 1, 3, 2)
+
+
+        conv = fft_convolve(t, c, correlation=True)
+        conv = torch.sum(conv, dim=2)
+        real_best = torch.argmax(conv, dim=-1) / conv.shape[-1]
 
         # what's the difference between the scalar location
         # and the actual best position for this clip?
