@@ -16,12 +16,13 @@ from modules.transfer import ImpulseGenerator, PosEncodedImpulseGenerator, Trans
 from modules.fft import fft_convolve
 from train.optim import optimizer
 from upsample import ConvUpsample, PosEncodedUpsample
-from modules.normalization import ExampleNorm, limit_norm
+from modules.normalization import ExampleNorm, limit_norm, unit_norm
 from torch.nn import functional as F
 from modules.phase import MelScale
 from modules.stft import stft
 from torch.nn.utils.clip_grad import clip_grad_norm_, clip_grad_value_
 from modules.latent_loss import latent_loss
+from collections import Counter
 
 from util import device, playable
 from modules import pos_encoded
@@ -54,7 +55,9 @@ class VQ(nn.Module):
         super().__init__()
         self.code_dim = code_dim
         self.n_codes = n_codes
-        self.codebook = nn.Parameter(torch.zeros(n_codes, code_dim).normal_(0, 1))
+        self.codebook = nn.Parameter(torch.zeros(
+            n_codes, code_dim).normal_(0, 1))
+
         self.commitment_cost = commitment_weight
 
         self.one_hot = one_hot
@@ -64,7 +67,8 @@ class VQ(nn.Module):
         if self.one_hot:
             self.up = nn.Linear(code_dim, n_codes)
             self.down = nn.Linear(n_codes, code_dim)
-    
+        
+
     def forward(self, x):
 
         if self.passthrough:
@@ -75,6 +79,7 @@ class VQ(nn.Module):
             x = F.gumbel_softmax(x, dim=-1, hard=True)
             x = self.down(x)
             return x, None, 0
+
 
         dist = torch.cdist(x, self.codebook)
         mn, indices = torch.min(dist, dim=-1)
@@ -217,11 +222,11 @@ class Summarizer(nn.Module):
 
         self.to_time = LinearOutputStack(
             exp.model_dim, 1, out_channels=event_latent_dim)
-        self.time_vq = VQ(exp.model_dim, 2048, 1, passthrough=True)
+        self.time_vq = VQ(exp.model_dim, 2048, commitment_weight=0.1, one_hot=True)
 
         self.to_transfer = LinearOutputStack(
             exp.model_dim, 1, out_channels=event_latent_dim)
-        self.transfer_vq = VQ(exp.model_dim, 2048, 1, passthrough=True)
+        self.transfer_vq = VQ(exp.model_dim, 2048, commitment_weight=0.1, one_hot=True)
 
         self.norm = ExampleNorm()
 
@@ -257,6 +262,7 @@ class Summarizer(nn.Module):
         transfer = self.to_transfer(x).view(-1, event_latent_dim)
         transfer, tf_indices, tf_loss = self.transfer_vq(transfer)
 
+
         return time, transfer
     
 
@@ -279,10 +285,10 @@ class Summarizer(nn.Module):
         encoded = x
 
         # split into independent time and transfer function representations
-        time = self.to_time(x).view(-1, event_latent_dim)
+        orig_time = time = self.to_time(x).view(-1, event_latent_dim)
         time, t_indices, t_loss = self.time_vq(time)
 
-        transfer = self.to_transfer(x).view(-1, event_latent_dim)
+        orig_transfer = transfer = self.to_transfer(x).view(-1, event_latent_dim)
         transfer, tf_indices, tf_loss = self.transfer_vq(transfer)
 
 
@@ -293,7 +299,7 @@ class Summarizer(nn.Module):
 
 
         loss = t_loss + tf_loss
-        return output, indices, encoded, env.view(batch, n_events, -1), loss, tf, time, transfer
+        return output, indices, encoded, env.view(batch, n_events, -1), loss, tf, time, transfer, orig_time, orig_transfer
 
 
 class Model(nn.Module):
@@ -312,24 +318,24 @@ class Model(nn.Module):
         return self.summary.generate(time, transfer)
 
     def forward(self, x):
-        x, indices, encoded, env, loss, tf, time, transfer = self.summary(x)
-        return x, indices, encoded, env, loss, tf, time, transfer
+        x, indices, encoded, env, loss, tf, time, transfer, orig_time, orig_transfer = self.summary(x)
+        return x, indices, encoded, env, loss, tf, time, transfer, orig_time, orig_transfer
 
 
 model = Model().to(device)
-try:
-    model.load_state_dict(torch.load(Path(__file__).parent.joinpath('model.dat'), map_location=device))
-    print('loaded model')
-except IOError:
-    print('Could not load weights')
+# try:
+#     model.load_state_dict(torch.load(Path(__file__).parent.joinpath('model.dat'), map_location=device))
+#     print('loaded model')
+# except IOError:
+#     print('Could not load weights')
 optim = optimizer(model, lr=1e-4)
 
 
 def train_model(batch):
     optim.zero_grad()
-    recon, indices, encoded, env, vq_loss, tf, time, transfer = model.forward(
+    recon, indices, encoded, env, vq_loss, tf, time, transfer, orig_time, orig_transfer = model.forward(
         batch)
-    ll = (latent_loss(time) + latent_loss(transfer)) * 0.25
+    ll = (latent_loss(orig_time) + latent_loss(orig_transfer)) * 0.25
     loss = exp.perceptual_loss(recon, batch) + vq_loss + ll
     loss.backward()
     optim.step()
