@@ -35,6 +35,20 @@ def fft_convolve(*args, correlation=False):
     final = final[..., :n_samples]
     return final
 
+def fft_shift(a, shift):
+    n_samples = a.shape[-1]
+    a = F.pad(a, (0, n_samples))
+    shift_samples = (shift * 0.5) * n_samples
+    spec = torch.fft.rfft(a, dim=-1, norm='ortho')
+    
+    n_coeffs = spec.shape[-1]
+    shift = (torch.arange(0, n_coeffs) * 2j * np.pi) / n_coeffs
+    shift = torch.exp(-shift * shift_samples)
+    spec = spec * shift
+    samples = torch.fft.irfft(spec, dim=-1, norm='ortho')
+    samples = samples[..., :n_samples]
+    return samples
+
 
 def position(x, clips, n_samples, sum_channels=False):
     
@@ -81,30 +95,35 @@ def position(x, clips, n_samples, sum_channels=False):
 class Position(torch.autograd.Function):
 
     def forward(self, items, positions, targets):
-        # x = position(positions, items, items.shape[-1])
-        self.save_for_backward(positions, targets, items)
-        return positions
+        x = position(positions, items, items.shape[-1])
+        self.save_for_backward(positions, targets, items, x)
+        return x
 
     def backward(self, *grad_outputs: Collection[torch.Tensor]):
         x, = grad_outputs
-        pos, targets, clips = self.saved_tensors
+        pos, targets, clips, recon = self.saved_tensors
 
         batch = x.shape[0]
         n_samples = x.shape[-1]
-        # n_clips = recon.shape[1]
 
+        # what's the best possible position for each stem?
         targets = targets.view(batch, 1, n_samples)
         clips = clips.view(-1, pos.shape[1], n_samples)
 
         conv = fft_convolve(targets, clips, correlation=True)
-        conv = torch.abs(conv)
         real_best = torch.argmax(conv, dim=-1) / n_samples
 
         # what's the difference between the scalar location
         # and the actual best position for this clip?
         pos_grad = (pos - real_best)
 
-        return None, pos_grad, None
+        # gradient for clips based on the best possible render
+        best_render = fft_shift(clips, real_best[..., None])
+        clip_loss = best_render - targets
+        # shift the gradients backward to align with the clip
+        clip_loss = fft_shift(clip_loss, -real_best[..., None])
+
+        return clip_loss, pos_grad, None
 
 
 schedule_atoms = Position.apply

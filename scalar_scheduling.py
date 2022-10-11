@@ -8,6 +8,7 @@ from matplotlib import pyplot as plt
 from functools import reduce
 from scipy.signal import stft
 from torch.optim import Adam
+from modules.transfer import schedule_atoms
 
 from data.audioiter import AudioIterator
 
@@ -54,61 +55,34 @@ def fft_convolve(*args, correlation=False):
     return final
 
 
-class ScalarPositioning(torch.autograd.Function):
-    def forward(self, positions: torch.Tensor, n_samples: int):
-        batch, _ = positions.shape
-        positions = (positions.view(batch, 1) * n_samples * 0.9999).long()
-        impulses = torch.zeros(batch, n_samples)
-        impulses = torch.scatter(impulses, -1, positions, torch.ones(positions.shape))
-        return impulses
+# class ScalarPositioning(torch.autograd.Function):
+#     def forward(self, positions: torch.Tensor, n_samples: int):
+#         batch, _ = positions.shape
+#         self.save_for_backward(positions)
+#         positions = (positions.view(batch, 1) * n_samples * 0.9999).long()
+#         impulses = torch.zeros(batch, n_samples)
+#         impulses = torch.scatter(impulses, -1, positions, torch.ones(positions.shape))
+#         return impulses
     
-    def backward(self, *grad_outputs):
-        x, = grad_outputs
-
-        rng = torch.linspace(0, 1, n_samples)[None, ...]
-
-        x = torch.abs(x)
-        grad = torch.sum(rng * x, dim=-1) / torch.sum(x, dim=-1)
-        grad = grad[..., None]
-        return grad, None
-
-
-scalar_position = ScalarPositioning.apply
+#     def backward(self, *grad_outputs):
+#         x, = grad_outputs
+#         pos, = self.saved_tensors
+#         x = x.view(-1, 1, n_samples)
+#         x = F.relu(x)
+#         index = torch.argmax(x, dim=-1)
+#         new_pos = index / n_samples
+#         grad = pos - new_pos
+#         return grad, None
 
 
-class Position(torch.autograd.Function):
+# scalar_position = ScalarPositioning.apply
 
-    def forward(self, items, positions, targets):
-        x = position(positions, items, items.shape[-1])
-        self.save_for_backward(positions, targets, x, items)
-        return x
 
-    def backward(self, *grad_outputs: Collection[torch.Tensor]):
-        x, = grad_outputs
-        pos, targets, recon, clips = self.saved_tensors
-
-        batch = x.shape[0]
-        n_samples = x.shape[-1]
-        n_clips = recon.shape[1]
-        
-        targets = targets.view(batch, 1, n_samples)
-        clips = clips.view(-1, n_clips, n_samples)
-
-        conv = fft_convolve(targets, clips, correlation=True)
-        conv = torch.abs(conv)
-        conv = F.avg_pool1d(conv, 128, 1, padding=64)[..., :n_samples]
-        real_best = torch.argmax(conv, dim=-1) / recon.shape[-1]
-
-        grad = (pos - real_best)
-
-        return None, grad, None
-
-fft_placement = Position.apply
 
 def init_weights(p):
     with torch.no_grad():
         try:
-            p.weight.uniform_(-0.1, 0.1)
+            p.weight.uniform_(-0.02, 0.02)
         except AttributeError:
             pass
 
@@ -158,7 +132,7 @@ def stft(x, ws=512, step=256, pad=False, log_amplitude=False, log_epsilon=1e-4):
     x = x * win[None, None, :]
     x = torch.fft.rfft(x, norm='ortho')
     x = torch.abs(x)
-
+    
     if log_amplitude:
         x = torch.log(x + log_epsilon)
     
@@ -186,26 +160,12 @@ def normalize(x):
     return x / (mx + 1e-8)
 
 
-# class NormalPDFScheduler(nn.Module):
-#     def __init__(self, n_samples):
-#         super().__init__()
-#         self.n_samples = n_samples
-#         self.register_buffer('rng', torch.linspace(0, 1, n_samples))
-#         self.register_buffer('scale', torch.zeros(1).fill_(1 / (n_samples * 2)))
-    
-#     def forward(self, x, clips):
-#         x = x.view(-1, 1)
-#         normal = Normal(x, self.scale[None, :])
-#         pdf = torch.exp(normal.log_prob(self.rng[None:]))
-#         pdf = fft_convolve(pdf, clips)
-#         pdf = normalize(pdf)
-#         return pdf
 
 
 def position(x, clips, n_samples, sum_channels=False):
     
     if len(x.shape) != 2:
-        raise ValueError('clips shoud be (batch, n_clips)')
+        raise ValueError('pos shoud be (batch, n_clips)')
 
     batch_size, n_clips = x.shape
 
@@ -242,38 +202,11 @@ def position(x, clips, n_samples, sum_channels=False):
     outer = torch.stack(outer)
     if sum_channels:
         outer = torch.sum(outer, dim=1, keepdim=True)
+    
     return outer
 
 
-class RollScheduler(nn.Module):
-    def __init__(self, n_samples):
-        super().__init__()
-        self.n_samples = n_samples
-    
-    def forward(self, x, clips, actual):
-        return fft_placement(clips, x, actual)
         
-# class FFTShiftScheduler(nn.Module):
-#     def __init__(self, n_samples):
-#         super().__init__()
-#         self.n_samples = n_samples
-    
-#     def forward(self, x, clips):
-#         x = x.view(-1, 1)
-#         impulses = fft_shift(clips, x)
-#         # impulses = fft_placement(clips, x)
-#         impulses = normalize(impulses)
-#         return impulses
-
-
-# class MSELoss(nn.Module):
-#     def __init__(self, n_samples):
-#         super().__init__()
-#         self.n_samples = n_samples
-    
-#     def forward(self, input, target):
-#         return ((input - target) ** 2).mean(dim=-1)
-
 
 class STFTLoss(nn.Module):
     def __init__(self, n_samples, log_amp=False):
@@ -294,34 +227,6 @@ class STFTLoss(nn.Module):
         return ((input - target.detach()) ** 2).mean(dim=(1, 2))
 
 
-# class FFTLoss(nn.Module):
-#     def __init__(self, n_samples):
-#         super().__init__()
-#         self.n_samples = n_samples
-    
-#     def forward(self, input, target):
-#         input_coeffs = torch.fft.rfft(input, dim=-1, norm='ortho')
-#         target_coeffs = torch.fft.rfft(target, dim=-1, norm='ortho')
-
-#         input_coeffs = torch.cat([input_coeffs.real, input_coeffs.imag], dim=-1)
-#         target_coeffs = torch.cat([target_coeffs.real, target_coeffs.imag], dim=-1)
-#         return ((input_coeffs - target_coeffs) ** 2).mean(dim=-1)
-
-
-# class SelfSimilarityLoss(nn.Module):
-#     def __init__(self, n_samples):
-#         super().__init__()
-#         self.n_samples = n_samples
-    
-#     def _self_sim(self, x):
-#         spec = stft(x.view(-1, self.n_samples), 512, 256, pad=True)
-#         sim = spec @ spec.permute(0, 2, 1)
-#         return sim
-
-#     def forward(self, input, target):
-#         input_sim = self._self_sim(input)
-#         target_sim = self._self_sim(target)
-#         return ((input_sim - target_sim) ** 2).mean(dim=(1, 2))
 
 
 class CompositeLoss(nn.Module):
@@ -334,14 +239,12 @@ class CompositeLoss(nn.Module):
 
 
 class Model(nn.Module):
-    def __init__(self, n_samples, stems, scheduler):
+    def __init__(self, n_samples, stems):
         super().__init__()
         self.n_samples = n_samples
         self.embed_spec = nn.Linear(257, 33)
         self.embed = nn.Linear(66, 128)
 
-        # layer = nn.TransformerEncoderLayer(128, 4, 128 ,batch_first=True)
-        # self.net = nn.TransformerEncoder(layer, 3)
 
         self.net = nn.Sequential(
             nn.Conv1d(128, 128, 3, 1, dilation=1, padding=1),
@@ -356,9 +259,8 @@ class Model(nn.Module):
         )
 
         self.to_pos = nn.Linear(128, 8)
-        self.stems = stems
+        self.stems = nn.Parameter(torch.zeros_like(stems).uniform_(-1, 1))
 
-        self.scheduler = scheduler
 
         self.apply(init_weights)
     
@@ -381,15 +283,14 @@ class Model(nn.Module):
         x = self.to_pos(x)
         
         locations = torch.sigmoid(x)
-        locations = locations.view(-1, 1)
+        pos = locations.view(batch_size, 8, 1)
 
-        pos = scalar_position(locations, n_samples)
-        pos = pos.view(-1, 8, n_samples)
-        
-        x = fft_convolve(pos, self.stems.view(1, 8, n_samples))
-        # x = self.scheduler.forward(locations, self.stems, target)
+        x = schedule_atoms(self.stems.view(1, -1, n_samples), locations, target)
+        # x = fft_shift(self.stems.view(1, 8, -1), pos)
 
-        final = torch.sum(x, dim=1, keepdim=True)
+        x = torch.sum(x, dim=1, keepdim=True)
+
+        final = x
         return x, locations, final
 
 
@@ -459,6 +360,7 @@ class DataSet(object):
 #     a = torch.abs(a)
 #     b = torch.abs(b)
 
+        # self.net = nn.TransformerEncoder(layer, 3)
 #     return a, b
 
 if __name__ == '__main__':
@@ -473,7 +375,7 @@ if __name__ == '__main__':
     stems = stems.view(8, 1, stem_size)
     stems = F.pad(stems, (0, n_samples - stem_size))
 
-    scheduler = RollScheduler(n_samples)
+    # scheduler = RollScheduler(n_samples)
 
     # TODO: Instead of synthetic examples, these will be
     # normal batches of (batch, 1, n_samples)
@@ -504,21 +406,26 @@ if __name__ == '__main__':
     #     range_low=0, 
     #     range_high=1)
     
-    model = Model(n_samples, stems, scheduler)
-    optim = Adam(model.parameters(), lr=1e-4, betas=(0, 0.9))
+    model = Model(n_samples, stems)
+    optim = Adam(model.parameters(), lr=1e-3, betas=(0, 0.9))
 
     loss = CompositeLoss(
         STFTLoss(n_samples),
     )
     
-
     i = 0
     losses = []
 
     # # train network
+        # self.net = nn.TransformerEncoder(layer, 3)
     for item in iter_random_arrangement_batches(batch_size):
+
+        item = item.view(batch_size, 1, n_samples)
+
         optim.zero_grad()
         recon, fake_loc, final = model.forward(item)
+
+        
         l = loss.forward(recon, item).mean()
         l.backward()
         optim.step()
@@ -532,6 +439,6 @@ if __name__ == '__main__':
             plt.plot(losses)
             plt.show()
 
-            plt.plot(-np.abs(recon[0].data.cpu().numpy().squeeze().sum(axis=0)))
+            plt.plot(-np.abs(recon[0].data.cpu().numpy().squeeze()))
             plt.plot(np.abs(item[0].data.cpu().numpy().squeeze()))
             plt.show()
