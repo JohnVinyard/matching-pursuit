@@ -12,7 +12,7 @@ from modules.psychoacoustic import PsychoacousticFeature
 from modules.scattering import MoreCorrectScattering
 from modules.shape import Reshape
 from modules.sparse import VectorwiseSparsity
-from modules.transfer import ImpulseGenerator, PosEncodedImpulseGenerator, TransferFunction
+from modules.transfer import ImpulseGenerator, PosEncodedImpulseGenerator, TransferFunction, schedule_atoms
 from modules.fft import fft_convolve
 from train.optim import optimizer
 from upsample import ConvUpsample, PosEncodedUpsample
@@ -23,6 +23,7 @@ from modules.stft import stft
 from torch.nn.utils.clip_grad import clip_grad_norm_, clip_grad_value_
 from modules.latent_loss import latent_loss
 from collections import Counter
+
 
 from util import device, playable
 from modules import pos_encoded
@@ -110,35 +111,35 @@ class SegmentGenerator(nn.Module):
     def __init__(self):
         super().__init__()
 
-        # self.env = ConvUpsample(
-        #     event_latent_dim,
-        #     exp.model_dim,
-        #     4,
-        #     exp.n_frames * 2,
-        #     out_channels=1,
-        #     mode='fft')
+        self.env = ConvUpsample(
+            event_latent_dim,
+            exp.model_dim,
+            4,
+            exp.n_frames * 2,
+            out_channels=1,
+            mode='nearest')
 
-        self.env = nn.Sequential(
-            nn.Linear(event_latent_dim, exp.model_dim * 4),
-            Reshape((exp.model_dim, 4)),
+        # self.env = nn.Sequential(
+        #     nn.Linear(event_latent_dim, exp.model_dim * 4),
+        #     Reshape((exp.model_dim, 4)),
 
-            nn.ConvTranspose1d(exp.model_dim, 64, 4, 2, 1),
-            nn.LeakyReLU(0.2),
+        #     nn.ConvTranspose1d(exp.model_dim, 64, 4, 2, 1),
+        #     nn.LeakyReLU(0.2),
 
-            nn.ConvTranspose1d(64, 32, 4, 2, 1),
-            nn.LeakyReLU(0.2),
+        #     nn.ConvTranspose1d(64, 32, 4, 2, 1),
+        #     nn.LeakyReLU(0.2),
 
-            nn.ConvTranspose1d(32, 16, 4, 2, 1),
-            nn.LeakyReLU(0.2),
+        #     nn.ConvTranspose1d(32, 16, 4, 2, 1),
+        #     nn.LeakyReLU(0.2),
 
-            nn.ConvTranspose1d(16, 8, 4, 2, 1),
-            nn.LeakyReLU(0.2),
+        #     nn.ConvTranspose1d(16, 8, 4, 2, 1),
+        #     nn.LeakyReLU(0.2),
 
-            nn.ConvTranspose1d(8, 4, 4, 2, 1),
-            nn.LeakyReLU(0.2),
+        #     nn.ConvTranspose1d(8, 4, 4, 2, 1),
+        #     nn.LeakyReLU(0.2),
 
-            nn.Conv1d(4, 1, 3, 1, 1)
-        )
+        #     nn.Conv1d(4, 1, 3, 1, 1)
+        # )
         
 
         self.n_coeffs = 257
@@ -173,13 +174,13 @@ class SegmentGenerator(nn.Module):
 
     def forward(self, time, transfer):
         transfer = transfer.view(-1, event_latent_dim)
-        time = time.view(-1, event_latent_dim)
+        # time = time.view(-1, event_latent_dim)
 
         # x = x.view(-1, self.model_dim)
-        batch = time.shape[0]
+        batch = transfer.shape[0]
 
         # create envelope
-        env = torch.relu(self.env(time))
+        env = torch.relu(self.env(transfer))
         orig_env = env
         env = F.interpolate(env, size=self.n_samples, mode='linear')
         noise = torch.zeros(1, 1, self.n_samples, device=env.device).uniform_(-1, 1)
@@ -221,12 +222,12 @@ class Summarizer(nn.Module):
         self.decode = SegmentGenerator()
 
         self.to_time = LinearOutputStack(
-            exp.model_dim, 1, out_channels=event_latent_dim)
-        self.time_vq = VQ(exp.model_dim, 2048, commitment_weight=0.1, one_hot=True)
+            exp.model_dim, 1, out_channels=1)
+        # self.time_vq = VQ(exp.model_dim, 2048, commitment_weight=0.1, one_hot=True)
 
         self.to_transfer = LinearOutputStack(
             exp.model_dim, 1, out_channels=event_latent_dim)
-        self.transfer_vq = VQ(exp.model_dim, 2048, commitment_weight=0.1, one_hot=True)
+        self.transfer_vq = VQ(exp.model_dim, 2048, commitment_weight=0.1, passthrough=True)
 
         self.norm = ExampleNorm()
 
@@ -256,8 +257,8 @@ class Summarizer(nn.Module):
         encoded = x
 
         # split into independent time and transfer function representations
-        time = self.to_time(x).view(-1, event_latent_dim)
-        time, t_indices, t_loss = self.time_vq(time)
+        time = self.to_time(x).view(-1, 1)
+        # time, t_indices, t_loss = self.time_vq(time)
 
         transfer = self.to_transfer(x).view(-1, event_latent_dim)
         transfer, tf_indices, tf_loss = self.transfer_vq(transfer)
@@ -268,7 +269,9 @@ class Summarizer(nn.Module):
 
     def forward(self, x):
         batch = x.shape[0]
-        x = x.view(-1, 1, exp.n_samples)
+
+        target = x = x.view(-1, 1, exp.n_samples)
+
         x = exp.fb.forward(x, normalize=False)
         x = exp.fb.temporal_pooling(
             x, exp.window_size, exp.step_size)[..., :exp.n_frames]
@@ -285,8 +288,10 @@ class Summarizer(nn.Module):
         encoded = x
 
         # split into independent time and transfer function representations
-        orig_time = time = self.to_time(x).view(-1, event_latent_dim)
-        time, t_indices, t_loss = self.time_vq(time)
+        orig_time = time = self.to_time(x).view(-1, 1)
+        # time, t_indices, t_loss = self.time_vq(time)
+        t_loss = 0
+        time = (torch.sin(orig_time) + 1) * 0.5
 
         orig_transfer = transfer = self.to_transfer(x).view(-1, event_latent_dim)
         transfer, tf_indices, tf_loss = self.transfer_vq(transfer)
@@ -294,6 +299,9 @@ class Summarizer(nn.Module):
 
         x, env, loss, tf = self.decode.forward(time, transfer)
         x = x.view(batch, n_events, exp.n_samples)
+
+
+        x = schedule_atoms(x, time.view(-1, n_events), target)
 
         output = torch.sum(x, dim=1, keepdim=True)
 
@@ -333,10 +341,20 @@ optim = optimizer(model, lr=1e-4)
 
 def train_model(batch):
     optim.zero_grad()
-    recon, indices, encoded, env, vq_loss, tf, time, transfer, orig_time, orig_transfer = model.forward(
-        batch)
-    ll = (latent_loss(orig_time) + latent_loss(orig_transfer)) * 0.25
-    loss = exp.perceptual_loss(recon, batch) + vq_loss + ll
+    recon, indices, encoded, env, vq_loss, tf, time, transfer, orig_time, orig_transfer = model.forward(batch)
+
+    # transfer latent should be from a standard normal distribution
+    ll = (latent_loss(orig_transfer)) * 0.5
+
+    # times should be uniformly distributed.  Hopefully this
+    # naturally pushes envelopes to start near 0
+    # t_loss = torch.abs(0.5 - time.mean()) + torch.abs(0.25 - time.std())
+
+    peripheral_loss = vq_loss + ll #+ t_loss
+
+    pl = exp.perceptual_loss(recon, batch)
+
+    loss = pl + peripheral_loss
     loss.backward()
     optim.step()
     return loss, recon, indices, encoded, env, time, transfer
@@ -382,7 +400,7 @@ class WaveguideSynthesisExperiment3(object):
         return self.env.data.cpu().numpy()[0].T
 
     def t_latent(self):
-        return self.time_latent.data.cpu().numpy().squeeze().reshape((-1, event_latent_dim))
+        return self.time_latent.data.cpu().numpy().squeeze().squeeze()
 
     def tf_latent(self):
         return self.transfer_latent.data.cpu().numpy().squeeze().reshape((-1, event_latent_dim))
