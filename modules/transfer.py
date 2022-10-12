@@ -3,11 +3,10 @@ from typing import Any, Collection
 import torch
 from torch import nn
 import zounds
-from modules import stft
 
 from modules.ddsp import overlap_add
-from modules.normalization import unit_norm
 from modules.pos_encode import pos_encoded
+from util import device
 from .phase import morlet_filter_bank
 import numpy as np
 from torch.nn import functional as F
@@ -44,7 +43,7 @@ def fft_shift(a, shift):
     spec = torch.fft.rfft(a, dim=-1, norm='ortho')
     
     n_coeffs = spec.shape[-1]
-    shift = (torch.arange(0, n_coeffs) * 2j * np.pi).to(a.device) / n_coeffs
+    shift = (torch.arange(0, n_coeffs) * 2j * np.pi).to(device) / n_coeffs
     shift = torch.exp(-shift * shift_samples)
     spec = spec * shift
     samples = torch.fft.irfft(spec, dim=-1, norm='ortho')
@@ -94,7 +93,6 @@ def position(x, clips, n_samples, sum_channels=False):
 
 
 
-
 class Position(torch.autograd.Function):
 
     def forward(self, items, positions, targets):
@@ -113,16 +111,8 @@ class Position(torch.autograd.Function):
         targets = targets.view(batch, 1, n_samples)
         clips = clips.view(-1, pos.shape[1], n_samples)
 
-        t = stft(targets, 512, 256, 256)
-        t = unit_norm(t, dim=-1).permute(0, 1, 3, 2)
-
-        c = stft(clips, 512, 256, 256)
-        c = unit_norm(c, dim=-1).permute(0, 1, 3, 2)
-
-
-        conv = fft_convolve(t, c, correlation=True)
-        conv = torch.sum(conv, dim=2)
-        real_best = torch.argmax(conv, dim=-1) / conv.shape[-1]
+        conv = fft_convolve(targets, clips, correlation=True)
+        real_best = torch.argmax(conv, dim=-1) / n_samples
 
         # what's the difference between the scalar location
         # and the actual best position for this clip?

@@ -180,7 +180,7 @@ class SegmentGenerator(nn.Module):
         batch = transfer.shape[0]
 
         # create envelope
-        env = torch.abs(self.env(transfer))
+        env = torch.relu(self.env(transfer))
         orig_env = env
         env = F.interpolate(env, size=self.n_samples, mode='linear')
         noise = torch.zeros(1, 1, self.n_samples, device=env.device).uniform_(-1, 1)
