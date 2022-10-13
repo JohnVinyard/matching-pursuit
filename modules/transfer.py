@@ -91,13 +91,30 @@ def position(x, clips, n_samples, sum_channels=False):
         outer = torch.sum(outer, dim=1, keepdim=True)
     return outer
 
+class FFTShifter(torch.autograd.Function):
+    def forward(self, items, positions):
+        positions.retain_grad()
+        self.save_for_backward(items, positions)
+        result = fft_shift(items, positions)
+        return result
+    
+    def backward(self, *grad_outputs):
+        x, = grad_outputs
+        items, positions = self.saved_tensors
+        # print(items.grad.shape)
+        print(positions.grad.shape)
+        return x
 
+differentiable_fft_shift = FFTShifter.apply
 
 class Position(torch.autograd.Function):
+
+    counter = 0
 
     def forward(self, items, positions, targets):
         x = position(positions, items, items.shape[-1])
         self.save_for_backward(positions, targets, items, x)
+        Position.counter += 1
         return x
 
     def backward(self, *grad_outputs: Collection[torch.Tensor]):
@@ -112,17 +129,19 @@ class Position(torch.autograd.Function):
         clips = clips.view(-1, pos.shape[1], n_samples)
 
         conv = fft_convolve(targets, clips, correlation=True)
-        real_best = torch.argmax(conv, dim=-1) / n_samples
+        real_best = torch.argmax(conv, dim=-1) / conv.shape[-1]
 
         # what's the difference between the scalar location
         # and the actual best position for this clip?
         pos_grad = (pos - real_best)
 
+        p = real_best
+
         # gradient for clips based on the best possible render
-        best_render = fft_shift(clips, real_best[..., None])
+        best_render = fft_shift(clips, p[..., None])
         clip_loss = best_render - targets
         # shift the gradients backward to align with the clip
-        clip_loss = fft_shift(clip_loss, -real_best[..., None])
+        clip_loss = fft_shift(clip_loss, -p[..., None])
 
         return clip_loss, pos_grad, None
 

@@ -222,7 +222,9 @@ class Summarizer(nn.Module):
         self.decode = SegmentGenerator()
 
         self.to_time = LinearOutputStack(
-            exp.model_dim, 1, out_channels=1)
+            exp.model_dim, 1, out_channels=128)
+        self.to_pos = ConvUpsample(128, 128, 4, end_size=128, mode='learned', out_channels=1)
+        self.impulse = ImpulseGenerator(exp.n_samples)
         # self.time_vq = VQ(exp.model_dim, 2048, commitment_weight=0.1, one_hot=True)
 
         self.to_transfer = LinearOutputStack(
@@ -234,6 +236,11 @@ class Summarizer(nn.Module):
     def generate(self, time, transfer):
         x, env, loss, tf = self.decode.forward(time, transfer)
         x = x.view(-1, n_events, exp.n_samples)
+
+        pos = self.to_pos(time)
+        impulse = self.impulse(pos.view(-1, 128)).view(-1, n_events, exp.n_samples)
+
+        x = fft_convolve(x, impulse)
         output = torch.sum(x, dim=1, keepdim=True)
         return output
 
@@ -257,7 +264,7 @@ class Summarizer(nn.Module):
         encoded = x
 
         # split into independent time and transfer function representations
-        time = self.to_time(x).view(-1, 1)
+        time = self.to_time(x).view(-1, 128)
         # time, t_indices, t_loss = self.time_vq(time)
 
         transfer = self.to_transfer(x).view(-1, event_latent_dim)
@@ -288,10 +295,13 @@ class Summarizer(nn.Module):
         encoded = x
 
         # split into independent time and transfer function representations
-        orig_time = time = self.to_time(x).view(-1, 1)
+        orig_time = time = self.to_time(x).view(-1, 128)
+        pos = self.to_pos(time)
+        impulse = self.impulse(pos.view(-1, 128)).view(-1, n_events, exp.n_samples)
+
         # time, t_indices, t_loss = self.time_vq(time)
         t_loss = 0
-        time = (torch.sin(orig_time) + 1) * 0.5
+        # time = (torch.sin(orig_time) + 1) * 0.5
 
         orig_transfer = transfer = self.to_transfer(x).view(-1, event_latent_dim)
         transfer, tf_indices, tf_loss = self.transfer_vq(transfer)
@@ -301,7 +311,9 @@ class Summarizer(nn.Module):
         x = x.view(batch, n_events, exp.n_samples)
 
 
-        x = schedule_atoms(x, time.view(-1, n_events), target)
+        # x = schedule_atoms(x, time.view(-1, n_events), target)
+
+        x = fft_convolve(x, impulse)
 
         output = torch.sum(x, dim=1, keepdim=True)
 
