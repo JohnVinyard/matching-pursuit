@@ -35,12 +35,24 @@ import numpy as np
 exp = Experiment(
     samplerate=zounds.SR22050(),
     n_samples=2**15,
-    weight_init=0.1,
+    weight_init=0.05,
     model_dim=128,
     kernel_size=512)
 
 n_events = 16
 event_latent_dim = exp.model_dim
+
+def exp_softmax(x):
+    return F.gumbel_softmax(torch.exp(x), tau=1, dim=-1, hard=True)
+
+    # x = torch.softmax(x, dim=-1)
+    # return x
+    
+    # values, indices = torch.max(x, dim=-1, keepdim=True)
+    # z = torch.zeros_like(x)
+    # z = torch.scatter(z, dim=-1, index=indices, src=values)
+    # return z
+    
 
 # mel_scale = MelScale()
 
@@ -77,7 +89,7 @@ class VQ(nn.Module):
 
         if self.one_hot:
             x = self.up(x)
-            x = F.gumbel_softmax(x, dim=-1, hard=True)
+            x = exp_softmax(x)
             x = self.down(x)
             return x, None, 0
 
@@ -155,6 +167,9 @@ class SegmentGenerator(nn.Module):
         self.resolution = 32
 
         
+        # TODO: Use some kind of normalization
+        # here to keep this from exploding when using gumbel
+        # softmax
         self.transfer = ConvUpsample(
             exp.model_dim, 
             exp.model_dim, 
@@ -169,7 +184,12 @@ class SegmentGenerator(nn.Module):
             exp.n_frames, 
             self.resolution, 
             exp.n_samples, 
-            softmax_func=lambda x: F.gumbel_softmax(x, dim=-1, hard=True))
+            # TODO: This should be using torch.exp(x)
+            # softmax_func=lambda x: F.gumbel_softmax(torch.exp(x), dim=-1, hard=True))
+            softmax_func=lambda x: torch.softmax(x, dim=-1))
+        
+
+        self.noise_factor = nn.Parameter(torch.zeros(1).fill_(1e5))
 
 
     def forward(self, time, transfer):
@@ -180,10 +200,13 @@ class SegmentGenerator(nn.Module):
         batch = transfer.shape[0]
 
         # create envelope
-        env = torch.relu(self.env(transfer))
+        env = torch.sigmoid(self.env(transfer))
+        # mx, _ = torch.max(env, dim=-1, keepdim=True)
+        # env = env / (mx + 1e-8)
+
         orig_env = env
         env = F.interpolate(env, size=self.n_samples, mode='linear')
-        noise = torch.zeros(1, 1, self.n_samples, device=env.device).uniform_(-1, 1)
+        noise = torch.zeros(1, 1, self.n_samples, device=env.device).uniform_(-1, 1) * self.noise_factor
         env = env * noise
 
         loss = 0
@@ -194,6 +217,7 @@ class SegmentGenerator(nn.Module):
 
 
         final = fft_convolve(env, tf)
+
 
         final = torch.mean(final, dim=1, keepdim=True)
 
@@ -224,7 +248,7 @@ class Summarizer(nn.Module):
         self.to_time = LinearOutputStack(
             exp.model_dim, 1, out_channels=128)
         self.to_pos = ConvUpsample(128, 128, 4, end_size=128, mode='learned', out_channels=1)
-        self.impulse = ImpulseGenerator(exp.n_samples)
+        self.impulse = ImpulseGenerator(exp.n_samples, softmax=exp_softmax)
         # self.time_vq = VQ(exp.model_dim, 2048, commitment_weight=0.1, one_hot=True)
 
         self.to_transfer = LinearOutputStack(
@@ -297,6 +321,7 @@ class Summarizer(nn.Module):
         # split into independent time and transfer function representations
         orig_time = time = self.to_time(x).view(-1, 128)
         pos = self.to_pos(time)
+        time = pos
         impulse = self.impulse(pos.view(-1, 128)).view(-1, n_events, exp.n_samples)
 
         # time, t_indices, t_loss = self.time_vq(time)
@@ -362,6 +387,13 @@ def train_model(batch):
     # naturally pushes envelopes to start near 0
     # t_loss = torch.abs(0.5 - time.mean()) + torch.abs(0.25 - time.std())
 
+    time = time.view(-1, 128)
+    time = exp_softmax(time)
+    t = torch.sum(time, dim=0)
+    mx = torch.max(t)
+    t_loss = torch.relu(mx - 1)
+
+
     peripheral_loss = vq_loss + ll #+ t_loss
 
     pl = exp.perceptual_loss(recon, batch)
@@ -412,7 +444,9 @@ class WaveguideSynthesisExperiment3(object):
         return self.env.data.cpu().numpy()[0].T
 
     def t_latent(self):
-        return self.time_latent.data.cpu().numpy().squeeze().squeeze()
+        with torch.no_grad():
+            t = exp_softmax(self.time_latent)
+            return t.data.cpu().numpy().squeeze()
 
     def tf_latent(self):
         return self.transfer_latent.data.cpu().numpy().squeeze().reshape((-1, event_latent_dim))

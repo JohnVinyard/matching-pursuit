@@ -129,6 +129,7 @@ class Position(torch.autograd.Function):
         clips = clips.view(-1, pos.shape[1], n_samples)
 
         conv = fft_convolve(targets, clips, correlation=True)
+
         real_best = torch.argmax(conv, dim=-1) / conv.shape[-1]
 
         # what's the difference between the scalar location
