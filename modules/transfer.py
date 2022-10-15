@@ -252,7 +252,9 @@ class TransferFunction(nn.Module):
             n_frames: int, 
             resolution: int,
             n_samples: int,
-            softmax_func: Any):
+            softmax_func: Any,
+            is_continuous=False,
+            resonance_exp=1):
 
         super().__init__()
         self.samplerate = samplerate
@@ -261,14 +263,16 @@ class TransferFunction(nn.Module):
         self.resolution = resolution
         self.n_samples = n_samples
         self.softmax_func = softmax_func
+        self.is_continuous = is_continuous
 
         bank = morlet_filter_bank(
             samplerate, n_samples, scale, 0.1, normalize=False)\
             .real.astype(np.float32)
         
+        
         self.register_buffer('filter_bank', torch.from_numpy(bank)[None, :, :])
 
-        resonances = torch.linspace(0, 0.999, resolution)\
+        resonances = (torch.linspace(0, 0.999, resolution) ** resonance_exp)\
             .view(resolution, 1).repeat(1, n_frames)
         resonances = torch.cumprod(resonances, dim=-1)
         self.register_buffer('resonance', resonances)
@@ -279,16 +283,19 @@ class TransferFunction(nn.Module):
     
     def forward(self, x: torch.Tensor):
         batch, bands, resolution = x.shape
-        if bands != self.n_bands or resolution != self.resolution:
-            raise ValueError(
-                f'Expecting tensor with shape (*, {self.n_bands}, {self.resolution})')
-        
-        # x = F.gumbel_softmax(x, dim=-1, hard=True)
-        # x = F.softmax(x, dim=-1)
-        x = self.softmax_func(x)
-    
-        x = x @ self.resonance
+
+        if not self.is_continuous:
+            if bands != self.n_bands or resolution != self.resolution:
+                raise ValueError(
+                    f'Expecting tensor with shape (*, {self.n_bands}, {self.resolution})')
+            x = self.softmax_func(x)
+            x = x @ self.resonance
+        else:
+            x = torch.clamp(x, 0, 1) * 0.9999
+            x = torch.cumprod(x, dim=-1)
+
         x = F.interpolate(x, size=self.n_samples, mode='linear')
+
         x = x * self.filter_bank
         x = torch.mean(x, dim=1, keepdim=True)
         return x

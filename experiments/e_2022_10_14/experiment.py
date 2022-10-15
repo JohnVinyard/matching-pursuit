@@ -164,9 +164,11 @@ class SegmentGenerator(nn.Module):
         self.n_inflections = 1
 
         
-        self.resolution = 32
+        self.resolution = 64
 
         
+        self.is_continuous = False
+
         # TODO: Use some kind of normalization
         # here to keep this from exploding when using gumbel
         # softmax
@@ -176,7 +178,8 @@ class SegmentGenerator(nn.Module):
             8, 
             scale.n_bands, 
             mode='nearest', 
-            out_channels=self.resolution)
+            out_channels=1 if self.is_continuous else self.resolution)
+        
 
         self.tf = TransferFunction(
             exp.samplerate, 
@@ -184,12 +187,15 @@ class SegmentGenerator(nn.Module):
             exp.n_frames, 
             self.resolution, 
             exp.n_samples, 
-            # TODO: This should be using torch.exp(x)
-            # softmax_func=lambda x: F.gumbel_softmax(torch.exp(x), dim=-1, hard=True))
-            softmax_func=lambda x: torch.softmax(x, dim=-1))
+            softmax_func=lambda x: F.gumbel_softmax(torch.exp(x), dim=-1, hard=True),
+            # softmax_func=lambda x: torch.softmax(x, dim=-1),
+            is_continuous=self.is_continuous,
+            resonance_exp=1)
         
 
         self.noise_factor = nn.Parameter(torch.zeros(1).fill_(1e5))
+
+        self.amp = LinearOutputStack(exp.model_dim, 2, out_channels=1)
 
 
     def forward(self, time, transfer):
@@ -201,8 +207,9 @@ class SegmentGenerator(nn.Module):
 
         # create envelope
         env = torch.sigmoid(self.env(transfer))
-        # mx, _ = torch.max(env, dim=-1, keepdim=True)
-        # env = env / (mx + 1e-8)
+        mx, _ = torch.max(env, dim=-1, keepdim=True)
+        env = env / (mx + 1e-8)
+        env = env ** 2
 
         orig_env = env
         env = F.interpolate(env, size=self.n_samples, mode='linear')
@@ -211,12 +218,17 @@ class SegmentGenerator(nn.Module):
 
         loss = 0
         tf = self.transfer.forward(transfer)
-        tf = tf.permute(0, 2, 1).view(batch, scale.n_bands, self.resolution)
+        tf = tf.permute(0, 2, 1)
+        if not self.is_continuous:
+            tf = tf.view(batch, scale.n_bands, self.resolution)
         tf = self.tf.forward(tf)
         orig_tf = None
 
 
         final = fft_convolve(env, tf)
+
+        amp = torch.sigmoid(self.amp(transfer)) ** 2
+        final = final * amp
 
 
         final = torch.mean(final, dim=1, keepdim=True)
