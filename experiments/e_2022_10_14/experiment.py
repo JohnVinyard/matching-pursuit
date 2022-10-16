@@ -16,7 +16,7 @@ from modules.transfer import ImpulseGenerator, PosEncodedImpulseGenerator, Trans
 from modules.fft import fft_convolve, fft_shift
 from train.optim import optimizer
 from upsample import ConvUpsample, PosEncodedUpsample
-from modules.normalization import ExampleNorm, limit_norm, unit_norm
+from modules.normalization import ExampleNorm, limit_norm, max_norm, unit_norm
 from torch.nn import functional as F
 from modules.phase import MelScale
 from modules.stft import stft
@@ -42,23 +42,20 @@ exp = Experiment(
 n_events = 16
 event_latent_dim = exp.model_dim
 
+def hard_softmax(x):
+    x = torch.softmax(x, dim=-1)
+    values, indices = torch.max(x, dim=-1, keepdim=True)
+    values = values + (1 - values)
+    z = torch.zeros_like(x)
+    z = torch.scatter(z, dim=-1, index=indices, src=values)
+    return z
+
+
 def exp_softmax(x):
-    return F.gumbel_softmax(torch.exp(x), tau=1, dim=-1, hard=True)
-
-    # x = torch.softmax(x, dim=-1)
-    # return x
+    return hard_softmax(x)
+    # x = max_norm(x, dim=-1)
+    # return F.gumbel_softmax(torch.exp(x), tau=1, dim=-1, hard=True)
     
-    # values, indices = torch.max(x, dim=-1, keepdim=True)
-    # z = torch.zeros_like(x)
-    # z = torch.scatter(z, dim=-1, index=indices, src=values)
-    # return z
-    
-
-# mel_scale = MelScale()
-
-
-# band = zounds.FrequencyBand(30, exp.samplerate.nyquist)
-# scale = zounds.MelScale(band, 128)
 
 scale = MusicalScale()
 
@@ -187,7 +184,8 @@ class SegmentGenerator(nn.Module):
             exp.n_frames, 
             self.resolution, 
             exp.n_samples, 
-            softmax_func=lambda x: F.gumbel_softmax(torch.exp(x), dim=-1, hard=True),
+            softmax_func=exp_softmax,
+            # softmax_func=lambda x: F.gumbel_softmax(torch.exp(x), dim=-1, hard=True),
             # softmax_func=lambda x: torch.softmax(x, dim=-1),
             is_continuous=self.is_continuous,
             resonance_exp=1)
@@ -218,6 +216,8 @@ class SegmentGenerator(nn.Module):
 
         loss = 0
         tf = self.transfer.forward(transfer)
+
+        # KLUDGE: Keep exp() in transfer function from exploding
         tf = tf.permute(0, 2, 1)
         if not self.is_continuous:
             tf = tf.view(batch, scale.n_bands, self.resolution)
@@ -249,6 +249,8 @@ class BestFitScheduler(nn.Module):
         scheduled = fft_convolve(sparse, stems)
         return scheduled
 
+
+
 class PosEncodedScheduler(nn.Module):
     def __init__(self):
         super().__init__()
@@ -256,7 +258,7 @@ class PosEncodedScheduler(nn.Module):
         self.pos = PosEncodedImpulseGenerator(
             exp.n_frames, 
             exp.n_samples, 
-            softmax=lambda x: F.gumbel_softmax(torch.exp(x), dim=-1, hard=True))
+            softmax=exp_softmax)
     
     def forward(self, time_latent, stems, targets):
         time_latent = self.to_pos(time_latent)
@@ -276,9 +278,11 @@ class ImpulseScheduler(nn.Module):
             exp.n_frames, 
             mode='nearest', 
             out_channels=1)
+        
         self.imp = ImpulseGenerator(
             exp.n_samples, 
-            softmax=lambda x: F.gumbel_softmax(x, dim=-1, hard=True))
+            softmax=exp_softmax
+        )
         
     def forward(self, time_latent, stems, targets):
         time_latent = self.to_pos(time_latent).view(-1, exp.n_frames)
@@ -296,7 +300,7 @@ class FFTShiftScheduler(nn.Module):
     
     def forward(self, time_latent, stems, targets):
         time_latent = self.to_pos(time_latent)
-        time_latent = (torch.sin(time_latent) + 1) * 0.5
+        time_latent = torch.sigmoid(time_latent)
         scheduled = fft_shift(stems, time_latent)
         return scheduled
 
@@ -309,7 +313,7 @@ class AtomPlacementScheduler(nn.Module):
     
     def forward(self, time_latent, stems, targets):
         time_latent = self.to_pos(time_latent)
-        time_latent = (torch.sin(time_latent) + 1) * 0.5
+        time_latent = torch.sigmoid(time_latent)
         scheduled = schedule_atoms(stems, time_latent.view(-1, n_events), targets)
         return scheduled
 

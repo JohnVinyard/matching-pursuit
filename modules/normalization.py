@@ -7,6 +7,11 @@ def unit_norm(x, dim=-1, epsilon=1e-8):
     return x / (n + epsilon)
 
 
+def max_norm(x, dim=-1, epsilon=1e-8):
+    n, _ = torch.max(torch.abs(x), dim=dim, keepdim=True)
+    return x / (n + epsilon)
+
+
 class UnitNorm(nn.Module):
     def __init__(self, axis=-1, epsilon=1e-8):
         super().__init__()

@@ -19,7 +19,7 @@ def fft_convolve(*args):
 
 def fft_shift(a, shift):
     n_samples = a.shape[-1]
-    shift_samples = shift * n_samples
+    shift_samples = shift * n_samples * 0.5
     a = F.pad(a, (0, n_samples))
     spec = torch.fft.rfft(a, dim=-1, norm='ortho')
 
