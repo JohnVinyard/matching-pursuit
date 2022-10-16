@@ -266,7 +266,7 @@ class TransferFunction(nn.Module):
         self.is_continuous = is_continuous
 
         bank = morlet_filter_bank(
-            samplerate, n_samples, scale, 0.1, normalize=True)\
+            samplerate, n_samples, scale, 0.1, normalize=False)\
             .real.astype(np.float32)
         
         
