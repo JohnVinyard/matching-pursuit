@@ -4,6 +4,7 @@ from modules.pif import AuditoryImage
 from modules.psychoacoustic import PsychoacousticFeature
 
 from util import device
+from util.music import MusicalScale
 from util.weight_init import make_initializer
 import torch
 from torch.nn import functional as F
@@ -33,8 +34,7 @@ class Experiment(object):
         self.model_dim = model_dim
         self.kernel_size = kernel_size
 
-        band = zounds.FrequencyBand(40, samplerate.nyquist)
-        self.scale = zounds.MelScale(band, self.n_bands)
+        self.scale = MusicalScale()
         self.fb = zounds.learn.FilterBank(
             samplerate,
             self.kernel_size,

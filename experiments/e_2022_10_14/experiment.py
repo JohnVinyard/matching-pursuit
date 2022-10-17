@@ -42,19 +42,26 @@ exp = Experiment(
 n_events = 16
 event_latent_dim = exp.model_dim
 
-def hard_softmax(x):
+def hard_softmax(x, soft=False):
     x = torch.softmax(x, dim=-1)
+
+    if soft:
+        return x
+    
+    x_backward = x
+    
     values, indices = torch.max(x, dim=-1, keepdim=True)
     values = values + (1 - values)
     z = torch.zeros_like(x)
     z = torch.scatter(z, dim=-1, index=indices, src=values)
-    return z
+    x_forward = z
 
+    return x_backward + (x_forward - x_backward).detach()
 
 def exp_softmax(x):
     return hard_softmax(x)
-    # x = max_norm(x, dim=-1)
-    # return F.gumbel_softmax(torch.exp(x), tau=1, dim=-1, hard=True)
+    x = max_norm(x, dim=-1)
+    return F.gumbel_softmax(torch.exp(x), tau=1, dim=-1, hard=True)
     
 
 scale = MusicalScale()
@@ -207,7 +214,7 @@ class SegmentGenerator(nn.Module):
         env = torch.sigmoid(self.env(transfer))
         mx, _ = torch.max(env, dim=-1, keepdim=True)
         env = env / (mx + 1e-8)
-        env = env ** 2
+        # env = env ** 2
 
         orig_env = env
         env = F.interpolate(env, size=self.n_samples, mode='linear')
@@ -227,7 +234,7 @@ class SegmentGenerator(nn.Module):
 
         final = fft_convolve(env, tf)
 
-        amp = torch.sigmoid(self.amp(transfer)) ** 2
+        amp = torch.sigmoid(self.amp(transfer)) #** 2
         final = final * amp
 
 
@@ -342,7 +349,7 @@ class Summarizer(nn.Module):
         self.to_time = LinearOutputStack(
             exp.model_dim, 1, out_channels=128)
 
-        self.scheduler = PosEncodedScheduler()
+        self.scheduler = ImpulseScheduler()
 
         self.to_transfer = LinearOutputStack(
             exp.model_dim, 1, out_channels=event_latent_dim)
