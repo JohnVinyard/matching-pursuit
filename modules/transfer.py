@@ -12,6 +12,7 @@ import numpy as np
 from torch.nn import functional as F
 
 
+
 def fft_convolve(*args, correlation=False):
     args = list(args)
 
@@ -90,6 +91,24 @@ def position(x, clips, n_samples, sum_channels=False):
     if sum_channels:
         outer = torch.sum(outer, dim=1, keepdim=True)
     return outer
+
+class ScalarPosition(torch.autograd.Function):
+
+    def forward(self, positions, n_samples):
+        indices = (positions * n_samples * 0.9999).long()
+        self.save_for_backward(indices)
+        batch, n_examples = positions.shape[:2]
+        one_hot = torch.zeros(batch, n_examples, n_samples)
+        one_hot = torch.scatter(one_hot, dim=-1, index=indices, src=torch.ones_like(positions))
+        return one_hot
+
+    def backward(self, *grad_outputs):
+        x, = grad_outputs
+        indices, = self.saved_tensors
+        x = torch.gather(x, dim=-1, index=indices)
+        return x, None
+
+scalar_position = ScalarPosition.apply
 
 class FFTShifter(torch.autograd.Function):
     def forward(self, items, positions):

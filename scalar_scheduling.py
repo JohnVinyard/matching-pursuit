@@ -1,4 +1,4 @@
-from typing import Collection
+from typing import Collection, Set
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -8,8 +8,9 @@ from matplotlib import pyplot as plt
 from functools import reduce
 from scipy.signal import stft
 from torch.optim import Adam
+from modules.normalization import unit_norm
 from modules.shape import Reshape
-from modules.transfer import ImpulseGenerator, schedule_atoms
+from modules.transfer import ImpulseGenerator, schedule_atoms, scalar_position
 from upsample import ConvUpsample
 from util import device
 from data.audioiter import AudioIterator
@@ -34,6 +35,48 @@ since the positioned clip begins to disappear
 That said, choosing a domain that avoids boundary issues
 and guarantees a convex loss landscape
 '''
+
+# def tiled_loss(a: torch.Tensor, b: torch.Tensor):
+#     a = a.unfold(-1, 512, 256)
+#     b = b.unfold(-1, 512, 256)
+
+#     # batch x frames x frames
+#     sim = a @ b.permute(0, 2, 1)
+
+#     sorted = torch.argsort(sim, dim=-1, descending=True)
+#     seen = set()
+
+
+#     x = []
+#     y = []
+
+#     for batch in range(a.shape[0]):
+#         for i in range(sim.shape[1]):
+#             index = 0
+#             j = sorted[batch, i, index]
+
+#             while (batch, index) in seen:
+#                 index += 1
+#                 j = sorted[batch, i, index]
+            
+#             seen.add((batch, index))
+            
+#             # x = a[batch, i]
+#             # y = b[batch, j]
+
+#             # losses.append(((x - y) ** 2).mean().view(-1))
+#             x.append(a[batch, i][None, ...])
+#             y.append(b[batch, j][None, ...])
+    
+#     x = torch.cat(x, dim=0)
+#     y = torch.cat(y, dim=0)
+
+#     loss = ((x - y) ** 2).mean()
+#     return loss
+
+#     # losses = torch.cat(losses)
+#     # return losses.mean()
+
 
 class FFTShifterModule(nn.Module):
     def __init__(self):
@@ -80,7 +123,7 @@ def fft_convolve(*args, correlation=False):
 def init_weights(p):
     with torch.no_grad():
         try:
-            p.weight.uniform_(-0.02, 0.02)
+            p.weight.uniform_(-0.1, 0.1)
         except AttributeError:
             pass
 
@@ -253,12 +296,12 @@ class Model(nn.Module):
             nn.Conv1d(128, 128, 3, 1, dilation=1, padding=1),
         )
 
-        # self.to_pos = nn.Linear(128, 8)
-        self.to_pos = nn.Sequential(
-            ConvUpsample(128, 128, 4, 128, mode='learned', out_channels=1),
-            Reshape((128,)),
-            ImpulseGenerator(n_samples, softmax=lambda x: F.gumbel_softmax(x, dim=-1, hard=True))
-        )
+        self.to_pos = nn.Linear(128, 8)
+        # self.to_pos = nn.Sequential(
+        #     ConvUpsample(128, 128, 4, 128, mode='learned', out_channels=1),
+        #     Reshape((128,)),
+        #     ImpulseGenerator(n_samples, softmax=lambda x: F.gumbel_softmax(x, dim=-1, hard=True))
+        # )
         self.stems = nn.Parameter(torch.zeros_like(stems).uniform_(-1, 1))
 
         self.fft_shifter = FFTShifterModule()
@@ -284,22 +327,24 @@ class Model(nn.Module):
         # x = x[:, -1, :]
         x = self.to_pos(x)
         
-        # locations = torch.sigmoid(x)
-        # pos = locations.view(batch_size, 8, 1)
+        locations = x
+        pos = torch.sigmoid(locations).view(batch_size, 8, 1)
+        # print(pos.data.cpu().numpy())
 
         # x = schedule_atoms(self.stems.view(1, -1, n_samples), locations, target)
         padded = self.stems.view(1, 8, -1)
 
-        # print(x.shape, padded.shape)
+        one_hot = scalar_position(pos, n_samples)
+        x = fft_convolve(one_hot, padded)
 
+        # print(x.shape, padded.shape)
         # x = fft_shift(padded, pos)
         # x = schedule_atoms(padded, pos.view(-1, 8), target)
         # x = self.fft_shifter(padded, pos)
 
-        x = fft_convolve(x, padded)
+        # x = fft_convolve(x, padded)
         x = torch.sum(x, dim=1, keepdim=True)
 
-        locations = None
         final = x
         
         return x, locations, final
@@ -416,8 +461,10 @@ if __name__ == '__main__':
         item = item.view(batch_size, 1, n_samples)
         optim.zero_grad()
         recon, fake_loc, final = model.forward(item)
+
         # l = F.mse_loss(recon, item)
         l = loss.forward(recon, item).mean()
+        # l = tiled_loss(recon.view(-1, n_samples), item.view(-1, n_samples))
         l.backward()
         optim.step()
         print(i, l.item())

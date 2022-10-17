@@ -19,7 +19,7 @@ from .diffusion import DiffusionProcess
 # from .atoms import AudioEvent
 from .diffindex import diff_index
 from .scattering import MoreCorrectScattering
-from .normalization import UnitNorm, ExampleNorm, limit_norm, unit_norm
+from .normalization import UnitNorm, ExampleNorm, limit_norm, unit_norm, max_norm
 from .sparse import \
     VectorwiseSparsity, ElementwiseSparsity, AtomPlacement, \
     to_sparse_vectors_with_context, sparsify, sparsify_vectors
@@ -28,5 +28,5 @@ from .waveguide import TransferFunctionSegmentGenerator
 from .shape import Reshape
 from .transfer import \
     TransferFunction, STFTTransferFunction, ImpulseGenerator, \
-    PosEncodedImpulseGenerator, schedule_atoms, Position, fft_convolve, differentiable_fft_shift
+    PosEncodedImpulseGenerator, schedule_atoms, Position, fft_convolve, differentiable_fft_shift, scalar_position
 from .fft import fft_shift
