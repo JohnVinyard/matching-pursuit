@@ -42,7 +42,7 @@ exp = Experiment(
 n_events = 16
 event_latent_dim = exp.model_dim
 
-def hard_softmax(x, soft=False):
+def hard_softmax(x, soft=False, backward_trick=True):
     x = torch.softmax(x, dim=-1)
 
     if soft:
@@ -54,12 +54,16 @@ def hard_softmax(x, soft=False):
     values = values + (1 - values)
     z = torch.zeros_like(x)
     z = torch.scatter(z, dim=-1, index=indices, src=values)
-    x_forward = z
 
+    if not backward_trick:
+        return z
+    
+    x_forward = z
     return x_backward + (x_forward - x_backward).detach()
 
 def exp_softmax(x):
-    return hard_softmax(x)
+    return hard_softmax(x, soft=False, backward_trick=True)
+
     x = max_norm(x, dim=-1)
     return F.gumbel_softmax(torch.exp(x), tau=1, dim=-1, hard=True)
     
@@ -278,13 +282,15 @@ class PosEncodedScheduler(nn.Module):
 class ImpulseScheduler(nn.Module):
     def __init__(self):
         super().__init__()
-        self.to_pos = ConvUpsample(
-            exp.model_dim, 
-            exp.model_dim, 
-            4, 
-            exp.n_frames, 
-            mode='nearest', 
-            out_channels=1)
+        # self.to_pos = ConvUpsample(
+        #     exp.model_dim, 
+        #     exp.model_dim, 
+        #     4, 
+        #     exp.n_frames, 
+        #     mode='learned', 
+        #     out_channels=1)
+        
+        self.to_pos = nn.Linear(exp.model_dim, exp.n_frames)
         
         self.imp = ImpulseGenerator(
             exp.n_samples, 
@@ -443,11 +449,11 @@ def train_model(batch):
     # naturally pushes envelopes to start near 0
     # t_loss = torch.abs(0.5 - time.mean()) + torch.abs(0.25 - time.std())
 
-    time = time.view(-1, 128)
-    time = exp_softmax(time)
-    t = torch.sum(time, dim=0)
-    mx = torch.max(t)
-    t_loss = torch.relu(mx - 1)
+    # time = time.view(-1, 128)
+    # time = exp_softmax(time)
+    # t = torch.sum(time, dim=0)
+    # mx = torch.max(t)
+    # t_loss = torch.relu(mx - 1)
 
 
     peripheral_loss = vq_loss + ll #+ t_loss
