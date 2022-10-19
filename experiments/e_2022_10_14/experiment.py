@@ -15,7 +15,7 @@ from modules.sparse import VectorwiseSparsity
 from modules.transfer import ImpulseGenerator, PosEncodedImpulseGenerator, TransferFunction, schedule_atoms
 from modules.fft import fft_convolve, fft_shift
 from train.optim import optimizer
-from upsample import ConvUpsample, PosEncodedUpsample
+from upsample import ConvUpsample, FFTUpsampleBlock, PosEncodedUpsample
 from modules.normalization import ExampleNorm, limit_norm, max_norm, unit_norm
 from torch.nn import functional as F
 from modules.phase import MelScale
@@ -127,6 +127,31 @@ def fft_convolve(env, tf):
     final = torch.fft.irfft(spec, dim=-1, norm='ortho')
     return final[..., :exp.n_samples]
 
+
+class EnvelopeGenerator(nn.Module):
+    def __init__(self, n_envelopes, n_frames, n_samples):
+        super().__init__()
+        self.n_envelopes = n_envelopes
+        self.n_frames = n_frames
+        self.n_samples = n_samples
+        self.to_env_selection = nn.Linear(exp.model_dim, n_envelopes)
+        self.env = nn.Parameter(torch.zeros(n_envelopes, n_frames).uniform_(0, 0.02))
+        self.up = FFTUpsampleBlock(1, 1, size=n_frames, factor=n_samples // n_frames)
+    
+    def forward(self, x):
+        x = self.to_env_selection(x)
+        x = exp_softmax(x)
+
+        env = x @ self.env[None, ...]
+
+        env = torch.relu(env)
+        env = max_norm(env)
+        orig_env = env
+
+        env = env.view(-1, 1, self.n_frames)
+        env = self.up(env)
+        return env, orig_env
+
 class SegmentGenerator(nn.Module):
     def __init__(self):
         super().__init__()
@@ -161,6 +186,7 @@ class SegmentGenerator(nn.Module):
         #     nn.Conv1d(4, 1, 3, 1, 1)
         # )
         
+        # self.env = EnvelopeGenerator(16, exp.n_frames * 2, exp.n_samples)
 
         self.n_coeffs = 257
 
@@ -199,7 +225,7 @@ class SegmentGenerator(nn.Module):
             # softmax_func=lambda x: F.gumbel_softmax(torch.exp(x), dim=-1, hard=True),
             # softmax_func=lambda x: torch.softmax(x, dim=-1),
             is_continuous=self.is_continuous,
-            resonance_exp=1)
+            resonance_exp=2)
         
 
         self.noise_factor = nn.Parameter(torch.zeros(1).fill_(1e5))
@@ -222,6 +248,7 @@ class SegmentGenerator(nn.Module):
 
         orig_env = env
         env = F.interpolate(env, size=self.n_samples, mode='linear')
+        
         noise = torch.zeros(1, 1, self.n_samples, device=env.device).uniform_(-1, 1) * self.noise_factor
         env = env * noise
 
@@ -445,19 +472,12 @@ def train_model(batch):
     # transfer latent should be from a standard normal distribution
     ll = (latent_loss(orig_transfer)) * 0.5
 
-    # times should be uniformly distributed.  Hopefully this
-    # naturally pushes envelopes to start near 0
-    # t_loss = torch.abs(0.5 - time.mean()) + torch.abs(0.25 - time.std())
+    # envelope centroid loss
+    rng = torch.linspace(0, 1, env.shape[-1], device=env.device)[None, None, :]
+    env_centroid = torch.sum(rng * env, dim=-1) / torch.sum(rng, dim=-1)
+    env_loss = env_centroid.mean()
 
-    # time = time.view(-1, 128)
-    # time = exp_softmax(time)
-    # t = torch.sum(time, dim=0)
-    # mx = torch.max(t)
-    # t_loss = torch.relu(mx - 1)
-
-
-    peripheral_loss = vq_loss + ll #+ t_loss
-
+    peripheral_loss = vq_loss + ll + env_loss
     pl = exp.perceptual_loss(recon, batch)
 
     loss = pl + peripheral_loss
