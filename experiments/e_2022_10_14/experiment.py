@@ -11,7 +11,7 @@ from modules.normal_pdf import pdf
 from modules.psychoacoustic import PsychoacousticFeature
 from modules.scattering import MoreCorrectScattering
 from modules.shape import Reshape
-from modules.sparse import VectorwiseSparsity
+from modules.sparse import AtomPlacement, VectorwiseSparsity
 from modules.transfer import ImpulseGenerator, PosEncodedImpulseGenerator, TransferFunction, schedule_atoms
 from modules.fft import fft_convolve, fft_shift
 from train.optim import optimizer
@@ -62,7 +62,7 @@ def hard_softmax(x, soft=False, backward_trick=True):
     return x_backward + (x_forward - x_backward).detach()
 
 def exp_softmax(x):
-    return hard_softmax(x, soft=False, backward_trick=True)
+    return hard_softmax(x, soft=True, backward_trick=False)
 
     x = max_norm(x, dim=-1)
     return F.gumbel_softmax(torch.exp(x), tau=1, dim=-1, hard=True)
@@ -156,6 +156,8 @@ class SegmentGenerator(nn.Module):
     def __init__(self):
         super().__init__()
 
+        # self.env = LinearOutputStack(exp.model_dim, 2, out_channels=exp.n_frames * 2)
+
         self.env = ConvUpsample(
             event_latent_dim,
             exp.model_dim,
@@ -163,6 +165,7 @@ class SegmentGenerator(nn.Module):
             exp.n_frames * 2,
             out_channels=1,
             mode='nearest')
+
 
         # self.env = nn.Sequential(
         #     nn.Linear(event_latent_dim, exp.model_dim * 4),
@@ -225,7 +228,7 @@ class SegmentGenerator(nn.Module):
             # softmax_func=lambda x: F.gumbel_softmax(torch.exp(x), dim=-1, hard=True),
             # softmax_func=lambda x: torch.softmax(x, dim=-1),
             is_continuous=self.is_continuous,
-            resonance_exp=2)
+            resonance_exp=1)
         
 
         self.noise_factor = nn.Parameter(torch.zeros(1).fill_(1e5))
@@ -241,10 +244,11 @@ class SegmentGenerator(nn.Module):
         batch = transfer.shape[0]
 
         # create envelope
-        env = torch.sigmoid(self.env(transfer))
+        env = self.env(transfer).view(batch, 1, -1)
+        env = torch.cumsum(env, dim=-1)
+        env = torch.abs(env)
         mx, _ = torch.max(env, dim=-1, keepdim=True)
         env = env / (mx + 1e-8)
-        # env = env ** 2
 
         orig_env = env
         env = F.interpolate(env, size=self.n_samples, mode='linear')
@@ -380,15 +384,17 @@ class Summarizer(nn.Module):
         self.decode = SegmentGenerator()
 
         self.to_time = LinearOutputStack(
-            exp.model_dim, 1, out_channels=128)
+            exp.model_dim, 1, out_channels=1)
 
-        self.scheduler = ImpulseScheduler()
+        # self.scheduler = PosEncodedScheduler()
 
         self.to_transfer = LinearOutputStack(
             exp.model_dim, 1, out_channels=event_latent_dim)
         self.transfer_vq = VQ(exp.model_dim, 2048, commitment_weight=0.1, passthrough=True)
 
         self.norm = ExampleNorm()
+
+        self.placement = AtomPlacement(exp.n_samples, n_events, exp.step_size)
 
 
     def forward(self, x):
@@ -411,23 +417,28 @@ class Summarizer(nn.Module):
         x, indices = self.sparse(x)
         encoded = x
 
+
+        # base_times = (indices / exp.n_frames).view(batch, n_events, 1)
+
         # split into independent time and transfer function representations
-        orig_time = time = self.to_time(x).view(-1, 128)
+        # orig_time = time = self.to_time(x).view(batch, n_events, 1)
         t_loss = 0
+        # time = torch.tanh(time) * 0.1
+        # times = base_times + time
+        time = None
+        orig_time = None
 
         orig_transfer = transfer = self.to_transfer(x).view(-1, event_latent_dim)
         transfer, tf_indices, tf_loss = self.transfer_vq(transfer)
 
 
-        x, env, loss, tf = self.decode.forward(time, transfer)
+        x, env, loss, tf = self.decode.forward(None, transfer)
         x = x.view(batch, n_events, exp.n_samples)
 
 
-        # x = schedule_atoms(x, time.view(-1, n_events), target)
-
-        # x = fft_convolve(x, impulse)
-
-        x = self.scheduler.forward(time, x, target)
+        # x = self.scheduler.forward(times, x, target)
+        # x = fft_shift(x, times)
+        x = self.placement.render(x, indices)
 
         output = torch.sum(x, dim=1, keepdim=True)
 
@@ -472,12 +483,12 @@ def train_model(batch):
     # transfer latent should be from a standard normal distribution
     ll = (latent_loss(orig_transfer)) * 0.5
 
-    # envelope centroid loss
-    rng = torch.linspace(0, 1, env.shape[-1], device=env.device)[None, None, :]
-    env_centroid = torch.sum(rng * env, dim=-1) / torch.sum(rng, dim=-1)
-    env_loss = env_centroid.mean()
+    b = F.avg_pool1d(torch.abs(batch), 256, 128, 128)
+    c = F.avg_pool1d(torch.abs(recon), 256, 128, 128)
 
-    peripheral_loss = vq_loss + ll + env_loss
+    amp_loss = F.mse_loss(c, b)
+
+    peripheral_loss = vq_loss + ll  + amp_loss 
     pl = exp.perceptual_loss(recon, batch)
 
     loss = pl + peripheral_loss
@@ -526,9 +537,7 @@ class WaveguideSynthesisExperiment4(object):
         return self.env.data.cpu().numpy()[0].T
 
     def t_latent(self):
-        with torch.no_grad():
-            t = exp_softmax(self.time_latent)
-            return t.data.cpu().numpy().squeeze()
+        return self.time_latent.data.cpu().numpy().squeeze()
 
     def tf_latent(self):
         return self.transfer_latent.data.cpu().numpy().squeeze().reshape((-1, event_latent_dim))
