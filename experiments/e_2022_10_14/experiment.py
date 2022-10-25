@@ -62,7 +62,7 @@ def hard_softmax(x, soft=False, backward_trick=True):
     return x_backward + (x_forward - x_backward).detach()
 
 def exp_softmax(x):
-    return hard_softmax(x, soft=True, backward_trick=False)
+    return hard_softmax(x, soft=True, backward_trick=True)
 
     x = max_norm(x, dim=-1)
     return F.gumbel_softmax(torch.exp(x), tau=1, dim=-1, hard=True)
@@ -162,7 +162,7 @@ class SegmentGenerator(nn.Module):
             event_latent_dim,
             exp.model_dim,
             4,
-            exp.n_frames * 2,
+            8192 // (exp.step_size),
             out_channels=1,
             mode='nearest')
 
@@ -231,9 +231,9 @@ class SegmentGenerator(nn.Module):
             resonance_exp=1)
         
 
-        self.noise_factor = nn.Parameter(torch.zeros(1).fill_(1e5))
+        # self.noise_factor = nn.Parameter(torch.zeros(1).fill_(1e5))
 
-        self.amp = LinearOutputStack(exp.model_dim, 2, out_channels=1)
+        # self.amp = LinearOutputStack(exp.model_dim, 2, out_channels=1)
 
 
     def forward(self, time, transfer):
@@ -245,15 +245,17 @@ class SegmentGenerator(nn.Module):
 
         # create envelope
         env = self.env(transfer).view(batch, 1, -1)
-        env = torch.cumsum(env, dim=-1)
+        env = F.pad(env, (0, (exp.n_samples // exp.step_size) - (8192 // exp.step_size)))
+        # env = torch.cumsum(env, dim=-1)
         env = torch.abs(env)
-        mx, _ = torch.max(env, dim=-1, keepdim=True)
-        env = env / (mx + 1e-8)
+        # env = torch.flip(env, dims=(-1,))
+        # mx, _ = torch.max(env, dim=-1, keepdim=True)
+        # env = env / (mx + 1e-8)
 
         orig_env = env
         env = F.interpolate(env, size=self.n_samples, mode='linear')
         
-        noise = torch.zeros(1, 1, self.n_samples, device=env.device).uniform_(-1, 1) * self.noise_factor
+        noise = torch.zeros(1, 1, self.n_samples, device=env.device).uniform_(-1, 1)
         env = env * noise
 
         loss = 0
@@ -269,8 +271,8 @@ class SegmentGenerator(nn.Module):
 
         final = fft_convolve(env, tf)
 
-        amp = torch.sigmoid(self.amp(transfer)) #** 2
-        final = final * amp
+        # amp = torch.sigmoid(self.amp(transfer)) #** 2
+        # final = final * amp
 
 
         final = torch.mean(final, dim=1, keepdim=True)
@@ -483,12 +485,8 @@ def train_model(batch):
     # transfer latent should be from a standard normal distribution
     ll = (latent_loss(orig_transfer)) * 0.5
 
-    b = F.avg_pool1d(torch.abs(batch), 256, 128, 128)
-    c = F.avg_pool1d(torch.abs(recon), 256, 128, 128)
 
-    amp_loss = F.mse_loss(c, b)
-
-    peripheral_loss = vq_loss + ll  + amp_loss 
+    peripheral_loss = vq_loss + ll
     pl = exp.perceptual_loss(recon, batch)
 
     loss = pl + peripheral_loss
