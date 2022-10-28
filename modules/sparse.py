@@ -2,6 +2,8 @@ import torch
 from torch import jit
 from torch import nn
 
+from modules.normalization import unit_norm
+
 
 def sparsify(x, n_to_keep):
     orig_shape = x.shape
@@ -147,9 +149,11 @@ class VectorwiseSparsity(nn.Module):
 
         batch, channels, time = x.shape
 
-        attn = self.attn(x.permute(0, 2, 1))
+        x = x.permute(0, 2, 1)
+
+        attn = self.attn(x)
         attn = attn.view(batch, time)
-        attn = torch.softmax(attn, dim=1)
+        # attn = torch.softmax(attn, dim=1)
 
         x = sparsify_vectors(
             x, attn, n_to_keep=self.keep, dense=self.dense, normalize=self.normalize)

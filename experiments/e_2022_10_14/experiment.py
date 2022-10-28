@@ -62,7 +62,7 @@ def hard_softmax(x, soft=False, backward_trick=True):
     return x_backward + (x_forward - x_backward).detach()
 
 def exp_softmax(x):
-    return hard_softmax(x, soft=True, backward_trick=True)
+    return hard_softmax(x, soft=False, backward_trick=True)
 
     x = max_norm(x, dim=-1)
     return F.gumbel_softmax(torch.exp(x), tau=1, dim=-1, hard=True)
@@ -376,7 +376,10 @@ class Summarizer(nn.Module):
     def __init__(self):
         super().__init__()
 
-        self.context = DilatedStack(exp.model_dim, [1, 3, 9, 27, 1])
+        encoder = nn.TransformerEncoderLayer(exp.model_dim, 4, exp.model_dim, batch_first=True)
+        self.context = nn.TransformerEncoder(encoder, 4)
+
+        # self.context = DilatedStack(exp.model_dim, [1, 3, 9, 27, 1])
 
         self.reduce = nn.Conv1d(exp.model_dim + 33, exp.model_dim, 1, 1, 0)
 
@@ -413,7 +416,10 @@ class Summarizer(nn.Module):
         x = torch.cat([x, pos], dim=1)
         x = self.reduce(x)
 
+        x = x.permute(0, 2, 1)
         x = self.context(x)
+        x = x.permute(0, 2, 1)
+
         x = self.norm(x)
 
         x, indices = self.sparse(x)

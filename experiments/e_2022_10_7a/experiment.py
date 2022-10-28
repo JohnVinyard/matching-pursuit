@@ -2,7 +2,7 @@
 from config.experiment import Experiment
 from modules.dilated import DilatedStack
 from modules.linear import LinearOutputStack
-from modules.normalization import ExampleNorm
+from modules.normalization import ExampleNorm, max_norm
 from train.optim import optimizer
 from util import device, playable
 from util.readmedocs import readme
@@ -73,7 +73,9 @@ class Leaf(nn.Module):
         time = (torch.sigmoid(self.to_time(x)) * self.factor) + times
 
         amp = self.to_amp(x) ** 2
-        selections = F.gumbel_softmax(self.to_selection(x), tau=1, dim=-1, hard=True)
+        x = self.to_selection(x)
+        x = max_norm(x)
+        selections = F.gumbel_softmax(torch.exp(x), tau=1, dim=-1, hard=True)
 
         atoms = (selections @ self.normed_atoms)
         atoms = atoms * amp
@@ -118,7 +120,7 @@ class Model(nn.Module):
 
 
 model = Model().to(device)
-optim = optimizer(model, lr=1e-3)
+optim = optimizer(model, lr=1e-4)
 
 
 def train(batch):
