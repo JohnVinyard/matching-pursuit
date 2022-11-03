@@ -283,6 +283,7 @@ class TransferFunction(nn.Module):
         self.n_samples = n_samples
         self.softmax_func = softmax_func
         self.is_continuous = is_continuous
+        self.resonance_exp = resonance_exp
 
         bank = morlet_filter_bank(
             samplerate, n_samples, scale, 0.1, normalize=False)\
@@ -310,7 +311,7 @@ class TransferFunction(nn.Module):
             x = self.softmax_func(x)
             x = x @ self.resonance
         else:
-            x = torch.clamp(x, 0, 1) * 0.9999
+            x = (torch.clamp(x, 0, 1) ** self.resonance_exp) * 0.9999
             x = torch.cumprod(x, dim=-1)
 
         x = F.interpolate(x, size=self.n_samples, mode='linear')
