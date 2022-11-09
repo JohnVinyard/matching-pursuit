@@ -7,9 +7,10 @@ from modules.dilated import DilatedStack
 from modules.linear import LinearOutputStack
 from modules.sparse import AtomPlacement, VectorwiseSparsity
 from modules.transfer import ImpulseGenerator, PosEncodedImpulseGenerator, TransferFunction, schedule_atoms
+from modules.shape import Reshape
 from modules.fft import fft_convolve, fft_shift
 from train.optim import optimizer
-from upsample import ConvUpsample, FFTUpsampleBlock
+from upsample import ConvUpsample, FFTUpsampleBlock, PosEncodedUpsample
 from modules.normalization import ExampleNorm, max_norm
 from torch.nn import functional as F
 from modules.latent_loss import latent_loss
@@ -32,83 +33,8 @@ exp = Experiment(
 n_events = 16
 event_latent_dim = exp.model_dim
 
-def hard_softmax(x, soft=False, backward_trick=True):
-    x = torch.softmax(x, dim=-1)
-
-    if soft:
-        return x
-    
-    x_backward = x
-    
-    values, indices = torch.max(x, dim=-1, keepdim=True)
-    values = values + (1 - values)
-    z = torch.zeros_like(x)
-    z = torch.scatter(z, dim=-1, index=indices, src=values)
-
-    if not backward_trick:
-        return z
-    
-    x_forward = z
-    return x_backward + (x_forward - x_backward).detach()
-    
-
-def scheduler_softmax(x):
-    return hard_softmax(x, soft=False, backward_trick=True)
-
-def resonance_softmax(x):
-    return hard_softmax(x, soft=False, backward_trick=True)
-
-    # x = max_norm(x, dim=-1)
-    # return F.gumbel_softmax(torch.exp(x), tau=1, dim=-1, hard=True)
 
 scale = MusicalScale()
-
-# TODO: What about discretization is causing issues?
-class VQ(nn.Module):
-    def __init__(self, code_dim, n_codes, commitment_weight=1, one_hot=False, passthrough=False):
-        super().__init__()
-        self.code_dim = code_dim
-        self.n_codes = n_codes
-        self.codebook = nn.Parameter(torch.zeros(
-            n_codes, code_dim).normal_(0, 1))
-
-        self.commitment_cost = commitment_weight
-
-        self.one_hot = one_hot
-
-        self.passthrough = passthrough
-
-        if self.one_hot:
-            self.up = nn.Linear(code_dim, n_codes)
-            self.down = nn.Linear(n_codes, code_dim)
-        
-
-    def forward(self, x):
-
-        if self.passthrough:
-            return x, None, 0
-
-        if self.one_hot:
-            x = self.up(x)
-            x = scheduler_softmax(x)
-            x = self.down(x)
-            return x, None, 0
-
-
-        dist = torch.cdist(x, self.codebook)
-        mn, indices = torch.min(dist, dim=-1)
-        codes = self.codebook[indices]
-
-        # bring codes closer to embeddings
-        code_loss = ((codes - x.detach()) ** 2).mean()
-
-        # bring embeddings closter to codes
-        embedding_loss = (((x - codes.detach()) ** 2).mean() * self.commitment_cost)
-
-        loss = code_loss + embedding_loss
-
-        quantized = x + (codes - x).detach()
-        return quantized, indices, loss
 
 def fft_convolve(env, tf):
     env = F.pad(env, (0, env.shape[-1]))
@@ -125,19 +51,39 @@ def fft_convolve(env, tf):
 class SegmentGenerator(nn.Module):
     def __init__(self):
         super().__init__()
-
-
-        env_frames = 32
-        self.env_frames = env_frames
-
+        
         self.env = ConvUpsample(
             event_latent_dim,
             exp.model_dim,
             4,
-            env_frames,
+            exp.n_frames * 2,
             out_channels=1,
             mode='nearest')
 
+        # self.env = nn.Sequential(
+        #     nn.Linear(event_latent_dim, exp.model_dim * 4),
+        #     Reshape((exp.model_dim, 4)),
+
+        #     nn.ConvTranspose1d(exp.model_dim, 64, 4, 2, 1),
+        #     nn.LeakyReLU(0.2),
+
+        #     nn.ConvTranspose1d(64, 32, 4, 2, 1),
+        #     nn.LeakyReLU(0.2),
+
+        #     nn.ConvTranspose1d(32, 16, 4, 2, 1),
+        #     nn.LeakyReLU(0.2),
+
+        #     nn.ConvTranspose1d(16, 8, 4, 2, 1),
+        #     nn.LeakyReLU(0.2),
+
+        #     nn.ConvTranspose1d(8, 4, 4, 2, 1),
+        #     nn.LeakyReLU(0.2),
+
+        #     nn.Conv1d(4, 1, 3, 1, 1)
+        # )
+
+        self.noise_factor = nn.Parameter(torch.zeros(1).fill_(1e5))
+        
 
         self.n_coeffs = 257
 
@@ -154,9 +100,6 @@ class SegmentGenerator(nn.Module):
         
         self.is_continuous = False
 
-        # TODO: Use some kind of normalization
-        # here to keep this from exploding when using gumbel
-        # softmax
         self.transfer = ConvUpsample(
             exp.model_dim, 
             exp.model_dim, 
@@ -172,30 +115,27 @@ class SegmentGenerator(nn.Module):
             exp.n_frames, 
             self.resolution, 
             exp.n_samples, 
-            softmax_func=resonance_softmax,
+            softmax_func=lambda x: torch.softmax(x, dim=-1),
             is_continuous=self.is_continuous,
-            resonance_exp=2)
+            resonance_exp=1)
         
 
 
 
     def forward(self, time, transfer):
         transfer = transfer.view(-1, event_latent_dim)
+        time = time.view(-1, event_latent_dim)
 
         # x = x.view(-1, self.model_dim)
         batch = transfer.shape[0]
 
         # create envelope
-        env = self.env(transfer).view(batch, 1, -1)
-        diff = exp.n_frames - self.env_frames
-        if diff > 0:
-            env = F.pad(env, (0, diff))
+        env = self.env(time).view(batch, 1, -1)
         env = torch.abs(env)
-
         orig_env = env
         env = F.interpolate(env, size=self.n_samples, mode='linear')
         
-        noise = torch.zeros(1, 1, self.n_samples, device=env.device).uniform_(-1, 1)
+        noise = torch.zeros(1, 1, self.n_samples, device=env.device).uniform_(-1, 1) * self.noise_factor
         env = env * noise
 
         loss = 0
@@ -213,74 +153,6 @@ class SegmentGenerator(nn.Module):
 
         return final, orig_env, loss, orig_tf
 
-
-class PosEncodedScheduler(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.to_pos = nn.Linear(exp.model_dim, 33)
-        self.pos = PosEncodedImpulseGenerator(
-            exp.n_frames, 
-            exp.n_samples, 
-            softmax=scheduler_softmax)
-    
-    def forward(self, time_latent, stems, targets):
-        time_latent = self.to_pos(time_latent)
-        sparse, _ = self.pos.forward(time_latent)
-        sparse = sparse.view(-1, n_events, exp.n_samples)
-        scheduled = fft_convolve(sparse, stems)
-        return scheduled
-
-
-class ImpulseScheduler(nn.Module):
-    def __init__(self):
-        super().__init__()
-        # self.to_pos = ConvUpsample(
-        #     exp.model_dim, 
-        #     exp.model_dim, 
-        #     4, 
-        #     exp.n_frames, 
-        #     mode='learned', 
-        #     out_channels=1)
-        
-        self.to_pos = nn.Linear(exp.model_dim, exp.n_frames)
-        
-        self.imp = ImpulseGenerator(
-            exp.n_samples, 
-            softmax=scheduler_softmax
-        )
-        
-    def forward(self, time_latent, stems, targets):
-        time_latent = self.to_pos(time_latent).view(-1, exp.n_frames)
-        sparse  = self.imp.forward(time_latent)
-        sparse = sparse.view(-1, n_events, exp.n_samples)
-        scheduled = fft_convolve(sparse, stems)
-        return scheduled
-
-
-class FFTShiftScheduler(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.to_pos = nn.Linear(exp.model_dim, 1)
-    
-    def forward(self, time_latent, stems, targets):
-        time_latent = self.to_pos(time_latent)
-        # time_latent = torch.sigmoid(time_latent)
-        time_latent = (torch.sin(time_latent * 30) + 1) * 0.5
-        scheduled = fft_shift(stems, time_latent)
-        return scheduled
-
-
-class AtomPlacementScheduler(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.to_pos = nn.Linear(exp.model_dim, 1)
-        
-    
-    def forward(self, time_latent, stems, targets):
-        time_latent = self.to_pos(time_latent)
-        time_latent = torch.sigmoid(time_latent)
-        scheduled = schedule_atoms(stems, time_latent.view(-1, n_events), targets)
-        return scheduled
 
 
 class Summarizer(nn.Module):
@@ -305,17 +177,13 @@ class Summarizer(nn.Module):
         self.decode = SegmentGenerator()
 
         self.to_time = LinearOutputStack(
-            exp.model_dim, 1, out_channels=exp.model_dim)
-
-        self.scheduler = ImpulseScheduler()
+            exp.model_dim, 1, out_channels=event_latent_dim)
 
         self.to_transfer = LinearOutputStack(
             exp.model_dim, 1, out_channels=event_latent_dim)
-        self.transfer_vq = VQ(exp.model_dim, 2048, commitment_weight=0.1, passthrough=True)
 
         self.norm = ExampleNorm()
 
-        self.placement = AtomPlacement(exp.n_samples, n_events, exp.step_size)
 
 
     def forward(self, x):
@@ -344,13 +212,12 @@ class Summarizer(nn.Module):
         t_loss = 0
 
         orig_transfer = transfer = self.to_transfer(x).view(-1, event_latent_dim)
-        transfer, tf_indices, tf_loss = self.transfer_vq(transfer)
+        # transfer, tf_indices, tf_loss = self.transfer_vq(transfer)
+        tf_indices = None
+        tf_loss = 0
 
-        x, env, loss, tf = self.decode.forward(None, transfer)
+        x, env, loss, tf = self.decode.forward(time, transfer)
         x = x.view(batch, n_events, exp.n_samples)
-
-        # x = self.placement.render(x, indices)
-        x = self.scheduler.forward(time.view(-1, exp.model_dim), x, target)
 
         output = torch.sum(x, dim=1, keepdim=True)
 
@@ -392,13 +259,13 @@ def train_model(batch):
     recon, indices, encoded, env, vq_loss, tf, time, transfer, orig_time, orig_transfer = model.forward(batch)
 
     # transfer latent should be from a standard normal distribution
-    ll = (latent_loss(orig_transfer)) * 0.5
+    # ll = (latent_loss(orig_transfer)) * 0.5
 
 
-    peripheral_loss = vq_loss + ll
+    # peripheral_loss = vq_loss + ll
     pl = exp.perceptual_loss(recon, batch)
 
-    loss = pl + peripheral_loss
+    loss = pl #+ peripheral_loss
     loss.backward()
     optim.step()
     return loss, recon, indices, encoded, env, time, transfer
