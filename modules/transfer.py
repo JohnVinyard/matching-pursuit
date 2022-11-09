@@ -104,9 +104,27 @@ class ScalarPosition(torch.autograd.Function):
 
     def backward(self, *grad_outputs):
         x, = grad_outputs
+
         indices, = self.saved_tensors
-        x = torch.gather(x, dim=-1, index=indices)
-        return x, None
+        grads = []
+
+        for b in range(x.shape[0]):
+            for i, index in enumerate(indices[b]):
+                left, right = x[b, i, index:], x[b, i, :index]
+                scalar_grad = left.sum() - right.sum()
+                grads.append(scalar_grad.view(-1))
+        
+        grads = torch.cat(grads).view(x.shape[0], -1, 1)
+
+        # x = x.sum(dim=-1)
+        # x = torch.cat
+        # x = p2.grad.mean(dim=1)
+        # x = torch.cat([x[50:], x[:50]])
+
+        # indices, = self.saved_tensors
+        # x = torch.gather(x, dim=-1, index=indices)
+
+        return grads, None
 
 scalar_position = ScalarPosition.apply
 

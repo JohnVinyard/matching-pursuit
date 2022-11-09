@@ -114,23 +114,27 @@ if __name__ == '__main__':
     p2 = torch.scatter(p2, dim=-1, index=indices[:, None], src=torch.ones(100, requires_grad=True)[:, None])
     p2.retain_grad()
 
-    plt.matshow(p2.detach())    
-    plt.show()
+    # plt.matshow(p2.detach())    
+    # plt.show()
 
     renders, ang, mag = fft_shift(stem[None, ...], positions[..., None] )
     r, a, m = fft_convolve(stem[None, ...], p2)
 
     target = c.view(1, -1).repeat(100, 1)
 
-    l = ((target - r) ** 2).mean()
-    l.backward()
-    plt.plot(torch.diag(p2.grad))
+    l = ((target - r) ** 2).mean(dim=(-1))
+    lz = l.mean()
+    lz.backward()
+
+    plt.matshow(p2.grad, cmap='gray')
     plt.title('Eye Grad')
     plt.show()
 
     loss = ((target - renders) ** 2).mean(dim=(-1))
+
+    plt.title('losses')
     plt.plot(loss.detach())
-    plt.title('loss')
+    plt.plot(l.detach())
     plt.show()
 
     loss = loss.mean()
@@ -139,6 +143,29 @@ if __name__ == '__main__':
     plt.plot(positions.grad)
     plt.title('position grad')
     plt.show()
+
+    # candidate
+    # grads = []
+    # for i, item in enumerate(p2.grad):
+
+    #     # TODO: This should be based on the original
+    #     # position.  I can do this safely because our
+    #     # candidate positions are linear and monotonically
+    #     # ascending
+    #     index = int((i / 100) * 256)
+    #     left, right = item[:index], item[index:]
+    #     scalar_grad = (left.mean() - right.mean()).view(-1)
+    #     grads.append(scalar_grad)
+    
+    # grads = torch.cat(grads)
+    # plt.plot(grads.detach())
+    # plt.title('grad candidate')
+    # plt.show()
+
+    # grad = (p2.grad.T @ p2).sum(dim=0)
+    # plt.plot(grad.detach())
+    # plt.title('grad candidate')
+    # plt.show()
 
 
     # a = fft_convolve(stem, impulse)
