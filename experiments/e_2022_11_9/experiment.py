@@ -53,8 +53,8 @@ class BandLimitedNoise(nn.Module):
         self.nyquist = self.samplerate // 2
         self.min_center_freq = min_center_freq_hz / self.nyquist
         self.max_center_freq = max_center_freq_hz / self.nyquist
-        self.window = Window(n_samples // 2 + 1, self.min_center_freq, self.max_center_freq)
-
+        self.window = Window(n_samples // 2 + 1,
+                             self.min_center_freq, self.max_center_freq)
 
     def forward(self, center_frequencies, bandwidths):
         windows = self.window.forward(center_frequencies, bandwidths)
@@ -116,8 +116,8 @@ class Model(nn.Module):
         time_means = torch.sigmoid(self.to_time_means(x)).view(
             batch, self.n_events, 1)
         time_stds = torch.sigmoid(self.to_time_stds(x)).view(
-            batch, self.n_events, 1)
-
+            batch, self.n_events, 1) * 0.1
+        
         windows = self.noise.forward(freq_means, freq_stds)
         events = self.impulses.forward(time_means, time_stds)
 
@@ -133,12 +133,7 @@ optim = optimizer(model, lr=1e-3)
 def train(batch):
     optim.zero_grad()
     recon = model.forward(batch)
-    # loss = exp.perceptual_loss(recon, batch)
-
-    rspec = stft(batch)
-    fspec = stft(recon)
-    loss = F.mse_loss(rspec, fspec)
-
+    loss = exp.perceptual_loss(recon, batch)
     loss.backward()
     optim.step()
     return recon, loss
