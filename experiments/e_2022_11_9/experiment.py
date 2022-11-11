@@ -7,9 +7,11 @@ from modules.dilated import DilatedStack
 from modules.fft import fft_convolve
 from modules.linear import LinearOutputStack
 from modules.normalization import ExampleNorm
+from modules.phase import AudioCodec, MelScale
 from modules.pos_encode import pos_encoded
 from modules.stft import stft
 from train.optim import optimizer
+from upsample import ConvUpsample
 from util import playable
 from util.readmedocs import readme
 import numpy as np
@@ -34,17 +36,24 @@ samples_per_frame = 128
 min_center_freq = 20
 max_center_freq = 4000
 
+# it'd be nice to summarize the harmonics/resonance spectrogram...somehow
+# harmonics, f0, impulse_loc, impulse_std, bandwidth_loc, bandwidth_std, amplitude
+params_per_event = n_harmonics + 6
 
+mel_scale = MelScale()
+codec = AudioCodec(mel_scale)
+        
 class Window(nn.Module):
-    def __init__(self, n_samples, mn, mx):
+    def __init__(self, n_samples, mn, mx, epsilon=1e-8):
         super().__init__()
         self.n_samples = n_samples
         self.mn = mn
         self.mx = mx
         self.scale = self.mx - self.mn
+        self.epsilon = epsilon
 
     def forward(self, means, stds):
-        dist = Normal(self.mn + (means * self.scale), stds)
+        dist = Normal(self.mn + (means * self.scale), self.epsilon + stds)
         rng = torch.linspace(0, 1, self.n_samples)[None, None, :]
         windows = torch.exp(dist.log_prob(rng))
         return windows
@@ -62,7 +71,7 @@ class Resonance(nn.Module):
         self.samplerate = samplerate
         self.nyquist = self.samplerate // 2
         self.min_freq = min_freq_hz / self.nyquist
-        self.max_freq = max_freq_hz / self.nyquist
+        self.max_freq = max_freq_hz / self.nyquist    
         self.freq_scale = self.max_freq - self.min_freq
 
     def forward(self, f0, res):
@@ -91,7 +100,7 @@ class BandLimitedNoise(nn.Module):
     def __init__(self, n_samples, samplerate, min_center_freq_hz=20, max_center_freq_hz=4000):
         super().__init__()
         self.n_samples = n_samples
-        self.samplerate = samplerate
+        self.samplerate = samplerate            
         self.nyquist = self.samplerate // 2
         self.min_center_freq = min_center_freq_hz / self.nyquist
         self.max_center_freq = max_center_freq_hz / self.nyquist
@@ -108,8 +117,49 @@ class BandLimitedNoise(nn.Module):
         band_limited_noise = torch.fft.irfft(filtered, dim=-1, norm='ortho')
         return band_limited_noise
 
+class Renderer(nn.Module):
+    """
+    The renderer is responsible for taking a batch of events and global context vectors
+    and producing a spectrogram rendering of each event
+    """
+    def __init__(self, latent_dim, n_frames, n_freq_bins, n_events):
+        super().__init__()
+        self.n_frames = n_frames
+        self.n_freq_bins = n_freq_bins
+        self.latent_dim = latent_dim
+        self.n_events = n_events
+        self.reduce = LinearOutputStack(
+            exp.model_dim, 
+            2, 
+            out_channels=exp.model_dim, 
+            in_channels=latent_dim + params_per_event)
 
-class Model(nn.Module):
+        self.net = ConvUpsample(
+            exp.model_dim, 
+            exp.model_dim, 
+            4, 
+            end_size=n_frames, 
+            mode='nearest', 
+            out_channels=n_freq_bins,
+            batch_norm=True)
+        
+        self.apply(init_weights)
+    
+    def forward(self, event, context):
+        context = context.view(-1, 1, self.latent_dim).repeat(1, self.n_events, 1).view(-1, self.latent_dim)
+        x = torch.cat([event, context], dim=-1)
+        x = self.reduce(x)
+        specs = self.net(x)
+        specs = specs.view(-1, n_events, self.n_freq_bins, self.n_frames)
+        specs = torch.mean(specs, dim=1)
+        specs = specs.permute(0, 2, 1)
+        # we're producing magnitudes, so positive values only
+        specs = torch.relu(specs)
+        return specs
+
+
+
+class Model(nn.Module):    
     def __init__(self, n_samples, n_events, n_harmonics, samples_per_frame):
         super().__init__()
         self.n_samples = n_samples
@@ -139,6 +189,8 @@ class Model(nn.Module):
 
         self.to_mix = LinearOutputStack(exp.model_dim, 2, out_channels=1)
         self.to_room = LinearOutputStack(exp.model_dim, 2, out_channels=self.n_rooms)
+
+        # (n_harmonics + 6) * n_events
 
         self.to_f0 = LinearOutputStack(
             exp.model_dim, 2, out_channels=n_events)
@@ -176,7 +228,7 @@ class Model(nn.Module):
 
         x, _ = torch.max(x, dim=-1)
 
-        mx = torch.sigmoid(self.to_mix(x))
+        mx = torch.sigmoid(self.to_mix(x)).view(batch, 1, 1)
         rooms = torch.softmax(self.to_room(x), dim=-1)
 
         f0 = torch.sigmoid(self.to_f0.forward(x)).view(
@@ -197,6 +249,10 @@ class Model(nn.Module):
         amps = torch.sigmoid(self.to_amplitudes(x)).view(
             batch, self.n_events, 1)
 
+        event_params = torch.cat(
+            [f0, res, freq_means, freq_stds, time_means, time_stds, amps], dim=-1)
+
+        # gradients do not flow through the following operations
         windows = self.noise.forward(freq_means, freq_stds)
         events = self.impulses.forward(time_means, time_stds)
 
@@ -215,8 +271,7 @@ class Model(nn.Module):
 
         located = (dry * (1 - mx)) + (wet * mx)
 
-        return located
-
+        return located, x, event_params
 
 model = Model(
     exp.n_samples, 
@@ -225,15 +280,39 @@ model = Model(
     samples_per_frame)
 optim = optimizer(model, lr=1e-3)
 
+render = Renderer(
+    exp.model_dim, 
+    n_frames=128, 
+    n_freq_bins=256, 
+    n_events=n_events)
+render_optim = optimizer(render, lr=1e-3)
+
+def train_renderer(batch):
+    optim.zero_grad()
+
+    with torch.no_grad():
+        recon, latent, params = model.forward(batch)
+        params = params.view(-1, params_per_event)
+    
+    rendered = render.forward(params, latent)
+
+    with torch.no_grad():
+        actual = codec.to_frequency_domain(recon.view(-1, exp.n_samples))[..., 0]
+    
+    loss = F.mse_loss(rendered, actual)
+    loss.backward()
+    render_optim.step()
+    return loss, rendered, actual
 
 def train(batch):
     optim.zero_grad()
-    recon = model.forward(batch)
-    loss = exp.perceptual_loss(recon, batch)
+    recon, latent, params = model.forward(batch)
+    real_spec = codec.to_frequency_domain(batch.view(-1, exp.n_samples))[..., 0]
+    pred_spec = render.forward(params.view(-1, params_per_event), latent)
+    loss = F.mse_loss(pred_spec, real_spec)
     loss.backward()
     optim.step()
-    return recon, loss
-
+    return recon, latent, loss
 
 @readme
 class ResonantAtomsExperiment(object):
@@ -242,23 +321,42 @@ class ResonantAtomsExperiment(object):
         self.stream = stream
         self.win = None
         self.real = None
+        self.latent = None
+        self.rendered = None
+        self.actual = None
+
+    def actual_spec(self):
+        return self.actual.data.cpu().numpy()[0]
+
+    def real_spec(self):
+        sp = codec.to_frequency_domain(self.real.view(-1, exp.n_samples))
+        return sp.data.cpu().numpy()[0, ..., 0]
 
     def orig(self):
         return playable(self.real, exp.samplerate)
 
-    def orig_spec(self):
-        return np.abs(zounds.spectral.stft(self.orig()))
-
-    def noise(self):
+    def listen(self):
         return playable(self.win[0, 0], exp.samplerate)
 
-    def noise_spec(self):
-        return np.abs(zounds.spectral.stft(self.noise()))
+    def fake_spec(self):
+        return self.rendered.data.cpu().numpy()[0]
+    
+    def z(self):
+        return self.latent.data.cpu().numpy().squeeze()
 
     def run(self):
         for i, item in enumerate(self.stream):
             item = item.view(-1, 1, exp.n_samples)
             self.real = item
-            w, loss = train(item)
-            self.win = w
-            print(loss.item())
+        
+            if i % 2 == 0:
+                w, latent, loss = train(item)
+                self.win = w
+                self.latent = latent
+                print('G', loss.item())
+            else:
+                loss, rendered, actual = train_renderer(item)
+                self.rendered = rendered
+                self.actual = actual
+                print('R', loss.item())
+
