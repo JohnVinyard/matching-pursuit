@@ -52,37 +52,36 @@ class SegmentGenerator(nn.Module):
     def __init__(self):
         super().__init__()
         
-        self.env = ConvUpsample(
-            event_latent_dim,
-            exp.model_dim,
-            4,
-            exp.n_frames * 2,
-            out_channels=1,
-            mode='nearest')
+        # self.env = ConvUpsample(
+        #     event_latent_dim,
+        #     exp.model_dim,
+        #     4,
+        #     exp.n_frames * 2,
+        #     out_channels=1,
+        #     mode='nearest')
 
-        # self.env = nn.Sequential(
-        #     nn.Linear(event_latent_dim, exp.model_dim * 4),
-        #     Reshape((exp.model_dim, 4)),
+        self.env = nn.Sequential(
+            nn.Linear(event_latent_dim, exp.model_dim * 4),
+            Reshape((exp.model_dim, 4)),
 
-        #     nn.ConvTranspose1d(exp.model_dim, 64, 4, 2, 1),
-        #     nn.LeakyReLU(0.2),
+            nn.ConvTranspose1d(exp.model_dim, 64, 4, 2, 1),
+            nn.LeakyReLU(0.2),
 
-        #     nn.ConvTranspose1d(64, 32, 4, 2, 1),
-        #     nn.LeakyReLU(0.2),
+            nn.ConvTranspose1d(64, 32, 4, 2, 1),
+            nn.LeakyReLU(0.2),
 
-        #     nn.ConvTranspose1d(32, 16, 4, 2, 1),
-        #     nn.LeakyReLU(0.2),
+            nn.ConvTranspose1d(32, 16, 4, 2, 1),
+            nn.LeakyReLU(0.2),
 
-        #     nn.ConvTranspose1d(16, 8, 4, 2, 1),
-        #     nn.LeakyReLU(0.2),
+            nn.ConvTranspose1d(16, 8, 4, 2, 1),
+            nn.LeakyReLU(0.2),
 
-        #     nn.ConvTranspose1d(8, 4, 4, 2, 1),
-        #     nn.LeakyReLU(0.2),
+            nn.ConvTranspose1d(8, 4, 4, 2, 1),
+            nn.LeakyReLU(0.2),
 
-        #     nn.Conv1d(4, 1, 3, 1, 1)
-        # )
+            nn.Conv1d(4, 1, 3, 1, 1)
+        )
 
-        self.noise_factor = nn.Parameter(torch.zeros(1).fill_(1e5))
         
 
         self.n_coeffs = 257
@@ -115,7 +114,7 @@ class SegmentGenerator(nn.Module):
             exp.n_frames, 
             self.resolution, 
             exp.n_samples, 
-            softmax_func=lambda x: torch.softmax(x, dim=-1),
+            softmax_func=lambda x: F.gumbel_softmax(x, dim=-1, hard=True),
             is_continuous=self.is_continuous,
             resonance_exp=1)
         
@@ -131,11 +130,11 @@ class SegmentGenerator(nn.Module):
 
         # create envelope
         env = self.env(time).view(batch, 1, -1)
-        env = torch.abs(env)
+        env = torch.relu(env)
         orig_env = env
         env = F.interpolate(env, size=self.n_samples, mode='linear')
         
-        noise = torch.zeros(1, 1, self.n_samples, device=env.device).uniform_(-1, 1) * self.noise_factor
+        noise = torch.zeros(1, 1, self.n_samples, device=env.device).uniform_(-1, 1)
         env = env * noise
 
         loss = 0
@@ -251,7 +250,7 @@ model = Model().to(device)
 #     print('loaded model')
 # except IOError:
 #     print('Could not load weights')
-optim = optimizer(model, lr=1e-4)
+optim = optimizer(model, lr=1e-3)
 
 
 def train_model(batch):
