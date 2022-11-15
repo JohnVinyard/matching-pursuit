@@ -83,7 +83,13 @@ class Resonance(nn.Module):
         f0 = self.min_freq + (self.freq_scale * f0) 
         freqs = f0 * self.factors[None, None, :]
         freqs = freqs[..., None].repeat(1, 1, 1, self.n_frames).view(-1, 1, self.n_frames)
+
+        # zero out anything above the nyquist frequency
+        indices = torch.where(freqs >= 1)
+        freqs[indices] = 0
+
         freqs = F.interpolate(freqs, size=self.n_samples, mode='linear')
+        
 
         # we also need resonance values for each harmonic        
         res = res[..., None].repeat(1, 1, 1, self.n_frames)
@@ -194,35 +200,8 @@ class Model(nn.Module):
         self.to_room = LinearOutputStack(exp.model_dim, 2, out_channels=self.n_rooms)
 
         self.to_event_params = nn.Sequential(
-            # PosEncodedUpsample(
-            #     exp.model_dim, 
-            #     exp.model_dim, 
-            #     size=n_events, 
-            #     out_channels=params_per_event, 
-            #     layers=4)
-
             LinearOutputStack(exp.model_dim, 2, out_channels=params_per_event)
         )
-
-        # (n_harmonics + 6) * n_events
-
-        # self.to_f0 = LinearOutputStack(
-        #     exp.model_dim, 2, out_channels=n_events)
-        # self.to_harmonics = LinearOutputStack(
-        #     exp.model_dim, 2, out_channels=n_events * n_harmonics)
-
-        # self.to_amplitudes = LinearOutputStack(
-        #     exp.model_dim, 2, out_channels=n_events)
-
-        # self.to_freq_means = LinearOutputStack(
-        #     exp.model_dim, 2, out_channels=n_events)
-        # self.to_freq_stds = LinearOutputStack(
-        #     exp.model_dim, 2, out_channels=n_events)
-
-        # self.to_time_means = LinearOutputStack(
-        #     exp.model_dim, 2, out_channels=n_events)
-        # self.to_time_stds = LinearOutputStack(
-        #     exp.model_dim, 2, out_channels=n_events)
 
         self.apply(init_weights)
 
@@ -244,18 +223,8 @@ class Model(nn.Module):
 
         x, indices = self.sparse(x)
         
-        # x, _ = torch.max(x, dim=-1)
-
         verb_params, _ = torch.max(x, dim=1)
         
-
-        '''
-        TODO: 
-            - Expand from (batch, model_dim) to (batch, n_events, n_event_params)
-            - optionally apply noise at this point
-            - apply sigmoid and transform to event params
-        '''
-
         # expand to params
         mx = torch.sigmoid(self.to_mix(verb_params)).view(batch, 1, 1)
         rooms = torch.softmax(self.to_room(verb_params), dim=-1)
@@ -294,7 +263,7 @@ class Model(nn.Module):
         located = windows * events * amps
 
         # convolve impulses with resonances
-        located = located + fft_convolve(located, resonances)
+        located = fft_convolve(located, resonances) + located
 
         located = torch.mean(located, dim=1, keepdim=True)
 
@@ -342,7 +311,7 @@ def train_renderer(batch, iteration):
     loss = F.mse_loss(rendered, actual)
     loss.backward()
     render_optim.step()
-    return loss, rendered, actual
+    return loss, rendered, actual, recon
 
 def train(batch, iteration):
     optim.zero_grad()
@@ -383,6 +352,7 @@ class ResonantAtomsExperiment(object):
         self.latent = None
         self.rendered = None
         self.actual = None
+        self.render_recon = None
         self.model = model
 
     def actual_spec(self):
@@ -408,6 +378,12 @@ class ResonantAtomsExperiment(object):
     
     def z(self):
         return self.latent.data.cpu().numpy().squeeze()
+    
+    def rr(self):
+        return playable(self.render_recon, exp.samplerate)
+    
+    def rr_spec(self):
+        return np.abs(zounds.spectral.stft(self.rr()))
 
     def run(self):
         for i, item in enumerate(self.stream):
@@ -424,7 +400,8 @@ class ResonantAtomsExperiment(object):
             self.latent = latent
             print(i, 'G', loss.item())
 
-            loss, rendered, actual = train_renderer(item, i)
+            loss, rendered, actual, recon = train_renderer(item, i)
+            self.render_recon = recon
             self.rendered = rendered
             self.actual = actual
             print(i, 'R', loss.item())
