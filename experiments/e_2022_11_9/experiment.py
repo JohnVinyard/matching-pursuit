@@ -41,6 +41,9 @@ max_center_freq = 4000
 # harmonics, f0, impulse_loc, impulse_std, bandwidth_loc, bandwidth_std, amplitude
 params_per_event = n_harmonics + 6
 
+resonance_baseline = 0.9
+noise_coeff = 0
+
 mel_scale = MelScale()
 codec = AudioCodec(mel_scale)
         
@@ -241,7 +244,7 @@ class Model(nn.Module):
             event_params = (noise * noise_mix) + (actual_amt * torch.sigmoid(event_params))
 
         
-        res_baseline = 0.9
+        res_baseline = resonance_baseline
         res_span = 1 - res_baseline
 
         freq_means = event_params[:, :, 0].view(batch, self.n_events, 1)
@@ -263,7 +266,7 @@ class Model(nn.Module):
         located = windows * events * amps
 
         # convolve impulses with resonances
-        located = fft_convolve(located, resonances) + located
+        located = fft_convolve(located, resonances) + (located * noise_coeff)
 
         located = torch.mean(located, dim=1, keepdim=True)
 
