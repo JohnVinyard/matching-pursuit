@@ -29,11 +29,11 @@ exp = Experiment(
     model_dim=128,
     kernel_size=512)
 
-init_weights = make_initializer(0.02)
+init_weights = make_initializer(0.1)
 
 n_events = 32
 n_harmonics = 16
-samples_per_frame = 128
+samples_per_frame = 256
 min_center_freq = 20
 max_center_freq = 4000
 
@@ -123,7 +123,7 @@ class Renderer(nn.Module):
     The renderer is responsible for taking a batch of events and global context vectors
     and producing a spectrogram rendering of each event
     """
-    def __init__(self, latent_dim, n_frames, n_freq_bins, n_events):
+    def __init__(self, latent_dim, n_frames, n_freq_bins, n_events, n_rooms):
         super().__init__()
         self.n_frames = n_frames
         self.n_freq_bins = n_freq_bins
@@ -133,21 +133,22 @@ class Renderer(nn.Module):
             exp.model_dim, 
             2, 
             out_channels=exp.model_dim, 
-            in_channels=latent_dim + params_per_event)
+            in_channels=n_rooms + 1 + params_per_event)
 
         self.net = ConvUpsample(
             exp.model_dim, 
             exp.model_dim, 
             4, 
             end_size=n_frames, 
-            mode='nearest', 
-            out_channels=n_freq_bins,
-            batch_norm=True)
+            mode='learned', 
+            out_channels=n_freq_bins)
+        
+        self.global_context_size = n_rooms + 1
         
         self.apply(init_weights)
     
     def forward(self, event, context):
-        context = context.view(-1, 1, self.latent_dim).repeat(1, self.n_events, 1).view(-1, self.latent_dim)
+        context = context.view(-1, 1, self.global_context_size).repeat(1, self.n_events, 1).view(-1, self.global_context_size)
         x = torch.cat([event, context], dim=-1)
         x = self.reduce(x)
         specs = self.net(x)
@@ -259,27 +260,7 @@ class Model(nn.Module):
         mx = torch.sigmoid(self.to_mix(verb_params)).view(batch, 1, 1)
         rooms = torch.softmax(self.to_room(verb_params), dim=-1)
 
-        # f0 = torch.sigmoid(self.to_f0.forward(x)).view(
-        #     batch, self.n_events, 1)
-        # res = torch.sigmoid(self.to_harmonics(x)).view(
-        #     batch, self.n_events, self.n_harmonics)
-
-        # freq_means = torch.sigmoid(self.to_freq_means(x)).view(
-        #     batch, self.n_events, 1)
-        # freq_stds = torch.sigmoid(self.to_freq_stds(x)).view(
-        #     batch, self.n_events, 1) * 0.1
-
-        # time_means = torch.sigmoid(self.to_time_means(x)).view(
-        #     batch, self.n_events, 1)
-        # time_stds = torch.sigmoid(self.to_time_stds(x)).view(
-        #     batch, self.n_events, 1) * 0.1
-
-        # amps = torch.sigmoid(self.to_amplitudes(x)).view(
-        #     batch, self.n_events, 1)
-
-        # # (n_harmonics + 6) * n_events
-        # event_params = torch.cat(
-        #     [f0, res, freq_means, freq_stds, time_means, time_stds, amps], dim=-1)
+        verb_params = torch.cat([mx.view(-1, 1), rooms.view(-1, self.n_rooms)], dim=-1)
 
         event_params = self.to_event_params.forward(x).view(-1, n_events, params_per_event)
 
@@ -291,7 +272,7 @@ class Model(nn.Module):
             event_params = (noise * noise_mix) + (actual_amt * torch.sigmoid(event_params))
 
         
-        res_baseline = 0.999
+        res_baseline = 0.9
         res_span = 1 - res_baseline
 
         freq_means = event_params[:, :, 0].view(batch, self.n_events, 1)
@@ -329,19 +310,20 @@ model = Model(
     n_events, 
     n_harmonics, 
     samples_per_frame).to(device)
-optim = optimizer(model, lr=1e-4)
+optim = optimizer(model, lr=1e-3)
 
 render = Renderer(
     exp.model_dim, 
     n_frames=128, 
     n_freq_bins=256, 
-    n_events=n_events).to(device)
-render_optim = optimizer(render, lr=1e-4)
+    n_events=n_events,
+    n_rooms=model.n_rooms).to(device)
+render_optim = optimizer(render, lr=1e-3)
 
 def iteration_to_noise_mix(iteration):
-    # value = 1 - (iteration * 1e-5)
-    # return max(value, 0)
-    return 0
+    value = 1 - (iteration * 1e-6)
+    return max(value, 0)
+    # return 0
 
 def train_renderer(batch, iteration):
     render_optim.zero_grad()
@@ -367,7 +349,7 @@ def train(batch, iteration):
     recon, latent, params = model.forward(batch)
     real_spec = codec.to_frequency_domain(batch.view(-1, exp.n_samples))[..., 0]
     pred_spec = render.forward(params.view(-1, params_per_event), latent)
-    loss = F.mse_loss(pred_spec, real_spec) + torch.abs(batch.std() - recon.std())
+    loss = F.mse_loss(pred_spec, real_spec)
     loss.backward()
     optim.step()
     return recon, latent, loss
@@ -380,11 +362,11 @@ def train_direct(batch, iteration):
     # real_spec = codec.to_frequency_domain(batch.view(-1, exp.n_samples))[..., 0]
     # pred_spec = codec.to_frequency_domain(recon.view(-1, exp.n_samples))[..., 0]
 
-    # real_spec = stft(batch, 512, 256, pad=True)
-    # pred_spec = stft(recon, 512, 256, pad=True)
+    real_spec = stft(batch, 512, 256, pad=True)
+    fake_spec = stft(recon, 512, 256, pad=True)
 
-    real_spec = exp.perceptual_feature(batch)
-    fake_spec = exp.perceptual_feature(recon)
+    # real_spec = exp.perceptual_feature(batch)
+    # fake_spec = exp.perceptual_feature(recon)
 
     loss = F.mse_loss(fake_spec, real_spec)
     loss.backward()
@@ -401,26 +383,28 @@ class ResonantAtomsExperiment(object):
         self.latent = None
         self.rendered = None
         self.actual = None
+        self.model = model
 
-    # def actual_spec(self):
-        # return self.actual.data.cpu().numpy()[0]
+    def actual_spec(self):
+        return self.actual.data.cpu().numpy()[0]
 
     def real_spec(self):
-        sp = codec.to_frequency_domain(self.real.view(-1, exp.n_samples))
-        return sp.data.cpu().numpy()[0, ..., 0]
+        with torch.no_grad():
+            sp = codec.to_frequency_domain(self.real.view(-1, exp.n_samples))
+            return sp.data.cpu().numpy()[0, ..., 0]
 
     def orig(self):
         return playable(self.real, exp.samplerate)
     
-    def fake_spec(self):
-        sp = codec.to_frequency_domain(self.win[0, 0].view(-1, exp.n_samples))
-        return sp.data.cpu().numpy()[0, ..., 0]
+    # def fake_spec(self):
+    #     sp = codec.to_frequency_domain(self.win[0, 0].view(-1, exp.n_samples))
+    #     return sp.data.cpu().numpy()[0, ..., 0]
 
     def listen(self):
         return playable(self.win[0, 0], exp.samplerate)
 
-    # def fake_spec(self):
-        # return self.rendered.data.cpu().numpy()[0]
+    def fake_spec(self):
+        return self.rendered.data.cpu().numpy()[0]
     
     def z(self):
         return self.latent.data.cpu().numpy().squeeze()
@@ -430,18 +414,18 @@ class ResonantAtomsExperiment(object):
             item = item.view(-1, 1, exp.n_samples)
             self.real = item
 
-            w, latent, loss = train_direct(item, i)
-            self.win = w
-            self.latent = latent
-            print(i, 'D', loss.item())
-        
-            # w, latent, loss = train(item, i)
+            # w, latent, loss = train_direct(item, i)
             # self.win = w
             # self.latent = latent
-            # print(i, 'G', loss.item())
+            # print(i, 'D', loss.item())
+        
+            w, latent, loss = train(item, i)
+            self.win = w
+            self.latent = latent
+            print(i, 'G', loss.item())
 
-            # loss, rendered, actual = train_renderer(item, i)
-            # self.rendered = rendered
-            # self.actual = actual
-            # print(i, 'R', loss.item())
+            loss, rendered, actual = train_renderer(item, i)
+            self.rendered = rendered
+            self.actual = actual
+            print(i, 'R', loss.item())
 
