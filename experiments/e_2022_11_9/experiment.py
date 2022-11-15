@@ -42,11 +42,11 @@ max_center_freq = 4000
 # harmonics, f0, impulse_loc, impulse_std, bandwidth_loc, bandwidth_std, amplitude
 params_per_event = n_harmonics + 6
 
-resonance_baseline = 0.9
-noise_coeff = 0
-render_type = '2d'
+resonance_baseline = 0.8
+noise_coeff = 1
+render_type = '1d'
 
-train_generator = False
+train_generator = True
 train_renderer = True
 
 mel_scale = MelScale()
@@ -109,7 +109,7 @@ class Resonance(nn.Module):
         # generate resonances
         final = res * torch.sin(torch.cumsum(freqs * 2 * np.pi, dim=-1))
         final = final.view(batch, n_events, n_freqs, self.n_samples)
-        final = torch.mean(final, dim=2)
+        final = torch.sum(final, dim=2)
         return final
 
 
@@ -168,7 +168,7 @@ class Renderer(nn.Module):
                 exp.model_dim,
                 4,
                 end_size=n_frames,
-                mode='learned',
+                mode='nearest',
                 out_channels=n_freq_bins)
         elif render_type == '2d':
             self.net = nn.Sequential(
@@ -206,7 +206,7 @@ class Renderer(nn.Module):
         x = self.reduce(x)
         specs = self.net(x)
         specs = specs.view(-1, n_events, self.n_freq_bins, self.n_frames)
-        specs = torch.mean(specs, dim=1)
+        specs = torch.sum(specs, dim=1)
         specs = specs.permute(0, 2, 1)
         # we're producing magnitudes, so positive values only
         specs = specs ** 2
@@ -315,7 +315,7 @@ class Model(nn.Module):
         # convolve impulses with resonances
         located = fft_convolve(located, resonances) + (located * noise_coeff)
 
-        located = torch.mean(located, dim=1, keepdim=True)
+        located = torch.sum(located, dim=1, keepdim=True)
 
         dry = located
         wet = self.verb.forward(located, rooms)
