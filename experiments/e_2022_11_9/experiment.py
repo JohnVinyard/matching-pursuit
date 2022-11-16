@@ -44,10 +44,11 @@ params_per_event = n_harmonics + 6
 
 resonance_baseline = 0.8
 noise_coeff = 1
-render_type = '1d'
+render_type = '2d'
 
 train_generator = True
 train_renderer = True
+train_true = False
 
 mel_scale = MelScale()
 codec = AudioCodec(mel_scale)
@@ -135,6 +136,14 @@ class BandLimitedNoise(nn.Module):
         band_limited_noise = torch.fft.irfft(filtered, dim=-1, norm='ortho')
         return band_limited_noise
 
+class NerfEventRenderer(nn.Module):
+    def __init__(self, latent_dim, n_frames, freq_bins, n_events, n_rooms):
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.n_frames = n_frames
+        self.freq_bins = freq_bins
+        self.n_events = n_events
+        self.n_rooms = n_rooms
 
 class Renderer(nn.Module):
     """
@@ -168,7 +177,7 @@ class Renderer(nn.Module):
                 exp.model_dim,
                 4,
                 end_size=n_frames,
-                mode='nearest',
+                mode='learned',
                 out_channels=n_freq_bins)
         elif render_type == '2d':
             self.net = nn.Sequential(
@@ -209,7 +218,7 @@ class Renderer(nn.Module):
         specs = torch.sum(specs, dim=1)
         specs = specs.permute(0, 2, 1)
         # we're producing magnitudes, so positive values only
-        specs = specs ** 2
+        specs = torch.abs(specs)
         return specs
 
 
@@ -330,7 +339,7 @@ model = Model(
     n_events,
     n_harmonics,
     samples_per_frame).to(device)
-optim = optimizer(model, lr=1e-3)
+optim = optimizer(model, lr=1e-4)
 
 render = Renderer(
     exp.model_dim,
@@ -339,13 +348,15 @@ render = Renderer(
     n_events=n_events,
     n_rooms=model.n_rooms,
     render_type=render_type).to(device)
-render_optim = optimizer(render, lr=1e-3)
+render_optim = optimizer(render, lr=1e-4)
 
 
 def iteration_to_noise_mix(iteration):
-    value = 1 - (iteration * 1e-6)
-    return max(value, 0)
-    # return 0
+    if train_true:
+        return 0
+    else:
+        value = 1 - (iteration * 1e-6)
+        return max(value, 0)
 
 
 def train_renderer(batch, iteration):
@@ -375,7 +386,7 @@ def train(batch, iteration):
     real_spec = codec.to_frequency_domain(
         batch.view(-1, exp.n_samples))[..., 0]
     pred_spec = render.forward(params.view(-1, params_per_event), latent)
-    loss = F.mse_loss(pred_spec, real_spec)
+    loss = F.mse_loss(pred_spec, real_spec) + torch.abs(batch.std() - recon.std())
     loss.backward()
     optim.step()
     return recon, latent, loss
@@ -424,15 +435,15 @@ class ResonantAtomsExperiment(object):
     def orig(self):
         return playable(self.real, exp.samplerate)
 
-    # def fake_spec(self):
-    #     sp = codec.to_frequency_domain(self.win[0, 0].view(-1, exp.n_samples))
-    #     return sp.data.cpu().numpy()[0, ..., 0]
-
     def listen(self):
         return playable(self.win[0, 0], exp.samplerate)
 
     def fake_spec(self):
-        return self.rendered.data.cpu().numpy()[0]
+        if train_true:
+            sp = codec.to_frequency_domain(self.win[0, 0].view(-1, exp.n_samples))
+            return sp.data.cpu().numpy()[0, ..., 0]
+        else:
+            return self.rendered.data.cpu().numpy()[0]
 
     def z(self):
         return self.latent.data.cpu().numpy().squeeze()
@@ -448,10 +459,11 @@ class ResonantAtomsExperiment(object):
             item = item.view(-1, 1, exp.n_samples)
             self.real = item
 
-            # w, latent, loss = train_direct(item, i)
-            # self.win = w
-            # self.latent = latent
-            # print(i, 'D', loss.item())
+            if train_true:
+                w, latent, loss = train_direct(item, i)
+                self.win = w
+                self.latent = latent
+                print(i, 'D', loss.item())
 
             if train_generator:
                 w, latent, loss = train(item, i)

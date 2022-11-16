@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 import zounds
+import numpy as np
 
 from modules.stft import morlet_filter_bank
 
@@ -129,3 +130,23 @@ class ExpandUsingPosEncodings(nn.Module):
             x = x + pos
 
         return x
+
+
+def two_d_pos_encode(n_frames, n_freqs, device):
+    time_dim = torch.linspace(-np.pi, np.pi, n_frames)
+    freq_dim = torch.linspace(-np.pi, np.pi, n_freqs)
+
+    x, y = torch.meshgrid(time_dim, freq_dim)
+    grid = torch.cat([x[None, ...], y[None, ...]], dim=0)
+
+    n_pos_freqs = 8
+
+    pos = [grid]
+
+    for i in range(n_pos_freqs):
+        pos.append(torch.sin(grid * (2 ** i)))
+        pos.append(torch.cos(grid * (2 ** i)))
+
+    pos = torch.cat(pos, dim=0).to(device)
+    norms = torch.norm(pos, dim=0, keepdim=True)
+    pos = pos / (norms + 1e-8)
