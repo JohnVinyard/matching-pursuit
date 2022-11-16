@@ -253,7 +253,7 @@ class Renderer(nn.Module):
         specs = torch.sum(specs, dim=1)
         specs = specs.permute(0, 2, 1)
         # we're producing magnitudes, so positive values only
-        specs = torch.abs(specs)
+        specs = specs ** 2
         return specs
 
 
@@ -374,7 +374,7 @@ model = Model(
     n_events,
     n_harmonics,
     samples_per_frame).to(device)
-optim = optimizer(model, lr=1e-4)
+optim = optimizer(model, lr=1e-3)
 
 render = Renderer(
     exp.model_dim,
@@ -383,7 +383,7 @@ render = Renderer(
     n_events=n_events,
     n_rooms=model.n_rooms,
     render_type=render_type).to(device)
-render_optim = optimizer(render, lr=1e-4)
+render_optim = optimizer(render, lr=1e-3)
 
 
 def iteration_to_noise_mix(iteration):
