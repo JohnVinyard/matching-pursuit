@@ -8,7 +8,7 @@ from modules.fft import fft_convolve
 from modules.linear import LinearOutputStack
 from modules.normalization import ExampleNorm
 from modules.phase import AudioCodec, MelScale
-from modules.pos_encode import pos_encoded
+from modules.pos_encode import ExpandUsingPosEncodings, pos_encoded, two_d_pos_encode
 from modules.shape import Reshape
 from modules.sparse import VectorwiseSparsity
 from modules.stft import stft
@@ -44,7 +44,7 @@ params_per_event = n_harmonics + 6
 
 resonance_baseline = 0.8
 noise_coeff = 1
-render_type = '2d'
+render_type = 'nerf'
 
 train_generator = True
 train_renderer = True
@@ -145,6 +145,38 @@ class NerfEventRenderer(nn.Module):
         self.n_events = n_events
         self.n_rooms = n_rooms
 
+        self.two_d = False
+
+        if self.two_d:
+            self.register_buffer(
+                'grid', two_d_pos_encode(n_frames, freq_bins, device))
+            self.expand_pos_encoding = nn.Linear(34, 128)
+            self.net = LinearOutputStack(
+                16, layers=4, out_channels=1, in_channels=exp.model_dim)
+        else:
+            self.pos = PosEncodedUpsample(
+                exp.model_dim, 
+                exp.model_dim, 
+                size=n_frames, 
+                out_channels=self.freq_bins, 
+                layers=4, 
+                concat=False)
+
+
+            
+    def forward(self, x):
+        if self.two_d:
+            grid = self.grid[None, ...].permute(0, 2, 3, 1)
+            grid = self.expand_pos_encoding(grid)
+            x = x[..., None, None].permute(0, 2, 3, 1)
+            x = x + grid
+            x = self.net(x)
+            x = x.view(-1, self.n_frames, self.freq_bins).permute(0, 2, 1)
+            return x
+        else:
+            x = self.pos(x)
+            return x
+
 class Renderer(nn.Module):
     """
     The renderer is responsible for taking a batch of events and global context vectors
@@ -197,6 +229,9 @@ class Renderer(nn.Module):
                 nn.LeakyReLU(0.2),
                 nn.ConvTranspose2d(4, 1, (4, 3), (2, 1), (1, 1)),  # 256
             )
+        elif render_type == 'nerf':
+            self.net = NerfEventRenderer(
+                latent_dim, n_frames, n_freq_bins, n_events, n_rooms)
         else:
             raise ValueError(f'unknown render type {render_type}')
 

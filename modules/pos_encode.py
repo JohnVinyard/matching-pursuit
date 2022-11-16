@@ -150,3 +150,4 @@ def two_d_pos_encode(n_frames, n_freqs, device):
     pos = torch.cat(pos, dim=0).to(device)
     norms = torch.norm(pos, dim=0, keepdim=True)
     pos = pos / (norms + 1e-8)
+    return pos
