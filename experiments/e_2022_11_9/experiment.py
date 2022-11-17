@@ -30,7 +30,7 @@ exp = Experiment(
     model_dim=128,
     kernel_size=512)
 
-init_weights = make_initializer(0.1)
+init_weights = make_initializer(0.05)
 
 n_events = 32
 n_harmonics = 16
@@ -47,8 +47,13 @@ noise_coeff = 1
 render_type = 'nerf'
 
 train_generator = True
-train_renderer = True
+should_train_renderer = True
 train_true = False
+
+def activation(x):
+    return torch.sigmoid(x)
+    # return (torch.sin(x) + 1) * 0.5
+    # return torch.clamp(x, 0, 1)
 
 mel_scale = MelScale()
 codec = AudioCodec(mel_scale)
@@ -137,22 +142,30 @@ class BandLimitedNoise(nn.Module):
         return band_limited_noise
 
 class NerfEventRenderer(nn.Module):
-    def __init__(self, latent_dim, n_frames, freq_bins, n_events, n_rooms):
+    def __init__(self, latent_dim, n_frames, freq_bins, n_events, n_rooms, patch_size):
         super().__init__()
         self.latent_dim = latent_dim
         self.n_frames = n_frames
         self.freq_bins = freq_bins
         self.n_events = n_events
         self.n_rooms = n_rooms
+        self.patch_size = patch_size
+
+        width, height = self.patch_size
+
+        self.patch_frames = n_frames // width
+        self.patch_bins = freq_bins // height
 
         self.two_d = False
 
         if self.two_d:
             self.register_buffer(
-                'grid', two_d_pos_encode(n_frames, freq_bins, device))
+                'grid', two_d_pos_encode(self.patch_frames, self.patch_bins, device))
             self.expand_pos_encoding = nn.Linear(34, 128)
-            self.net = LinearOutputStack(
-                16, layers=4, out_channels=1, in_channels=exp.model_dim)
+
+            self.net = nn.Linear(exp.model_dim, np.prod(self.patch_size))
+            # self.net = LinearOutputStack(
+            #     8, layers=1, out_channels=1, in_channels=exp.model_dim)
         else:
             self.pos = PosEncodedUpsample(
                 exp.model_dim, 
@@ -171,7 +184,10 @@ class NerfEventRenderer(nn.Module):
             x = x[..., None, None].permute(0, 2, 3, 1)
             x = x + grid
             x = self.net(x)
-            x = x.view(-1, self.n_frames, self.freq_bins).permute(0, 2, 1)
+            x = x\
+                .view(-1, self.patch_frames, self.patch_bins, np.prod(self.patch_size))\
+                .permute(0, 2, 1, 3)\
+                .view(-1, self.freq_bins, self.n_frames)
             return x
         else:
             x = self.pos(x)
@@ -327,13 +343,13 @@ class Model(nn.Module):
             x).view(-1, n_events, params_per_event)
 
         if noise_mix == 0:
-            event_params = torch.sigmoid(event_params)
+            event_params = activation(event_params)
         else:
             noise = torch.zeros_like(
                 event_params, device=x.device).uniform_(0, 1)
             actual_amt = 1 - noise_mix
             event_params = (noise * noise_mix) + \
-                (actual_amt * torch.sigmoid(event_params))
+                (actual_amt * activation(event_params))
 
         res_baseline = resonance_baseline
         res_span = 1 - res_baseline
@@ -374,7 +390,7 @@ model = Model(
     n_events,
     n_harmonics,
     samples_per_frame).to(device)
-optim = optimizer(model, lr=1e-3)
+optim = optimizer(model, lr=1e-4)
 
 render = Renderer(
     exp.model_dim,
@@ -383,7 +399,7 @@ render = Renderer(
     n_events=n_events,
     n_rooms=model.n_rooms,
     render_type=render_type).to(device)
-render_optim = optimizer(render, lr=1e-3)
+render_optim = optimizer(render, lr=1e-4)
 
 
 def iteration_to_noise_mix(iteration):
@@ -421,7 +437,7 @@ def train(batch, iteration):
     real_spec = codec.to_frequency_domain(
         batch.view(-1, exp.n_samples))[..., 0]
     pred_spec = render.forward(params.view(-1, params_per_event), latent)
-    loss = F.mse_loss(pred_spec, real_spec) + torch.abs(batch.std() - recon.std())
+    loss = F.mse_loss(pred_spec, real_spec)
     loss.backward()
     optim.step()
     return recon, latent, loss
@@ -506,7 +522,7 @@ class ResonantAtomsExperiment(object):
                 self.latent = latent
                 print(i, 'G', loss.item())
 
-            if train_renderer:
+            if should_train_renderer:
                 loss, rendered, actual, recon = train_renderer(item, i)
                 self.render_recon = recon
                 self.rendered = rendered
