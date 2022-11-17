@@ -32,6 +32,8 @@ exp = Experiment(
 
 init_weights = make_initializer(0.05)
 
+
+# Experiment Params ########################################################
 n_events = 32
 n_harmonics = 16
 samples_per_frame = 256
@@ -49,6 +51,10 @@ render_type = 'nerf'
 train_generator = True
 should_train_renderer = True
 train_true = False
+
+patch_size = (4, 4)
+
+# #########################################################################
 
 def activation(x):
     return torch.sigmoid(x)
@@ -156,16 +162,14 @@ class NerfEventRenderer(nn.Module):
         self.patch_frames = n_frames // width
         self.patch_bins = freq_bins // height
 
-        self.two_d = False
+        self.two_d = True
 
         if self.two_d:
             self.register_buffer(
                 'grid', two_d_pos_encode(self.patch_frames, self.patch_bins, device))
             self.expand_pos_encoding = nn.Linear(34, 128)
-
-            self.net = nn.Linear(exp.model_dim, np.prod(self.patch_size))
-            # self.net = LinearOutputStack(
-            #     8, layers=1, out_channels=1, in_channels=exp.model_dim)
+            self.net = LinearOutputStack(
+                exp.model_dim, layers=3, out_channels=np.prod(self.patch_size), in_channels=exp.model_dim)
         else:
             self.pos = PosEncodedUpsample(
                 exp.model_dim, 
@@ -187,7 +191,7 @@ class NerfEventRenderer(nn.Module):
             x = x\
                 .view(-1, self.patch_frames, self.patch_bins, np.prod(self.patch_size))\
                 .permute(0, 2, 1, 3)\
-                .view(-1, self.freq_bins, self.n_frames)
+                .reshape(-1, self.freq_bins, self.n_frames)
             return x
         else:
             x = self.pos(x)
@@ -247,7 +251,7 @@ class Renderer(nn.Module):
             )
         elif render_type == 'nerf':
             self.net = NerfEventRenderer(
-                latent_dim, n_frames, n_freq_bins, n_events, n_rooms)
+                latent_dim, n_frames, n_freq_bins, n_events, n_rooms, patch_size=patch_size)
         else:
             raise ValueError(f'unknown render type {render_type}')
 
