@@ -48,9 +48,10 @@ resonance_baseline = 0.8
 noise_coeff = 1
 render_type = 'nerf'
 
-train_generator = True
-should_train_renderer = True
-train_true = False
+train_generator = False
+should_train_renderer = False
+train_true = True
+train_encoder = True
 
 patch_size = (4, 4)
 
@@ -276,6 +277,27 @@ class Renderer(nn.Module):
         specs = specs ** 2
         return specs
 
+def generate_random_synth_params(batch, n_rooms, device):
+
+    res_baseline = resonance_baseline
+    res_span = 1 - res_baseline
+
+    event_params = torch.zeros(batch, n_events, params_per_event, device=device).uniform_(0, 1)
+    freq_means = event_params[:, :, 0].view(batch, n_events, 1)
+    freq_stds = event_params[:, :, 1].view(batch, n_events, 1) * 0.1
+    time_means = event_params[:, :, 2].view(batch,n_events, 1)
+    time_stds = event_params[:, :, 3].view(batch, n_events, 1) * 0.1
+    f0 = event_params[:, :, 4].view(batch, n_events, 1) ** 2
+    amps = event_params[:, :, 5].view(batch, n_events, 1)
+    res = (event_params[:, :, 6:].view(
+        batch, n_events, n_harmonics) * res_span) + res_baseline
+    
+
+    mx = torch.zeros(batch, 1).uniform_(0, 1)
+    rooms = torch.softmax(torch.zeros(batch, n_rooms, device=device).normal_(0, 1), dim=-1)
+    
+    return freq_means, freq_stds, time_means, time_stds, f0, amps, res, mx, rooms
+
 
 class Model(nn.Module):
     def __init__(self, n_samples, n_events, n_harmonics, samples_per_frame):
@@ -315,8 +337,32 @@ class Model(nn.Module):
         )
 
         self.apply(init_weights)
+    
+    def synthesize(self, freq_means, freq_stds, time_means, time_stds, f0, res, amps, mx, rooms):
 
-    def forward(self, x, noise_mix=0):
+        # gradients do not flow through the following operations
+        windows = self.noise.forward(freq_means, freq_stds)
+        events = self.impulses.forward(time_means, time_stds)
+
+        resonances = self.resonance.forward(f0, res)
+
+        # locate events in time and scale by amplitude
+        located = windows * events * amps
+
+        # convolve impulses with resonances
+        located = fft_convolve(located, resonances) + (located * noise_coeff)
+
+        located = torch.sum(located, dim=1, keepdim=True)
+
+        dry = located
+        wet = self.verb.forward(located, rooms)
+
+        located = (dry * (1 - mx)) + (wet * mx)
+
+        return located
+
+
+    def forward(self, x, noise_mix=0, return_encodings=False):
 
         # encode
         batch = x.shape[0]
@@ -366,25 +412,40 @@ class Model(nn.Module):
         amps = event_params[:, :, 5].view(batch, self.n_events, 1)
         res = (event_params[:, :, 6:].view(
             batch, self.n_events, self.n_harmonics) * res_span) + res_baseline
+        
+
+        if return_encodings:
+            return freq_means, freq_stds, time_means, time_stds, f0, res, amps, mx, rooms
 
         # gradients do not flow through the following operations
-        windows = self.noise.forward(freq_means, freq_stds)
-        events = self.impulses.forward(time_means, time_stds)
+        # windows = self.noise.forward(freq_means, freq_stds)
+        # events = self.impulses.forward(time_means, time_stds)
 
-        resonances = self.resonance.forward(f0, res)
+        # resonances = self.resonance.forward(f0, res)
 
-        # locate events in time and scale by amplitude
-        located = windows * events * amps
+        # # locate events in time and scale by amplitude
+        # located = windows * events * amps
 
-        # convolve impulses with resonances
-        located = fft_convolve(located, resonances) + (located * noise_coeff)
+        # # convolve impulses with resonances
+        # located = fft_convolve(located, resonances) + (located * noise_coeff)
 
-        located = torch.sum(located, dim=1, keepdim=True)
+        # located = torch.sum(located, dim=1, keepdim=True)
 
-        dry = located
-        wet = self.verb.forward(located, rooms)
+        # dry = located
+        # wet = self.verb.forward(located, rooms)
 
-        located = (dry * (1 - mx)) + (wet * mx)
+        # located = (dry * (1 - mx)) + (wet * mx)
+
+        located = self.synthesize(
+            freq_means, 
+            freq_stds, 
+            time_means, 
+            time_stds, 
+            f0, 
+            res, 
+            amps, 
+            mx, 
+            rooms)
 
         return located, verb_params, event_params
 
@@ -446,19 +507,51 @@ def train(batch, iteration):
     optim.step()
     return recon, latent, loss
 
+def train_encodings(batch, iteration):
+    with torch.no_grad():
+        freq_means, freq_stds, time_means, time_stds, f0, amps, res, mx, rooms = generate_random_synth_params(
+            batch.shape[0], model.n_rooms, device=device)
+        random_audio = model.synthesize(
+            freq_means, freq_stds, time_means, time_stds, f0, res, amps, mx, rooms)        
+        real_packed = torch.cat([
+            freq_means.view(-1), 
+            freq_stds.view(-1), 
+            time_means.view(-1), 
+            time_stds.view(-1), 
+            f0.view(-1), 
+            res.view(-1), 
+            amps.view(-1), 
+            mx.view(-1), 
+            rooms.view(-1)])
+
+    
+    freq_means, freq_stds, time_means, time_stds, f0, res, amps, mx, rooms = model.forward(random_audio, return_encodings=True)
+    fake_packed = torch.cat([
+            freq_means.view(-1), 
+            freq_stds.view(-1), 
+            time_means.view(-1), 
+            time_stds.view(-1), 
+            f0.view(-1), 
+            res.view(-1), 
+            amps.view(-1), 
+            mx.view(-1), 
+            rooms.view(-1)])
+    
+    loss = F.mse_loss(fake_packed, real_packed)
+    loss.backward()
+
+    optim.step()
+
+    return loss
+
+    
 
 def train_direct(batch, iteration):
     optim.zero_grad()
     recon, latent, params = model.forward(batch)
 
-    # real_spec = codec.to_frequency_domain(batch.view(-1, exp.n_samples))[..., 0]
-    # pred_spec = codec.to_frequency_domain(recon.view(-1, exp.n_samples))[..., 0]
-
     real_spec = stft(batch, 512, 256, pad=True)
     fake_spec = stft(recon, 512, 256, pad=True)
-
-    # real_spec = exp.perceptual_feature(batch)
-    # fake_spec = exp.perceptual_feature(recon)
 
     loss = F.mse_loss(fake_spec, real_spec)
     loss.backward()
@@ -519,6 +612,10 @@ class ResonantAtomsExperiment(object):
                 self.win = w
                 self.latent = latent
                 print(i, 'D', loss.item())
+            
+            if train_encoder:
+                loss = train_encodings(item, i)
+                print(i, 'E', loss.item())
 
             if train_generator:
                 w, latent, loss = train(item, i)
