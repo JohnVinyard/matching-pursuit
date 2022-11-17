@@ -190,7 +190,7 @@ class NerfEventRenderer(nn.Module):
             x = self.net(x)
             x = x\
                 .view(-1, self.patch_frames, self.patch_bins, np.prod(self.patch_size))\
-                .permute(0, 2, 1, 3)\
+                .permute(0, 3, 2, 1)\
                 .reshape(-1, self.freq_bins, self.n_frames)
             return x
         else:
