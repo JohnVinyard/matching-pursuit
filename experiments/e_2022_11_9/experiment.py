@@ -56,7 +56,9 @@ train_true = True
 train_encoder = False
 patch_size = (4, 4)
 
-transformer_encoder = True
+transformer_encoder = False
+
+collapse_latent = True
 
 def soft_clamp(x):
     x_backward = x
@@ -65,8 +67,8 @@ def soft_clamp(x):
     return y
 
 def activation(x):
-    return torch.sigmoid(x)
-    # return (torch.sin(x) + 1) * 0.5
+    # return torch.sigmoid(x)
+    return (torch.sin(x) + 1) * 0.5
     # return torch.clamp(x, 0, 1)
     # return soft_clamp(x)
 
@@ -339,9 +341,9 @@ class Model(nn.Module):
         self.n_rooms = self.verb.n_rooms
 
         if transformer_encoder:
-            # encoder = nn.TransformerEncoderLayer(exp.model_dim, 4, exp.model_dim, batch_first=True)
-            # self.context = nn.TransformerEncoder(encoder, 4)
-            self.context = Transformer(exp.model_dim, 5)
+            encoder = nn.TransformerEncoderLayer(exp.model_dim, 4, exp.model_dim, batch_first=True)
+            self.context = nn.TransformerEncoder(encoder, 4)
+            # self.context = Transformer(exp.model_dim, 5)
         else:
             self.context = DilatedStack(exp.model_dim, [1, 3, 9, 27, 1])
         
@@ -355,14 +357,24 @@ class Model(nn.Module):
         self.to_room = LinearOutputStack(
             exp.model_dim, 2, out_channels=self.n_rooms)
 
-        self.to_event_params = nn.Sequential(
-            LinearOutputStack(exp.model_dim, 2, out_channels=params_per_event)
-        )
+        if collapse_latent:
+            self.to_event_params = PosEncodedUpsample(
+                        exp.model_dim, 
+                        exp.model_dim, 
+                        size=n_events, 
+                        out_channels=params_per_event, 
+                        layers=4,
+                        concat=True, 
+                        multiply=False, 
+                        learnable_encodings=False)
+        else:
+            self.to_event_params = nn.Sequential(
+                LinearOutputStack(exp.model_dim, 2, out_channels=params_per_event)
+            )
 
+        
         self.apply(init_weights)
     
-    
-
 
     def forward(self, x, noise_mix=0, return_encodings=False):
 
@@ -386,7 +398,7 @@ class Model(nn.Module):
         else:
             x = self.context(x)
         
-        # x = self.norm(x)
+        x = self.norm(x)
 
         x, indices = self.sparse(x)
 
@@ -399,8 +411,12 @@ class Model(nn.Module):
         verb_params = torch.cat(
             [mx.view(-1, 1), rooms.view(-1, self.n_rooms)], dim=-1)
 
-        event_params = self.to_event_params.forward(
-            x).view(-1, n_events, params_per_event)
+        if collapse_latent:
+            event_params = self.to_event_params(x).permute(0, 2, 1)
+        else:
+            event_params = self.to_event_params.forward(x)
+        
+        event_params = event_params.view(-1, n_events, params_per_event)
 
         if noise_mix == 0:
             event_params = activation(event_params)
@@ -474,7 +490,7 @@ model = Model(
     n_events,
     n_harmonics,
     samples_per_frame).to(device)
-optim = optimizer(model, lr=1e-4)
+optim = optimizer(model, lr=1e-3)
 
 render = Renderer(
     exp.model_dim,

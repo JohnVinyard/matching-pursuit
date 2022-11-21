@@ -69,7 +69,10 @@ class Experiment(object):
         x = self.aim.forward(x)
         return x
 
-    def perceptual_loss(self, a, b):
+    def perceptual_loss(self, a, b, norm='l2'):
         a = self.perceptual_feature(a)
         b = self.perceptual_feature(b)
-        return F.mse_loss(a, b)
+        if norm == 'l2':
+            return F.mse_loss(a, b)
+        else:
+            return torch.abs(a - b).sum()
