@@ -291,7 +291,8 @@ class TransferFunction(nn.Module):
             n_samples: int,
             softmax_func: Any,
             is_continuous=False,
-            resonance_exp=1):
+            resonance_exp=1,
+            reduction=lambda x: torch.mean(x, dim=-1, keepdim=True)):
 
         super().__init__()
         self.samplerate = samplerate
@@ -302,11 +303,11 @@ class TransferFunction(nn.Module):
         self.softmax_func = softmax_func
         self.is_continuous = is_continuous
         self.resonance_exp = resonance_exp
+        self.reduction = reduction
 
         bank = morlet_filter_bank(
             samplerate, n_samples, scale, 0.1, normalize=False)\
             .real.astype(np.float32)
-        
         
         self.register_buffer('filter_bank', torch.from_numpy(bank)[None, :, :])
 
@@ -335,7 +336,7 @@ class TransferFunction(nn.Module):
         x = F.interpolate(x, size=self.n_samples, mode='linear')
 
         x = x * self.filter_bank
-        x = torch.mean(x, dim=1, keepdim=True)
+        x = self.reduction(x)
         return x
 
 
