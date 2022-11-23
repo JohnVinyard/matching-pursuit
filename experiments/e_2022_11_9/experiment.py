@@ -43,7 +43,7 @@ min_center_freq = 20
 max_center_freq = 4000
 
 resonance_steps = n_harmonics
-precompute_resonance = True
+precompute_resonance = False
 
 # it'd be nice to summarize the harmonics/resonance spectrogram...somehow
 # harmonics, f0, impulse_loc, impulse_std, bandwidth_loc, bandwidth_std, amplitude
@@ -60,7 +60,7 @@ noise_coeff = 1
 # train_encoder = False
 # patch_size = (4, 4)
 
-transformer_encoder = True
+transformer_encoder = False
 collapse_latent = False
 
 
@@ -72,10 +72,16 @@ def soft_clamp(x):
 
 
 def activation(x):
-    # return torch.sigmoid(x)
-    return (torch.sin(x) + 1) * 0.5
+    return torch.sigmoid(x)
+    # return (torch.sin(x) + 1) * 0.5
     # return torch.clamp(x, 0, 1)
     # return soft_clamp(x)
+
+learning_rate = 1e-4
+
+def softmax(x):
+    return torch.softmax(x, dim=-1)
+    # return F.gumbel_softmax(x, dim=-1, hard=True)
 
 # #########################################################################
 
@@ -98,7 +104,8 @@ class Window(nn.Module):
         rng = torch.linspace(0, 1, self.n_samples, device=means.device)[
             None, None, :]
         windows = torch.exp(dist.log_prob(rng))
-        windows = max_norm(windows, dim=-1)
+        # windows = max_norm(windows, dim=-1)
+        # print(means.shape, stds.shape, windows.shape)
         return windows
 
 
@@ -129,7 +136,7 @@ class Resonance(nn.Module):
         self.freq_scale = self.max_freq - self.min_freq
 
         if self.precomputed:
-            resonances = torch.linspace(0, 0.999, resonance_steps)\
+            resonances = torch.linspace(resonance_baseline, 0.999, resonance_steps)\
                 .view(resonance_steps, 1).repeat(1, exp.n_frames)
             resonances = torch.cumprod(resonances, dim=-1)
             self.register_buffer('resonance', resonances)
@@ -153,8 +160,7 @@ class Resonance(nn.Module):
 
         # we also need resonance values for each harmonic
         if self.precomputed:
-            # res = torch.softmax(res, dim=-1)
-            res = F.gumbel_softmax(res, dim=-1, hard=True)
+            res = softmax(res)
             res = res @ self.resonance
             res = torch.sum(res, dim=2)
         else:
@@ -373,10 +379,10 @@ class Model(nn.Module):
         self.n_rooms = self.verb.n_rooms
 
         if transformer_encoder:
-            encoder = nn.TransformerEncoderLayer(
-                exp.model_dim, 4, exp.model_dim, batch_first=True)
-            self.context = nn.TransformerEncoder(encoder, 4)
-            # self.context = Transformer(exp.model_dim, 5)
+            # encoder = nn.TransformerEncoderLayer(
+            #     exp.model_dim, 4, exp.model_dim, batch_first=True)
+            # self.context = nn.TransformerEncoder(encoder, 4)
+            self.context = Transformer(exp.model_dim, 5)
         else:
             self.context = DilatedStack(exp.model_dim, [1, 3, 9, 27, 1])
 
@@ -402,8 +408,7 @@ class Model(nn.Module):
                 learnable_encodings=False)
         else:
             self.to_event_params = nn.Sequential(
-                LinearOutputStack(exp.model_dim, 2,
-                                  out_channels=params_per_event)
+                LinearOutputStack(exp.model_dim, 4, out_channels=params_per_event)
             )
 
         self.apply(init_weights)
@@ -431,7 +436,6 @@ class Model(nn.Module):
             x = self.context(x)
 
         x = self.norm(x)
-
         
         x, indices = self.sparse(x)
 
@@ -526,7 +530,7 @@ model = Model(
     n_events,
     n_harmonics,
     samples_per_frame).to(device)
-optim = optimizer(model, lr=1e-4)
+optim = optimizer(model, lr=learning_rate)
 
 # render = Renderer(
 #     exp.model_dim,
@@ -635,15 +639,16 @@ def train_direct(batch, iteration):
     optim.zero_grad()
     recon, latent, params = model.forward(batch)
 
-    real_spec = stft(batch, 512, 256, pad=True)
-    fake_spec = stft(recon, 512, 256, pad=True)
-    loss = F.mse_loss(fake_spec, real_spec)
-
-    # loss = exp.perceptual_loss(recon, batch)
+    # real_spec = stft(batch, 512, 256, pad=True)
+    # fake_spec = stft(recon, 512, 256, pad=True)
+    # loss = F.mse_loss(fake_spec, real_spec)
 
     # fake_spec = torch.fft.rfft(recon, dim=-1, norm='ortho')
     # real_spec = torch.fft.rfft(batch, dim=-1, norm='ortho')
     # loss = F.mse_loss(torch.abs(fake_spec), torch.abs(real_spec))
+
+    loss = exp.perceptual_loss(recon, batch)
+    
 
     loss.backward()
     optim.step()
