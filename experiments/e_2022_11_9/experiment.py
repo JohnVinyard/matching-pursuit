@@ -43,7 +43,7 @@ min_center_freq = 20
 max_center_freq = 4000
 
 resonance_steps = n_harmonics
-precompute_resonance = False
+precompute_resonance = True
 
 # it'd be nice to summarize the harmonics/resonance spectrogram...somehow
 # harmonics, f0, impulse_loc, impulse_std, bandwidth_loc, bandwidth_std, amplitude
@@ -162,7 +162,7 @@ class Resonance(nn.Module):
         if self.precomputed:
             res = softmax(res)
             res = res @ self.resonance
-            res = torch.sum(res, dim=2)
+            res = res.view(-1, 1, exp.n_frames)
         else:
             res = res[..., None].repeat(1, 1, 1, self.n_frames)
             res = torch.cumprod(res, dim=-1).view(-1, 1, self.n_frames)
