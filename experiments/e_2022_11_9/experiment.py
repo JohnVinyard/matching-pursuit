@@ -32,18 +32,18 @@ exp = Experiment(
     kernel_size=512)
 
 
-init_weights = make_initializer(0.1)
+init_weights = make_initializer(0.08)
 
 
 # Experiment Params ########################################################
 n_events = 16
-n_harmonics = 8
+n_harmonics = 16
 samples_per_frame = 256
 min_center_freq = 20
 max_center_freq = 4000
 
 resonance_steps = n_harmonics
-precompute_resonance = True
+precompute_resonance = False
 
 # it'd be nice to summarize the harmonics/resonance spectrogram...somehow
 # harmonics, f0, impulse_loc, impulse_std, bandwidth_loc, bandwidth_std, amplitude
@@ -77,7 +77,7 @@ def activation(x):
     # return torch.clamp(x, 0, 1)
     # return soft_clamp(x)
 
-learning_rate = 1e-4
+learning_rate = 1e-3
 
 def softmax(x):
     return torch.softmax(x, dim=-1)
@@ -91,22 +91,34 @@ codec = AudioCodec(mel_scale)
 
 
 class Window(nn.Module):
-    def __init__(self, n_samples, mn, mx, epsilon=1e-8):
+    def __init__(self, n_samples, mn, mx, epsilon=1e-8, padding=0):
         super().__init__()
         self.n_samples = n_samples
         self.mn = mn
         self.mx = mx
         self.scale = self.mx - self.mn
         self.epsilon = epsilon
+        self.padding = padding
+
+        self.up = ConvUpsample(2, 16, 8, end_size=32 if padding else 128, mode='nearest', out_channels=1)
 
     def forward(self, means, stds):
-        dist = Normal(self.mn + (means * self.scale), self.epsilon + stds)
-        rng = torch.linspace(0, 1, self.n_samples, device=means.device)[
-            None, None, :]
-        windows = torch.exp(dist.log_prob(rng))
-        # windows = max_norm(windows, dim=-1)
-        # print(means.shape, stds.shape, windows.shape)
-        return windows
+        
+        # dist = Normal(self.mn + (means * self.scale), self.epsilon + stds)
+        # rng = torch.linspace(0, 1, self.n_samples, device=means.device)[
+        #     None, None, :]
+        # windows = torch.exp(dist.log_prob(rng))
+        # return windows
+
+        x = torch.cat([means, stds], dim=-1).view(-1, 2)
+        x = self.up(x)
+
+        up_size = self.n_samples - self.padding
+        x = F.interpolate(x, size=up_size, mode='nearest')
+        if self.padding > 0:
+            x = F.pad(x, (0, self.padding))
+        x = x.view(-1, n_events, self.n_samples)
+        return x
 
 
 class Resonance(nn.Module):
@@ -185,7 +197,7 @@ class BandLimitedNoise(nn.Module):
         self.min_center_freq = min_center_freq_hz / self.nyquist
         self.max_center_freq = max_center_freq_hz / self.nyquist
         self.window = Window(n_samples // 2 + 1,
-                             self.min_center_freq, self.max_center_freq)
+                             self.min_center_freq, self.max_center_freq, padding=1)
 
     def forward(self, center_frequencies, bandwidths):
         windows = self.window.forward(center_frequencies, bandwidths)
@@ -639,16 +651,15 @@ def train_direct(batch, iteration):
     optim.zero_grad()
     recon, latent, params = model.forward(batch)
 
-    # real_spec = stft(batch, 512, 256, pad=True)
-    # fake_spec = stft(recon, 512, 256, pad=True)
-    # loss = F.mse_loss(fake_spec, real_spec)
+    real_spec = stft(batch, 512, 256, pad=True, log_amplitude=True)
+    fake_spec = stft(recon, 512, 256, pad=True, log_amplitude=True)
+    loss = F.mse_loss(fake_spec, real_spec)
 
     # fake_spec = torch.fft.rfft(recon, dim=-1, norm='ortho')
     # real_spec = torch.fft.rfft(batch, dim=-1, norm='ortho')
-    # loss = F.mse_loss(torch.abs(fake_spec), torch.abs(real_spec))
+    # loss = loss + F.mse_loss(torch.abs(fake_spec), torch.abs(real_spec))
 
-    loss = exp.perceptual_loss(recon, batch)
-    
+    # loss = exp.perceptual_loss(recon, batch)
 
     loss.backward()
     optim.step()
