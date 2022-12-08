@@ -6,9 +6,10 @@ from config.experiment import Experiment
 from modules.dilated import DilatedStack
 from modules.fft import fft_convolve
 from modules.linear import LinearOutputStack
-from modules.normalization import ExampleNorm, max_norm
+from modules.normalization import ExampleNorm, max_norm, unit_norm
 from modules.phase import AudioCodec, MelScale
 from modules.pos_encode import ExpandUsingPosEncodings, pos_encoded, two_d_pos_encode
+from modules.psychoacoustic import PsychoacousticFeature
 from modules.shape import Reshape
 from modules.sparse import VectorwiseSparsity
 from modules.stft import stft
@@ -47,13 +48,14 @@ n_f0_steps = len(exp.scale)
 
 resonance_steps = n_harmonics
 precompute_resonance = True
+learned_envelopes = False
 
 # it'd be nice to summarize the harmonics/resonance spectrogram...somehow
 # harmonics, f0, impulse_loc, impulse_std, bandwidth_loc, bandwidth_std, amplitude
 params_per_event = (n_harmonics * resonance_steps) + \
     5 + n_f0_steps if precompute_resonance else n_harmonics + 5 + n_f0_steps
 
-resonance_baseline = 0.5
+resonance_baseline = 0.75
 noise_coeff = 1
 
 transformer_encoder = False
@@ -68,10 +70,11 @@ def soft_clamp(x):
 
 
 def activation(x):
-    return torch.sigmoid(x)
-    # return (torch.sin(x) + 1) * 0.5
+    # return torch.sigmoid(x)
+    return (torch.sin(x) + 1) * 0.5
     # return torch.clamp(x, 0, 1)
     # return soft_clamp(x)
+    # return (F.hardtanh(x) + 1) * 0.5
 
 
 learning_rate = 1e-4
@@ -98,27 +101,34 @@ class Window(nn.Module):
         self.epsilon = epsilon
         self.padding = padding
 
-        # self.up = ConvUpsample(
-        #     2, 16, 8, end_size=32 if padding else 128, mode='learned', out_channels=1)
+        self.up = ConvUpsample(
+            2, exp.model_dim, 8, 128, mode='nearest', out_channels=1)
+
 
     def forward(self, means, stds):
 
-        dist = Normal(self.mn + (means * self.scale), self.epsilon + stds)
-        rng = torch.linspace(0, 1, self.n_samples, device=means.device)[
-            None, None, :]
-        windows = torch.exp(dist.log_prob(rng))
-        windows = max_norm(windows)
-        return windows
+        if learned_envelopes:
+            x = torch.cat([means, stds], dim=-1).view(-1, 2)
+            x = unit_norm(x)
+            x = self.up(x)
 
-        # x = torch.cat([means, stds], dim=-1).view(-1, 2)
-        # x = self.up(x)
+            up_size = self.n_samples - self.padding
+            x = F.interpolate(x, size=up_size, mode='linear')
+            if self.padding > 0:
+                x = F.pad(x, (0, self.padding))
+            x = x.view(-1, n_events, self.n_samples)
+            x = x ** 2
+            x = max_norm(x)
+            return x
+        else:
+            dist = Normal(self.mn + (means * self.scale), self.epsilon + stds)
+            rng = torch.linspace(0, 1, self.n_samples, device=means.device)[
+                None, None, :]
+            windows = torch.exp(dist.log_prob(rng))
+            windows = max_norm(windows)
+            return windows
 
-        # up_size = self.n_samples - self.padding
-        # x = F.interpolate(x, size=up_size, mode='nearest')
-        # if self.padding > 0:
-        #     x = F.pad(x, (0, self.padding))
-        # x = x.view(-1, n_events, self.n_samples)
-        # return torch.sigmoid(x)
+        
 
 
 class Resonance(nn.Module):
@@ -236,10 +246,10 @@ class Model(nn.Module):
         self.n_rooms = self.verb.n_rooms
 
         if transformer_encoder:
-            encoder = nn.TransformerEncoderLayer(
-                exp.model_dim, 4, exp.model_dim, batch_first=True)
-            self.context = nn.TransformerEncoder(encoder, 4)
-            # self.context = Transformer(exp.model_dim, 5)
+            # encoder = nn.TransformerEncoderLayer(
+            #     exp.model_dim, 4, exp.model_dim, batch_first=True)
+            # self.context = nn.TransformerEncoder(encoder, 4)
+            self.context = Transformer(exp.model_dim, 5)
         else:
             self.context = DilatedStack(exp.model_dim, [1, 3, 9, 27, 1])
 
@@ -300,8 +310,8 @@ class Model(nn.Module):
         x = self.norm(x)
 
         x, indices = self.sparse(x)
-
         verb_params, _ = torch.max(x, dim=1)
+        collapsed_latent = verb_params
 
         # expand to params
         mx = torch.sigmoid(self.to_mix(verb_params)).view(batch, 1, 1)
@@ -311,7 +321,7 @@ class Model(nn.Module):
             [mx.view(-1, 1), rooms.view(-1, self.n_rooms)], dim=-1)
 
         if collapse_latent:
-            event_params = self.to_event_params(x).permute(0, 2, 1)
+            event_params = self.to_event_params(collapsed_latent).permute(0, 2, 1)
         else:
             event_params = self.to_event_params.forward(x)
 
@@ -329,16 +339,26 @@ class Model(nn.Module):
         res_baseline = resonance_baseline
         res_span = 1 - res_baseline
 
-        freq_means = event_params[:, :, 0].view(batch, self.n_events, 1) ** 2
+        freq_means = event_params[:, :, 0].view(batch, self.n_events, 1)
         freq_stds = event_params[:, :, 1].view(
-            batch, self.n_events, 1)  # * 0.1
+            batch, self.n_events, 1)
+        
+        if not learned_envelopes:
+            freq_means = (freq_means * 2) - 0.5
 
         time_means = event_params[:, :, 2].view(batch, self.n_events, 1)
-        time_stds = event_params[:, :, 3].view(batch, self.n_events, 1) * 0.1
+        time_stds = event_params[:, :, 3].view(batch, self.n_events, 1)
 
-        f0 = event_params[:, :, 4:4 + n_f0_steps].view(batch, self.n_events, n_f0_steps)
-        f0 = F.gumbel_softmax(f0, dim=-1, hard=True)
-        f0 = (f0 @ self.f0s).view(batch, n_events, 1)
+        if not learned_envelopes:
+            time_means = (time_means * 2) - 0.5
+            time_stds = time_stds * 0.1
+
+        if n_f0_steps == 1:
+            f0 = event_params[:, :, 4:4 + n_f0_steps].view(batch, self.n_events, n_f0_steps) ** 2
+        else:
+            f0 = event_params[:, :, 4:4 + n_f0_steps].view(batch, self.n_events, n_f0_steps)
+            f0 = softmax(f0)
+            f0 = (f0 @ self.f0s).view(batch, n_events, 1)
 
         amps = event_params[:, :, 4 + n_f0_steps].view(batch, self.n_events, 1) ** 2
 
@@ -411,7 +431,7 @@ def train_direct(batch, iteration):
     # real_spec = torch.fft.rfft(batch, dim=-1, norm='ortho')
     # loss = loss + F.mse_loss(torch.abs(fake_spec), torch.abs(real_spec))
 
-    loss = exp.perceptual_loss(recon, batch)
+    loss = exp.perceptual_loss(recon, batch, norm='l1')
 
     loss.backward()
     optim.step()
