@@ -5,7 +5,8 @@ from scipy.signal import resample, stft
 '''
 Resonator
 -------------------
-f0 * n_frames
+f0
+f0_variance * n_frames
 harm_amp * n_harmonics
 decay * n_harmonics
 
@@ -13,6 +14,40 @@ Impulse
 --------------------
 amp * n_frames
 freq domain envelope
+window (if impulses must be localized in time)
+
+
+This still needs to be viewed as individual events, because
+of polyphonic instruments like the piano
+
+It can be factored into
+
+instrument
+------------
+harm_amp * n_harmonics
+decay * n_harmonics
+freq_domain_envelope
+
+event
+-----------
+f0
+f0_variance * n_frames
+amp * n_frames
+
+
+For the initial over-fitting experiment(s), 
+we should just optimize the synth parameters directly
+and exclude any latent generation/hierarchical network
+stuff
+
+https://freesound.org/people/LiftPizzas/sounds/586617/
+https://freesound.org/people/Seidhepriest/sounds/232014/
+https://freesound.org/people/Walter_Odington/sounds/25602/
+https://freesound.org/people/hellska/sounds/328727/
+https://freesound.org/people/ananth-pattabi/sounds/44335/
+https://freesound.org/people/ldk1609/sounds/55944/
+https://freesound.org/people/MTG/sounds/358332/
+
 '''
 
 def naive(impulse, decay, n_harmonics, harmonic_amps):
