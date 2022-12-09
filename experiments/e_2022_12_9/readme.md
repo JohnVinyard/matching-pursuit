@@ -1,0 +1,1 @@
+Hopefully this is a better model for resonators

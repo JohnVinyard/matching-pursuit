@@ -80,10 +80,14 @@ if __name__ == '__main__':
     f0 = f0 + change
 
     osc = f0[None, :] * harmonic_factors[:, None]
+
     decay = np.linspace(0.99, 0.9, n_harmonics)
+
     harmonic_amps = np.geomspace(1, 0.95, n_harmonics)
     harmonic_amps[1::2] = 0
+
     radians = (osc / nyquist) * np.pi
+    
     radians = resample(radians, n_samples, axis=-1)
     # radians = radians[:, None].repeat(n_samples, axis=-1)
     osc = np.sin(np.cumsum(radians, axis=-1))
