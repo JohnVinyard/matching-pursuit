@@ -280,7 +280,7 @@ class Model(nn.Module):
         )
 
 
-        mode = 'learned'
+        mode = 'nearest'
         self.to_f = LinearOutputStack(exp.model_dim, 3, out_channels=len(scale) if discrete_freqs else 1)
         self.to_fine = ConvUpsample(
             exp.model_dim, 32, start_size=4, end_size=n_frames, mode=mode, out_channels=1)
