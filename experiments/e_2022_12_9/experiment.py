@@ -6,11 +6,16 @@ import torch
 import numpy as np
 from torch.jit import ScriptModule, script_method
 from torch.nn import functional as F
-from modules.normalization import max_norm
+from modules.dilated import DilatedStack
+from modules.linear import LinearOutputStack
+from modules.normalization import ExampleNorm, max_norm
+from modules.pos_encode import pos_encoded
 from modules.reverb import NeuralReverb
+from modules.sparse import VectorwiseSparsity
 from modules.stft import stft
 
 from train.optim import optimizer
+from upsample import ConvUpsample
 from util import playable
 from util.music import MusicalScale
 from util.readmedocs import readme
@@ -18,10 +23,9 @@ from util.readmedocs import readme
 exp = Experiment(
     samplerate=zounds.SR22050(),
     n_samples=2**15,
-    weight_init=0.1,
+    weight_init=0.05,
     model_dim=128,
     kernel_size=512)
-
 
 total_noise_coeffs = exp.n_samples // 2 + 1
 
@@ -32,8 +36,7 @@ min_f0 = (min_f0_hz / exp.samplerate.nyquist)
 max_f0 = (max_f0_hz / exp.samplerate.nyquist)
 f0_span = max_f0 - min_f0
 
-
-min_resonance = 0.1
+min_resonance = 0.5
 res_span = 1 - min_resonance
 
 n_frames = 128
@@ -42,11 +45,19 @@ harmonic_factors = torch.arange(1, n_harmonics + 1, step=1)
 freq_domain_filter_size = 64
 n_events = 8
 
+perceptual_loss = False
+discrete_freqs = False
+learning_rate = 1e-4
+
+def softmax(x):
+    # return F.gumbel_softmax(x, dim=-1, hard=True)
+    return torch.softmax(x, dim=-1)
+
 scale = MusicalScale()
 frequencies = torch.from_numpy(np.array(list(scale.center_frequencies)) / exp.samplerate.nyquist).float()
 
 param_sizes = {
-    'f0': len(scale),
+    'f0': len(scale) if discrete_freqs else 1,
     'f0_fine': n_frames,
     'amp': n_frames,
     'harmonic_amps': n_harmonics,
@@ -70,9 +81,15 @@ param_slices = build_param_slices()
 
 
 def activation(x):
+    # return torch.clamp(x, 0, 1)
     # return (torch.sin(x * 30) + 1) * 0.5
     return torch.sigmoid(x)
 
+def fb_feature(x):
+    x = exp.fb.forward(x, normalize=False)
+    x = exp.fb.temporal_pooling(
+        x, exp.window_size, exp.step_size)[..., :exp.n_frames]
+    return x
 
 '''
 Resonator
@@ -130,10 +147,14 @@ class SynthParams(object):
 
     @property
     def f0(self) -> Tensor:
-        x = self.packed[:, param_slices['f0']].view(-1, len(scale))
-        x = F.gumbel_softmax(x, dim=-1, hard=True)
-        x = x @ frequencies
-        return x.view(-1, 1).repeat(1, n_frames)
+        if discrete_freqs:
+            x = self.packed[:, param_slices['f0']].view(-1, len(scale))
+            x = softmax(x)
+            x = x @ frequencies
+            return x.view(-1, 1).repeat(1, n_frames)
+        else:
+            x = self.packed[:, param_slices['f0']].view(-1, 1).repeat(1, n_frames)
+            return x
 
     @property
     def f0_fine(self) -> Tensor:
@@ -210,11 +231,13 @@ class Synthesizer(nn.Module):
         x = torch.cat(output, dim=-1).view(-1, n_harmonics, n_frames)
         x = F.interpolate(x, size=exp.n_samples, mode='linear')
 
+
         x = x * osc_bank
         x = noise + x
 
-        x = torch.mean(x, dim=(0, 1), keepdim=True)
-        # x = max_norm(x)
+        x = x.view(-1, n_events, n_harmonics, exp.n_samples)
+
+        x = torch.mean(x, dim=(1, 2), keepdim=True).view(-1, 1, exp.n_samples)
 
         return x
 
@@ -222,26 +245,101 @@ class Synthesizer(nn.Module):
 class Model(nn.Module):
     def __init__(self):
         super().__init__()
-        self.params = nn.Parameter(
-            torch.zeros(n_events, total_synth_params).uniform_(0.01, 0.999))
+        # self.params = nn.Parameter(
+        #     torch.zeros(n_events, total_synth_params).uniform_(0.01, 0.999))
 
         self.verb = NeuralReverb.from_directory(
             Config.impulse_response_path(), exp.samplerate, exp.n_samples)
+        self.n_rooms = self.verb.n_rooms
 
-        self.rooms = nn.Parameter(torch.zeros(
-            self.verb.n_rooms).uniform_(-1, 1))
-        self.mix = nn.Parameter(torch.zeros(1).uniform_(0, 1))
+        # self.rooms = nn.Parameter(torch.zeros(
+            # self.verb.n_rooms).uniform_(-1, 1))
+        # /elf.mix = nn.Parameter(torch.zeros(1).uniform_(0, 1))
         self.synth = Synthesizer()
 
+        self.context = DilatedStack(exp.model_dim, [1, 3, 9, 27, 1])
+
+        self.reduce = nn.Conv1d(exp.scale.n_bands + 33, exp.model_dim, 1, 1, 0)
+        self.norm = ExampleNorm()
+
+        self.sparse = VectorwiseSparsity(
+            exp.model_dim, keep=n_events, channels_last=False, dense=False, normalize=True)
+
+        self.to_mix = LinearOutputStack(exp.model_dim, 2, out_channels=1)
+        self.to_room = LinearOutputStack(
+            exp.model_dim, 2, out_channels=self.n_rooms)
+
+
+        self.to_event_params = nn.Sequential(
+            LinearOutputStack(exp.model_dim, 4,
+                                out_channels=total_synth_params)
+        )
+
+
+        mode = 'learned'
+        self.to_f = LinearOutputStack(exp.model_dim, 3, out_channels=len(scale) if discrete_freqs else 1)
+        self.to_fine = ConvUpsample(
+            exp.model_dim, 32, start_size=4, end_size=n_frames, mode=mode, out_channels=1)
+        self.to_harm_amp = ConvUpsample(
+            exp.model_dim, 32, start_size=4, end_size=n_harmonics, out_channels=1, mode=mode)
+        self.to_harm_decay = ConvUpsample(
+            exp.model_dim, 32, start_size=4, end_size=n_harmonics, out_channels=1, mode=mode)
+        self.to_freq_domain_env = ConvUpsample(
+            exp.model_dim, 32, start_size=4, end_size=freq_domain_filter_size, out_channels=1, mode=mode)
+        self.to_amp = ConvUpsample(
+            exp.model_dim, 32, start_size=4, end_size=n_frames, out_channels=1, mode=mode)
+
+
+        self.apply(lambda p: exp.init_weights(p))
+
     def forward(self, x):
-        p = activation(self.params)
+
+        batch = x.shape[0]
+        x = exp.fb.forward(x, normalize=False)
+        x = exp.fb.temporal_pooling(
+            x, exp.window_size, exp.step_size)[..., :exp.n_frames]
+        x = self.norm(x)
+        pos = pos_encoded(
+            batch, exp.n_frames, 16, device=x.device).permute(0, 2, 1)
+
+        x = torch.cat([x, pos], dim=1)
+        x = self.reduce(x)
+
+        x = self.context(x)
+
+        x = self.norm(x)
+
+        x, indices = self.sparse(x)
+        verb_params, _ = torch.max(x, dim=1)
+
+        # expand to params
+        mx = torch.sigmoid(self.to_mix(verb_params)).view(batch, 1, 1)
+        rooms = softmax(self.to_room(verb_params))
+
+        verb_params = torch.cat(
+            [mx.view(-1, 1), rooms.view(-1, self.n_rooms)], dim=-1)
+
+        # event_params = self.to_event_params.forward(x)
+
+        # p = event_params.view(-1, total_synth_params)
+
+        f0 = self.to_f.forward(x).view(-1, 1)
+        f0_fine = self.to_fine(x).view(-1, n_frames)
+        harm_amp = self.to_harm_amp(x).view(-1, n_harmonics)
+        harm_decay = self.to_harm_decay(x).view(-1, n_harmonics)
+        freq_env = self.to_freq_domain_env(x).view(-1, freq_domain_filter_size)
+        amp = self.to_amp(x).view(-1, n_frames)
+
+        p = torch.cat([f0, f0_fine, harm_amp, harm_decay, freq_env, amp], dim=-1)
+
+        p = activation(p)
+
         params = SynthParams(p)
         samples = self.synth.forward(params)
 
-        rm = F.gumbel_softmax(self.rooms, dim=-1, hard=True)[None, ...]
+        rm = softmax(rooms)
         wet = self.verb.forward(samples, rm)
 
-        mx = torch.sigmoid(self.mix).view(-1, 1, 1)
 
         samples = (mx * wet) + ((1 - mx) * samples)
 
@@ -249,18 +347,22 @@ class Model(nn.Module):
 
 
 model = Model()
-optim = optimizer(model, lr=1e-4)
+optim = optimizer(model, lr=learning_rate)
 
 
 def train(batch):
     optim.zero_grad()
     recon = model.forward(batch)
-    # loss = exp.perceptual_loss(recon, batch)
 
-    real_spec = stft(batch, 512, 256, pad=True, log_amplitude=True)
-    fake_spec = stft(recon, 512, 256, pad=True, log_amplitude=True)
-
-    loss = F.mse_loss(fake_spec, real_spec)
+    if perceptual_loss:
+        loss = exp.perceptual_loss(recon, batch)
+    else:
+        real_spec = stft(batch, 512, 256, pad=True, log_amplitude=True)
+        fake_spec = stft(recon, 512, 256, pad=True, log_amplitude=True)
+        # real_spec = fb_feature(batch)
+        # fake_spec = fb_feature(recon)
+        loss = F.mse_loss(fake_spec, real_spec)
+    
     loss.backward()
     optim.step()
 
