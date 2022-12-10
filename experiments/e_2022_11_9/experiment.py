@@ -34,7 +34,7 @@ exp = Experiment(
     kernel_size=512)
 
 
-init_weights = make_initializer(0.1)
+init_weights = make_initializer(0.02)
 
 
 # Experiment Params ########################################################
@@ -47,15 +47,18 @@ max_center_freq = 4000
 n_f0_steps = len(exp.scale)
 
 resonance_steps = n_harmonics
-precompute_resonance = True
+
+# TODO: Damping only works *without* the precomputed resonances.  Fix this
+precompute_resonance = False
+
 learned_envelopes = False
 
 # it'd be nice to summarize the harmonics/resonance spectrogram...somehow
 # harmonics, f0, impulse_loc, impulse_std, bandwidth_loc, bandwidth_std, amplitude
 params_per_event = (n_harmonics * resonance_steps) + \
-    5 + n_f0_steps if precompute_resonance else n_harmonics + 5 + n_f0_steps
+    8 + n_f0_steps if precompute_resonance else n_harmonics + 8 + n_f0_steps
 
-resonance_baseline = 0.75
+resonance_baseline = 0.5
 noise_coeff = 1
 
 transformer_encoder = False
@@ -70,8 +73,8 @@ def soft_clamp(x):
 
 
 def activation(x):
-    # return torch.sigmoid(x)
-    return (torch.sin(x) + 1) * 0.5
+    return torch.sigmoid(x)
+    # return (torch.sin(x) + 1) * 0.5
     # return torch.clamp(x, 0, 1)
     # return soft_clamp(x)
     # return (F.hardtanh(x) + 1) * 0.5
@@ -81,8 +84,8 @@ learning_rate = 1e-4
 
 
 def softmax(x):
-    # return torch.softmax(x, dim=-1)
-    return F.gumbel_softmax(x, dim=-1, hard=True)
+    return torch.softmax(x, dim=-1)
+    # return F.gumbel_softmax(x, dim=-1, hard=True)
 
 # #########################################################################
 
@@ -162,8 +165,10 @@ class Resonance(nn.Module):
                 .view(resonance_steps, 1).repeat(1, exp.n_frames)
             resonances = torch.cumprod(resonances, dim=-1)
             self.register_buffer('resonance', resonances)
+        
+        self.damping_window = Window(self.n_frames, 0, self.n_frames)
 
-    def forward(self, f0, res):
+    def forward(self, f0, res, damping_means, damping_stds, damping_amps):
         batch, n_events, _ = f0.shape
         # batch, n_events, n_freqs = res.shape
 
@@ -186,6 +191,13 @@ class Resonance(nn.Module):
             res = res.view(-1, 1, exp.n_frames)
         else:
             res = res[..., None].repeat(1, 1, 1, self.n_frames)
+
+            damping = self.damping_window.forward(damping_means, damping_stds)
+            damping = damping * damping_amps
+            # KLUDGE: For now, damping is applied evenly across all harmonics
+            res = res - damping[:, :, None, :]
+            res = torch.clamp(res, 0, 1)
+
             res = torch.exp(torch.cumsum(torch.log(res + 1e-12), dim=-1))
             # res = torch.cumprod(res, dim=-1).view(-1, 1, self.n_frames)
             res = res.view(-1, 1, self.n_frames)
@@ -362,11 +374,15 @@ class Model(nn.Module):
 
         amps = event_params[:, :, 4 + n_f0_steps].view(batch, self.n_events, 1) ** 2
 
+        damp_means = event_params[:, :, (5 + n_f0_steps)].view(batch, self.n_events, 1)
+        damp_stds = event_params[:, :, (6 + n_f0_steps)].view(batch, self.n_events, 1)
+        damp_amps = event_params[:, :, (7 + n_f0_steps)].view(batch, self.n_events, 1)
+
         if precompute_resonance:
-            res = event_params[:, :, (5 + n_f0_steps):].view(
+            res = event_params[:, :, (8 + n_f0_steps):].view(
                 batch, self.n_events, self.n_harmonics, resonance_steps)
         else:
-            res = (event_params[:, :, (5 + n_f0_steps):].view(
+            res = (event_params[:, :, (8 + n_f0_steps):].view(
                 batch, self.n_events, self.n_harmonics) * res_span) + res_baseline
 
         if return_encodings:
@@ -378,6 +394,9 @@ class Model(nn.Module):
             time_means,
             time_stds,
             f0,
+            damp_means,
+            damp_stds,
+            damp_amps,
             res,
             amps,
             mx,
@@ -385,7 +404,7 @@ class Model(nn.Module):
 
         return located, verb_params, event_params
 
-    def synthesize(self, freq_means, freq_stds, time_means, time_stds, f0, res, amps, mx, rooms):
+    def synthesize(self, freq_means, freq_stds, time_means, time_stds, f0, damp_means, damp_stds, damp_amps, res, amps, mx, rooms):
 
         mx = mx.view(-1, 1, 1)
 
@@ -393,7 +412,7 @@ class Model(nn.Module):
         windows = self.noise.forward(freq_means, freq_stds)
         events = self.impulses.forward(time_means, time_stds)
 
-        resonances = self.resonance.forward(f0, res)
+        resonances = self.resonance.forward(f0, res, damp_means, damp_stds, damp_amps)
 
         # locate events in time and scale by amplitude
         located = windows * events * amps
