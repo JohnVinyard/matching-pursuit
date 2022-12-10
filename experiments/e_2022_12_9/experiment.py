@@ -40,14 +40,14 @@ min_resonance = 0.5
 res_span = 1 - min_resonance
 
 n_frames = 128
-n_harmonics = 16
+n_harmonics = 8
 harmonic_factors = torch.arange(1, n_harmonics + 1, step=1)
 freq_domain_filter_size = 64
 n_events = 8
 
 perceptual_loss = False
 discrete_freqs = False
-learning_rate = 1e-4
+learning_rate = 1e-3
 
 def softmax(x):
     # return F.gumbel_softmax(x, dim=-1, hard=True)
@@ -229,6 +229,10 @@ class Synthesizer(nn.Module):
             current = current * harm_decay[..., None]
 
         x = torch.cat(output, dim=-1).view(-1, n_harmonics, n_frames)
+
+        indices = torch.where(x >= np.pi)
+        x[indices] = 0
+
         x = F.interpolate(x, size=exp.n_samples, mode='linear')
 
 
@@ -237,7 +241,7 @@ class Synthesizer(nn.Module):
 
         x = x.view(-1, n_events, n_harmonics, exp.n_samples)
 
-        x = torch.mean(x, dim=(1, 2), keepdim=True).view(-1, 1, exp.n_samples)
+        x = torch.sum(x, dim=(1, 2), keepdim=True).view(-1, 1, exp.n_samples)
 
         return x
 
