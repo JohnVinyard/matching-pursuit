@@ -6,10 +6,13 @@ import torch
 import numpy as np
 from torch.jit import ScriptModule, script_method
 from torch.nn import functional as F
+from modules.atoms import unit_norm
+from modules.decompose import fft_frequency_decompose
 from modules.dilated import DilatedStack
 from modules.linear import LinearOutputStack
 from modules.normalization import ExampleNorm, max_norm
 from modules.pos_encode import pos_encoded
+from modules.psychoacoustic import PsychoacousticFeature
 from modules.reverb import NeuralReverb
 from modules.sparse import VectorwiseSparsity
 from modules.stft import stft
@@ -19,11 +22,12 @@ from upsample import ConvUpsample
 from util import playable
 from util.music import MusicalScale
 from util.readmedocs import readme
+from util import device
 
 exp = Experiment(
     samplerate=zounds.SR22050(),
     n_samples=2**15,
-    weight_init=0.05,
+    weight_init=0.1,
     model_dim=128,
     kernel_size=512)
 
@@ -36,25 +40,56 @@ min_f0 = (min_f0_hz / exp.samplerate.nyquist)
 max_f0 = (max_f0_hz / exp.samplerate.nyquist)
 f0_span = max_f0 - min_f0
 
-min_resonance = 0.5
+min_resonance = 0.9
 res_span = 1 - min_resonance
 
 n_frames = 128
 n_harmonics = 8
-harmonic_factors = torch.arange(1, n_harmonics + 1, step=1)
+harmonic_factors = torch.arange(1, n_harmonics + 1, step=1, device=device)
 freq_domain_filter_size = 64
 n_events = 8
 
-perceptual_loss = False
-discrete_freqs = False
-learning_rate = 1e-3
+# perceptual_loss = True
+# multiscale = True
+
+
+loss_type = 'multiscale'
+discrete_freqs = True
+learning_rate = 1e-4
+
+class MultiscaleLoss(nn.Module):
+    def __init__(self, kernel_size, n_bands):
+        super().__init__()
+        scale = zounds.LinearScale(
+            zounds.FrequencyBand(1, exp.samplerate.nyquist), n_bands, False)
+        self.fb = zounds.learn.FilterBank(
+            exp.samplerate, kernel_size, scale, 0.25, normalize_filters=True).to(device)
+    
+    def _feature(self, x):
+        x = x.view(-1, 1, exp.n_samples)
+        bands = fft_frequency_decompose(x, 512)
+        output = []
+        for size, band in bands.items():
+            spec = self.fb.forward(band, normalize=False)
+            windowed = spec.unfold(-1, 128, 64)
+            pooled = windowed.mean(dim=-1)
+            windowed = torch.abs(torch.fft.rfft(windowed, dim=-1, norm='ortho'))
+            windowed = unit_norm(windowed, axis=-1)
+            output.append(pooled.view(-1))
+            output.append(windowed.view(-1))
+        return torch.cat(output)
+
+    def forward(self, a, b):
+        a = self._feature(a)
+        b = self._feature(b)
+        return torch.abs(a - b).sum()
 
 def softmax(x):
     # return F.gumbel_softmax(x, dim=-1, hard=True)
     return torch.softmax(x, dim=-1)
 
 scale = MusicalScale()
-frequencies = torch.from_numpy(np.array(list(scale.center_frequencies)) / exp.samplerate.nyquist).float()
+frequencies = torch.from_numpy(np.array(list(scale.center_frequencies)) / exp.samplerate.nyquist).float().to(device)
 
 param_sizes = {
     'f0': len(scale) if discrete_freqs else 1,
@@ -79,6 +114,18 @@ def build_param_slices():
 
 param_slices = build_param_slices()
 
+
+multiscale = PsychoacousticFeature().to(device)
+
+def multiscale_feature(x):
+    d = multiscale.compute_feature_dict(x)
+    x = torch.cat([v.view(-1) for v in d.values()])
+    return x
+
+def multiscale_loss(a, b):
+    a = multiscale_feature(a)
+    b = multiscale_feature(b)
+    return torch.abs(a - b).sum()
 
 def activation(x):
     # return torch.clamp(x, 0, 1)
@@ -212,14 +259,14 @@ class Synthesizer(nn.Module):
             noise_filter, exp.n_samples // 2, mode='linear')
         noise_filter = F.pad(noise_filter, (0, 1))
 
-        noise = torch.zeros(batch, 1, exp.n_samples).uniform_(-1, 1)
+        noise = torch.zeros(batch, 1, exp.n_samples, device=f0.device).uniform_(-1, 1)
         noise_spec = torch.fft.rfft(noise, dim=-1, norm='ortho')
 
         filtered_noise = noise_spec * noise_filter
         noise = torch.fft.irfft(filtered_noise, dim=-1, norm='ortho')
         noise = noise * torch.clamp(amp_full, 0, 1)
 
-        current = torch.zeros(batch, n_harmonics, 1)
+        current = torch.zeros(batch, n_harmonics, 1, device=f0.device)
         output = []
 
         for i in range(n_frames):
@@ -275,23 +322,23 @@ class Model(nn.Module):
 
 
         self.to_event_params = nn.Sequential(
-            LinearOutputStack(exp.model_dim, 4,
-                                out_channels=total_synth_params)
+            LinearOutputStack(
+                exp.model_dim, 4, out_channels=total_synth_params)
         )
 
 
         mode = 'nearest'
         self.to_f = LinearOutputStack(exp.model_dim, 3, out_channels=len(scale) if discrete_freqs else 1)
         self.to_fine = ConvUpsample(
-            exp.model_dim, 32, start_size=4, end_size=n_frames, mode=mode, out_channels=1)
+            exp.model_dim, exp.model_dim, start_size=4, end_size=n_frames, mode=mode, out_channels=1)
         self.to_harm_amp = ConvUpsample(
-            exp.model_dim, 32, start_size=4, end_size=n_harmonics, out_channels=1, mode=mode)
+            exp.model_dim, exp.model_dim, start_size=4, end_size=n_harmonics, out_channels=1, mode=mode)
         self.to_harm_decay = ConvUpsample(
-            exp.model_dim, 32, start_size=4, end_size=n_harmonics, out_channels=1, mode=mode)
+            exp.model_dim, exp.model_dim, start_size=4, end_size=n_harmonics, out_channels=1, mode=mode)
         self.to_freq_domain_env = ConvUpsample(
-            exp.model_dim, 32, start_size=4, end_size=freq_domain_filter_size, out_channels=1, mode=mode)
+            exp.model_dim, exp.model_dim, start_size=4, end_size=freq_domain_filter_size, out_channels=1, mode=mode)
         self.to_amp = ConvUpsample(
-            exp.model_dim, 32, start_size=4, end_size=n_frames, out_channels=1, mode=mode)
+            exp.model_dim, exp.model_dim, start_size=4, end_size=n_frames, out_channels=1, mode=mode)
 
 
         self.apply(lambda p: exp.init_weights(p))
@@ -327,7 +374,9 @@ class Model(nn.Module):
 
         # p = event_params.view(-1, total_synth_params)
 
-        f0 = self.to_f.forward(x).view(-1, 1)
+        x = x.view(-1, exp.model_dim)
+
+        f0 = self.to_f.forward(x).view(-1, len(scale) if discrete_freqs else 1)
         f0_fine = self.to_fine(x).view(-1, n_frames)
         harm_amp = self.to_harm_amp(x).view(-1, n_harmonics)
         harm_decay = self.to_harm_decay(x).view(-1, n_harmonics)
@@ -350,16 +399,20 @@ class Model(nn.Module):
         return samples
 
 
-model = Model()
+model = Model().to(device)
 optim = optimizer(model, lr=learning_rate)
 
+multi = MultiscaleLoss(128, 128)
 
 def train(batch):
     optim.zero_grad()
     recon = model.forward(batch)
 
-    if perceptual_loss:
-        loss = exp.perceptual_loss(recon, batch)
+    if loss_type == 'perceptual':
+        loss = exp.perceptual_loss(recon, batch, norm='l1')
+    elif loss_type == 'multiscale':
+        # loss = multiscale_loss(recon, batch)
+        loss = multi.forward(recon, batch)
     else:
         real_spec = stft(batch, 512, 256, pad=True, log_amplitude=True)
         fake_spec = stft(recon, 512, 256, pad=True, log_amplitude=True)
