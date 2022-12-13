@@ -41,19 +41,19 @@ min_f0 = (min_f0_hz / exp.samplerate.nyquist)
 max_f0 = (max_f0_hz / exp.samplerate.nyquist)
 f0_span = max_f0 - min_f0
 
-min_resonance = 0.5
-res_span = 1 - min_resonance
 
 n_frames = 128
 n_harmonics = 8
 harmonic_factors = torch.arange(1, n_harmonics + 1, step=1, device=device)
-freq_domain_filter_size = 64
+freq_domain_filter_size = 32
 n_events = 8
 
 logged = {}
 
-loss_type = 'multiscale'
-discrete_freqs = False
+min_resonance = 0.8
+res_span = 1 - min_resonance
+loss_type = 'perceptual'
+discrete_freqs = True
 learning_rate = 1e-4
 
 class MultiscaleLoss(nn.Module):
@@ -86,7 +86,6 @@ class MultiscaleLoss(nn.Module):
 def softmax(x):
     # return F.gumbel_softmax(x, dim=-1, hard=True)
     return torch.softmax(x, dim=-1)
-
 
 def amp_activation(x):
     # return torch.abs(x)
@@ -208,10 +207,10 @@ class SynthParams(object):
             x = self.packed[:, param_slices['f0']].view(-1, len(scale))
             x = softmax(x)
             x = x @ frequencies
-            return x.view(-1, 1).repeat(1, n_frames)
+            return x.view(-1, 1).repeat(1, n_frames) ** 2
         else:
             x = self.packed[:, param_slices['f0']].view(-1, 1).repeat(1, n_frames)
-            return x
+            return x ** 2
 
     @property
     def f0_fine(self) -> Tensor:
