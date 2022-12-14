@@ -50,11 +50,15 @@ n_events = 8
 
 logged = {}
 
-min_resonance = 0.8
+min_resonance = 0.5
 res_span = 1 - min_resonance
-loss_type = 'perceptual'
+loss_type = 'multiscale'
 discrete_freqs = True
-learning_rate = 1e-4
+learning_rate = 1e-3
+
+def softmax(x):
+    # return F.gumbel_softmax(x, dim=-1, hard=True)
+    return torch.softmax(x, dim=-1)
 
 class MultiscaleLoss(nn.Module):
     def __init__(self, kernel_size, n_bands):
@@ -83,15 +87,13 @@ class MultiscaleLoss(nn.Module):
         b = self._feature(b)
         return torch.abs(a - b).sum()
 
-def softmax(x):
-    # return F.gumbel_softmax(x, dim=-1, hard=True)
-    return torch.softmax(x, dim=-1)
+
 
 def amp_activation(x):
     # return torch.abs(x)
     # return torch.clamp(x, 0, 1)
-    return torch.relu(x)
-    # return F.leaky_relu(x, 0.2)
+    # return torch.relu(x)
+    return F.leaky_relu(x, 0.2)
 
 def activation(x):
     # return torch.clamp(x, 0, 1)
@@ -377,8 +379,7 @@ class Model(nn.Module):
                 exp.model_dim, 4, out_channels=total_synth_params)
         )
 
-
-        mode = 'learned'
+        mode = 'nearest'
         self.to_f = LinearOutputStack(exp.model_dim, 3, out_channels=len(scale) if discrete_freqs else 1)
         self.to_fine = ConvUpsample(
             exp.model_dim, exp.model_dim, start_size=4, end_size=n_frames, mode=mode, out_channels=1)
