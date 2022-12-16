@@ -45,16 +45,16 @@ f0_span = max_f0 - min_f0
 n_frames = 128
 n_harmonics = 8
 harmonic_factors = torch.arange(1, n_harmonics + 1, step=1, device=device)
-freq_domain_filter_size = 32
+freq_domain_filter_size = 16
 n_events = 8
 
 logged = {}
 
-min_resonance = 0.5
+min_resonance = 0.75
 res_span = 1 - min_resonance
-loss_type = 'multiscale'
+loss_type = 'perceptual'
 discrete_freqs = True
-learning_rate = 1e-3
+learning_rate = 1e-4
 
 def softmax(x):
     # return F.gumbel_softmax(x, dim=-1, hard=True)
@@ -90,10 +90,10 @@ class MultiscaleLoss(nn.Module):
 
 
 def amp_activation(x):
-    # return torch.abs(x)
+    return torch.abs(x)
     # return torch.clamp(x, 0, 1)
     # return torch.relu(x)
-    return F.leaky_relu(x, 0.2)
+    # return F.leaky_relu(x, 0.2)
 
 def activation(x):
     # return torch.clamp(x, 0, 1)
@@ -144,8 +144,8 @@ def fb_feature(x):
     x = exp.fb.forward(x, normalize=False)
     x = exp.fb.temporal_pooling(
         x, exp.window_size, exp.step_size)[..., :exp.n_frames]
-    x = x.reshape(x.shape[0], 1, -1)
-    x = max_norm(x, dim=2)
+    # x = x.reshape(x.shape[0], 1, -1)
+    # x = max_norm(x, dim=2)
     x = x.view(-1, 128, 128)
     return x
 
@@ -240,10 +240,16 @@ class ProxySpec(nn.Module):
         super().__init__()
 
         self.net = nn.Sequential(
+            
+            ConvUpsample(
+                total_synth_params + exp.model_dim, 
+                exp.model_dim, 
+                4, 
+                end_size=128, 
+                mode='nearest', 
+                out_channels=128)
+            
             # nn.Linear(total_synth_params + exp.model_dim, 512),
-            # Reshape((128, 4)),
-            ConvUpsample(total_synth_params + exp.model_dim, exp.model_dim, 4, end_size=128, mode='nearest', out_channels=128)
-
             # Reshape((128, 2, 2)),
             # nn.ConvTranspose2d(128, 64, (4, 4), (2, 2), (1, 1)),
             # nn.LeakyReLU(0.2),
@@ -269,10 +275,12 @@ class ProxySpec(nn.Module):
         x = x.view(-1, total_synth_params + exp.model_dim)
         x = self.net(x)
         x = x.view(-1, n_events, 128, 128)
-        x = torch.relu(x)
+        # x = torch.relu(x)
+        # x = x ** 2
+        x = torch.abs(x)
         x = torch.sum(x, dim=1, keepdim=True)
         x = x.view(x.shape[0], -1)
-        x = max_norm(x, dim=1)
+        # x = max_norm(x, dim=1)
         x = x.view(-1, 128, 128)
         return x
 
@@ -312,7 +320,7 @@ class Synthesizer(nn.Module):
             noise_filter, exp.n_samples // 2, mode='linear')
         noise_filter = F.pad(noise_filter, (0, 1))
 
-        noise = torch.zeros(batch, 1, exp.n_samples, device=f0.device).uniform_(-100, 100)
+        noise = torch.zeros(batch, 1, exp.n_samples, device=f0.device).uniform_(-1, 1)
         noise_spec = torch.fft.rfft(noise, dim=-1, norm='ortho')
 
         filtered_noise = noise_spec * noise_filter
@@ -324,7 +332,7 @@ class Synthesizer(nn.Module):
 
         for i in range(n_frames):
             current = current + (amp[..., i:i + 1] * harm_amp[..., None])
-            current = torch.clamp(current, 0, np.inf)
+            current = torch.clamp(current, 0, 1)
             output.append(current)
             current = current * harm_decay[..., None]
 
@@ -379,6 +387,7 @@ class Model(nn.Module):
                 exp.model_dim, 4, out_channels=total_synth_params)
         )
 
+
         mode = 'nearest'
         self.to_f = LinearOutputStack(exp.model_dim, 3, out_channels=len(scale) if discrete_freqs else 1)
         self.to_fine = ConvUpsample(
@@ -395,7 +404,7 @@ class Model(nn.Module):
 
         self.apply(lambda p: exp.init_weights(p))
 
-    def forward(self, x, add_noise=0):
+    def forward(self, x, add_noise=False):
 
         batch = x.shape[0]
         x = exp.fb.forward(x, normalize=False)
@@ -413,6 +422,7 @@ class Model(nn.Module):
         x = self.norm(x)
 
         x, indices = self.sparse(x)
+
         orig_verb_params, _ = torch.max(x, dim=1)
         verb_params = orig_verb_params
 
@@ -438,11 +448,10 @@ class Model(nn.Module):
 
 
         p = torch.cat([f0, f0_fine, amp, harm_amp, harm_decay, freq_env], dim=-1)
+        p = activation(p)
 
         if add_noise:
-            p = p + torch.zeros_like(p).uniform_(-0.1, 0.1)
-        
-        p = activation(p)
+            p = (p * 0.5) + (0.5 * torch.zeros_like(p).uniform_(0, 1))
 
         params = SynthParams(p)
         samples = self.synth.forward(params)
@@ -452,7 +461,7 @@ class Model(nn.Module):
 
         samples = (mx * wet) + ((1 - mx) * samples)
 
-        # samples = max_norm(samples)
+        samples = max_norm(samples)
 
         return samples, p, orig_verb_params
 
@@ -472,6 +481,7 @@ def train_proxy(batch):
 
     pred_spec = proxy.forward(params, verb)
     real_spec = fb_feature(recon)
+
     loss = F.mse_loss(pred_spec, real_spec)
     loss.backward()
     proxy_optim.step()
@@ -481,27 +491,29 @@ def train(batch):
     optim.zero_grad()
     recon, params, verb = model.forward(batch)
 
-    # fake_spec = proxy.forward(params, verb)
-    # real_spec = fb_feature(batch)
+    fake_spec = proxy.forward(params, verb)
+    real_spec = fb_feature(batch)
 
-    # loss = F.mse_loss(fake_spec, real_spec)
-    # loss.backward()
-    # optim.step()
+    loss = F.mse_loss(fake_spec, real_spec)
 
-    if loss_type == 'perceptual':
-        loss = exp.perceptual_loss(recon, batch, norm='l1')
-    elif loss_type == 'multiscale':
-        # loss = multiscale_loss(recon, batch)
-        loss = multi.forward(recon, batch)
-    else:
-        real_spec = stft(batch, 512, 256, pad=True, log_amplitude=True)
-        fake_spec = stft(recon, 512, 256, pad=True, log_amplitude=True)
-        # real_spec = fb_feature(batch)
-        # fake_spec = fb_feature(recon)
-        loss = F.mse_loss(fake_spec, real_spec)
-    
+
     loss.backward()
     optim.step()
+
+    # if loss_type == 'perceptual':
+    #     loss = exp.perceptual_loss(recon, batch, norm='l1')
+    # elif loss_type == 'multiscale':
+    #     # loss = multiscale_loss(recon, batch)
+    #     loss = multi.forward(recon, batch)
+    # else:
+    #     real_spec = stft(batch, 512, 256, pad=True, log_amplitude=False)
+    #     fake_spec = stft(recon, 512, 256, pad=True, log_amplitude=False)
+    #     # real_spec = fb_feature(batch)
+    #     # fake_spec = fb_feature(recon)
+    #     loss = F.mse_loss(fake_spec, real_spec)
+    
+    # loss.backward()
+    # optim.step()
 
     return loss, recon
 
@@ -539,13 +551,13 @@ class ResonatorModelExperiment(object):
             item = item.view(-1, 1, exp.n_samples)
             self.real = item
 
-            # if i % 2 == 0:
+            if i % 2 == 0:
 
-            l, recon = train(item)
-            self.fake = recon
-            print('R', i, l.item())
+                l, recon = train(item)
+                self.fake = recon
+                print('R', i, l.item())
 
-            # else:
-            #     l, pred = train_proxy(item)
-            #     self.pred = pred
-            #     print('P', i, l.item())
+            else:
+                l, pred = train_proxy(item)
+                self.pred = pred
+                print('P', i, l.item())
