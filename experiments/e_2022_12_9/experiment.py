@@ -28,7 +28,7 @@ from util import device
 exp = Experiment(
     samplerate=zounds.SR22050(),
     n_samples=2**15,
-    weight_init=0.05,
+    weight_init=0.1,
     model_dim=128,
     kernel_size=512)
 
@@ -53,7 +53,7 @@ logged = {}
 min_resonance = 0.75
 res_span = 1 - min_resonance
 loss_type = 'perceptual'
-discrete_freqs = False
+discrete_freqs = True
 learning_rate = 1e-3
 
 
@@ -92,9 +92,9 @@ class MultiscaleLoss(nn.Module):
 
 
 def amp_activation(x):
-    return torch.abs(x)
+    # return torch.abs(x)
     # return torch.clamp(x, 0, 1)
-    # return torch.relu(x)
+    return torch.relu(x)
     # return F.leaky_relu(x, 0.2)
 
 
@@ -289,7 +289,7 @@ class ProxySpec(nn.Module):
         x = torch.abs(x)
         x = torch.sum(x, dim=1, keepdim=True)
         x = x.view(x.shape[0], -1)
-        # x = max_norm(x, dim=1)
+        x = max_norm(x, dim=1)
         x = x.view(-1, 128, 128)
         return x
 
@@ -465,12 +465,12 @@ class Model(nn.Module):
         return p, rooms, mx, verb_params
 
     def generate_random_params(self, batch_size):
-        p = torch.zeros(batch_size, n_events, total_synth_params).uniform_(
+        p = torch.zeros(batch_size, n_events, total_synth_params, device=device).uniform_(
             0, 1).view(-1, total_synth_params)
 
         rooms = F.gumbel_softmax(torch.zeros(
-            batch_size, self.n_rooms).uniform_(0, 1), dim=-1, hard=True)
-        mx = torch.zeros(batch_size).uniform_(0, 1).view(-1, 1, 1)
+            batch_size, self.n_rooms, device=device).uniform_(0, 1), dim=-1, hard=True)
+        mx = torch.zeros(batch_size, device=device).uniform_(0, 1).view(-1, 1, 1)
         packed = self.pack_verb_params(rooms, mx)
         return p, rooms, mx, packed
 
@@ -483,7 +483,7 @@ class Model(nn.Module):
 
         samples = (mx * wet) + ((1 - mx) * samples)
 
-        # samples = max_norm(samples)
+        samples = max_norm(samples)
 
         return samples, p, verb_params
 
