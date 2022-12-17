@@ -28,7 +28,7 @@ from util import device
 exp = Experiment(
     samplerate=zounds.SR22050(),
     n_samples=2**15,
-    weight_init=0.1,
+    weight_init=0.05,
     model_dim=128,
     kernel_size=512)
 
@@ -53,8 +53,8 @@ logged = {}
 min_resonance = 0.75
 res_span = 1 - min_resonance
 loss_type = 'perceptual'
-discrete_freqs = True
-learning_rate = 1e-3
+discrete_freqs = False
+learning_rate = 1e-4
 
 
 def softmax(x):
@@ -220,7 +220,7 @@ class SynthParams(object):
             return x.view(-1, 1).repeat(1, n_frames) ** 2
         else:
             x = self.packed[:, param_slices['f0']
-                            ].view(-1, 1).repeat(1, n_frames)
+                            ].reshape(-1, 1).repeat(1, n_frames)
             return x ** 2
 
     @property
@@ -289,7 +289,7 @@ class ProxySpec(nn.Module):
         x = torch.abs(x)
         x = torch.sum(x, dim=1, keepdim=True)
         x = x.view(x.shape[0], -1)
-        x = max_norm(x, dim=1)
+        # x = max_norm(x, dim=1)
         x = x.view(-1, 128, 128)
         return x
 
@@ -305,7 +305,7 @@ class Synthesizer(nn.Module):
         f0 = min_f0 + (f0 * f0_span)
 
         proportion = (f0 / exp.samplerate.nyquist) * 0.1
-        f0_fine = synth_params.f0_fine.view(-1, 1, n_frames) * \
+        f0_fine = synth_params.f0_fine.reshape(-1, 1, n_frames) * \
             exp.samplerate.nyquist * proportion
         f0 + f0 + f0_fine
 
@@ -321,6 +321,7 @@ class Synthesizer(nn.Module):
         harm_amp = synth_params.harmonic_amps.view(-1, n_harmonics)
 
         amp = (synth_params.amp.view(-1, 1, n_frames) * 2) - 1
+        # amp = torch.cumsum(amp, dim=-1)
         logged['amp'] = amp
         amp_full = F.interpolate(amp, size=exp.n_samples, mode='linear')
 
@@ -465,8 +466,26 @@ class Model(nn.Module):
         return p, rooms, mx, verb_params
 
     def generate_random_params(self, batch_size):
-        p = torch.zeros(batch_size, n_events, total_synth_params, device=device).uniform_(
-            0, 1).view(-1, total_synth_params)
+        # p = torch.zeros(batch_size, n_events, total_synth_params, device=device).uniform_(
+            # 0, 1).view(-1, total_synth_params)
+        
+
+        p_mag = torch.zeros(batch_size, n_events, total_synth_params // 2 + 1).uniform_(-1, 1)
+        p_angle = torch.zeros(batch_size, n_events, total_synth_params // 2 + 1).uniform_(-np.pi, np.pi)
+        mag_env = torch.linspace(1, 0, total_synth_params // 2 + 1) ** 10
+        p_mag = p_mag * mag_env[None, None, :]
+
+        real = p_mag * torch.cos(p_angle)
+        imag = p_mag * torch.sin(p_angle)
+
+        tf = torch.complex(real, imag)
+        p = torch.fft.irfft(tf, dim=-1, norm='ortho')
+        p = torch.cat([p, torch.zeros(batch_size, n_events, 1)], dim=-1)
+        p = p.view(-1, total_synth_params)
+        # p = p - p.min()
+        p = p / (p.max() + 1e-8)
+        p = torch.relu(p)
+
 
         rooms = F.gumbel_softmax(torch.zeros(
             batch_size, self.n_rooms, device=device).uniform_(0, 1), dim=-1, hard=True)
@@ -483,7 +502,7 @@ class Model(nn.Module):
 
         samples = (mx * wet) + ((1 - mx) * samples)
 
-        samples = max_norm(samples)
+        # samples = max_norm(samples)
 
         return samples, p, verb_params
 
@@ -578,6 +597,11 @@ def train_proxy(batch):
     return loss, pred_spec
 
 
+def canonical_sort(x):
+    x = x.view(-1, n_events, total_synth_params)
+    x, _ = torch.sort(x, dim=-1)
+    return x
+
 def train_encoder(batch):
     """
     Ensure that the encoder does not always produce the same
@@ -590,6 +614,9 @@ def train_encoder(batch):
         samples, p, verb_params = model.synthesize(p, rooms, mx, packed)
 
     fake_p, rooms, mx, fake_packed = model.encode(samples)
+
+    fake_p = canonical_sort(fake_p)
+    p = canonical_sort(p)
 
     p_loss = F.mse_loss(fake_p, p)
     v_loss = F.mse_loss(fake_packed, packed)
