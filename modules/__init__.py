@@ -30,3 +30,4 @@ from .transfer import \
     TransferFunction, STFTTransferFunction, ImpulseGenerator, \
     PosEncodedImpulseGenerator, schedule_atoms, Position, fft_convolve, differentiable_fft_shift, scalar_position
 from .fft import fft_shift
+from .physical import Window, harmonics

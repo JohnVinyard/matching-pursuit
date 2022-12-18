@@ -12,6 +12,7 @@ from modules.decompose import fft_frequency_decompose
 from modules.dilated import DilatedStack
 from modules.linear import LinearOutputStack
 from modules.normalization import ExampleNorm, max_norm
+from modules.physical import Window, harmonics
 from modules.pos_encode import pos_encoded
 from modules.psychoacoustic import PsychoacousticFeature
 from modules.reverb import NeuralReverb
@@ -25,6 +26,7 @@ from util import playable
 from util.music import MusicalScale
 from util.readmedocs import readme
 from util import device
+from random import choice
 
 exp = Experiment(
     samplerate=zounds.SR22050(),
@@ -51,7 +53,7 @@ n_events = 8
 
 logged = {}
 
-min_resonance = 0.75
+min_resonance = 0.5
 res_span = 1 - min_resonance
 loss_type = 'perceptual'
 discrete_freqs = False
@@ -204,10 +206,45 @@ https://freesound.org/people/MTG/sounds/358332/
 '''
 
 
+
 class SynthParams(object):
     def __init__(self, packed):
         super().__init__()
         self.packed = packed
+    
+    @staticmethod
+    def random_events(n_events):
+        '''
+        p = torch.cat([f0, f0_fine, amp, harm_amp,
+                       harm_decay, freq_env], dim=-1)
+        '''
+        f0s = torch.zeros(n_events, 1, 1, device=device).uniform_(0, 1) ** 2
+        f0s = f0s.view(n_events, -1)
+
+        f0_fine = torch.zeros(n_events, n_frames, device=device).uniform_(0, 1)
+        
+        amp_win = Window(n_frames, 0, 1)
+        means = torch.zeros(n_events, 1).uniform_(0, 1)
+        stds = torch.zeros(n_events, 1, device=device).uniform_(0, 0.5) ** 2
+        amps = (amp_win.forward(means, stds).view(n_events, n_frames) + 1) * 0.5
+
+        harm_amps = torch.cat(
+            [
+                harmonics(n_harmonics, choice(['triangle', 'square', 'sawtooth']), device=device)[None, :] 
+                for _ in range(n_events)
+            ], dim=0)
+
+        harm_resonance = torch.zeros(n_events, 1, device=device).uniform_(0, 1).repeat(1, n_harmonics)
+
+        freq_win = Window(freq_domain_filter_size, 0, 1)
+        means = torch.zeros(n_events, 1, device=device).uniform_(0, 1) ** 2
+        stds = torch.zeros(n_events, 1, device=device).uniform_(0, 1)
+        freq_env = freq_win.forward(means, stds).view(n_events, freq_domain_filter_size)
+
+
+        params = torch.cat([f0s, f0_fine, amps, harm_amps, harm_resonance, freq_env], dim=-1)
+        return params
+
 
     @property
     def f0(self) -> Tensor:
@@ -247,51 +284,23 @@ class ProxySpec(nn.Module):
         super().__init__()
 
         self.net = nn.Sequential(
-
-            # ConvUpsample(
-            #     total_synth_params + 39,
-            #     exp.model_dim,
-            #     4,
-            #     end_size=128,
-            #     mode='learned',
-            #     out_channels=128,
-            #     norm=ExampleNorm())
-
             PosEncodedUpsample(
                 total_synth_params + 39, exp.model_dim, size=128, out_channels=128, layers=5)
-
-            # nn.Linear(total_synth_params + exp.model_dim, 512),
-            # Reshape((128, 2, 2)),
-            # nn.ConvTranspose2d(128, 64, (4, 4), (2, 2), (1, 1)),
-            # nn.LeakyReLU(0.2),
-            # nn.ConvTranspose2d(64, 32, (4, 4), (2, 2), (1, 1)),
-            # nn.LeakyReLU(0.2),
-            # nn.ConvTranspose2d(32, 16, (4, 4), (2, 2), (1, 1)),
-            # nn.LeakyReLU(0.2),
-            # nn.ConvTranspose2d(16, 8, (4, 4), (2, 2), (1, 1)),
-            # nn.LeakyReLU(0.2),
-            # nn.ConvTranspose2d(8, 4, (4, 4), (2, 2), (1, 1)),
-            # nn.LeakyReLU(0.2),
-            # nn.ConvTranspose2d(4, 1, (4, 4), (2, 2), (1, 1)),
         )
 
         self.apply(lambda p: exp.init_weights(p))
 
     def forward(self, x, verb):
-
         x = x.view(-1, n_events, total_synth_params)
         verb = verb.view(-1, 1, 39).repeat(1, n_events, 1)
-
         x = torch.cat([x, verb], dim=-1)
         x = x.view(-1, total_synth_params + 39)
         x = self.net(x)
         x = x.view(-1, n_events, 128, 128)
-        # x = torch.relu(x)
-        # x = x ** 2
         x = torch.abs(x)
         x = torch.sum(x, dim=1, keepdim=True)
         x = x.view(x.shape[0], -1)
-        x = max_norm(x, dim=1)
+        # x = max_norm(x, dim=1)
         x = x.view(-1, 128, 128)
         return x
 
@@ -320,10 +329,10 @@ class Synthesizer(nn.Module):
 
         harm_decay = synth_params.harmonic_decay.view(-1, n_harmonics)
         harm_decay = min_resonance + (harm_decay * res_span)
+
         harm_amp = synth_params.harmonic_amps.view(-1, n_harmonics)
 
         amp = (synth_params.amp.view(-1, 1, n_frames) * 2) - 1
-        # amp = torch.cumsum(amp, dim=-1)
         logged['amp'] = amp
         amp_full = F.interpolate(amp, size=exp.n_samples, mode='linear')
 
@@ -346,19 +355,23 @@ class Synthesizer(nn.Module):
 
         for i in range(n_frames):
             current = current + (amp[..., i:i + 1] * harm_amp[..., None])
-            current = torch.clamp(current, 0, 1)
+            current = torch.clamp(current, 0, np.inf)
             output.append(current)
+            # print(current.shape, harm_decay.shape)
             current = current * harm_decay[..., None]
+
 
         x = torch.cat(output, dim=-1).view(-1, n_harmonics, n_frames)
 
-        indices = torch.where(x >= np.pi)
-        x[indices] = 0
+        logged['res'] = x
+
+        # indices = torch.where(x >= np.pi)
+        # x[indices] = 0
 
         x = F.interpolate(x, size=exp.n_samples, mode='linear')
 
         x = x * osc_bank
-        x = noise + x
+        x = (noise / n_harmonics) + x
 
         x = x.view(-1, n_events, n_harmonics, exp.n_samples)
 
@@ -399,12 +412,19 @@ class Model(nn.Module):
             exp.model_dim, 3, out_channels=len(scale) if discrete_freqs else 1)
         self.to_fine = ConvUpsample(
             exp.model_dim, exp.model_dim, start_size=4, end_size=n_frames, mode=mode, out_channels=1)
-        self.to_harm_amp = ConvUpsample(
-            exp.model_dim, exp.model_dim, start_size=4, end_size=n_harmonics, out_channels=1, mode=mode)
-        self.to_harm_decay = ConvUpsample(
-            exp.model_dim, exp.model_dim, start_size=4, end_size=n_harmonics, out_channels=1, mode=mode)
-        self.to_freq_domain_env = ConvUpsample(
-            exp.model_dim, exp.model_dim, start_size=4, end_size=freq_domain_filter_size, out_channels=1, mode=mode)
+        
+
+        # self.to_harm_amp = ConvUpsample(
+        #     exp.model_dim, exp.model_dim, start_size=4, end_size=n_harmonics, out_channels=1, mode=mode)
+        # self.to_harm_decay = ConvUpsample(
+        #     exp.model_dim, exp.model_dim, start_size=4, end_size=n_harmonics, out_channels=1, mode=mode)
+        # self.to_freq_domain_env = ConvUpsample(
+        #     exp.model_dim, exp.model_dim, start_size=4, end_size=freq_domain_filter_size, out_channels=1, mode=mode)
+
+        self.to_harm_amp = LinearOutputStack(exp.model_dim, 3, out_channels=n_harmonics)
+        self.to_harm_decay = LinearOutputStack(exp.model_dim, 3, out_channels=n_harmonics)
+        self.to_freq_domain_env = LinearOutputStack(exp.model_dim, 3, out_channels=freq_domain_filter_size)
+
         self.to_amp = ConvUpsample(
             exp.model_dim, exp.model_dim, start_size=4, end_size=n_frames, out_channels=1, mode=mode)
 
@@ -451,8 +471,9 @@ class Model(nn.Module):
         freq_env = self.to_freq_domain_env(x).view(-1, freq_domain_filter_size)
         amp = self.to_amp(x).view(-1, n_frames)
 
-        p = torch.cat([f0, f0_fine, amp, harm_amp,
-                       harm_decay, freq_env], dim=-1)
+        # print(f0.shape, f0_fine.shape, harm_amp.shape, harm_decay.shape, freq_env.shape, amp.shape)
+
+        p = torch.cat([f0, f0_fine, amp, harm_amp, harm_decay, freq_env], dim=-1)
         p = activation(p)
         return p, rooms, mx, verb_params
 
@@ -461,21 +482,23 @@ class Model(nn.Module):
             # 0, 1).view(-1, total_synth_params)
         
 
-        p_mag = torch.zeros(batch_size, n_events, total_synth_params // 2 + 1).uniform_(-1, 1)
-        p_angle = torch.zeros(batch_size, n_events, total_synth_params // 2 + 1).uniform_(-np.pi, np.pi)
-        mag_env = torch.linspace(1, 0, total_synth_params // 2 + 1) ** 10
-        p_mag = p_mag * mag_env[None, None, :]
+        # p_mag = torch.zeros(batch_size, n_events, total_synth_params // 2 + 1).uniform_(-1, 1)
+        # p_angle = torch.zeros(batch_size, n_events, total_synth_params // 2 + 1).uniform_(-np.pi, np.pi)
+        # mag_env = torch.linspace(1, 0, total_synth_params // 2 + 1) ** 10
+        # p_mag = p_mag * mag_env[None, None, :]
 
-        real = p_mag * torch.cos(p_angle)
-        imag = p_mag * torch.sin(p_angle)
+        # real = p_mag * torch.cos(p_angle)
+        # imag = p_mag * torch.sin(p_angle)
 
-        tf = torch.complex(real, imag)
-        p = torch.fft.irfft(tf, dim=-1, norm='ortho')
-        p = torch.cat([p, torch.zeros(batch_size, n_events, 1)], dim=-1)
-        p = p.view(-1, total_synth_params)
-        # p = p - p.min()
-        p = p / (p.max() + 1e-8)
-        p = torch.relu(p)
+        # tf = torch.complex(real, imag)
+        # p = torch.fft.irfft(tf, dim=-1, norm='ortho')
+        # p = torch.cat([p, torch.zeros(batch_size, n_events, 1)], dim=-1)
+        # p = p.view(-1, total_synth_params)
+        # # p = p - p.min()
+        # p = p / (p.max() + 1e-8)
+        # p = torch.relu(p)
+
+        p = SynthParams.random_events(batch_size * n_events).view(-1, total_synth_params)
 
 
         rooms = F.gumbel_softmax(torch.zeros(
@@ -493,7 +516,7 @@ class Model(nn.Module):
 
         samples = (mx * wet) + ((1 - mx) * samples)
 
-        samples = max_norm(samples)
+        # samples = max_norm(samples)
 
         return samples, p, verb_params
 
@@ -531,7 +554,7 @@ def train_proxy(batch):
     loss = F.mse_loss(pred_spec, real_spec)
     loss.backward()
     proxy_optim.step()
-    return loss, pred_spec
+    return loss, pred_spec, samples
 
 
 # def canonical_sort(x):
@@ -608,6 +631,7 @@ class ResonatorModelExperiment(object):
         self.real = None
         self.fake = None
         self.pred = None
+        self.synthetic = None
 
     def proxy_spec(self):
         return self.pred[0].view(128, 128).data.cpu().numpy().T
@@ -626,6 +650,15 @@ class ResonatorModelExperiment(object):
 
     def amps(self):
         return logged['amp'].view(-1, n_events, n_frames)[0].data.cpu().numpy()
+    
+    def res(self):
+        return logged['res'].view(-1, n_harmonics, n_frames)[0].data.cpu().numpy()
+    
+    def synth(self):
+        return playable(self.synthetic, exp.samplerate)
+    
+    def synth_spec(self):
+        return np.abs(zounds.spectral.stft(self.synth()))
 
     def run(self):
         for i, item in enumerate(self.stream):
@@ -634,13 +667,14 @@ class ResonatorModelExperiment(object):
 
             print('-------------------------')
 
-            l, recon = train(item)
-            self.fake = recon
-            print('R', i, l.item())
+            # l, recon = train(item)
+            # self.fake = recon
+            # print('R', i, l.item())
 
             # l = train_encoder(item)
             # print('E', i, l.item())
 
-            l, pred = train_proxy(item)
+            l, pred, synth = train_proxy(item)
             self.pred = pred
+            self.synthetic = synth
             print('P', i, l.item())
