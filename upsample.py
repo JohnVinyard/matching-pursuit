@@ -123,7 +123,8 @@ class PosEncodedUpsample(nn.Module):
             learnable_encodings=False,
             transformer=False,
             concat=False,
-            filter_bank=False):
+            filter_bank=False,
+            activation=None):
 
         super().__init__()
         self.latent_dim = latent_dim
@@ -152,7 +153,7 @@ class PosEncodedUpsample(nn.Module):
             # )
         else:
             self.net = LinearOutputStack(
-                channels, layers, out_channels=out_channels)
+                channels, layers, out_channels=out_channels, activation=activation)
 
             
 
