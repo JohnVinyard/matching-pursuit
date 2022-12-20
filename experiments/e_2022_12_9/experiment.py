@@ -31,7 +31,7 @@ from random import choice
 exp = Experiment(
     samplerate=zounds.SR22050(),
     n_samples=2**15,
-    weight_init=0.05,
+    weight_init=0.1,
     model_dim=128,
     kernel_size=512)
 
@@ -56,8 +56,9 @@ logged = {}
 min_resonance = 0.5
 res_span = 1 - min_resonance
 loss_type = 'perceptual'
-discrete_freqs = False
-learning_rate = 1e-3
+discrete_freqs = True
+learning_rate = 1e-4
+conv_mode = 'nearest'
 
 
 def softmax(x):
@@ -65,43 +66,44 @@ def softmax(x):
     return torch.softmax(x, dim=-1)
 
 
-class MultiscaleLoss(nn.Module):
-    def __init__(self, kernel_size, n_bands):
-        super().__init__()
-        scale = zounds.LinearScale(
-            zounds.FrequencyBand(1, exp.samplerate.nyquist), n_bands, False)
-        self.fb = zounds.learn.FilterBank(
-            exp.samplerate, kernel_size, scale, 0.25, normalize_filters=True).to(device)
+# class MultiscaleLoss(nn.Module):
+#     def __init__(self, kernel_size, n_bands):
+#         super().__init__()
+#         scale = zounds.LinearScale(
+#             zounds.FrequencyBand(1, exp.samplerate.nyquist), n_bands, False)
+#         self.fb = zounds.learn.FilterBank(
+#             exp.samplerate, kernel_size, scale, 0.25, normalize_filters=True).to(device)
 
-    def _feature(self, x):
-        x = x.view(-1, 1, exp.n_samples)
-        bands = fft_frequency_decompose(x, 512)
-        output = []
-        for size, band in bands.items():
-            spec = self.fb.forward(band, normalize=False)
-            windowed = spec.unfold(-1, 128, 64)
-            pooled = windowed.mean(dim=-1)
-            windowed = torch.abs(torch.fft.rfft(
-                windowed, dim=-1, norm='ortho'))
-            windowed = unit_norm(windowed, axis=-1)
-            output.append(pooled.view(-1))
-            output.append(windowed.view(-1))
-        return torch.cat(output)
+#     def _feature(self, x):
+#         x = x.view(-1, 1, exp.n_samples)
+#         bands = fft_frequency_decompose(x, 512)
+#         output = []
+#         for size, band in bands.items():
+#             spec = self.fb.forward(band, normalize=False)
+#             windowed = spec.unfold(-1, 128, 64)
+#             pooled = windowed.mean(dim=-1)
+#             windowed = torch.abs(torch.fft.rfft(
+#                 windowed, dim=-1, norm='ortho'))
+#             windowed = unit_norm(windowed, axis=-1)
+#             output.append(pooled.view(-1))
+#             output.append(windowed.view(-1))
+#         return torch.cat(output)
 
-    def forward(self, a, b):
-        a = self._feature(a)
-        b = self._feature(b)
-        return torch.abs(a - b).sum()
+#     def forward(self, a, b):
+#         a = self._feature(a)
+#         b = self._feature(b)
+#         return torch.abs(a - b).sum()
 
 
 def amp_activation(x):
-    return torch.relu(x)
-    # return F.leaky_relu(x, 0.2)
+    # return x
+    # return torch.relu(x)
+    return F.leaky_relu(x, 0.2)
 
 
 def activation(x):
-    # return torch.sigmoid(x)
-    return (torch.sin(x) + 1) * 0.5
+    return torch.sigmoid(x)
+    # return (torch.sin(x) + 1) * 0.5
 
 
 scale = MusicalScale()
@@ -157,55 +159,6 @@ def fb_feature(x):
     return x
 
 
-'''
-Resonator
--------------------
-f0
-f0_variance * n_frames
-harm_amp * n_harmonics
-decay * n_harmonics
-
-Impulse
---------------------
-amp * n_frames
-freq domain envelope
-window (if impulses must be localized in time)
-
-
-This still needs to be viewed as individual events, because
-of polyphonic instruments like the piano
-
-It can be factored into
-
-instrument
-------------
-harm_amp * n_harmonics
-decay * n_harmonics
-freq_domain_envelope
-
-event
------------
-f0
-f0_variance * n_frames
-amp * n_frames
-
-
-For the initial over-fitting experiment(s), 
-we should just optimize the synth parameters directly
-and exclude any latent generation/hierarchical network
-stuff
-
-https://freesound.org/people/LiftPizzas/sounds/586617/
-https://freesound.org/people/Seidhepriest/sounds/232014/
-https://freesound.org/people/Walter_Odington/sounds/25602/
-https://freesound.org/people/hellska/sounds/328727/
-https://freesound.org/people/ananth-pattabi/sounds/44335/
-https://freesound.org/people/ldk1609/sounds/55944/
-https://freesound.org/people/MTG/sounds/358332/
-
-'''
-
-
 
 class SynthParams(object):
     def __init__(self, packed):
@@ -218,14 +171,18 @@ class SynthParams(object):
         p = torch.cat([f0, f0_fine, amp, harm_amp,
                        harm_decay, freq_env], dim=-1)
         '''
-        f0s = torch.zeros(n_events, 1, 1, device=device).uniform_(0, 1) ** 2
-        f0s = f0s.view(n_events, -1)
+
+        if discrete_freqs:
+            f0s = torch.zeros(n_events, 1, len(scale), device=device).uniform_(0, 1).view(-1, len(scale))
+        else:
+            f0s = torch.zeros(-1, 1, 1, device=device).uniform_(0, 1) ** 2
+            f0s = f0s.view(-1, 1)
 
         f0_fine = torch.zeros(n_events, n_frames, device=device).uniform_(0, 1)
         
         amp_win = Window(n_frames, 0, 1)
-        means = torch.zeros(n_events, 1).uniform_(0, 1)
-        stds = torch.zeros(n_events, 1, device=device).uniform_(0, 0.5) ** 2
+        means = torch.zeros(n_events, 1, device=device).uniform_(0, 1)
+        stds = torch.zeros(n_events, 1, device=device).uniform_(0, 0.1) ** 2
         amps = (amp_win.forward(means, stds).view(n_events, n_frames) + 1) * 0.5
 
         harm_amps = torch.cat(
@@ -300,7 +257,7 @@ class ProxySpec(nn.Module):
         x = torch.abs(x)
         x = torch.sum(x, dim=1, keepdim=True)
         x = x.view(x.shape[0], -1)
-        # x = max_norm(x, dim=1)
+        x = max_norm(x, dim=1)
         x = x.view(-1, 128, 128)
         return x
 
@@ -308,6 +265,8 @@ class ProxySpec(nn.Module):
 class Synthesizer(nn.Module):
     def __init__(self):
         super().__init__()
+
+        self.global_amp = nn.Parameter(torch.zeros(1).fill_(5000))
 
     def forward(self, synth_params: SynthParams):
 
@@ -324,8 +283,12 @@ class Synthesizer(nn.Module):
 
         osc = f0 * harmonic_factors[None, :, None]
         radians = (osc / exp.samplerate.nyquist) * np.pi
+
+        indices = torch.where(radians >= np.pi)
+        radians[indices] = 0
+
         radians = F.interpolate(radians, size=exp.n_samples, mode='linear')
-        osc_bank = torch.sin(torch.cumsum(radians, dim=-1))
+        osc_bank = torch.sin(torch.cumsum(radians, dim=-1)) * (self.global_amp * 0.01)
 
         harm_decay = synth_params.harmonic_decay.view(-1, n_harmonics)
         harm_decay = min_resonance + (harm_decay * res_span)
@@ -343,7 +306,7 @@ class Synthesizer(nn.Module):
         noise_filter = F.pad(noise_filter, (0, 1))
 
         noise = torch.zeros(batch, 1, exp.n_samples,
-                            device=f0.device).uniform_(-1, 1)
+                            device=f0.device).uniform_(-1, 1) * self.global_amp
         noise_spec = torch.fft.rfft(noise, dim=-1, norm='ortho')
 
         filtered_noise = noise_spec * noise_filter
@@ -365,8 +328,7 @@ class Synthesizer(nn.Module):
 
         logged['res'] = x
 
-        # indices = torch.where(x >= np.pi)
-        # x[indices] = 0
+        
 
         x = F.interpolate(x, size=exp.n_samples, mode='linear')
 
@@ -407,11 +369,12 @@ class Model(nn.Module):
                 exp.model_dim, 4, out_channels=total_synth_params)
         )
 
-        mode = 'learned'
+        mode = conv_mode
         self.to_f = LinearOutputStack(
             exp.model_dim, 3, out_channels=len(scale) if discrete_freqs else 1)
         self.to_fine = ConvUpsample(
             exp.model_dim, exp.model_dim, start_size=4, end_size=n_frames, mode=mode, out_channels=1)
+        # self.to_fine = LinearOutputStack(exp.model_dim, 3, out_channels=n_frames)
         
 
         # self.to_harm_amp = ConvUpsample(
@@ -427,6 +390,7 @@ class Model(nn.Module):
 
         self.to_amp = ConvUpsample(
             exp.model_dim, exp.model_dim, start_size=4, end_size=n_frames, out_channels=1, mode=mode)
+        # self.to_amp = LinearOutputStack(exp.model_dim, 3, out_channels=n_frames)
 
         self.apply(lambda p: exp.init_weights(p))
 
@@ -462,7 +426,7 @@ class Model(nn.Module):
 
         verb_params = self.pack_verb_params(rooms, mx)
 
-        x = x.view(-1, exp.model_dim)
+        latent = x = x.view(-1, exp.model_dim)
 
         f0 = self.to_f.forward(x).view(-1, len(scale) if discrete_freqs else 1)
         f0_fine = self.to_fine(x).view(-1, n_frames)
@@ -475,7 +439,7 @@ class Model(nn.Module):
 
         p = torch.cat([f0, f0_fine, amp, harm_amp, harm_decay, freq_env], dim=-1)
         p = activation(p)
-        return p, rooms, mx, verb_params
+        return p, rooms, mx, verb_params, latent
 
     def generate_random_params(self, batch_size):
         # p = torch.zeros(batch_size, n_events, total_synth_params, device=device).uniform_(
@@ -522,9 +486,9 @@ class Model(nn.Module):
 
     def forward(self, x):
 
-        p, rooms, mx, verb_params = self.encode(x)
+        p, rooms, mx, verb_params, latent = self.encode(x)
         samples, p, verb_params = self.synthesize(p, rooms, mx, verb_params)
-        return samples, p, verb_params
+        return samples, p, verb_params, latent
 
 model = Model().to(device)
 optim = optimizer(model, lr=learning_rate)
@@ -532,7 +496,7 @@ optim = optimizer(model, lr=learning_rate)
 proxy = ProxySpec().to(device)
 proxy_optim = optimizer(proxy, lr=learning_rate)
 
-multi = MultiscaleLoss(128, 128)
+# multi = MultiscaleLoss(128, 128)
 
 
 def train_proxy(batch):
@@ -557,36 +521,6 @@ def train_proxy(batch):
     return loss, pred_spec, samples
 
 
-# def canonical_sort(x):
-#     x = x.view(-1, n_events, total_synth_params)
-#     x, _ = torch.sort(x, dim=-1)
-#     return x
-
-# def train_encoder(batch):
-#     """
-#     Ensure that the encoder does not always produce the same
-#     output
-#     """
-#     optim.zero_grad()
-
-#     with torch.no_grad():
-#         p, rooms, mx, packed = model.generate_random_params(batch.shape[0])
-#         samples, p, verb_params = model.synthesize(p, rooms, mx, packed)
-
-#     fake_p, rooms, mx, fake_packed = model.encode(samples)
-
-#     fake_p = canonical_sort(fake_p)
-#     p = canonical_sort(p)
-
-#     p_loss = F.mse_loss(fake_p, p)
-#     v_loss = F.mse_loss(fake_packed, packed)
-
-#     loss = p_loss + v_loss
-#     loss.backward()
-#     optim.step()
-
-#     return loss
-
 
 def train(batch):
     """
@@ -594,30 +528,18 @@ def train(batch):
     """
 
     optim.zero_grad()
-    recon, params, verb = model.forward(batch)
+    recon, params, verb, latent = model.forward(batch)
 
-    fake_spec = proxy.forward(params, verb)
-    real_spec = fb_feature(batch)
+    # fake_spec = proxy.forward(params, verb)
+    # fake_spec = fb_feature(recon)
+    # real_spec = fb_feature(batch)
 
-    loss = F.mse_loss(fake_spec, real_spec)
+    # loss = F.mse_loss(fake_spec, real_spec)
+    loss = exp.perceptual_loss(recon, batch) + latent_loss(latent)
 
     loss.backward()
     optim.step()
 
-    # if loss_type == 'perceptual':
-    #     loss = exp.perceptual_loss(recon, batch, norm='l1')
-    # elif loss_type == 'multiscale':
-    #     # loss = multiscale_loss(recon, batch)
-    #     loss = multi.forward(recon, batch)
-    # else:
-    #     real_spec = stft(batch, 512, 256, pad=True, log_amplitude=False)
-    #     fake_spec = stft(recon, 512, 256, pad=True, log_amplitude=False)
-    #     # real_spec = fb_feature(batch)
-    #     # fake_spec = fb_feature(recon)
-    #     loss = F.mse_loss(fake_spec, real_spec)
-
-    # loss.backward()
-    # optim.step()
 
     return loss, recon
 
@@ -667,14 +589,11 @@ class ResonatorModelExperiment(object):
 
             print('-------------------------')
 
-            # l, recon = train(item)
-            # self.fake = recon
-            # print('R', i, l.item())
+            l, recon = train(item)
+            self.fake = recon
+            print('R', i, l.item())
 
-            # l = train_encoder(item)
-            # print('E', i, l.item())
-
-            l, pred, synth = train_proxy(item)
-            self.pred = pred
-            self.synthetic = synth
-            print('P', i, l.item())
+            # l, pred, synth = train_proxy(item)
+            # self.pred = pred
+            # self.synthetic = synth
+            # print('P', i, l.item())
