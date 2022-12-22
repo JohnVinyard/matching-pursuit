@@ -267,6 +267,7 @@ class Synthesizer(nn.Module):
         super().__init__()
 
         self.global_amp = nn.Parameter(torch.zeros(1).fill_(5000))
+        self.osc_amp = nn.Parameter(torch.zeros(1).fill_(50))
 
     def forward(self, synth_params: SynthParams):
 
@@ -288,7 +289,7 @@ class Synthesizer(nn.Module):
         radians[indices] = 0
 
         radians = F.interpolate(radians, size=exp.n_samples, mode='linear')
-        osc_bank = torch.sin(torch.cumsum(radians, dim=-1)) * (self.global_amp * 0.01)
+        osc_bank = torch.sin(torch.cumsum(radians, dim=-1)) * self.osc_amp
 
         harm_decay = synth_params.harmonic_decay.view(-1, n_harmonics)
         harm_decay = min_resonance + (harm_decay * res_span)

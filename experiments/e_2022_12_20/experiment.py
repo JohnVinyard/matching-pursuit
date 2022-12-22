@@ -15,7 +15,7 @@ from modules.sparse import VectorwiseSparsity
 from modules.stft import stft
 
 from train.optim import optimizer
-from upsample import PosEncodedUpsample
+from upsample import ConvUpsample, PosEncodedUpsample
 from util import playable
 from util.readmedocs import readme
 from util import device
@@ -33,45 +33,60 @@ learning_rate = 1e-4
 
 
 def activation(x):
-    return torch.sin(x * 30)
+    return F.leaky_relu(x, 0.2)
 
 def softmax(x):
-    # return torch.softmax(x, dim=-1)
     return F.gumbel_softmax(x, dim=-1, hard=True)
 
 def amp_activation(x):
-    return torch.relu(x)
+    return x ** 2
 
 class AtomSynth(nn.Module):
     def __init__(self):
         super().__init__()
-        self.net = PosEncodedUpsample(
+        # self.net = PosEncodedUpsample(
+        #     exp.model_dim, 
+        #     exp.model_dim, 
+        #     n_atom_samples, 
+        #     out_channels=1, 
+        #     layers=5, 
+        #     activation=activation,
+        #     concat=False)
+        self.net = ConvUpsample(
             exp.model_dim, 
             exp.model_dim, 
-            n_atom_samples, 
-            out_channels=1, 
-            layers=6, 
-            activation=activation,
-            concat=True)
+            8, 
+            end_size=n_atom_samples, 
+            mode='learned', 
+            out_channels=1)
         
         self.amp = LinearOutputStack(
             exp.model_dim, 3, out_channels=1, activation=activation)
         
-        self.time = PosEncodedUpsample(
+        # self.time = PosEncodedUpsample(
+        #     exp.model_dim,
+        #     exp.model_dim,
+        #     exp.n_frames,
+        #     out_channels=1,
+        #     layers=5,
+        #     activation=activation,
+        #     concat=False)
+
+        self.time = ConvUpsample(
             exp.model_dim,
             exp.model_dim,
-            exp.n_frames,
-            out_channels=1,
-            layers=6,
-            activation=activation,
-            concat=True)
+            8,
+            end_size=exp.n_frames,
+            mode='learned',
+            out_channels=1)
     
     def forward(self, x):
         amp = amp_activation(self.amp(x))
+        t = self.time(x)
+
         x = self.net(x)
         x = torch.tanh(x) * amp[:, None, :]
 
-        t = self.time(x)
 
         t = softmax(t)
 
@@ -147,7 +162,6 @@ class Model(nn.Module):
         samples = (mx * wet) + ((1 - mx) * samples)
         samples = samples
 
-        samples = max_norm(samples)
         return samples
         
 model = Model().to(device)
@@ -157,12 +171,8 @@ optim = optimizer(model, lr=learning_rate)
 def train(batch):
     optim.zero_grad()
     recon = model.forward(batch)
-    # loss = exp.perceptual_loss(recon, batch)
+    loss = exp.perceptual_loss(recon, batch)
 
-    fake = stft(recon, 512, 256, pad=True)
-    real = stft(batch, 512, 256, pad=True)
-
-    loss = F.mse_loss(fake, real)
     loss.backward()
     optim.step()
     return loss, recon
