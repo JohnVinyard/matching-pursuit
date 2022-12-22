@@ -64,7 +64,7 @@ class FFTUpsampleBlock(nn.Module):
         self.channels = in_channels
         self.size = size
         self.factor = factor
-        self.new_time = self.size * self.factor 
+        self.new_time = int(self.size * self.factor) 
         self.orig_coeffs = self.size // 2 + 1
         self.n_coeffs = self.new_time // 2 + 1
 
