@@ -49,21 +49,6 @@ phase_slice = slice(260, 260 + 257)
 noise_coeff_slice = slice(260 + 257, 260 + 257 + 16)
 
 
-def unpack(x):
-    means = (x[..., mean_slice] * 2) - 1
-    stds = x[..., std_slice] * 0.1
-    amps = x[..., amp_slice]
-
-    mag = min_resonance + (res_span * x[..., mag_slice])
-
-    # TODO: use the group-delay here, to simplify this
-    phase = (x[..., phase_slice] * np.pi * 2) - np.pi
-
-    noise_coeff = x[..., noise_coeff_slice]
-
-    return means, stds, amps, mag, phase, noise_coeff
-
-
 total_params = 1 + 1 + 1 + 257 + 257 + 16
 
 
@@ -77,11 +62,30 @@ n_frames = exp.n_samples // step_size
 min_resonance = 0.01
 res_span = 1 - min_resonance
 
+freqs = torch.fft.rfftfreq(window_size) * np.pi
+
+
+def unpack(x):
+    means = (x[..., mean_slice] * 2) - 1
+    stds = x[..., std_slice] * 0.1
+    amps = x[..., amp_slice]
+
+    mag = min_resonance + (res_span * x[..., mag_slice])
+
+    phase = (x[..., phase_slice] * np.pi * 2) - np.pi
+    phase = phase + freqs
+
+    noise_coeff = x[..., noise_coeff_slice]
+
+    return means, stds, amps, mag, phase, noise_coeff
+
+
 
 def unit_activation(x):
     # return torch.sigmoid(x)
     return torch.clamp(x, 0, 1)
     # return (torch.sin(x) + 1) * 0.5
+
 
 
 def to_mag_and_phase(x):
@@ -96,27 +100,23 @@ def to_mag_and_phase(x):
     norm = torch.norm(paired, dim=-1) + 1e-8
     ref_norm = torch.norm(reference, dim=-1)
 
-    freqs = torch.fft.rfftfreq(window_size) * 2 * np.pi
-    # normalized angle between vectors
-    phase = ((paired * reference).sum(dim=-1) / (norm * ref_norm))
-    phase = phase * freqs
-    # phase = (phase * np.pi) + freqs
+    # normalized angle between vectors, in radians
+    phase = ((paired * reference).sum(dim=-1) / (norm * ref_norm)) * np.pi
 
     mag = norm
-    # phase = torch.angle(x)
-    # print(phase)
     return mag, phase
 
 
 def to_complex(real, imag):
-    # tf = torch.complex(
-    #     real * torch.cos(imag),
-    #     real * torch.sin(imag)
-    # )
-    # return tf
 
-    spec = real * torch.exp(1j * imag)
-    return spec
+    tf = torch.complex(
+        real * torch.cos(imag),
+        real * torch.sin(imag)
+    )
+    return tf
+
+    # spec = real * torch.exp(1j * imag)
+    # return spec
 
 
 def localized_noise(means, stds, spec_shape, n_samples, device):
@@ -168,7 +168,6 @@ def resonance(noise_atoms, resonance, phase):
 
     mags, phases = to_mag_and_phase(spec)
 
-
     for i in range(n_frames):
 
         curr_mag =     mags[:, :, i:i + 1, :]
@@ -182,7 +181,8 @@ def resonance(noise_atoms, resonance, phase):
             prev_phase = res_phases[i - 1]
 
             m = curr_mag + (resonance[:, :, None, :] * prev_mag)
-            p = curr_phase + (phase[:, :, None, :] + prev_phase)
+            # p = curr_phase + (phase[:, :, None, :] + prev_phase)
+            p = curr_phase + phase[:, :, None, :]
 
 
             res_mags.append(m)
@@ -205,13 +205,6 @@ class Atoms(nn.Module):
 
     def forward(self, x):
         x = unit_activation(x)
-
-        # means can be before or after the audio frame
-        # means = x[..., 0:1]
-        # stds = x[..., 1:2]
-        # res_mags = min_resonance + (res_span * x[..., 2:259])
-        # spec_shape = x[..., 259:-1]
-        # amps = x[..., -1:].view(-1, n_events, 1)
 
         means, stds, amps, res_mags, res_phases, spec_shape = unpack(x)
 
@@ -245,10 +238,6 @@ def train(batch):
     optim.zero_grad()
     recon = model.forward(batch)
     loss = exp.perceptual_loss(recon, batch)
-
-    # real = stft(batch, 512, 256, pad=True)
-    # fake = stft(recon, 512, 256, pad=True)
-    # loss = F.mse_loss(fake, real)
 
     loss.backward()
     optim.step()
