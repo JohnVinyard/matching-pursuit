@@ -104,11 +104,14 @@ class WavetableSynth(nn.Module):
 
         # This determines each events read head position over time
         freq = self.to_frequency.forward(x).view(batch, 1, -1)
+
+        # TODO: What is all this nonsense?
         freq = 0.0009070294784580499 + (torch.sigmoid(freq) * 0.2)
         freq = F.interpolate(freq, size=exp.n_samples, mode='linear')
         freq = torch.cumsum(freq, dim=-1) % 1
         stds = torch.zeros(1, device=freq.device).fill_(0.01)
         
+        # TODO: replace with torch Normal distribution
         sampling_kernel = pdf(torch.linspace(0, 1, self.table_size, device=freq.device)[None, :, None], freq, stds).permute(0, 2, 1)
         # print(sampling_kernel.shape)
         # print(selected_tables.shape)
