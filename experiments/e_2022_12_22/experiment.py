@@ -2,12 +2,15 @@ from torch import nn
 import zounds
 import torch
 from torch.distributions import Normal
+from config.dotenv import Config
 from config.experiment import Experiment
 from fft_shift import fft_shift
 from modules.ddsp import overlap_add
 
 from modules.decompose import fft_resample
+from modules.fft import fft_convolve
 from modules.normalization import max_norm
+from modules.reverb import NeuralReverb
 from modules.stft import stft
 from train.optim import optimizer
 from upsample import FFTUpsampleBlock
@@ -17,21 +20,6 @@ import numpy as np
 from util.readmedocs import readme
 from torch.nn import functional as F
 
-'''
-event
----------------
-- mean (time) 1
-- std (width) 1
-- resonance magnitudes 257 (recurrently multiply)
-- noise spectral shape 16 (upscale and multiply in frequency domain)
-
-
-/home/john/workspace/matching-pursuit/config/experiment.py:78: UserWarning: Using a target size 
-(torch.Size([1, 128, 128, 257])) that is different to the input size 
-(torch.Size([32, 128, 128, 257])). 
-This will likely lead to incorrect results due to broadcasting. Please ensure they have the same size.
-
-'''
 
 exp = Experiment(
     samplerate=zounds.SR22050(),
@@ -40,17 +28,7 @@ exp = Experiment(
     model_dim=128,
     kernel_size=512)
 
-
-mean_slice = slice(0, 1)
-std_slice = slice(1, 2)
-amp_slice = slice(2, 3)
-mag_slice = slice(3, 260)
-phase_slice = slice(260, 260 + 257)
-noise_coeff_slice = slice(260 + 257, 260 + 257 + 16)
-
-
-total_params = 1 + 1 + 1 + 257 + 257 + 16
-
+n_harmonics = 8
 
 n_events = 16
 total_coeffs = exp.n_samples // 2 + 1
@@ -62,22 +40,36 @@ n_frames = exp.n_samples // step_size
 min_resonance = 0.01
 res_span = 1 - min_resonance
 
-freqs = torch.fft.rfftfreq(window_size) * np.pi
+mean_slice = slice(0, 1)
+std_slice = slice(1, 2)
+amp_slice = slice(2, 3)
+f0_slice = slice(3, 4)
+factors_slice = slice(4, 12)
+mag_slice = slice(12, 20)
+noise_coeff_slice = slice(20, 20 + noise_spectral_shape)
+fine_env_slice = slice(20 + noise_spectral_shape, 20 + noise_spectral_shape + exp.n_frames)
+amp_factors_slice = slice(20 + noise_spectral_shape + exp.n_frames, 20 + noise_spectral_shape + exp.n_frames + n_harmonics)
+
+
+total_params = 1 + 1 + 1 + 1 + 12 + 12 + 16 + 128
+
+min_freq = 20 / exp.samplerate.nyquist
+max_freq = 3000 / exp.samplerate.nyquist
+freq_span = max_freq - min_freq
 
 
 def unpack(x):
-    means = (x[..., mean_slice] * 2) - 1
+    means = x[..., mean_slice]
     stds = x[..., std_slice] * 0.1
-    amps = x[..., amp_slice]
-
-    mag = min_resonance + (res_span * x[..., mag_slice])
-
-    phase = (x[..., phase_slice] * np.pi * 2) - np.pi
-    phase = phase + freqs
-
+    amps = x[..., amp_slice] ** 2
+    f0 = x[..., f0_slice] ** 2
+    factors = x[..., factors_slice] * 8
+    mags = x[..., mag_slice]
     noise_coeff = x[..., noise_coeff_slice]
+    fine_env = (x[..., fine_env_slice] * 2) - 1
+    amp_factors = x[..., amp_factors_slice] ** 2
 
-    return means, stds, amps, mag, phase, noise_coeff
+    return means, stds, amps, f0, factors, mags, noise_coeff, fine_env, amp_factors
 
 
 
@@ -88,35 +80,36 @@ def unit_activation(x):
 
 
 
-def to_mag_and_phase(x):
+def generate_resonance(f0, factors, mag, amp_factors):
 
-    r, i = x.real, x.imag
+    f0 = f0.view(-1, 1)
+    factors = factors.view(-1, n_harmonics)
+    mag = mag.view(-1, n_harmonics)
 
-    paired = torch.cat([r[..., None], i[..., None]], dim=-1)
+    f0 = min_freq + (f0 * freq_span)
 
-    reference = torch.zeros_like(paired)
-    reference[..., 1] = 1
+    indices = torch.where(f0 > 1)
+    f0[indices] = 0
 
-    norm = torch.norm(paired, dim=-1) + 1e-8
-    ref_norm = torch.norm(reference, dim=-1)
-
-    # normalized angle between vectors, in radians
-    phase = ((paired * reference).sum(dim=-1) / (norm * ref_norm)) * np.pi
-
-    mag = norm
-    return mag, phase
+    all_freqs = f0 * factors
+    all_freqs = all_freqs * np.pi
+    all_freqs = all_freqs.view(-1, n_harmonics, 1).repeat(1, 1, exp.n_samples)
+    all_freqs = torch.sin(torch.cumsum(all_freqs, dim=-1)) * amp_factors.view(-1, n_harmonics, 1)
 
 
-def to_complex(real, imag):
+    mag = mag.view(-1, n_harmonics, 1).repeat(1, 1, n_frames)
+    mag = torch.cumprod(mag, dim=-1)
+    # mag = torch.exp(torch.cumsum(torch.log(mag + 1e-8), dim=-1))
+    mag = F.interpolate(mag, size=exp.n_samples, mode='linear')
 
-    tf = torch.complex(
-        real * torch.cos(imag),
-        real * torch.sin(imag)
-    )
-    return tf
+    resonance = all_freqs * mag
 
-    # spec = real * torch.exp(1j * imag)
-    # return spec
+
+    resonance = torch.sum(resonance, dim=1, keepdim=True)
+
+    resonance = resonance.view(-1, n_events, exp.n_samples)
+    return resonance
+
 
 
 def localized_noise(means, stds, spec_shape, n_samples, device):
@@ -129,7 +122,6 @@ def localized_noise(means, stds, spec_shape, n_samples, device):
     rng = torch.arange(0, n_samples, device=device)
     dist = Normal(
         torch.clamp(means * n_samples, -(n_samples // 2), n_samples * 1.5),
-        # 0,
         torch.clamp((1e-8 + stds) * n_samples, 0, n_samples - 1))
     probs = torch.exp(dist.log_prob(
         rng[None, ...])).view(-1, n_events, n_samples)
@@ -155,48 +147,6 @@ def localized_noise(means, stds, spec_shape, n_samples, device):
     return noise
 
 
-def resonance(noise_atoms, resonance, phase):
-
-    noise_atoms = F.pad(noise_atoms, (0, step_size))
-    windowed = \
-        noise_atoms.unfold(-1, 512, 256) \
-        * torch.hamming_window(window_size)[None, None, None, :]
-    spec = torch.fft.rfft(windowed, dim=-1, norm='ortho')
-
-    res_mags = []
-    res_phases = []
-
-    mags, phases = to_mag_and_phase(spec)
-
-    for i in range(n_frames):
-
-        curr_mag =     mags[:, :, i:i + 1, :]
-        curr_phase = phases[:, :, i:i + 1, :]
-
-        if i == 0:
-            res_mags.append(curr_mag)
-            res_phases.append(curr_phase)
-        else:
-            prev_mag = res_mags[i - 1]
-            prev_phase = res_phases[i - 1]
-
-            m = curr_mag + (resonance[:, :, None, :] * prev_mag)
-            # p = curr_phase + (phase[:, :, None, :] + prev_phase)
-            p = curr_phase + phase[:, :, None, :]
-
-
-            res_mags.append(m)
-            res_phases.append(p)
-        
-
-    mags = torch.cat(res_mags, dim=2)
-    phases = torch.cat(res_phases, dim=2)
-
-    final = to_complex(mags, phases)
-
-    res = torch.fft.irfft(final, dim=-1, norm='ortho')
-    res = overlap_add(res, apply_window=False)[..., :exp.n_samples]
-    return res
 
 
 class Atoms(nn.Module):
@@ -205,17 +155,25 @@ class Atoms(nn.Module):
 
     def forward(self, x):
         x = unit_activation(x)
+        means, stds, amps, f0, factors, mags, spec_shape, fine_env, amp_factors  = unpack(x)
 
-        means, stds, amps, res_mags, res_phases, spec_shape = unpack(x)
+        fine_env = fine_env.view(-1, 1, exp.n_frames)
+        fine_env = torch.cumsum(fine_env, dim=-1)
+        fine_env = torch.clamp(fine_env, 0, 1)
+
+        fine_env = F.interpolate(fine_env, size=exp.n_samples, mode='linear')
+        fine_env = fine_env.view(-1, exp.n_samples)
 
         atoms = localized_noise(
             means, stds, spec_shape, exp.n_samples, device=device)
-        atoms = atoms * amps
-        res = resonance(atoms, res_mags, res_phases)
-        res = res.view(-1, n_events, exp.n_samples)
+        atoms = atoms * amps * fine_env
 
+        res = generate_resonance(f0, factors, mags, amp_factors)
+
+        res = fft_convolve(atoms, res)
+        res = res.view(-1, n_events, exp.n_samples)
         res = torch.sum(res, dim=1, keepdim=True)
-        res = max_norm(res)
+        # res = max_norm(res)
         return res
 
 
@@ -225,9 +183,21 @@ class Model(nn.Module):
         self.p = nn.Parameter(torch.zeros(
             1, n_events, total_params).uniform_(0, 1))
         self.atoms = Atoms()
+        self.verb = NeuralReverb.from_directory(
+            Config.impulse_response_path(), exp.samplerate, exp.n_samples)
+
+        self.mix = nn.Parameter(torch.zeros(1, 1, 1).uniform_(0, 1))
+        self.rooms = nn.Parameter(torch.zeros(1, self.verb.n_rooms).uniform_(-1, 1))
 
     def forward(self, x):
-        return self.atoms(self.p)
+        atoms = self.atoms(self.p)
+
+        wet = self.verb.forward(atoms, torch.softmax(self.rooms, dim=-1))
+
+        mx = torch.clamp(self.mix, 0, 1)
+
+        final = (mx * wet) + ((1 - mx) * atoms)
+        return final
 
 
 model = Model().to(device)
@@ -239,6 +209,10 @@ def train(batch):
     recon = model.forward(batch)
     loss = exp.perceptual_loss(recon, batch)
 
+    # fake = stft(recon, 512, 256, pad=True)
+    # real = stft(batch, 512, 256, pad=True)
+    # loss = F.mse_loss(fake, real)
+    
     loss.backward()
     optim.step()
     return loss, recon
