@@ -14,6 +14,7 @@ from train.optim import optimizer
 from util import device, playable, readme
 import numpy as np
 from scipy.signal import square, sawtooth
+from torch.distributions import Normal
 
 exp = Experiment(
     samplerate=zounds.SR22050(),
@@ -23,7 +24,7 @@ exp = Experiment(
     kernel_size=64
 )
 
-n_events = 2
+n_events = 8
 
 n_tables = 4
 
@@ -104,6 +105,7 @@ class WavetableSynth(nn.Module):
 
         # This determines each events read head position over time
         freq = self.to_frequency.forward(x).view(batch, 1, -1)
+        freq = torch.cumsum(freq, dim=-1)
 
         # TODO: What is all this nonsense?
         freq = 0.0009070294784580499 + (torch.sigmoid(freq) * 0.2)
@@ -112,6 +114,9 @@ class WavetableSynth(nn.Module):
         stds = torch.zeros(1, device=freq.device).fill_(0.01)
         
         # TODO: replace with torch Normal distribution
+        dist = Normal(freq, stds)
+        rng = torch.arange(0, self.table_size)[None, :, None]
+        sampling_kernel = torch.exp(dist.log_prob(rng)).permute(0, 2, 1)
         sampling_kernel = pdf(torch.linspace(0, 1, self.table_size, device=freq.device)[None, :, None], freq, stds).permute(0, 2, 1)
         # print(sampling_kernel.shape)
         # print(selected_tables.shape)
