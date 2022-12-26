@@ -17,7 +17,7 @@ from modules.reverb import NeuralReverb
 from modules.sparse import VectorwiseSparsity
 from modules.stft import stft
 from train.optim import optimizer
-from upsample import FFTUpsampleBlock
+from upsample import FFTUpsampleBlock, PosEncodedUpsample
 from util import device, playable
 import numpy as np
 
@@ -34,7 +34,7 @@ exp = Experiment(
 
 n_harmonics = 8
 
-n_events = 16
+n_events = 8
 total_coeffs = exp.n_samples // 2 + 1
 window_size = 512
 step_size = window_size // 2
@@ -82,9 +82,9 @@ def unpack(x):
 
 
 def unit_activation(x):
-    # return torch.sigmoid(x)
+    return torch.sigmoid(x)
     # return torch.clamp(x, 0, 1)
-    return (torch.sin(x) + 1) * 0.5
+    # return (torch.sin(x) + 1) * 0.5
 
 
 
@@ -165,7 +165,46 @@ def localized_noise(means, stds, spec_shape, n_samples, device):
     # noise = fft_shift(noise, means)[..., :exp.n_samples]
     return noise
 
+def activation(x):
+    # return torch.sin(x * 30)
+    # return F.leaky_relu(x, 0.2)
+    return torch.sin(x)
 
+class NeuralAtoms(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = PosEncodedUpsample(
+            total_params, 
+            exp.model_dim, 
+            size=exp.n_samples, 
+            out_channels=1, 
+            layers=5, 
+            learnable_encodings=False,
+            multiply=False,
+            activation=activation,
+            filter_bank=False)
+        
+        self.to_time = LinearOutputStack(exp.model_dim, 2, out_channels=n_frames, in_channels=total_params)
+
+    
+    def forward(self, x):
+        x = x.view(-1, total_params)
+        t = self.to_time(x)
+        t = F.gumbel_softmax(t, dim=-1, hard=True)
+        t2 = torch.zeros(x.shape[0], exp.n_samples, device=x.device)
+        factor = exp.n_samples // n_frames
+
+        t2[:, ::factor] = t
+        t2 = t2.view(-1, 1, exp.n_samples)
+
+        x = self.net(x)
+
+
+        x = fft_convolve(x, t2)
+
+        x = x.view(-1, n_events, exp.n_samples)
+        x = torch.sum(x, dim=1, keepdim=True)
+        return x
 
 
 class Atoms(nn.Module):
@@ -209,7 +248,7 @@ class Atoms(nn.Module):
 class Model(nn.Module):
     def __init__(self):
         super().__init__()
-        self.atoms = Atoms()
+        self.atoms = NeuralAtoms()
         self.verb = NeuralReverb.from_directory(
             Config.impulse_response_path(), exp.samplerate, exp.n_samples)
 
@@ -227,6 +266,7 @@ class Model(nn.Module):
             exp.model_dim, 2, out_channels=self.n_rooms)
 
         self.to_params = LinearOutputStack(exp.model_dim, 2, out_channels=total_params)
+
 
         self.apply(lambda p: exp.init_weights(p))
         
@@ -249,6 +289,7 @@ class Model(nn.Module):
 
         x, indices = self.sparse(x)
 
+
         orig_verb_params, _ = torch.max(x, dim=1)
         verb_params = orig_verb_params
 
@@ -260,10 +301,15 @@ class Model(nn.Module):
         params = unit_activation(self.to_params(x))
         atoms = self.atoms(params)
 
+
+
         wet = self.verb.forward(atoms, torch.softmax(rm, dim=-1))
 
 
         final = (mx * wet) + ((1 - mx) * atoms)
+
+        # final = max_norm(final)
+
         return final
 
 
@@ -276,8 +322,8 @@ def train(batch):
     recon = model.forward(batch)
     # loss = exp.perceptual_loss(recon, batch)
 
-    fake = stft(recon, 512, 256, pad=True)
-    real = stft(batch, 512, 256, pad=True)
+    fake = stft(recon, 512, 256, pad=True, log_amplitude=True)
+    real = stft(batch, 512, 256, pad=True, log_amplitude=True)
     loss = F.mse_loss(fake, real)
     
     loss.backward()
