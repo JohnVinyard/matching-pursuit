@@ -5,11 +5,13 @@ from torch import nn
 from torch.nn import functional as F
 from fft_shift import fft_shift
 from modules.fft import fft_convolve
+from modules.linear import LinearOutputStack
 from modules.normalization import max_norm
 from modules.physical import Window
 from modules.sparse import SparseEncoderModel
 from modules.stft import stft
 from train.optim import optimizer
+from upsample import ConvUpsample
 
 from util.readmedocs import readme
 from util import device, playable
@@ -65,10 +67,26 @@ class Atoms(nn.Module):
     def __init__(self):
         super().__init__()
         self.window = Window(exp.n_samples, 0, 1)
+
+        self.f0 = LinearOutputStack(exp.model_dim, 3, out_channels=1)
+        self.f0_var = ConvUpsample(
+            exp.model_dim, exp.model_dim, start_size=8, end_size=exp.n_frames, mode='nearest', out_channels=1)
+        self.amp_params = ConvUpsample(
+            exp.model_dim, exp.model_dim, start_size=8, end_size=exp.n_frames, mode='nearest', out_channels=n_harmonics * 2
+        )
+
+        self.loc = ConvUpsample(
+            exp.model_dim, exp.model_dim, start_size=8, end_size=exp.n_frames, mode='learned', out_channels=1
+        )
     
     def forward(self, x):
-        x = x.view(-1, total_params)
-        means, stds, f0, f0_var, amp_params, discrete_f0 = unpack(x)
+        x = x.view(-1, exp.model_dim)
+        # means, stds, f0, f0_var, amp_params, discrete_f0 = unpack(x)
+
+        discrete_f0 = unit_activation(self.loc(x))
+        f0 = unit_activation(self.f0(x))
+        f0_var = unit_activation(self.f0_var(x))
+        amp_params = unit_activation(self.amp_params(x))
 
         loc = F.gumbel_softmax(discrete_f0, dim=-1, hard=True).view(-1, n_events, 128)
         loc_full = torch.zeros(x.shape[0] // n_events, n_events, exp.n_samples)
@@ -112,6 +130,7 @@ class Atoms(nn.Module):
         full = torch.cat([harm, noise_bands], dim=1)
         amp_params = F.interpolate(
             amp_params.view(-1, n_noise_bands + n_harmonics, exp.n_frames), size=exp.n_samples, mode='linear')
+        
         x = full * amp_params
 
         x = x.view(-1, n_events, n_harmonics + n_noise_bands, exp.n_samples)
@@ -133,13 +152,13 @@ class Model(nn.Module):
             exp.model_dim, 
             exp.scale.n_bands, 
             n_events, 
-            total_params, 
+            exp.model_dim, 
             exp.fb, 
             exp.scale,
             window_size,
             step_size,
             exp.n_frames,
-            unit_activation)
+            lambda x: x)
         self.apply(lambda p: exp.init_weights(p))
     
     def forward(self, x):
