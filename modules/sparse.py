@@ -1,8 +1,13 @@
 import torch
 from torch import jit
 from torch import nn
+from config.dotenv import Config
+from modules.dilated import DilatedStack
+from modules.linear import LinearOutputStack
 
-from modules.normalization import unit_norm
+from modules.normalization import ExampleNorm, unit_norm
+from modules.pos_encode import pos_encoded
+from modules.reverb import NeuralReverb
 
 
 def sparsify(x, n_to_keep):
@@ -18,7 +23,6 @@ def sparsify(x, n_to_keep):
 def to_sparse_vectors_with_context(x, n_elements):
     batch, channels, time = x.shape
 
-
     one_hot = torch.zeros(batch, n_elements, channels, device=x.device)
     indices = torch.nonzero(x)
 
@@ -32,7 +36,8 @@ def to_sparse_vectors_with_context(x, n_elements):
         val = x[tuple(index)]
         one_hot[batch, el, index[1]] = val
 
-    context = torch.sum(x, dim=-1, keepdim=True).repeat(1, 1, n_elements).permute(0, 2, 1)
+    context = torch.sum(x, dim=-1, keepdim=True).repeat(1,
+                                                        1, n_elements).permute(0, 2, 1)
 
     return one_hot, context, positions
 
@@ -72,7 +77,6 @@ class AtomPlacement(jit.ScriptModule):
         self.n_samples = n_samples
         self.n_events = n_events
         self.step_size = step_size
-        
 
     @jit.script_method
     def render(self, x, indices):
@@ -123,12 +127,12 @@ class ElementwiseSparsity(nn.Module):
     def forward(self, x):
         if self.dropout is not None:
             x = torch.dropout(x, self.dropout, self.training)
-        
+
         x = self.expand(x)
-        
+
         if self.softmax:
             x = torch.softmax(x, dim=1)
-        
+
         sparse = sparsify(x, self.keep)
         x = self.contract(sparse)
         return x, sparse
@@ -157,7 +161,7 @@ class VectorwiseSparsity(nn.Module):
 
         x = sparsify_vectors(
             x.permute(0, 2, 1), attn, n_to_keep=self.keep, dense=self.dense, normalize=self.normalize)
-        
+
         if not self.dense:
             return x
 
@@ -165,3 +169,87 @@ class VectorwiseSparsity(nn.Module):
             x = x.permute(0, 2, 1)
 
         return x
+
+
+class SparseEncoderModel(nn.Module):
+    def __init__(
+            self,
+            atoms,
+            samplerate,
+            n_samples,
+            model_dim,
+            n_bands,
+            n_events,
+            total_params,
+            filter_bank,
+            scale,
+            window_size,
+            step_size,
+            n_frames,
+            unit_activation):
+
+        super().__init__()
+        self.atoms = atoms
+        self.samplerate = samplerate
+        self.n_samples = n_samples
+        self.model_dim = model_dim
+        self.n_bands = n_bands
+        self.n_events = n_events
+        self.total_params = total_params
+        self.filter_bank = filter_bank
+        self.scale = scale
+        self.window_size = window_size
+        self.step_size = step_size
+        self.n_frames = n_frames
+        self.unit_activation = unit_activation
+
+        self.verb = NeuralReverb.from_directory(
+            Config.impulse_response_path(), samplerate, n_samples)
+
+        self.n_rooms = self.verb.n_rooms
+        self.context = DilatedStack(model_dim, [1, 3, 9, 27, 1])
+
+        self.reduce = nn.Conv1d(scale.n_bands + 33, model_dim, 1, 1, 0)
+        self.norm = ExampleNorm()
+
+        self.sparse = VectorwiseSparsity(
+            model_dim, keep=n_events, channels_last=False, dense=False, normalize=True)
+
+        self.to_mix = LinearOutputStack(model_dim, 2, out_channels=1)
+        self.to_room = LinearOutputStack(
+            model_dim, 2, out_channels=self.n_rooms)
+
+        self.to_params = LinearOutputStack(
+            model_dim, 2, out_channels=total_params)
+
+    def forward(self, x):
+        batch = x.shape[0]
+        x = self.filter_bank.forward(x, normalize=False)
+        x = self.filter_bank.temporal_pooling(
+            x, self.window_size, self.step_size)[..., :self.n_frames]
+        x = self.norm(x)
+        pos = pos_encoded(
+            batch, self.n_frames, 16, device=x.device).permute(0, 2, 1)
+
+        x = torch.cat([x, pos], dim=1)
+        x = self.reduce(x)
+
+        x = self.context(x)
+
+        x = self.norm(x)
+
+        x, indices = self.sparse(x)
+
+        orig_verb_params, _ = torch.max(x, dim=1)
+        verb_params = orig_verb_params
+
+        # expand to params
+        mx = torch.sigmoid(self.to_mix(verb_params)).view(batch, 1, 1)
+        rm = torch.softmax(self.to_room(verb_params), dim=-1)
+
+        params = self.unit_activation(self.to_params(x))
+        atoms = self.atoms(params)
+
+        wet = self.verb.forward(atoms, torch.softmax(rm, dim=-1))
+        final = (mx * wet) + ((1 - mx) * atoms)
+        return final
