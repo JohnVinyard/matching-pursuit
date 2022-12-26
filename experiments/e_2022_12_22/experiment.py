@@ -110,25 +110,16 @@ def generate_resonance(f0, factors, mag, amp_factors, f0_variance):
     f0[indices] = 0
 
 
-    all_freqs = f0 * factors[..., None]
-    all_freqs = all_freqs * np.pi
-    # all_freqs = all_freqs.view(-1, n_harmonics, 1).repeat(1, 1, exp.n_samples)
-    all_freqs = torch.sin(torch.cumsum(all_freqs, dim=-1)) * amp_factors.view(-1, n_harmonics, 1)
+
+# def to_mag_and_phase(x):
+#     mag = torch.abs(x)
+#     phase = torch.angle(x)
+#     return mag, phase
 
 
-    mag = mag.view(-1, n_harmonics, 1).repeat(1, 1, n_frames)
-    mag = torch.cumprod(mag, dim=-1)
-    # mag = torch.exp(torch.cumsum(torch.log(mag + 1e-8), dim=-1))
-    mag = F.interpolate(mag, size=exp.n_samples, mode='linear')
-
-    resonance = all_freqs * mag
-
-
-    resonance = torch.sum(resonance, dim=1, keepdim=True)
-
-    resonance = resonance.view(-1, n_events, exp.n_samples)
-    return resonance
-
+# def to_complex(real, imag):
+#     spec = real * torch.exp(1j * imag)
+#     return spec
 
 
 def localized_noise(means, stds, spec_shape, n_samples, device):
@@ -197,7 +188,11 @@ class NeuralAtoms(nn.Module):
         t2[:, ::factor] = t
         t2 = t2.view(-1, 1, exp.n_samples)
 
-        x = self.net(x)
+        noise_atoms = F.pad(noise_atoms, (0, step_size))
+        windowed = \
+            noise_atoms.unfold(-1, 512, 256) \
+            * torch.hamming_window(window_size, device=device)[None, None, None, :]
+        spec = torch.fft.rfft(windowed, dim=-1, norm='ortho')
 
 
         x = fft_convolve(x, t2)
@@ -248,29 +243,10 @@ class Atoms(nn.Module):
 class Model(nn.Module):
     def __init__(self):
         super().__init__()
-        self.atoms = NeuralAtoms()
-        self.verb = NeuralReverb.from_directory(
-            Config.impulse_response_path(), exp.samplerate, exp.n_samples)
 
-        self.n_rooms = self.verb.n_rooms
-        self.context = DilatedStack(exp.model_dim, [1, 3, 9, 27, 1])
-
-        self.reduce = nn.Conv1d(exp.scale.n_bands + 33, exp.model_dim, 1, 1, 0)
-        self.norm = ExampleNorm()
-
-        self.sparse = VectorwiseSparsity(
-            exp.model_dim, keep=n_events, channels_last=False, dense=False, normalize=True)
-
-        self.to_mix = LinearOutputStack(exp.model_dim, 2, out_channels=1)
-        self.to_room = LinearOutputStack(
-            exp.model_dim, 2, out_channels=self.n_rooms)
-
-        self.to_params = LinearOutputStack(exp.model_dim, 2, out_channels=total_params)
-
-
-        self.apply(lambda p: exp.init_weights(p))
-        
-
+        self.p = nn.Parameter(torch.zeros(1, n_events, total_params, device=device).uniform_(0, 1))
+        self.atoms = Atoms()
+    
     def forward(self, x):
         batch = x.shape[0]
         x = exp.fb.forward(x, normalize=False)
