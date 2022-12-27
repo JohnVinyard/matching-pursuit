@@ -49,9 +49,9 @@ total_params = time_params + f0_params + f0_variance_params + n_amp_params + dis
 
 
 def unit_activation(x):
-    # return torch.sigmoid(x)
+    return torch.sigmoid(x)
     # return torch.clamp(x, 0, 1)
-    return (torch.sin(x) + 1) * 0.5
+    # return (torch.sin(x) + 1) * 0.5
 
 def unpack(x):
     means = x[..., 0:1]
@@ -105,7 +105,7 @@ class Atoms(nn.Module):
         f0 = min_freq + (f0 * freq_span)
 
         # TODO: What's a reasonable variance here?
-        f0_span = f0 * 0.001
+        f0_span = f0 * 0.01
         f0 = f0.view(-1, 1, 1).repeat(1, 1, exp.n_frames)
         f0_change = f0_var.view(-1, 1, exp.n_frames) * f0_span.view(-1, 1, 1)
         f0 = f0 + f0_change
@@ -141,8 +141,7 @@ class Atoms(nn.Module):
         x = x.view(-1, n_events, n_harmonics + n_noise_bands, exp.n_samples)
         x = torch.sum(x, dim=2)
 
-        # x = fft_convolve(x, loc_full)
-        
+        x = fft_convolve(x, loc_full)
 
         return x
 
