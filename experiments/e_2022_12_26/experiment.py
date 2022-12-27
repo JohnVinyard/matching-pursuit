@@ -4,6 +4,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from fft_shift import fft_shift
+from loss.serial import serial_loss
 from modules.fft import fft_convolve
 from modules.linear import LinearOutputStack
 from modules.normalization import max_norm
@@ -170,7 +171,7 @@ class Model(nn.Module):
     
     def forward(self, x):
         x = self.encoder(x)
-        x = torch.sum(x, dim=1, keepdim=True)
+        # x = torch.sum(x, dim=1, keepdim=True)
         # x = max_norm(x, dim=-1)
         return x
 
@@ -180,11 +181,18 @@ optim = optimizer(model, lr=1e-4)
 def train(batch):
     optim.zero_grad()
     recon = model.forward(batch)
-    loss = exp.perceptual_loss(recon, batch)
+
+    transform = lambda x: exp.perceptual_feature(x)
+
+    # transform = lambda x: stft(x, 512, 256, pad=True)
+    loss = serial_loss(recon, batch, transform)
+
+    # loss = exp.perceptual_loss(recon, batch)
 
     loss.backward()
     optim.step()
-    return loss, recon
+    with torch.no_grad():
+        return loss, recon.sum(dim=1, keepdim=True)
 
 
 @readme
