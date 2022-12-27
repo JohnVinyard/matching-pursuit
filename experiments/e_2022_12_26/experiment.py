@@ -71,6 +71,8 @@ class Atoms(nn.Module):
 
         # self.base_events = nn.Parameter(torch.zeros(1, n_events, exp.model_dim).uniform_(-1, 1))
 
+        self.switch = LinearOutputStack(exp.model_dim, 3, out_channels=2)
+
         self.f0 = LinearOutputStack(exp.model_dim, 3, out_channels=1)
         self.f0_var = ConvUpsample(
             exp.model_dim, exp.model_dim, start_size=8, end_size=exp.n_frames, mode='nearest', out_channels=1)
@@ -87,6 +89,9 @@ class Atoms(nn.Module):
         # x = x.view(-1, n_events, exp.model_dim) + self.base_events
         # x = x.view(-1, exp.model_dim)
         # means, stds, f0, f0_var, amp_params, discrete_f0 = unpack(x)
+
+        sw = self.switch(x)
+        sw = F.gumbel_softmax(sw, dim=-1, hard=True)[..., :1]
 
         discrete_f0 = unit_activation(self.loc(x))
         f0 = unit_activation(self.f0(x)) ** 2
@@ -137,7 +142,7 @@ class Atoms(nn.Module):
         amp_params = F.interpolate(
             amp_params.view(-1, n_noise_bands + n_harmonics, exp.n_frames), size=exp.n_samples, mode='linear')
         
-        x = full * amp_params
+        x = full * amp_params * sw[..., None]
 
         x = x.view(-1, n_events, n_harmonics + n_noise_bands, exp.n_samples)
         x = torch.sum(x, dim=2)
@@ -182,9 +187,9 @@ def train(batch):
     optim.zero_grad()
     recon = model.forward(batch)
 
-    transform = lambda x: exp.perceptual_feature(x)
+    # transform = lambda x: exp.perceptual_feature(x)
 
-    # transform = lambda x: stft(x, 512, 256, pad=True)
+    transform = lambda x: stft(x, 512, 256, pad=True)
     loss = serial_loss(recon, batch, transform)
 
     # loss = exp.perceptual_loss(recon, batch)
