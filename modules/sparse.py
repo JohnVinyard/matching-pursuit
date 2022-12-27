@@ -8,6 +8,7 @@ from modules.linear import LinearOutputStack
 from modules.normalization import ExampleNorm, unit_norm
 from modules.pos_encode import pos_encoded
 from modules.reverb import NeuralReverb
+from upsample import PosEncodedUpsample
 
 
 def sparsify(x, n_to_keep):
@@ -186,7 +187,8 @@ class SparseEncoderModel(nn.Module):
             window_size,
             step_size,
             n_frames,
-            unit_activation):
+            unit_activation,
+            collapse=False):
 
         super().__init__()
         self.atoms = atoms
@@ -202,6 +204,7 @@ class SparseEncoderModel(nn.Module):
         self.step_size = step_size
         self.n_frames = n_frames
         self.unit_activation = unit_activation
+        self.collapse = collapse
 
         self.verb = NeuralReverb.from_directory(
             Config.impulse_response_path(), samplerate, n_samples)
@@ -221,6 +224,14 @@ class SparseEncoderModel(nn.Module):
 
         self.to_params = LinearOutputStack(
             model_dim, 2, out_channels=total_params)
+        
+        if collapse:
+            self.to_latent = PosEncodedUpsample(
+                model_dim, 
+                model_dim, 
+                size=n_events, 
+                out_channels=model_dim, 
+                layers=4)
 
     def forward(self, x):
         batch = x.shape[0]
@@ -246,6 +257,10 @@ class SparseEncoderModel(nn.Module):
         # expand to params
         mx = torch.sigmoid(self.to_mix(verb_params)).view(batch, 1, 1)
         rm = torch.softmax(self.to_room(verb_params), dim=-1)
+
+        if self.collapse:
+            x = self.to_latent(orig_verb_params).permute(0, 2, 1)
+            x = x.reshape(-1, self.model_dim)
 
         params = self.unit_activation(self.to_params(x))
         atoms = self.atoms(params)

@@ -38,13 +38,13 @@ discrete_freqs = torch.linspace(min_freq, max_freq, 128, device=device)
 time_params = 2
 f0_params = 1
 f0_variance_params = exp.n_frames
-n_harmonics = 8
+n_harmonics = 64
 n_noise_bands = n_harmonics
 
 harmonics = torch.arange(1, n_harmonics + 1, device=device)
 n_amp_params = (n_noise_bands + n_harmonics) * exp.n_frames
 discrete_f0 = 128
-discrete_freqs = torch.linspace(min_freq, max_freq, discrete_f0)
+discrete_freqs = torch.linspace(min_freq, max_freq, discrete_f0, device=device)
 total_params = time_params + f0_params + f0_variance_params + n_amp_params + discrete_f0
 
 
@@ -68,6 +68,8 @@ class Atoms(nn.Module):
         super().__init__()
         self.window = Window(exp.n_samples, 0, 1)
 
+        # self.base_events = nn.Parameter(torch.zeros(1, n_events, exp.model_dim).uniform_(-1, 1))
+
         self.f0 = LinearOutputStack(exp.model_dim, 3, out_channels=1)
         self.f0_var = ConvUpsample(
             exp.model_dim, exp.model_dim, start_size=8, end_size=exp.n_frames, mode='nearest', out_channels=1)
@@ -81,15 +83,17 @@ class Atoms(nn.Module):
     
     def forward(self, x):
         x = x.view(-1, exp.model_dim)
+        # x = x.view(-1, n_events, exp.model_dim) + self.base_events
+        # x = x.view(-1, exp.model_dim)
         # means, stds, f0, f0_var, amp_params, discrete_f0 = unpack(x)
 
         discrete_f0 = unit_activation(self.loc(x))
-        f0 = unit_activation(self.f0(x))
-        f0_var = unit_activation(self.f0_var(x))
-        amp_params = unit_activation(self.amp_params(x))
+        f0 = unit_activation(self.f0(x)) ** 2
+        f0_var = (unit_activation(self.f0_var(x)) * 2) - 1
+        amp_params = self.amp_params(x) ** 2
 
         loc = F.gumbel_softmax(discrete_f0, dim=-1, hard=True).view(-1, n_events, 128)
-        loc_full = torch.zeros(x.shape[0] // n_events, n_events, exp.n_samples)
+        loc_full = torch.zeros(x.shape[0] // n_events, n_events, exp.n_samples, device=loc.device)
         step = exp.n_samples // 128
         loc_full[:, :, ::step] = loc
 
@@ -97,19 +101,20 @@ class Atoms(nn.Module):
         # discrete_f0 = torch.softmax(discrete_f0, dim=-1)
         # discrete_f0 = discrete_f0.view(-1, len(discrete_freqs))
         # f0 = discrete_f0 @ discrete_freqs
-
-        # indices = torch.where(f0 > 1)
-        # f0[indices] = 0
-
         
         f0 = min_freq + (f0 * freq_span)
 
+        # TODO: What's a reasonable variance here?
         f0_span = f0 * 0.001
         f0 = f0.view(-1, 1, 1).repeat(1, 1, exp.n_frames)
         f0_change = f0_var.view(-1, 1, exp.n_frames) * f0_span.view(-1, 1, 1)
         f0 = f0 + f0_change
 
         harm = f0.view(-1, 1, exp.n_frames) * harmonics[None, :, None]
+
+        # ensure we don't have any aliasing due to greater-than-nyquist frequencies
+        indices = torch.where(harm > 1)
+        harm[indices] = 0
 
 
         harm = harm * np.pi
@@ -134,9 +139,10 @@ class Atoms(nn.Module):
         x = full * amp_params
 
         x = x.view(-1, n_events, n_harmonics + n_noise_bands, exp.n_samples)
-        x = torch.mean(x, dim=2)
+        x = torch.sum(x, dim=2)
 
-        x = fft_convolve(x, loc_full)
+        # x = fft_convolve(x, loc_full)
+        
 
         return x
 
@@ -158,26 +164,24 @@ class Model(nn.Module):
             window_size,
             step_size,
             exp.n_frames,
-            lambda x: x)
+            lambda x: x,
+            collapse=False)
+        
         self.apply(lambda p: exp.init_weights(p))
     
     def forward(self, x):
         x = self.encoder(x)
-        x = torch.mean(x, dim=1, keepdim=True)
-        x = max_norm(x, dim=-1)
+        x = torch.sum(x, dim=1, keepdim=True)
+        # x = max_norm(x, dim=-1)
         return x
 
 model = Model().to(device)
-optim = optimizer(model, lr=1e-3)
+optim = optimizer(model, lr=1e-4)
 
 def train(batch):
     optim.zero_grad()
     recon = model.forward(batch)
     loss = exp.perceptual_loss(recon, batch)
-
-    # fake = stft(recon, 512, 256, pad=True, log_amplitude=True)
-    # real = stft(batch, 512, 256, pad=True, log_amplitude=True)
-    # loss = F.mse_loss(fake, real)
 
     loss.backward()
     optim.step()
