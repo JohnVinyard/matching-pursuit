@@ -65,13 +65,11 @@ def unpack(x):
 
 
 class Atoms(nn.Module):
-    def __init__(self):
+    def __init__(self, scalar_position=False):
         super().__init__()
         self.window = Window(exp.n_samples, 0, 1)
+        self.scalar_position = scalar_position
 
-        # self.base_events = nn.Parameter(torch.zeros(1, n_events, exp.model_dim).uniform_(-1, 1))
-
-        self.switch = LinearOutputStack(exp.model_dim, 3, out_channels=2)
 
         self.f0 = LinearOutputStack(exp.model_dim, 3, out_channels=1)
         self.f0_var = ConvUpsample(
@@ -83,6 +81,8 @@ class Atoms(nn.Module):
         self.loc = ConvUpsample(
             exp.model_dim, exp.model_dim, start_size=8, end_size=exp.n_frames, mode='learned', out_channels=1
         )
+
+        self.scalar_pos = LinearOutputStack(exp.model_dim, 3, out_channels=1)
     
     def forward(self, x):
         x = x.view(-1, exp.model_dim)
@@ -90,8 +90,8 @@ class Atoms(nn.Module):
         # x = x.view(-1, exp.model_dim)
         # means, stds, f0, f0_var, amp_params, discrete_f0 = unpack(x)
 
-        sw = self.switch(x)
-        sw = F.gumbel_softmax(sw, dim=-1, hard=True)[..., :1]
+        scalar = unit_activation(self.scalar_pos(x).view(-1, n_events, 1))
+
 
         discrete_f0 = unit_activation(self.loc(x))
         f0 = unit_activation(self.f0(x)) ** 2
@@ -142,12 +142,14 @@ class Atoms(nn.Module):
         amp_params = F.interpolate(
             amp_params.view(-1, n_noise_bands + n_harmonics, exp.n_frames), size=exp.n_samples, mode='linear')
         
-        x = full * amp_params * sw[..., None]
+        x = full * amp_params
 
         x = x.view(-1, n_events, n_harmonics + n_noise_bands, exp.n_samples)
         x = torch.sum(x, dim=2)
 
-        x = fft_convolve(x, loc_full)
+        # x = fft_convolve(x, loc_full)
+
+        # x = fft_shift(x, scalar)[..., :exp.n_samples]
 
         return x
 
