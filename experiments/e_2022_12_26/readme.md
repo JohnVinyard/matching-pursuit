@@ -10,3 +10,11 @@ Also, a passing idea this morning:
   with when positioning atoms.
 
 
+
+Encoders: `[transformer, dilated_stack]`
+Scheduling: `[fft_shift, fft_convolve, best_fit, prod_dist_func, none]`
+
+
+# To Try
+- normalized patches with embedded loudness to encoder
+- normalized patches + norms for loss

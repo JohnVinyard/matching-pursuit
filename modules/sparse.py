@@ -188,7 +188,8 @@ class SparseEncoderModel(nn.Module):
             step_size,
             n_frames,
             unit_activation,
-            collapse=False):
+            collapse=False,
+            transformer_context=False):
 
         super().__init__()
         self.atoms = atoms
@@ -205,12 +206,19 @@ class SparseEncoderModel(nn.Module):
         self.n_frames = n_frames
         self.unit_activation = unit_activation
         self.collapse = collapse
+        self.transformer_context = transformer_context
+
+        if self.transformer_context:
+            encoder = nn.TransformerEncoderLayer(model_dim, 4, model_dim, batch_first=True)
+            self.context = nn.TransformerEncoder(encoder, 6)
+        else:
+            self.context = DilatedStack(model_dim, [1, 3, 9, 27, 1])
 
         self.verb = NeuralReverb.from_directory(
             Config.impulse_response_path(), samplerate, n_samples)
 
         self.n_rooms = self.verb.n_rooms
-        self.context = DilatedStack(model_dim, [1, 3, 9, 27, 1])
+        
 
         self.reduce = nn.Conv1d(scale.n_bands + 33, model_dim, 1, 1, 0)
         self.norm = ExampleNorm()
@@ -245,7 +253,12 @@ class SparseEncoderModel(nn.Module):
         x = torch.cat([x, pos], dim=1)
         x = self.reduce(x)
 
-        x = self.context(x)
+        if self.transformer_context:
+            x = x.permute(0, 2, 1)
+            x = self.context(x)
+            x = x.permute(0, 2, 1)
+        else:
+            x = self.context(x)
 
         x = self.norm(x)
 

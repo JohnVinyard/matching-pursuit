@@ -4,7 +4,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from fft_shift import fft_shift
-from loss.serial import serial_loss
+from loss.serial import matching_pursuit, serial_loss
 from modules.fft import fft_convolve
 from modules.linear import LinearOutputStack
 from modules.normalization import max_norm
@@ -35,6 +35,10 @@ max_freq = 3000 / exp.samplerate.nyquist
 freq_span = max_freq - min_freq
 
 discrete_freqs = torch.linspace(min_freq, max_freq, 128, device=device)
+
+fade = torch.ones(1, 1, exp.n_samples, device=device)
+fade[:, :, :10] = torch.linspace(0, 1, 10, device=device)
+fade[:, :, -10:] = torch.linspace(1, 0, 10, device=device)
 
 time_params = 2
 f0_params = 1
@@ -98,7 +102,7 @@ class Atoms(nn.Module):
         f0_var = (unit_activation(self.f0_var(x)) * 2) - 1
         amp_params = self.amp_params(x) ** 2
 
-        loc = F.gumbel_softmax(discrete_f0, dim=-1, hard=True).view(-1, n_events, 128)
+        loc = F.gumbel_softmax(torch.exp(discrete_f0), dim=-1, hard=True).view(-1, n_events, 128)
         loc_full = torch.zeros(x.shape[0] // n_events, n_events, exp.n_samples, device=loc.device)
         step = exp.n_samples // 128
         loc_full[:, :, ::step] = loc
@@ -147,7 +151,9 @@ class Atoms(nn.Module):
         x = x.view(-1, n_events, n_harmonics + n_noise_bands, exp.n_samples)
         x = torch.sum(x, dim=2)
 
-        # x = fft_convolve(x, loc_full)
+        x = x * fade
+
+        x = fft_convolve(x, loc_full)
 
         # x = fft_shift(x, scalar)[..., :exp.n_samples]
 
@@ -172,7 +178,8 @@ class Model(nn.Module):
             step_size,
             exp.n_frames,
             lambda x: x,
-            collapse=False)
+            collapse=False,
+            transformer_context=True)
         
         self.apply(lambda p: exp.init_weights(p))
     
@@ -185,18 +192,38 @@ class Model(nn.Module):
 model = Model().to(device)
 optim = optimizer(model, lr=1e-4)
 
+def stft_loss(input, target):
+    input = stft(input, 512, 256, pad=True)
+    target = stft(target, 512, 256, pad=True)
+    return F.mse_loss(input, target)
+
+
+def experiment_loss(recon, batch):
+    # recon = recon.sum(dim=1, keepdim=True)
+    # loss = exp.perceptual_loss(recon, batch)
+    # return loss
+
+    transform = lambda x: stft(x, 512, 256, pad=True)
+    # transform = lambda x: exp.pooled_filter_bank(x)
+    loss = serial_loss(recon, batch, transform)
+    return loss
+
+    # target, recon = matching_pursuit(recon, batch)
+    # loss = torch.sum(torch.abs(target))
+    # return loss
+
+
 def train(batch):
     optim.zero_grad()
     recon = model.forward(batch)
 
-    # transform = lambda x: exp.perceptual_feature(x)
+    
 
-    transform = lambda x: stft(x, 512, 256, pad=True)
-    loss = serial_loss(recon, batch, transform)
-
-    # loss = exp.perceptual_loss(recon, batch)
-
+    loss = experiment_loss(recon, batch)
     loss.backward()
+
+    
+    
     optim.step()
     with torch.no_grad():
         return loss, recon.sum(dim=1, keepdim=True)
