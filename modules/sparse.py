@@ -8,7 +8,9 @@ from modules.linear import LinearOutputStack
 from modules.normalization import ExampleNorm, unit_norm
 from modules.pos_encode import pos_encoded
 from modules.reverb import NeuralReverb
+from perceptual.feature import CochleaModel, NormalizedSpectrogram
 from upsample import PosEncodedUpsample
+import zounds
 
 
 def sparsify(x, n_to_keep):
@@ -208,6 +210,18 @@ class SparseEncoderModel(nn.Module):
         self.collapse = collapse
         self.transformer_context = transformer_context
 
+        self.hearing_model = CochleaModel(
+            samplerate, 
+            zounds.MelScale(zounds.FrequencyBand(20, samplerate.nyquist - 10), 128),
+            kernel_size=512)
+        
+        self.audio_feature = NormalizedSpectrogram(
+            pool_window=512, 
+            n_bins=128, 
+            loudness_gradations=256, 
+            embedding_dim=64, 
+            out_channels=128)
+
         if self.transformer_context:
             encoder = nn.TransformerEncoderLayer(model_dim, 4, model_dim, batch_first=True)
             self.context = nn.TransformerEncoder(encoder, 6)
@@ -243,10 +257,15 @@ class SparseEncoderModel(nn.Module):
 
     def forward(self, x):
         batch = x.shape[0]
-        x = self.filter_bank.forward(x, normalize=False)
-        x = self.filter_bank.temporal_pooling(
-            x, self.window_size, self.step_size)[..., :self.n_frames]
+
+        x = self.hearing_model.forward(x)
+        x = self.audio_feature.forward(x)
+
+        # x = self.filter_bank.forward(x, normalize=False)
+        # x = self.filter_bank.temporal_pooling(
+        #     x, self.window_size, self.step_size)[..., :self.n_frames]
         x = self.norm(x)
+
         pos = pos_encoded(
             batch, self.n_frames, 16, device=x.device).permute(0, 2, 1)
 
