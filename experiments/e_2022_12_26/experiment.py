@@ -1,18 +1,23 @@
 import zounds
+from config.dotenv import Config
 from config.experiment import Experiment
 import torch
 from torch import nn
 from torch.nn import functional as F
 from fft_shift import fft_shift
+from loss.least_squares import least_squares_disc_loss, least_squares_generator_loss
 from loss.serial import matching_pursuit, serial_loss
 from modules.fft import fft_convolve
 from modules.linear import LinearOutputStack
-from modules.normalization import max_norm
+from modules.normalization import ExampleNorm, max_norm
 from modules.physical import Window
+from modules.reverb import NeuralReverb
 from modules.sparse import SparseEncoderModel
 from modules.stft import stft
+from perceptual.feature import CochleaModel, NormalizedSpectrogram
+from scalar_scheduling import pos_encoded
 from train.optim import optimizer
-from upsample import ConvUpsample
+from upsample import ConvUpsample, PosEncodedUpsample
 
 from util.readmedocs import readme
 from util import device, playable
@@ -102,10 +107,9 @@ class Atoms(nn.Module):
         # x = x.view(-1, n_events, exp.model_dim)
         # x = self.context(x)
 
-        x = x.view(-1, exp.model_dim)
+        x = x.reshape(-1, exp.model_dim)
 
 
-        x = x.view(-1, exp.model_dim)
         # x = x.view(-1, n_events, exp.model_dim) + self.base_events
         # x = x.view(-1, exp.model_dim)
         # means, stds, f0, f0_var, amp_params, discrete_f0 = unpack(x)
@@ -179,6 +183,95 @@ class Atoms(nn.Module):
         return x
 
 
+class Generator(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = PosEncodedUpsample(
+            exp.model_dim, 
+            exp.model_dim, 
+            size=n_events, 
+            out_channels=exp.model_dim, 
+            layers=6)
+        
+        self.atoms = Atoms()
+
+        self.verb = NeuralReverb.from_directory(
+            Config.impulse_response_path(), exp.samplerate, exp.n_samples)
+
+        self.n_rooms = self.verb.n_rooms
+
+        self.to_mix = LinearOutputStack(exp.model_dim, 2, out_channels=1)
+        self.to_room = LinearOutputStack(
+            exp.model_dim, 2, out_channels=self.n_rooms)
+        
+        self.apply(lambda p: exp.init_weights(p))
+        
+    
+    def forward(self, x):
+        orig_x = x = x.view(-1, exp.model_dim)
+        x = self.net(x)
+        x = self.atoms(x)
+        x = torch.sum(x, dim=1, keepdim=True)
+
+        # expand to params
+        mx = torch.sigmoid(self.to_mix(orig_x)).view(-1, 1, 1)
+        rm = torch.softmax(self.to_room(orig_x), dim=-1)
+
+        wet = self.verb.forward(x, torch.softmax(rm, dim=-1))
+        final = (mx * wet) + ((1 - mx) * x)
+        final = max_norm(final)
+        return final
+
+
+
+class Discriminator(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.hearing_model = CochleaModel(
+            exp.samplerate, 
+            zounds.MelScale(zounds.FrequencyBand(20, exp.samplerate.nyquist - 10), 128),
+            kernel_size=512)
+        
+        self.norm = ExampleNorm()
+        
+        self.n_frames = exp.n_frames
+        self.audio_feature = NormalizedSpectrogram(
+            pool_window=512, 
+            n_bins=128, 
+            loudness_gradations=256, 
+            embedding_dim=64, 
+            out_channels=128)
+        
+        encoder = nn.TransformerEncoderLayer(
+            exp.model_dim, 4, exp.model_dim, batch_first=True)
+        self.context = nn.TransformerEncoder(encoder, 6)
+
+        self.reduce = nn.Conv1d(128 + 33, exp.model_dim, 1, 1, 0)
+
+        self.judge = nn.Conv1d(exp.model_dim, 1, 1, 1, 0)
+
+        self.apply(lambda p: exp.init_weights(p))
+    
+    def forward(self, x):
+        batch = x.shape[0]
+
+        x = self.hearing_model.forward(x)
+        x = self.audio_feature.forward(x)
+
+        x = self.norm(x)
+
+        pos = pos_encoded(
+            batch, self.n_frames, 16, device=x.device).permute(0, 2, 1)
+
+        x = torch.cat([x, pos], dim=1)
+        x = self.reduce(x)
+
+        x = x.permute(0, 2, 1)
+        x = self.context(x)
+        x = x.permute(0, 2, 1)
+
+        x = self.judge(x)
+        return torch.sigmoid(x)
 
 class Model(nn.Module):
     def __init__(self):
@@ -211,7 +304,37 @@ class Model(nn.Module):
 model = Model().to(device)
 optim = optimizer(model, lr=1e-4)
 
+gen = Generator().to(device)
+gen_optim = optimizer(gen, lr=1e-3)
 
+disc = Discriminator().to(device)
+disc_optim = optimizer(disc, lr=1e-3)
+
+
+def train_gen(batch):
+    gen_optim.zero_grad()
+    latent = torch.zeros(batch.shape[0], exp.model_dim).normal_(0, 1)
+    x = gen.forward(latent)
+    fj = disc.forward(x)
+    l = least_squares_generator_loss(fj)
+    l.backward()
+    gen_optim.step()
+    print('G', l.item())
+    return x
+
+def train_disc(batch):
+    disc_optim.zero_grad()
+    with torch.no_grad():
+        latent = torch.zeros(batch.shape[0], exp.model_dim).normal_(0, 1)
+        x = gen.forward(latent)
+
+    fj = disc.forward(x)
+    rj = disc.forward(batch)
+
+    l = least_squares_disc_loss(rj, fj)
+    l.backward()
+    disc_optim.step()
+    print('D', l.item())
 
 def contrast_normalized_stft(x):
     # x = stft(x, 512, 256, pad=True)
@@ -271,6 +394,12 @@ class CompromiseExperiment(object):
         for i, item in enumerate(self.stream):
             item = item.view(-1, 1, exp.n_samples)
             self.real = item
-            l, recon = train(item)
-            self.fake = recon
-            print('R', i, l.item())
+
+            if i % 2 == 0:
+                self.fake = train_gen(item)
+            else:
+                train_disc(item)
+
+            # l, recon = train(item)
+            # self.fake = recon
+            # print('R', i, l.item())
