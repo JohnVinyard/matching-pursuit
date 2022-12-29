@@ -5,6 +5,8 @@ import numpy as np
 import torch
 from torch.nn import functional as F
 
+from modules.normalization import unit_norm
+
 
 
 class CochleaModel(nn.Module):
@@ -57,6 +59,19 @@ class CochleaModel(nn.Module):
             padding=self.phase_locking_kernel_size // 2)[..., :n_samples]
         return x
 
+class Periodicity(nn.Module):
+    def __init__(self, window_size, step):
+        super().__init__()
+        self.window_size = window_size
+        self.step = step
+
+    def forward(self, x):
+        x = F.pad(x, (0, self.step))
+        x = x.unfold(-1, self.window_size, self.step)
+        x = x * torch.hamming_window(self.window_size, device=x.device)[None, None, None, :]
+        spec = torch.fft.rfft(x, dim=-1, norm='ortho')
+        spec = unit_norm(spec, dim=-1)
+        return spec
 
 class NormalizedSpectrogram(nn.Module):
     def __init__(self, pool_window, n_bins, loudness_gradations, embedding_dim, out_channels):
@@ -84,10 +99,13 @@ class NormalizedSpectrogram(nn.Module):
         # we'd like the max norm in each window to be 1
         norms = torch.norm(x, dim=1)
         norms = norms / (norms.max(dim=1, keepdim=True)[0] + 1e-8)
+        # each "spectral shape" vector should have unit norm
         x = x / (norms[:, None, :] + 1e-8)
 
+        # TODO: consider a log-loudness scale here 
         embeddings = (norms * self.loudness_gradations * 0.9999).long()
         embeddings = self.loudness_embedding(embeddings)
+        embeddings = unit_norm(embeddings, dim=-1)
 
         x = torch.cat([x, embeddings.permute(0, 2, 1)], dim=1)
         x = self.reduce(x)

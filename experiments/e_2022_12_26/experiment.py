@@ -53,6 +53,11 @@ discrete_freqs = torch.linspace(min_freq, max_freq, discrete_f0, device=device)
 total_params = time_params + f0_params + f0_variance_params + n_amp_params + discrete_f0
 
 
+def softmax(x):
+    return F.gumbel_softmax(torch.exp(x), dim=-1, hard=True)
+    # return torch.softmax(x, dim=-1)
+
+
 def unit_activation(x):
     return torch.sigmoid(x)
     # return torch.clamp(x, 0, 1)
@@ -74,6 +79,11 @@ class Atoms(nn.Module):
         self.window = Window(exp.n_samples, 0, 1)
         self.scalar_position = scalar_position
 
+        encoder = nn.TransformerEncoderLayer(exp.model_dim, 4, exp.model_dim, batch_first=True)
+        self.context = nn.TransformerEncoder(encoder, 4)
+
+
+        self.switch = LinearOutputStack(exp.model_dim, 3, out_channels=2)
 
         self.f0 = LinearOutputStack(exp.model_dim, 3, out_channels=1)
         self.f0_var = ConvUpsample(
@@ -89,12 +99,21 @@ class Atoms(nn.Module):
         self.scalar_pos = LinearOutputStack(exp.model_dim, 3, out_channels=1)
     
     def forward(self, x):
+        # x = x.view(-1, n_events, exp.model_dim)
+        # x = self.context(x)
+
+        x = x.view(-1, exp.model_dim)
+
+
         x = x.view(-1, exp.model_dim)
         # x = x.view(-1, n_events, exp.model_dim) + self.base_events
         # x = x.view(-1, exp.model_dim)
         # means, stds, f0, f0_var, amp_params, discrete_f0 = unpack(x)
 
-        scalar = unit_activation(self.scalar_pos(x).view(-1, n_events, 1))
+        # scalar = unit_activation(self.scalar_pos(x).view(-1, n_events, 1))
+
+        sw = self.switch.forward(x)
+        sw = softmax(sw)
 
 
         discrete_f0 = unit_activation(self.loc(x))
@@ -102,7 +121,7 @@ class Atoms(nn.Module):
         f0_var = (unit_activation(self.f0_var(x)) * 2) - 1
         amp_params = self.amp_params(x) ** 2
 
-        loc = F.gumbel_softmax(torch.exp(discrete_f0), dim=-1, hard=True).view(-1, n_events, 128)
+        loc = softmax(discrete_f0).view(-1, n_events, 128)
         loc_full = torch.zeros(x.shape[0] // n_events, n_events, exp.n_samples, device=loc.device)
         step = exp.n_samples // 128
         loc_full[:, :, ::step] = loc
@@ -151,7 +170,7 @@ class Atoms(nn.Module):
         x = x.view(-1, n_events, n_harmonics + n_noise_bands, exp.n_samples)
         x = torch.sum(x, dim=2)
 
-        x = x * fade
+        x = x * fade #* sw[..., 0:1]
 
         x = fft_convolve(x, loc_full)
 
@@ -186,44 +205,43 @@ class Model(nn.Module):
     def forward(self, x):
         x = self.encoder(x)
         # x = torch.sum(x, dim=1, keepdim=True)
-        # x = max_norm(x, dim=-1)
+        x = max_norm(x, dim=-1)
         return x
 
 model = Model().to(device)
 optim = optimizer(model, lr=1e-4)
 
-def stft_loss(input, target):
-    input = stft(input, 512, 256, pad=True)
-    target = stft(target, 512, 256, pad=True)
-    return F.mse_loss(input, target)
 
+
+def contrast_normalized_stft(x):
+    # x = stft(x, 512, 256, pad=True)
+    x = exp.pooled_filter_bank(x)[:, None, :, :]
+    
+    unfold = nn.Unfold(kernel_size=(3, 3), stride=(2, 2), padding=(1, 1))
+    uf = unfold.forward(x)
+    norms = torch.norm(uf, dim=1, keepdim=True)
+    normed = uf / (norms + 1e-8)
+    # norms = norms.repeat(1, 9, 1)
+    x = torch.cat([normed, norms], dim=1)
+    return x
 
 def experiment_loss(recon, batch):
-    # recon = recon.sum(dim=1, keepdim=True)
-    # loss = exp.perceptual_loss(recon, batch)
-    # return loss
+    recon = recon.sum(dim=1, keepdim=True)
+    loss = F.mse_loss(contrast_normalized_stft(recon), contrast_normalized_stft(batch))
+    return loss
 
-    transform = lambda x: stft(x, 512, 256, pad=True)
-    # transform = lambda x: exp.pooled_filter_bank(x)
+
+    transform = contrast_normalized_stft
     loss = serial_loss(recon, batch, transform)
     return loss
 
-    # target, recon = matching_pursuit(recon, batch)
-    # loss = torch.sum(torch.abs(target))
-    # return loss
 
 
 def train(batch):
     optim.zero_grad()
     recon = model.forward(batch)
-
-    
-
     loss = experiment_loss(recon, batch)
     loss.backward()
-
-    
-    
     optim.step()
     with torch.no_grad():
         return loss, recon.sum(dim=1, keepdim=True)

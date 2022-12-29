@@ -1,1 +1,1 @@
-from .feature import CochleaModel, NormalizedSpectrogram
+from .feature import CochleaModel, NormalizedSpectrogram, Periodicity

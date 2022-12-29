@@ -8,7 +8,7 @@ from modules.linear import LinearOutputStack
 from modules.normalization import ExampleNorm, unit_norm
 from modules.pos_encode import pos_encoded
 from modules.reverb import NeuralReverb
-from perceptual.feature import CochleaModel, NormalizedSpectrogram
+from perceptual.feature import CochleaModel, NormalizedSpectrogram, Periodicity
 from upsample import PosEncodedUpsample
 import zounds
 
@@ -215,6 +215,8 @@ class SparseEncoderModel(nn.Module):
             zounds.MelScale(zounds.FrequencyBand(20, samplerate.nyquist - 10), 128),
             kernel_size=512)
         
+        self.periodicity = Periodicity(512, 256)
+        
         self.audio_feature = NormalizedSpectrogram(
             pool_window=512, 
             n_bins=128, 
@@ -259,7 +261,9 @@ class SparseEncoderModel(nn.Module):
         batch = x.shape[0]
 
         x = self.hearing_model.forward(x)
+        # p = self.periodicity.forward(x)
         x = self.audio_feature.forward(x)
+        # print(x.shape, p.shape)
 
         # x = self.filter_bank.forward(x, normalize=False)
         # x = self.filter_bank.temporal_pooling(
