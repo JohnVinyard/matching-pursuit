@@ -31,7 +31,7 @@ step_size = window_size // 2
 exp = Experiment(
     samplerate=zounds.SR22050(),
     n_samples=2**15,
-    weight_init=0.1,
+    weight_init=0.05,
     model_dim=128,
     kernel_size=512)
 
@@ -59,6 +59,7 @@ total_params = time_params + f0_params + f0_variance_params + n_amp_params + dis
 
 
 def softmax(x):
+    x = max_norm(x, dim=-1)
     return F.gumbel_softmax(torch.exp(x), dim=-1, hard=True)
     # return torch.softmax(x, dim=-1)
 
@@ -104,9 +105,8 @@ class Atoms(nn.Module):
         self.scalar_pos = LinearOutputStack(exp.model_dim, 3, out_channels=1)
     
     def forward(self, x):
-        # x = x.view(-1, n_events, exp.model_dim)
-        # x = self.context(x)
-
+        x = x.view(-1, n_events, exp.model_dim)
+        x = self.context(x)
         x = x.reshape(-1, exp.model_dim)
 
 
@@ -183,95 +183,96 @@ class Atoms(nn.Module):
         return x
 
 
-class Generator(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.net = PosEncodedUpsample(
-            exp.model_dim, 
-            exp.model_dim, 
-            size=n_events, 
-            out_channels=exp.model_dim, 
-            layers=6)
+# class Generator(nn.Module):
+#     def __init__(self):
+#         super().__init__()
+#         self.net = PosEncodedUpsample(
+#             exp.model_dim, 
+#             exp.model_dim, 
+#             size=n_events, 
+#             out_channels=exp.model_dim, 
+#             layers=6)
         
-        self.atoms = Atoms()
+#         self.atoms = Atoms()
 
-        self.verb = NeuralReverb.from_directory(
-            Config.impulse_response_path(), exp.samplerate, exp.n_samples)
+#         self.verb = NeuralReverb.from_directory(
+#             Config.impulse_response_path(), exp.samplerate, exp.n_samples)
 
-        self.n_rooms = self.verb.n_rooms
+#         self.n_rooms = self.verb.n_rooms
 
-        self.to_mix = LinearOutputStack(exp.model_dim, 2, out_channels=1)
-        self.to_room = LinearOutputStack(
-            exp.model_dim, 2, out_channels=self.n_rooms)
+#         self.to_mix = LinearOutputStack(exp.model_dim, 2, out_channels=1)
+#         self.to_room = LinearOutputStack(
+#             exp.model_dim, 2, out_channels=self.n_rooms)
         
-        self.apply(lambda p: exp.init_weights(p))
+#         self.apply(lambda p: exp.init_weights(p))
         
     
-    def forward(self, x):
-        orig_x = x = x.view(-1, exp.model_dim)
-        x = self.net(x)
-        x = self.atoms(x)
-        x = torch.sum(x, dim=1, keepdim=True)
+#     def forward(self, x):
+#         orig_x = x = x.view(-1, exp.model_dim)
+#         x = self.net(x)
+#         x = self.atoms(x)
+#         x = torch.sum(x, dim=1, keepdim=True)
 
-        # expand to params
-        mx = torch.sigmoid(self.to_mix(orig_x)).view(-1, 1, 1)
-        rm = torch.softmax(self.to_room(orig_x), dim=-1)
+#         # expand to params
+#         mx = torch.sigmoid(self.to_mix(orig_x)).view(-1, 1, 1)
+#         rm = torch.softmax(self.to_room(orig_x), dim=-1)
 
-        wet = self.verb.forward(x, torch.softmax(rm, dim=-1))
-        final = (mx * wet) + ((1 - mx) * x)
-        final = max_norm(final)
-        return final
+#         wet = self.verb.forward(x, torch.softmax(rm, dim=-1))
+#         final = (mx * wet) + ((1 - mx) * x)
+#         final = max_norm(final)
+#         return final
 
 
 
-class Discriminator(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.hearing_model = CochleaModel(
-            exp.samplerate, 
-            zounds.MelScale(zounds.FrequencyBand(20, exp.samplerate.nyquist - 10), 128),
-            kernel_size=512)
+# class Discriminator(nn.Module):
+#     def __init__(self):
+#         super().__init__()
+#         self.hearing_model = CochleaModel(
+#             exp.samplerate, 
+#             zounds.MelScale(zounds.FrequencyBand(20, exp.samplerate.nyquist - 10), 128),
+#             kernel_size=512)
         
-        self.norm = ExampleNorm()
+#         self.norm = ExampleNorm()
         
-        self.n_frames = exp.n_frames
-        self.audio_feature = NormalizedSpectrogram(
-            pool_window=512, 
-            n_bins=128, 
-            loudness_gradations=256, 
-            embedding_dim=64, 
-            out_channels=128)
+#         self.n_frames = exp.n_frames
+#         self.audio_feature = NormalizedSpectrogram(
+#             pool_window=512, 
+#             n_bins=128, 
+#             loudness_gradations=256, 
+#             embedding_dim=64, 
+#             out_channels=128)
         
-        encoder = nn.TransformerEncoderLayer(
-            exp.model_dim, 4, exp.model_dim, batch_first=True)
-        self.context = nn.TransformerEncoder(encoder, 6)
+#         encoder = nn.TransformerEncoderLayer(
+#             exp.model_dim, 4, exp.model_dim, batch_first=True)
+#         self.context = nn.TransformerEncoder(encoder, 6)
 
-        self.reduce = nn.Conv1d(128 + 33, exp.model_dim, 1, 1, 0)
+#         self.reduce = nn.Conv1d(128 + 33, exp.model_dim, 1, 1, 0)
 
-        self.judge = nn.Conv1d(exp.model_dim, 1, 1, 1, 0)
+#         self.judge = nn.Conv1d(exp.model_dim, 1, 1, 1, 0)
 
-        self.apply(lambda p: exp.init_weights(p))
+#         self.apply(lambda p: exp.init_weights(p))
     
-    def forward(self, x):
-        batch = x.shape[0]
+#     def forward(self, x):
+#         batch = x.shape[0]
 
-        x = self.hearing_model.forward(x)
-        x = self.audio_feature.forward(x)
+#         x = self.hearing_model.forward(x)
+#         x = self.audio_feature.forward(x)
 
-        x = self.norm(x)
+#         x = self.norm(x)
 
-        pos = pos_encoded(
-            batch, self.n_frames, 16, device=x.device).permute(0, 2, 1)
+#         pos = pos_encoded(
+#             batch, self.n_frames, 16, device=x.device).permute(0, 2, 1)
 
-        x = torch.cat([x, pos], dim=1)
-        x = self.reduce(x)
+#         x = torch.cat([x, pos], dim=1)
+#         x = self.reduce(x)
 
-        x = x.permute(0, 2, 1)
-        x = self.context(x)
-        x = x.permute(0, 2, 1)
+#         x = x.permute(0, 2, 1)
+#         x = self.context(x)
+#         x = x.permute(0, 2, 1)
 
-        x = self.judge(x)
-        return torch.sigmoid(x)
+#         x = self.judge(x)[:, :, -1]
+#         x = torch.sigmoid(x)
+#         return x
 
 class Model(nn.Module):
     def __init__(self):
@@ -298,43 +299,49 @@ class Model(nn.Module):
     def forward(self, x):
         x = self.encoder(x)
         # x = torch.sum(x, dim=1, keepdim=True)
-        x = max_norm(x, dim=-1)
+        # x = max_norm(x, dim=-1)
         return x
 
 model = Model().to(device)
 optim = optimizer(model, lr=1e-4)
 
-gen = Generator().to(device)
-gen_optim = optimizer(gen, lr=1e-3)
+# gen = Generator().to(device)
+# gen_optim = optimizer(gen, lr=1e-4)
 
-disc = Discriminator().to(device)
-disc_optim = optimizer(disc, lr=1e-3)
+# disc = Discriminator().to(device)
+# disc_optim = optimizer(disc, lr=1e-4)
 
 
-def train_gen(batch):
-    gen_optim.zero_grad()
-    latent = torch.zeros(batch.shape[0], exp.model_dim).normal_(0, 1)
-    x = gen.forward(latent)
-    fj = disc.forward(x)
-    l = least_squares_generator_loss(fj)
-    l.backward()
-    gen_optim.step()
-    print('G', l.item())
-    return x
+# def train_gen(batch):
+#     gen_optim.zero_grad()
+#     latent = torch.zeros(batch.shape[0], exp.model_dim, device=device).normal_(0, 1)
+#     x = gen.forward(latent)
+#     fj = disc.forward(x)
 
-def train_disc(batch):
-    disc_optim.zero_grad()
-    with torch.no_grad():
-        latent = torch.zeros(batch.shape[0], exp.model_dim).normal_(0, 1)
-        x = gen.forward(latent)
+#     # l = least_squares_generator_loss(fj)
+#     l = torch.abs(0.9 - fj).sum()
 
-    fj = disc.forward(x)
-    rj = disc.forward(batch)
+#     l.backward()
+#     gen_optim.step()
+#     print('G', l.item())
+#     return x
 
-    l = least_squares_disc_loss(rj, fj)
-    l.backward()
-    disc_optim.step()
-    print('D', l.item())
+# def train_disc(batch):
+#     disc_optim.zero_grad()
+#     with torch.no_grad():
+#         latent = torch.zeros(batch.shape[0], exp.model_dim, device=device).normal_(0, 1)
+#         x = gen.forward(latent)
+
+#     fj = disc.forward(x)
+#     rj = disc.forward(batch)
+
+#     # l = least_squares_disc_loss(rj, fj)
+
+#     l = torch.abs(0.1 - fj).sum() + torch.abs(0.9 - rj).sum()
+
+#     l.backward()
+#     disc_optim.step()
+#     print('D', l.item())
 
 def contrast_normalized_stft(x):
     # x = stft(x, 512, 256, pad=True)
@@ -349,12 +356,12 @@ def contrast_normalized_stft(x):
     return x
 
 def experiment_loss(recon, batch):
-    recon = recon.sum(dim=1, keepdim=True)
-    loss = F.mse_loss(contrast_normalized_stft(recon), contrast_normalized_stft(batch))
-    return loss
+    # recon = recon.sum(dim=1, keepdim=True)
+    # loss = F.mse_loss(contrast_normalized_stft(recon), contrast_normalized_stft(batch))
+    # return loss
 
 
-    transform = contrast_normalized_stft
+    transform = lambda p: stft(p, 512, 256, pad=True)
     loss = serial_loss(recon, batch, transform)
     return loss
 
@@ -395,11 +402,11 @@ class CompromiseExperiment(object):
             item = item.view(-1, 1, exp.n_samples)
             self.real = item
 
-            if i % 2 == 0:
-                self.fake = train_gen(item)
-            else:
-                train_disc(item)
+            # if i % 2 == 0:
+            #     self.fake = train_gen(item)
+            # else:
+            #     train_disc(item)
 
-            # l, recon = train(item)
-            # self.fake = recon
-            # print('R', i, l.item())
+            l, recon = train(item)
+            self.fake = recon
+            print('R', i, l.item())
