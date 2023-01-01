@@ -31,7 +31,7 @@ step_size = window_size // 2
 exp = Experiment(
     samplerate=zounds.SR22050(),
     n_samples=2**15,
-    weight_init=0.05,
+    weight_init=0.1,
     model_dim=128,
     kernel_size=512)
 
@@ -59,7 +59,7 @@ total_params = time_params + f0_params + f0_variance_params + n_amp_params + dis
 
 
 def softmax(x):
-    x = max_norm(x, dim=-1)
+    # x = max_norm(x, dim=-1)
     return F.gumbel_softmax(torch.exp(x), dim=-1, hard=True)
     # return torch.softmax(x, dim=-1)
 
@@ -93,9 +93,9 @@ class Atoms(nn.Module):
 
         self.f0 = LinearOutputStack(exp.model_dim, 3, out_channels=1)
         self.f0_var = ConvUpsample(
-            exp.model_dim, exp.model_dim, start_size=8, end_size=exp.n_frames, mode='nearest', out_channels=1)
+            exp.model_dim, exp.model_dim, start_size=8, end_size=exp.n_frames, mode='learned', out_channels=1)
         self.amp_params = ConvUpsample(
-            exp.model_dim, exp.model_dim, start_size=8, end_size=exp.n_frames, mode='nearest', out_channels=n_harmonics * 2
+            exp.model_dim, exp.model_dim, start_size=8, end_size=exp.n_frames, mode='learned', out_channels=n_harmonics * 2
         )
 
         self.loc = ConvUpsample(
@@ -299,7 +299,7 @@ class Model(nn.Module):
     def forward(self, x):
         x = self.encoder(x)
         # x = torch.sum(x, dim=1, keepdim=True)
-        # x = max_norm(x, dim=-1)
+        x = max_norm(x, dim=-1)
         return x
 
 model = Model().to(device)
