@@ -307,10 +307,17 @@ class Model(nn.Module):
 
 model = Model().to(device)
 optim = optimizer(model, lr=1e-4)
+try:
+    model.load_state_dict(torch.load('model.dat'))
+except IOError:
+    print('initializing model from scratch')
 
 disc = Discriminator().to(device)
 disc_optim = optimizer(disc, lr=1e-4)
-
+try:
+    disc.load_state_dict(torch.load('disc.dat'))
+except IOError:
+    print('initializing disc from scratch')
 
 def train_disc(batch):
     disc_optim.zero_grad()
@@ -353,6 +360,12 @@ class CompromiseExperiment(object):
         self.stream = stream
         self.real = None
         self.fake = None
+        self.model = model
+        self.disc = disc
+    
+    def checkpoint(self):
+        torch.save(self.model.state_dict(), 'model.dat')
+        torch.save(self.disc.state_dict(), 'disc.dat')
 
     def listen(self):
         return playable(self.fake, exp.samplerate)
