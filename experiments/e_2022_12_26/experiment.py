@@ -224,55 +224,58 @@ class Atoms(nn.Module):
 
 
 
-# class Discriminator(nn.Module):
-#     def __init__(self):
-#         super().__init__()
-#         self.hearing_model = CochleaModel(
-#             exp.samplerate, 
-#             zounds.MelScale(zounds.FrequencyBand(20, exp.samplerate.nyquist - 10), 128),
-#             kernel_size=512)
+class Discriminator(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.hearing_model = CochleaModel(
+            exp.samplerate, 
+            zounds.MelScale(zounds.FrequencyBand(20, exp.samplerate.nyquist - 10), 128),
+            kernel_size=512)
         
-#         self.norm = ExampleNorm()
+        self.norm = ExampleNorm()
         
-#         self.n_frames = exp.n_frames
-#         self.audio_feature = NormalizedSpectrogram(
-#             pool_window=512, 
-#             n_bins=128, 
-#             loudness_gradations=256, 
-#             embedding_dim=64, 
-#             out_channels=128)
+        self.n_frames = exp.n_frames
+        self.audio_feature = NormalizedSpectrogram(
+            pool_window=512, 
+            n_bins=128, 
+            loudness_gradations=256, 
+            embedding_dim=64, 
+            out_channels=128)
         
-#         encoder = nn.TransformerEncoderLayer(
-#             exp.model_dim, 4, exp.model_dim, batch_first=True)
-#         self.context = nn.TransformerEncoder(encoder, 6)
+        encoder = nn.TransformerEncoderLayer(
+            exp.model_dim, 4, exp.model_dim, batch_first=True)
+        self.context = nn.TransformerEncoder(encoder, 6)
 
-#         self.reduce = nn.Conv1d(128 + 33, exp.model_dim, 1, 1, 0)
+        self.reduce = nn.Conv1d(128 + 33, exp.model_dim, 1, 1, 0)
 
-#         self.judge = nn.Conv1d(exp.model_dim, 1, 1, 1, 0)
+        self.judge = nn.Conv1d(exp.model_dim, 1, 1, 1, 0)
 
-#         self.apply(lambda p: exp.init_weights(p))
+        self.apply(lambda p: exp.init_weights(p))
     
-#     def forward(self, x):
-#         batch = x.shape[0]
+    def forward(self, x):
+        batch = x.shape[0]
 
-#         x = self.hearing_model.forward(x)
-#         x = self.audio_feature.forward(x)
+        x = self.hearing_model.forward(x)
+        x = self.audio_feature.forward(x)
 
-#         x = self.norm(x)
+        x = self.norm(x)
 
-#         pos = pos_encoded(
-#             batch, self.n_frames, 16, device=x.device).permute(0, 2, 1)
+        pos = pos_encoded(
+            batch, self.n_frames, 16, device=x.device).permute(0, 2, 1)
 
-#         x = torch.cat([x, pos], dim=1)
-#         x = self.reduce(x)
+        x = torch.cat([x, pos], dim=1)
+        x = self.reduce(x)
 
-#         x = x.permute(0, 2, 1)
-#         x = self.context(x)
-#         x = x.permute(0, 2, 1)
+        features = []
+        x = x.permute(0, 2, 1)
+        for layer in self.context.layers:
+            x = layer(x)
+            features.append(x)
+        x = x.permute(0, 2, 1)
 
-#         x = self.judge(x)[:, :, -1]
-#         x = torch.sigmoid(x)
-#         return x
+        features = torch.cat([f.view(-1) for f in features])
+        x = self.judge(x)
+        return torch.sigmoid(x), features
 
 class Model(nn.Module):
     def __init__(self):
@@ -298,79 +301,45 @@ class Model(nn.Module):
     
     def forward(self, x):
         x = self.encoder(x)
-        # x = torch.sum(x, dim=1, keepdim=True)
+        x = torch.sum(x, dim=1, keepdim=True)
         x = max_norm(x, dim=-1)
         return x
 
 model = Model().to(device)
 optim = optimizer(model, lr=1e-4)
 
-# gen = Generator().to(device)
-# gen_optim = optimizer(gen, lr=1e-4)
-
-# disc = Discriminator().to(device)
-# disc_optim = optimizer(disc, lr=1e-4)
+disc = Discriminator().to(device)
+disc_optim = optimizer(disc, lr=1e-4)
 
 
-# def train_gen(batch):
-#     gen_optim.zero_grad()
-#     latent = torch.zeros(batch.shape[0], exp.model_dim, device=device).normal_(0, 1)
-#     x = gen.forward(latent)
-#     fj = disc.forward(x)
+def train_disc(batch):
+    disc_optim.zero_grad()
+    with torch.no_grad():
+        x = model.forward(batch)
 
-#     # l = least_squares_generator_loss(fj)
-#     l = torch.abs(0.9 - fj).sum()
+    fj, _ = disc.forward(x)
+    rj, _ = disc.forward(batch)
 
-#     l.backward()
-#     gen_optim.step()
-#     print('G', l.item())
-#     return x
+    l = least_squares_disc_loss(rj, fj)
+    l.backward()
+    disc_optim.step()
+    return l
 
-# def train_disc(batch):
-#     disc_optim.zero_grad()
-#     with torch.no_grad():
-#         latent = torch.zeros(batch.shape[0], exp.model_dim, device=device).normal_(0, 1)
-#         x = gen.forward(latent)
-
-#     fj = disc.forward(x)
-#     rj = disc.forward(batch)
-
-#     # l = least_squares_disc_loss(rj, fj)
-
-#     l = torch.abs(0.1 - fj).sum() + torch.abs(0.9 - rj).sum()
-
-#     l.backward()
-#     disc_optim.step()
-#     print('D', l.item())
-
-def contrast_normalized_stft(x):
-    # x = stft(x, 512, 256, pad=True)
-    x = exp.pooled_filter_bank(x)[:, None, :, :]
-    
-    unfold = nn.Unfold(kernel_size=(3, 3), stride=(2, 2), padding=(1, 1))
-    uf = unfold.forward(x)
-    norms = torch.norm(uf, dim=1, keepdim=True)
-    normed = uf / (norms + 1e-8)
-    # norms = norms.repeat(1, 9, 1)
-    x = torch.cat([normed, norms], dim=1)
-    return x
 
 def experiment_loss(recon, batch):
-    # recon = recon.sum(dim=1, keepdim=True)
-    # loss = F.mse_loss(contrast_normalized_stft(recon), contrast_normalized_stft(batch))
-    # return loss
-
-
-    transform = lambda p: stft(p, 512, 256, pad=True)
+    transform = lambda x: stft(x, 512, 256, pad=True)
     loss = serial_loss(recon, batch, transform)
     return loss
-
 
 
 def train(batch):
     optim.zero_grad()
     recon = model.forward(batch)
-    loss = experiment_loss(recon, batch)
+
+    _, ff = disc.forward(recon)
+    _, rf = disc.forward(batch)
+
+    loss = torch.abs(ff - rf).sum()
     loss.backward()
     optim.step()
     with torch.no_grad():
@@ -402,11 +371,12 @@ class CompromiseExperiment(object):
             item = item.view(-1, 1, exp.n_samples)
             self.real = item
 
-            # if i % 2 == 0:
-            #     self.fake = train_gen(item)
-            # else:
-            #     train_disc(item)
+            if i % 2 == 0:
+                l, recon = train(item)
+                self.fake = recon
+                print('R', i, l.item())
+            else:
+                l = train_disc(item)
+                print('D', i, l.item())
 
-            l, recon = train(item)
-            self.fake = recon
-            print('R', i, l.item())
+            
