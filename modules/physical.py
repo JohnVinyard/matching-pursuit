@@ -4,6 +4,21 @@ from torch import nn
 from modules.normalization import max_norm
 
 
+class PhysicalSimulation(nn.Module):
+    def __init__(self, room_size, buffer_size):
+        super().__init__()
+        self.room_size = room_size
+        self.buffer_size = buffer_size
+
+    def forward(
+            self,
+            n_samples: int,
+            impulses: torch.Tensor,
+            delays: torch.Tensor):
+
+        pass
+
+
 class Window(nn.Module):
     def __init__(self, n_samples, mn, mx, epsilon=1e-8, padding=0):
         super().__init__()
@@ -30,7 +45,7 @@ def harmonics(n_octaves, waveform, device):
     if waveform == 'sawtooth':
         return 1 / rng
     elif waveform == 'square':
-        rng =  1 / rng
+        rng = 1 / rng
         rng[::2] = 0
         return rng
     elif waveform == 'triangle':

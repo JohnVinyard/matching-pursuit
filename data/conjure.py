@@ -97,6 +97,18 @@ def cache(
         serialize=numpy_array_dumpb,
         deserialze=numpy_array_loadb,
         arg_hasher=hash_args):
+    
+    '''
+    TODO: 
+        - Collection should support getitem, setitem and....
+        - encoder should implement dump, load and MIME/content type
+        - hasher should define how the function and its arguments are serialized into a key, ideally
+            in a human-readable way, e.g. stft_(1234, 512, 256)
+        - indices should be created for each argument whose type is supported, e.g., strings, numbers, 
+            dates, so that it'd be possible to search for all stft invocations with window size 1024
+        
+    '''
+
     def deco(f):
         h = hash_function(f)
         return Wrapped(
