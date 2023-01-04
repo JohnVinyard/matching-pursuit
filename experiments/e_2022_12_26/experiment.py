@@ -105,8 +105,8 @@ class Atoms(nn.Module):
         self.scalar_pos = LinearOutputStack(exp.model_dim, 3, out_channels=1)
     
     def forward(self, x):
-        x = x.view(-1, n_events, exp.model_dim)
-        x = self.context(x)
+        # x = x.view(-1, n_events, exp.model_dim)
+        # x = self.context(x)
         x = x.reshape(-1, exp.model_dim)
 
 
@@ -306,14 +306,14 @@ class Model(nn.Module):
         return x
 
 model = Model().to(device)
-optim = optimizer(model, lr=1e-4)
+optim = optimizer(model, lr=1e-3)
 try:
     model.load_state_dict(torch.load('model.dat'))
 except IOError:
     print('initializing model from scratch')
 
 disc = Discriminator().to(device)
-disc_optim = optimizer(disc, lr=1e-4)
+disc_optim = optimizer(disc, lr=1e-3)
 try:
     disc.load_state_dict(torch.load('disc.dat'))
 except IOError:
@@ -345,8 +345,9 @@ def train(batch):
 
     _, ff = disc.forward(recon)
     _, rf = disc.forward(batch)
-
     loss = torch.abs(ff - rf).sum()
+
+
     loss.backward()
     optim.step()
     with torch.no_grad():
