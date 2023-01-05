@@ -30,11 +30,17 @@ class DilatedStack(nn.Module):
         self.stack = nn.Sequential(*[DilatedBlock(channels, d) for d in dilations])
         self.channels = channels
     
-    def forward(self, x):
+    def forward(self, x, return_features=False):
         batch = x.shape[0]
         n = x
         outputs = torch.zeros(batch, self.channels, x.shape[-1], device=x.device)
+        features = []
+
         for layer in self.stack:
             n, o = layer.forward(n)
+            features.append(n)
             outputs = outputs + o
-        return outputs
+        if return_features:
+            return outputs, torch.cat([x.view(-1) for x in features])
+        else:
+            return outputs

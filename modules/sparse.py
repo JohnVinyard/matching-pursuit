@@ -237,7 +237,7 @@ class SparseEncoderModel(nn.Module):
         
 
         self.reduce = nn.Conv1d(scale.n_bands + 33, model_dim, 1, 1, 0)
-        self.norm = ExampleNorm()
+        # self.norm = ExampleNorm()
 
         self.sparse = VectorwiseSparsity(
             model_dim, keep=n_events, channels_last=False, dense=False, normalize=True)
@@ -260,15 +260,15 @@ class SparseEncoderModel(nn.Module):
     def forward(self, x):
         batch = x.shape[0]
 
-        x = self.hearing_model.forward(x)
+        # x = self.hearing_model.forward(x)
         # p = self.periodicity.forward(x)
-        x = self.audio_feature.forward(x)
+        # x = self.audio_feature.forward(x)
         # print(x.shape, p.shape)
 
-        # x = self.filter_bank.forward(x, normalize=False)
-        # x = self.filter_bank.temporal_pooling(
-        #     x, self.window_size, self.step_size)[..., :self.n_frames]
-        x = self.norm(x)
+        x = self.filter_bank.forward(x, normalize=False)
+        x = self.filter_bank.temporal_pooling(
+            x, self.window_size, self.step_size)[..., :self.n_frames]
+        # x = self.norm(x)
 
         pos = pos_encoded(
             batch, self.n_frames, 16, device=x.device).permute(0, 2, 1)
@@ -283,7 +283,7 @@ class SparseEncoderModel(nn.Module):
         else:
             x = self.context(x)
 
-        x = self.norm(x)
+        # x = self.norm(x)
 
         x, indices = self.sparse(x)
 
