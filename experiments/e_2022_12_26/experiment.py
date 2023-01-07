@@ -87,10 +87,14 @@ def gumbel(x):
 location_softmax = hard_softmax
 pitch_softmax = hard_softmax
 
-do_serial_loss = True
-do_discrete_f0 = True
+do_discrete_f0 = True # ascending pitch problem without discrete f0
 conv_loc = True
 learning_rate = 1e-4
+
+do_serial_loss = True
+placeless_loss = True
+
+# TODO: Sequence generator options
 
 def unit_activation(x):
     return torch.sigmoid(x)
@@ -135,7 +139,7 @@ class Atoms(nn.Module):
                 exp.model_dim, exp.model_dim, start_size=8, end_size=exp.n_frames, mode='learned', out_channels=1
             )
         else:
-            self.loc = LinearOutputStack(exp.model_dim, 3, out_channels=1)
+            self.loc = LinearOutputStack(exp.model_dim, 3, out_channels=exp.n_frames)
 
 
         self.scalar_pos = LinearOutputStack(exp.model_dim, 3, out_channels=1)
@@ -397,15 +401,21 @@ def experiment_loss(recon, batch):
     
 
     if do_serial_loss:
-        transform = lambda x: torch.abs(torch.fft.rfft(x, dim=-1, norm='ortho'))
-        # transform = lambda x: stft(x, 512, 256, pad=True)
+        if placeless_loss:
+            transform = lambda x: torch.abs(torch.fft.rfft(x, dim=-1, norm='ortho'))
+        else:
+            transform = lambda x: stft(x, 512, 256, pad=True)
         loss = serial_loss(recon, batch, transform)
         return loss
     else:
-        # fake = contrast_normalized_stft(recon)
-        # real = contrast_normalized_stft(batch)
-        fake = torch.abs(torch.fft.rfft(recon, dim=-1, norm='ortho'))
-        real = torch.abs(torch.fft.rfft(batch, dim=-1, norm='ortho'))
+        
+        if placeless_loss:
+            fake = torch.abs(torch.fft.rfft(recon, dim=-1, norm='ortho'))
+            real = torch.abs(torch.fft.rfft(batch, dim=-1, norm='ortho'))
+        else:
+            fake = contrast_normalized_stft(recon)
+            real = contrast_normalized_stft(batch)
+        
         loss = F.mse_loss(fake, real)
         return loss
 
