@@ -67,6 +67,7 @@ musical_scale = MusicalScale()
 def hard_softmax(x):
     x_backward = torch.softmax(x, dim=-1)
     values, indices = torch.max(x_backward, dim=-1, keepdim=True)
+    values = values + (1 - values)
     x_forward = torch.zeros_like(x_backward)
     x_forward = torch.scatter(x_forward, dim=-1, index=indices, src=values)
     y = x_backward + (x_forward - x_backward).detach()
@@ -74,7 +75,7 @@ def hard_softmax(x):
 
 def gumbel(x):
     x = torch.tanh(x)
-    return F.gumbel_softmax(torch.exp(x), dim=-1, hard=True)
+    return F.gumbel_softmax(torch.exp(x), tau=1, dim=-1, hard=True)
 
 # def softmax(x):
 #     # x = torch.tanh(x)
@@ -83,12 +84,11 @@ def gumbel(x):
 #     # return torch.softmax(x, dim=-1)
 
 
-
-location_softmax = hard_softmax
+location_softmax = gumbel
 pitch_softmax = hard_softmax
 
 do_discrete_f0 = True # ascending pitch problem without discrete f0
-conv_loc = True
+conv_loc = True # only conv_loc seems to work well
 learning_rate = 1e-4
 
 do_serial_loss = True
@@ -180,7 +180,7 @@ class Atoms(nn.Module):
             f0 = pitch_softmax(self.f0(x)) 
             f0 = f0 @ self.center_freqs
         else:
-            f0 = unit_activation(self.f0(x))
+            f0 = unit_activation(self.f0(x)) ** 2
 
         # TODO: What's a reasonable variance here?
         f0_span = f0 * 0.01
