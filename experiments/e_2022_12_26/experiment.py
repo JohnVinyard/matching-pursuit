@@ -84,7 +84,7 @@ def gumbel(x):
 #     # return torch.softmax(x, dim=-1)
 
 
-location_softmax = gumbel
+location_softmax = hard_softmax
 pitch_softmax = hard_softmax
 
 do_discrete_f0 = True # ascending pitch problem without discrete f0
@@ -92,7 +92,7 @@ conv_loc = True # only conv_loc seems to work well
 learning_rate = 1e-4
 
 do_serial_loss = True
-placeless_loss = True
+placeless_loss = False
 
 # TODO: Sequence generator options
 
