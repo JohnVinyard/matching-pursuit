@@ -62,11 +62,35 @@ total_params = time_params + f0_params + f0_variance_params + n_amp_params + dis
 
 musical_scale = MusicalScale()
 
-def softmax(x):
-    # x = max_norm(x, dim=-1)
-    return F.gumbel_softmax(torch.exp(x), dim=-1, hard=True)
-    # return torch.softmax(x, dim=-1)
 
+
+def hard_softmax(x):
+    x_backward = torch.softmax(x, dim=-1)
+    values, indices = torch.max(x_backward, dim=-1, keepdim=True)
+    x_forward = torch.zeros_like(x_backward)
+    x_forward = torch.scatter(x_forward, dim=-1, index=indices, src=values)
+    y = x_backward + (x_forward - x_backward).detach()
+    return y
+
+def gumbel(x):
+    x = torch.tanh(x)
+    return F.gumbel_softmax(torch.exp(x), dim=-1, hard=True)
+
+# def softmax(x):
+#     # x = torch.tanh(x)
+#     # return F.gumbel_softmax(torch.exp(x), dim=-1, hard=True)
+
+#     # return torch.softmax(x, dim=-1)
+
+
+
+location_softmax = hard_softmax
+pitch_softmax = hard_softmax
+
+do_serial_loss = True
+do_discrete_f0 = True
+conv_loc = True
+learning_rate = 1e-4
 
 def unit_activation(x):
     return torch.sigmoid(x)
@@ -99,16 +123,20 @@ class Atoms(nn.Module):
 
         self.switch = LinearOutputStack(exp.model_dim, 3, out_channels=2)
 
-        self.f0 = LinearOutputStack(exp.model_dim, 3, out_channels=len(musical_scale))
+        self.f0 = LinearOutputStack(exp.model_dim, 3, out_channels=len(musical_scale) if do_discrete_f0 else 1)
         self.f0_var = ConvUpsample(
             exp.model_dim, exp.model_dim, start_size=8, end_size=exp.n_frames, mode='nearest', out_channels=1)
         self.amp_params = ConvUpsample(
             exp.model_dim, exp.model_dim, start_size=8, end_size=exp.n_frames, mode='nearest', out_channels=n_harmonics * 2
         )
 
-        self.loc = ConvUpsample(
-            exp.model_dim, exp.model_dim, start_size=8, end_size=exp.n_frames, mode='learned', out_channels=1
-        )
+        if conv_loc:
+            self.loc = ConvUpsample(
+                exp.model_dim, exp.model_dim, start_size=8, end_size=exp.n_frames, mode='learned', out_channels=1
+            )
+        else:
+            self.loc = LinearOutputStack(exp.model_dim, 3, out_channels=1)
+
 
         self.scalar_pos = LinearOutputStack(exp.model_dim, 3, out_channels=1)
     
@@ -122,10 +150,10 @@ class Atoms(nn.Module):
         # x = x.view(-1, exp.model_dim)
         # means, stds, f0, f0_var, amp_params, discrete_f0 = unpack(x)
 
-        # scalar = unit_activation(self.scalar_pos(x).view(-1, n_events, 1))
+        scalar = unit_activation(self.scalar_pos(x).view(-1, n_events, 1))
 
-        sw = self.switch.forward(x)
-        sw = softmax(sw)
+        # sw = self.switch.forward(x)
+        # sw = softmax(sw)
 
 
         discrete_f0 = unit_activation(self.loc(x))
@@ -133,7 +161,7 @@ class Atoms(nn.Module):
         f0_var = (unit_activation(self.f0_var(x)) * 2) - 1
         amp_params = self.amp_params(x) ** 2
 
-        loc = softmax(discrete_f0).view(-1, n_events, 128)
+        loc = location_softmax(discrete_f0).view(-1, n_events, 128)
         loc_full = torch.zeros(x.shape[0] // n_events, n_events, exp.n_samples, device=loc.device)
         step = exp.n_samples // 128
         loc_full[:, :, ::step] = loc
@@ -144,8 +172,11 @@ class Atoms(nn.Module):
         # f0 = discrete_f0 @ discrete_freqs
         
         # f0 = min_freq + (f0 * freq_span)
-        f0 = softmax(self.f0(x)) 
-        f0 = f0 @ self.center_freqs
+        if do_discrete_f0:
+            f0 = pitch_softmax(self.f0(x)) 
+            f0 = f0 @ self.center_freqs
+        else:
+            f0 = unit_activation(self.f0(x))
 
         # TODO: What's a reasonable variance here?
         f0_span = f0 * 0.01
@@ -316,12 +347,15 @@ class Model(nn.Module):
     
     def forward(self, x):
         x = self.encoder(x)
-        x = torch.sum(x, dim=1, keepdim=True)
-        # x = max_norm(x, dim=-1)
+
+        if not do_serial_loss:
+            x = torch.sum(x, dim=1, keepdim=True)
+            x = max_norm(x, dim=-1)
+        
         return x
 
 model = Model().to(device)
-optim = optimizer(model, lr=1e-4)
+optim = optimizer(model, lr=learning_rate)
 try:
     model.load_state_dict(torch.load('model.dat'))
 except IOError:
@@ -348,36 +382,43 @@ def train_disc(batch):
     return l
 
 def contrast_normalized_stft(x):
-    # x = stft(x, 512, 256, pad=True)
+    x = stft(x, 512, 256, pad=True)
 
-    x = exp.pooled_filter_bank(x)[:, None, :, :]
-    unfold = nn.Unfold(kernel_size=(3, 3), stride=(2, 2), padding=(1, 1))
-    uf = unfold.forward(x)
-    norms = torch.norm(uf, dim=1, keepdim=True)
-    normed = uf / (norms + 1e-8)
-    x = torch.cat([normed, norms], dim=1)
+    # x = exp.pooled_filter_bank(x)[:, None, :, :]
+    # unfold = nn.Unfold(kernel_size=(3, 3), stride=(2, 2), padding=(1, 1))
+    # uf = unfold.forward(x)
+    # norms = torch.norm(uf, dim=1, keepdim=True)
+    # normed = uf / (norms + 1e-8)
+    # x = torch.cat([normed, norms], dim=1)
+
     return x
 
 def experiment_loss(recon, batch):
-    # fake = contrast_normalized_stft(recon)
-    # real = contrast_normalized_stft(batch)
-    # loss = F.mse_loss(fake, real)
-    # return loss
+    
 
-    transform = lambda x: stft(x, 512, 256, pad=True)
-    loss = serial_loss(recon, batch, transform)
-    return loss
+    if do_serial_loss:
+        transform = lambda x: torch.abs(torch.fft.rfft(x, dim=-1, norm='ortho'))
+        # transform = lambda x: stft(x, 512, 256, pad=True)
+        loss = serial_loss(recon, batch, transform)
+        return loss
+    else:
+        # fake = contrast_normalized_stft(recon)
+        # real = contrast_normalized_stft(batch)
+        fake = torch.abs(torch.fft.rfft(recon, dim=-1, norm='ortho'))
+        real = torch.abs(torch.fft.rfft(batch, dim=-1, norm='ortho'))
+        loss = F.mse_loss(fake, real)
+        return loss
 
 
 def train(batch):
     optim.zero_grad()
     recon = model.forward(batch)
 
-    _, ff = disc.forward(recon)
-    _, rf = disc.forward(batch)
-    loss = torch.abs(ff - rf).sum()
+    # _, ff = disc.forward(recon)
+    # _, rf = disc.forward(batch)
+    # loss = torch.abs(ff - rf).sum()
 
-    # loss = experiment_loss(recon, batch)
+    loss = experiment_loss(recon, batch)
 
     loss.backward()
     optim.step()
@@ -416,13 +457,16 @@ class CompromiseExperiment(object):
             item = item.view(-1, 1, exp.n_samples)
             self.real = item
 
+            l, recon = train(item)
+            self.fake = recon
+            print('R', i, l.item())
 
-            if i % 2 == 0:
-                l, recon = train(item)
-                self.fake = recon
-                print('R', i, l.item())
-            else:
-                l = train_disc(item)
-                print('D', i, l.item())
+            # if i % 2 == 0:
+            #     l, recon = train(item)
+            #     self.fake = recon
+            #     print('R', i, l.item())
+            # else:
+            #     l = train_disc(item)
+            #     print('D', i, l.item())
 
             
