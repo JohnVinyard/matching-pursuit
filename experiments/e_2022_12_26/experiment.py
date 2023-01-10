@@ -90,11 +90,11 @@ def gumbel(x):
 location_softmax = gumbel
 pitch_softmax = gumbel
 
-do_discrete_f0 = True # ascending pitch problem without discrete f0
+do_discrete_f0 = True
 conv_loc = True # only conv_loc seems to work well
 learning_rate = 1e-4
 
-do_serial_loss = True
+do_serial_loss = False
 placeless_loss = False
 
 fft_shift_placement = False
@@ -362,7 +362,7 @@ class Model(nn.Module):
 
         if not do_serial_loss:
             x = torch.sum(x, dim=1, keepdim=True)
-            x = max_norm(x, dim=-1)
+            # x = max_norm(x, dim=-1)
         
         return x
 
@@ -437,19 +437,27 @@ def train(batch):
     # loss = torch.abs(ff - rf).sum()
 
     loss = experiment_loss(recon, batch)
+    # real_norms = torch.norm(batch, dim=-1)
+    # fake_norms = torch.norm(recon, dim=-1)
+    # norm_loss = torch.abs(fake_norms - real_norms).sum()
+    # loss = loss + norm_loss
 
-    real_norms = torch.norm(batch, dim=-1)
-    fake_norms = torch.norm(recon, dim=-1)
-
-    norm_loss = torch.abs(fake_norms - real_norms).sum()
-
-
-    loss = loss + norm_loss
     loss.backward()
     optim.step()
     with torch.no_grad():
         return loss, recon.sum(dim=1, keepdim=True)
 
+def train_disc(batch):
+    disc_optim.zero_grad()
+    with torch.no_grad():
+        recon = model.forward(batch)
+    
+    rj, _ = disc.forward(batch)
+    fj, _ = disc.forward(recon)
+    loss = least_squares_disc_loss(rj, fj)
+    loss.backward()
+    disc_optim.step()
+    return loss
 
 @readme
 class CompromiseExperiment(object):
