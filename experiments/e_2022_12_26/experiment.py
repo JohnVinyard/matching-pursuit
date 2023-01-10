@@ -73,9 +73,12 @@ def hard_softmax(x):
     y = x_backward + (x_forward - x_backward).detach()
     return y
 
+
+def regular_old_softmax(x):
+    return torch.softmax(x, dim=-1)
+
 def gumbel(x):
-    x = torch.tanh(x)
-    return F.gumbel_softmax(torch.exp(x), tau=1, dim=-1, hard=True)
+    return F.gumbel_softmax(x, tau=1, dim=-1, hard=True)
 
 # def softmax(x):
 #     # x = torch.tanh(x)
@@ -84,8 +87,8 @@ def gumbel(x):
 #     # return torch.softmax(x, dim=-1)
 
 
-location_softmax = hard_softmax
-pitch_softmax = hard_softmax
+location_softmax = gumbel
+pitch_softmax = gumbel
 
 do_discrete_f0 = True # ascending pitch problem without discrete f0
 conv_loc = True # only conv_loc seems to work well
@@ -94,7 +97,9 @@ learning_rate = 1e-4
 do_serial_loss = True
 placeless_loss = False
 
-# TODO: Sequence generator options
+fft_shift_placement = False
+do_positioning = True
+
 
 def unit_activation(x):
     return torch.sigmoid(x)
@@ -221,9 +226,12 @@ class Atoms(nn.Module):
 
         x = x * fade #* sw[..., 0:1]
 
-        x = fft_convolve(x, loc_full)
-
-        # x = fft_shift(x, scalar)[..., :exp.n_samples]
+        if do_positioning:
+            if fft_shift_placement:
+                x = fft_shift(x, scalar)[..., :exp.n_samples]
+            else:
+                x = fft_convolve(x, loc_full)
+        
 
         return x
 
@@ -430,6 +438,13 @@ def train(batch):
 
     loss = experiment_loss(recon, batch)
 
+    real_norms = torch.norm(batch, dim=-1)
+    fake_norms = torch.norm(recon, dim=-1)
+
+    norm_loss = torch.abs(fake_norms - real_norms).sum()
+
+
+    loss = loss + norm_loss
     loss.backward()
     optim.step()
     with torch.no_grad():
@@ -465,6 +480,10 @@ class CompromiseExperiment(object):
     def run(self):
         for i, item in enumerate(self.stream):
             item = item.view(-1, 1, exp.n_samples)
+
+            if item.max().item() == 0:
+                continue
+
             self.real = item
 
             l, recon = train(item)

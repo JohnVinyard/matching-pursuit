@@ -237,7 +237,7 @@ class SparseEncoderModel(nn.Module):
         
 
         self.reduce = nn.Conv1d(scale.n_bands + 33, model_dim, 1, 1, 0)
-        # self.norm = ExampleNorm()
+        self.norm = ExampleNorm()
 
         self.sparse = VectorwiseSparsity(
             model_dim, keep=n_events, channels_last=False, dense=False, normalize=True)
