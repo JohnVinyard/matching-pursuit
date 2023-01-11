@@ -93,7 +93,7 @@ def gumbel(x):
 location_softmax = gumbel
 pitch_softmax = gumbel
 
-do_discrete_f0 = False
+do_discrete_f0 = True
 conv_loc = True # only conv_loc seems to work well
 learning_rate = 1e-4
 
