@@ -11,6 +11,7 @@ from modules.dilated import DilatedStack
 from modules.fft import fft_convolve
 from modules.linear import LinearOutputStack
 from modules.normalization import ExampleNorm, max_norm
+from modules.phase import AudioCodec, MelScale
 from modules.physical import Window
 from modules.reverb import NeuralReverb
 from modules.sparse import SparseEncoderModel
@@ -29,6 +30,8 @@ n_events = 8
 window_size = 512
 step_size = window_size // 2
 
+mel_scale = MelScale()
+codec = AudioCodec(mel_scale)
 
 exp = Experiment(
     samplerate=zounds.SR22050(),
@@ -67,7 +70,7 @@ musical_scale = MusicalScale()
 def hard_softmax(x):
     x_backward = torch.softmax(x, dim=-1)
     values, indices = torch.max(x_backward, dim=-1, keepdim=True)
-    values = values + (1 - values)
+    # values = values + (1 - values)
     x_forward = torch.zeros_like(x_backward)
     x_forward = torch.scatter(x_forward, dim=-1, index=indices, src=values)
     y = x_backward + (x_forward - x_backward).detach()
@@ -412,7 +415,8 @@ def experiment_loss(recon, batch):
         if placeless_loss:
             transform = lambda x: torch.abs(torch.fft.rfft(x, dim=-1, norm='ortho'))
         else:
-            transform = lambda x: stft(x, 512, 256, pad=True)
+            # transform = lambda x: stft(x, 512, 256, pad=True)
+            transform = lambda x: torch.abs(mel_scale.to_frequency_domain(x))
         loss = serial_loss(recon, batch, transform)
         return loss
     else:
