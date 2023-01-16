@@ -38,6 +38,17 @@ class Window(nn.Module):
         return windows
 
 
+class BlockwiseResonatorModel(nn.Module):
+    
+    def __init__(self, n_samples, n_frames, channels):
+        super().__init__()
+        self.n_samples = n_samples
+        self.n_frames = n_frames
+        self.channels = channels
+    
+    def forward(self, x):
+        pass
+
 def harmonics(n_octaves, waveform, device):
 
     rng = torch.arange(1, n_octaves + 1, device=device)
