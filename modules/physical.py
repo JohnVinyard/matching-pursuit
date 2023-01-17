@@ -39,7 +39,9 @@ class Window(nn.Module):
 
 
 class BlockwiseResonatorModel(nn.Module):
-    
+    """
+    The transfer function 
+    """
     def __init__(self, n_samples, n_frames, channels):
         super().__init__()
         self.n_samples = n_samples

@@ -1,0 +1,1 @@
+Invertible scattering-like transform as a basis for next matching pursuit later
