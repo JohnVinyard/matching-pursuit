@@ -77,12 +77,13 @@ class PerceptualAudioModel(nn.Module):
         # we care about the *shape* and not the magnitude here
         norms = torch.norm(spec, dim=-1, keepdim=True)
         spec = spec / (norms + 1e-8)
+
         return pooled, spec
 
 
 loss_model = PerceptualAudioModel()
 
-model = OverfitRawAudio((1, 1, exp.n_samples), std=1e-4)
+model = OverfitRawAudio((1, 1, exp.n_samples), std=1e-5)
 optim = optimizer(model, lr=1e-3)
 
 
@@ -92,8 +93,8 @@ def train(batch):
     r1, r2 = loss_model.forward(batch)
     f1, f2 = loss_model.forward(recon)
 
-    spec_loss = F.mse_loss(f1, r1) 
-    periodicity_loss = F.mse_loss(f2, r2)
+    spec_loss = F.mse_loss(f1, r1) * 1
+    periodicity_loss = F.mse_loss(f2, r2) * 1
 
     loss = spec_loss + periodicity_loss
     loss.backward()
@@ -129,5 +130,5 @@ class ScatteringLossExperiment(object):
             self.real = item
             l, r, s = train(item)
             self.spec = s
-            print(l.item())
+            print(i, l.item())
             self.fake = r
