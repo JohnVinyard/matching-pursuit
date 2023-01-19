@@ -1,5 +1,6 @@
 import zounds
 from config.experiment import Experiment
+from modules.filter_bank import SynthesisBank
 from modules.overfitraw import OverfitRawAudio
 from modules.stft import morlet_filter_bank
 from train.optim import optimizer
@@ -10,6 +11,14 @@ from torch import nn
 import numpy as np
 import torch
 from torch.nn import functional as F
+
+
+"""
+TODO:
+- resonance model used for 12-26-2022 experiment
+- sine + noise synthesis filter bank in modules
+- matching pursuit in perceptual feature domain
+"""
 
 exp = Experiment(
     samplerate=zounds.SR22050(),
@@ -45,7 +54,6 @@ class PerceptualAudioModel(nn.Module):
 
         spec = torch.fft.rfft(x, dim=-1, norm='ortho')
 
-
         conv = spec * self.full_size_filters[None, ...]
 
         spec = torch.fft.irfft(conv, dim=-1, norm='ortho')
@@ -56,7 +64,7 @@ class PerceptualAudioModel(nn.Module):
         # compression
         spec = torch.sqrt(spec)
 
-        # loss of phase locking (TODO: make this independent of sample rate)
+        # loss of phase locking above 5khz (TODO: make this independent of sample rate)
         spec = F.avg_pool1d(spec, kernel_size=3, stride=1, padding=1)
 
         # compute within-band periodicity
@@ -83,7 +91,20 @@ class PerceptualAudioModel(nn.Module):
 
 loss_model = PerceptualAudioModel()
 
-model = OverfitRawAudio((1, 1, exp.n_samples), std=1e-5)
+class Model(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.n_osc = 128
+        self.n_frames = 256
+
+        self.amps = nn.Parameter(torch.zeros(1, self.n_osc * 2, self.n_frames).uniform_(-0.01, 0.01))
+        self.synth_bank = SynthesisBank(exp.samplerate, self.n_osc, exp.n_samples)
+    
+    def forward(self, x):
+        x = self.synth_bank.forward(torch.relu(self.amps))
+        return x
+
+model = Model()
 optim = optimizer(model, lr=1e-3)
 
 

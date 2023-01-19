@@ -1,7 +1,11 @@
 import torch
 from torch.distributions import Normal
 from torch import nn
+from modules.ddsp import overlap_add
+from modules.fft import fft_convolve
 from modules.normalization import max_norm
+from upsample import ConvUpsample
+from torch.nn import functional as F
 
 
 class PhysicalSimulation(nn.Module):
@@ -39,17 +43,67 @@ class Window(nn.Module):
 
 
 class BlockwiseResonatorModel(nn.Module):
-    """
-    The transfer function 
-    """
-    def __init__(self, n_samples, n_frames, channels):
+    def __init__(self, n_samples, n_frames, channels, n_events):
         super().__init__()
         self.n_samples = n_samples
         self.n_frames = n_frames
         self.channels = channels
+        self.n_events = n_events
+
+        self.step = n_samples // n_frames
+        self.window_size = self.step * 2
+        self.n_coeffs = self.window_size // 2 + 1
+
+        self.to_impulse = ConvUpsample(
+            channels, channels, 8, self.n_frames, mode='linear', out_channels=1)
+        
+        self.to_transfer = ConvUpsample(
+            channels, channels, 8, self.n_frames, mode='linear', out_channels=self.n_coeffs)
+        
+        self.to_loc = ConvUpsample(
+            channels, channels, start_size=8, end_size=n_frames, mode='learned', out_channels=1
+        )
     
     def forward(self, x):
-        pass
+
+        
+
+        loc = self.to_loc(x)
+        loc = F.gumbel_softmax(loc, dim=-1, hard=True)
+        loc_full = torch.zeros(loc.shape[0], 1, self.n_samples, device=loc.device)
+        step = self.n_samples // self.channels
+
+        loc_full[:, :, ::step] = loc
+
+        imp = self.to_impulse(x) ** 2
+
+        imp = F.interpolate(imp, size=self.n_samples, mode='linear')
+        noise = torch.zeros(1, 1, self.n_samples).uniform_(-1, 1)
+        imp = imp * noise
+        imp = F.pad(imp, (0, self.step))
+        windowed = imp.unfold(-1, 512, 256) * torch.hamming_window(self.window_size)[None, None, None, :]
+        freq = torch.fft.rfft(windowed, dim=-1, norm='ortho')
+
+        t = torch.sigmoid(self.to_transfer(x)) ** 2
+
+        output = []
+
+        for i in range(self.n_frames):
+            x = freq[:, :, i, :]
+            if i > 0:
+                recur = output[i - 1].view(x.shape[0], 1, self.n_coeffs) * t[..., i][:, None, :]
+                x = x + recur
+            x = x[:, :, None, :]
+            output.append(x)
+        
+        x = torch.cat(output, dim=2)
+        x = torch.fft.irfft(x, dim=-1, norm='ortho')
+        x = overlap_add(x, apply_window=False)[..., :self.n_samples]
+
+        x = fft_convolve(x, loc_full)[..., :self.n_samples]
+
+        x = x.view(-1, self.n_events, self.n_samples)
+        return x
 
 def harmonics(n_octaves, waveform, device):
 

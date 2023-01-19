@@ -12,7 +12,7 @@ from modules.fft import fft_convolve
 from modules.linear import LinearOutputStack
 from modules.normalization import ExampleNorm, max_norm
 from modules.phase import AudioCodec, MelScale
-from modules.physical import Window
+from modules.physical import BlockwiseResonatorModel, Window
 from modules.reverb import NeuralReverb
 from modules.sparse import SparseEncoderModel
 from modules.stft import stft
@@ -342,7 +342,7 @@ class Model(nn.Module):
     def __init__(self):
         super().__init__()
         self.encoder = SparseEncoderModel(
-            Atoms(), 
+            BlockwiseResonatorModel(exp.n_samples, exp.n_frames, exp.model_dim, n_events), 
             exp.samplerate, 
             exp.n_samples, 
             exp.model_dim, 
