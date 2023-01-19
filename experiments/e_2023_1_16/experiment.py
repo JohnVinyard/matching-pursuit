@@ -15,8 +15,8 @@ from torch.nn import functional as F
 
 """
 TODO:
-- resonance model used for 12-26-2022 experiment
-- sine + noise synthesis filter bank in modules
+- resonance model used for 12-26-2022 experiment - DONE
+- sine + noise synthesis filter bank in modules - DONE
 - matching pursuit in perceptual feature domain
 """
 
@@ -26,6 +26,18 @@ exp = Experiment(
     weight_init=0.1,
     model_dim=128,
     kernel_size=512)
+
+
+class PerceptualAtoms(nn.Module):
+    def __init__(self, n_atoms, n_bands, n_frames, bandwidth):
+        super().__init__()
+        self.n_atoms = n_atoms
+        self.n_bands = n_bands
+        self.n_frames = n_frames
+        self.bandwidth = bandwidth
+
+        self.atoms = nn.Parameter(torch.zeros(
+            n_atoms, self.bandwidth, self.n_bands, self.n_frames).uniform_(-1, 1))
 
 
 class PerceptualAudioModel(nn.Module):
@@ -101,10 +113,11 @@ class Model(nn.Module):
         self.synth_bank = SynthesisBank(exp.samplerate, self.n_osc, exp.n_samples)
     
     def forward(self, x):
-        x = self.synth_bank.forward(torch.relu(self.amps))
+        x = self.synth_bank.forward(self.amps ** 2)
         return x
 
 model = Model()
+# model = OverfitRawAudio((1, 1, exp.n_samples), std=1e-4)
 optim = optimizer(model, lr=1e-3)
 
 

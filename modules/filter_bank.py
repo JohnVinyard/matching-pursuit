@@ -22,7 +22,10 @@ class SynthesisBank(nn.Module):
         noise = torch.zeros(1, 1, n_samples).uniform_(-1, 1)
 
         noise_spec = torch.fft.rfft(noise, dim=-1, norm='ortho')
-        osc_spec = torch.fft.rfft(osc, dim=-1, norm='ortho')
+
+        osc_filt = osc[..., :128] * torch.hamming_window(128)[None, None, :]
+        osc_filt = F.pad(osc_filt, (0, n_samples - 128))
+        osc_spec = torch.fft.rfft(osc_filt, dim=-1, norm='ortho')
         conv = noise_spec * osc_spec
         noise_bank = torch.fft.irfft(conv, dim=-1, norm='ortho').view(1, n_osc, n_samples)
 
