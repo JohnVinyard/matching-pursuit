@@ -90,12 +90,12 @@ def gumbel(x):
 #     # return torch.softmax(x, dim=-1)
 
 
-location_softmax = gumbel
-pitch_softmax = gumbel
+location_softmax = hard_softmax
+pitch_softmax = hard_softmax
 
 do_discrete_f0 = True
 conv_loc = True # only conv_loc seems to work well
-learning_rate = 1e-4
+learning_rate = 1e-3
 
 do_serial_loss = True
 placeless_loss = False
@@ -342,7 +342,8 @@ class Model(nn.Module):
     def __init__(self):
         super().__init__()
         self.encoder = SparseEncoderModel(
-            BlockwiseResonatorModel(exp.n_samples, exp.n_frames, exp.model_dim, n_events), 
+            Atoms(),
+            # BlockwiseResonatorModel(exp.n_samples, exp.n_frames, exp.model_dim, n_events), 
             exp.samplerate, 
             exp.n_samples, 
             exp.model_dim, 
@@ -409,6 +410,7 @@ def contrast_normalized_stft(x):
     return x
 
 def experiment_loss(recon, batch):
+
     
 
     if do_serial_loss:
@@ -417,9 +419,11 @@ def experiment_loss(recon, batch):
         else:
             # transform = lambda x: stft(x, 512, 256, pad=True)
             transform = lambda x: torch.abs(mel_scale.to_frequency_domain(x))
+            # transform = lambda x: exp.perceptual_feature(x)
         loss = serial_loss(recon, batch, transform)
         return loss
     else:
+        return exp.perceptual_loss(recon, batch)
         
         if placeless_loss:
             fake = torch.abs(torch.fft.rfft(recon, dim=-1, norm='ortho'))

@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 from torch.distributions import Normal
 from torch import nn
@@ -42,6 +43,37 @@ class Window(nn.Module):
         return windows
 
 
+def scale_and_rotate(x, mag, phase):
+
+    scaled = x * mag
+    return scaled
+
+    r = scaled.real
+    i = scaled.imag
+
+    x = torch.cat([r[..., None], i[..., None]], dim=-1)
+
+    # compute group delay
+    rotations = 512 * torch.linspace(0, np.pi, 257)
+    phase = phase + rotations[None, None, :]
+
+    # create the rotation matrix
+    # TODO: Consider adding to group delay
+    mat = torch.zeros(*x.shape[:-1], 4)
+    mat[..., 0] = torch.cos(phase)
+    mat[..., 1] = torch.sin(phase)
+    mat[..., 2] = -torch.sin(phase)
+    mat[..., 3] = torch.cos(phase)
+    mat = mat.view(*mat.shape[:-1], 2, 2)
+
+
+    x = (x[..., None] * mat).sum(dim=-1)
+
+    x = torch.complex(x[..., 0], x[..., 1])
+    return x
+
+
+
 class BlockwiseResonatorModel(nn.Module):
     def __init__(self, n_samples, n_frames, channels, n_events):
         super().__init__()
@@ -55,17 +87,16 @@ class BlockwiseResonatorModel(nn.Module):
         self.n_coeffs = self.window_size // 2 + 1
 
         self.to_impulse = ConvUpsample(
-            channels, channels, 8, self.n_frames, mode='linear', out_channels=1)
+            channels, channels, 8, self.n_frames, mode='learned', out_channels=1)
         
         self.to_transfer = ConvUpsample(
-            channels, channels, 8, self.n_frames, mode='linear', out_channels=self.n_coeffs)
+            channels, channels, 8, self.n_frames, mode='learned', out_channels=self.n_coeffs * 2)
         
         self.to_loc = ConvUpsample(
             channels, channels, start_size=8, end_size=n_frames, mode='learned', out_channels=1
         )
     
     def forward(self, x):
-
         
 
         loc = self.to_loc(x)
@@ -84,14 +115,33 @@ class BlockwiseResonatorModel(nn.Module):
         windowed = imp.unfold(-1, 512, 256) * torch.hamming_window(self.window_size)[None, None, None, :]
         freq = torch.fft.rfft(windowed, dim=-1, norm='ortho')
 
-        t = torch.sigmoid(self.to_transfer(x)) ** 2
+        # t = torch.sigmoid(self.to_transfer(x)) ** 2
+        t = self.to_transfer(x)
+        mag = torch.sigmoid(t[:, :self.n_coeffs, :]) * 0.5
+        phase = torch.tanh(t[:, self.n_coeffs:, :]) * np.pi
+
+        # w = torch.complex(
+        #     t[:, :self.n_coeffs, :], 
+        #     t[:, self.n_coeffs:self.n_coeffs * 2, :]
+        # )
+        # w = max_norm(w)        
+
+        # b = torch.complex(
+        #     t[:, self.n_coeffs * 2:self.n_coeffs * 3, :], 
+        #     t[:, self.n_coeffs * 3:, :]
+        # )
 
         output = []
 
         for i in range(self.n_frames):
             x = freq[:, :, i, :]
             if i > 0:
-                recur = output[i - 1].view(x.shape[0], 1, self.n_coeffs) * t[..., i][:, None, :]
+                # recur = (output[i - 1].view(x.shape[0], 1, self.n_coeffs) * w[..., i][:, None, :]) #+ b[..., i][:, None, :]
+                recur = scale_and_rotate(
+                    output[i - 1].view(x.shape[0], 1, self.n_coeffs), 
+                    mag[..., i][:, None, :], 
+                    phase[..., i][:, None, :])
+
                 x = x + recur
             x = x[:, :, None, :]
             output.append(x)
