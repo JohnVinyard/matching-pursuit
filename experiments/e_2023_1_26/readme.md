@@ -1,0 +1,1 @@
+Does hard/binary positional encoding work better?

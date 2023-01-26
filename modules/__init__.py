@@ -9,7 +9,7 @@ from .decompose import fft_frequency_decompose, fft_frequency_recompose
 from .linear import LinearOutputStack
 from .stft import geom_basis, stft, log_stft, stft_relative_phase, short_time_transform
 from .psychoacoustic import PsychoacousticFeature
-from .pos_encode import pos_encoded, ExpandUsingPosEncodings, LearnedPosEncodings
+from .pos_encode import pos_encoded, ExpandUsingPosEncodings, LearnedPosEncodings, hard_pos_encoding
 from .transformer import ForwardBlock, FourierMixer, Transformer
 from .reverb import NeuralReverb
 # from .phase import AudioCodec, MelScale

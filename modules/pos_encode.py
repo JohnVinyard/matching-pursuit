@@ -5,6 +5,14 @@ import numpy as np
 
 from modules.stft import morlet_filter_bank
 
+def hard_pos_encoding(n_samples, device, operator=torch.eq):
+    x = torch.arange(0, n_samples, device=device)
+    n_bands = int(np.log2(n_samples))
+    y = 2 ** torch.arange(0, n_bands + 1, device=device)
+    x = x[None, None, :] % y[None, :, None]
+    return operator(x.float(), (y[None, :, None] * 0.5))
+
+
 def pos_encode_feature(x, domain, n_samples, n_freqs):
     # batch, time, _ = x.shape
     x = torch.clamp(x, -domain, domain)
