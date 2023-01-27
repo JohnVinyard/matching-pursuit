@@ -3,9 +3,15 @@ from torch import nn
 from torch.nn import functional as F
 import zounds
 import numpy as np
+from config.dotenv import Config
 from config.experiment import Experiment
+from modules.dilated import DilatedStack
+from modules.fft import fft_shift
 
 from modules.linear import LinearOutputStack
+from modules.pos_encode import pos_encoded
+from modules.reverb import NeuralReverb
+from modules.sparse import VectorwiseSparsity
 from train.experiment_runner import BaseExperimentRunner
 from train.optim import optimizer
 from upsample import ConvUpsample
@@ -20,6 +26,8 @@ exp = Experiment(
     model_dim=128,
     kernel_size=512)
 
+n_events = 8
+n_harmonics = 16
 
 class Atoms(nn.Module):
     def __init__(
@@ -30,7 +38,7 @@ class Atoms(nn.Module):
             layers: int,
             channels: int,
             samplerate: zounds.SampleRate,
-            freq_change_factor: float = 0.01,
+            freq_change_factor: float = 0.1,
             activation=lambda x: F.leaky_relu(x, 0.2),
             discrete_activation=lambda x: F.gumbel_softmax(x, tau=1, hard=True, dim=-1)):
 
@@ -58,7 +66,7 @@ class Atoms(nn.Module):
         center_freqs \
             = np.array(list(scale.center_frequencies)) / samplerate.nyquist
 
-        self.register_buffer('center_freqs', torch.from_numpy(center_freqs))
+        self.register_buffer('center_freqs', torch.from_numpy(center_freqs).float())
 
         self.f0 = LinearOutputStack(
             channels,
@@ -101,7 +109,7 @@ class Atoms(nn.Module):
         self.spec_shape = LinearOutputStack(
             channels,
             layers,
-            out_channels=self.total_bands,
+            out_channels=self.n_harmonics,
             activation=activation)
 
     def forward(self, x):
@@ -109,7 +117,7 @@ class Atoms(nn.Module):
         x = x.view(-1, self.channels)
 
         f0 = self.discrete_activation(self.f0.forward(x))
-        f0 = f0 @ self.center_freqs
+        f0 = (f0 @ self.center_freqs).view(-1, 1, 1)
 
         f0_change = torch.tanh(self.f0_change.forward(x))
         f0_change = (f0 * self.freq_change_factor) * f0_change
@@ -137,14 +145,15 @@ class Atoms(nn.Module):
         bl_noise = torch.fft.irfft(filtered, dim=-1, norm='ortho')
 
         mix = torch.sigmoid(self.mix.forward(x))
+        mix = F.interpolate(mix, size=self.n_samples, mode='linear')
 
         osc_mix = mix
         noise_mix = 1 - mix
 
         amp = torch.sigmoid(self.amp.forward(x))
-        factors = torch.sigmoid(self.spec_shape.forward(
-            x)).view(-1, self.total_bands, 1) * amp
-        amp = torch.cat([amp, factors])
+        factors = torch.sigmoid(self.spec_shape.forward(x)).view(-1, self.n_harmonics, 1) * amp
+        
+        amp = torch.cat([amp, factors], dim=1)
 
         decay = torch.sigmoid(self.decay.forward(x))
 
@@ -163,23 +172,87 @@ class Atoms(nn.Module):
         full_osc = osc * amp_with_decay
 
         full_signal = (full_osc * osc_mix) + (bl_noise * noise_mix)
+
+        full_signal = torch.sum(full_signal, dim=1, keepdim=True)
         return full_signal
 
 
 class Model(nn.Module):
     def __init__(self):
         super().__init__()
+        self.net = DilatedStack(exp.model_dim, [1, 3, 9, 27, 1])
+        self.reduce = nn.Conv1d(exp.model_dim + 33, exp.model_dim, 1, 1, 0)
+
+        self.sparse = VectorwiseSparsity(
+            exp.model_dim, keep=n_events, channels_last=False, dense=False, normalize=True)
+        
+        self.atoms = Atoms(
+            exp.n_frames, 
+            exp.n_samples, 
+            n_harmonics, 
+            3, 
+            exp.model_dim, 
+            exp.samplerate)
+        
+        self.verb = NeuralReverb.from_directory(
+            Config.impulse_response_path(), exp.samplerate, exp.n_samples)
+
+        self.n_rooms = self.verb.n_rooms
+
+        self.to_mix = LinearOutputStack(exp.model_dim, 2, out_channels=1)
+        self.to_room = LinearOutputStack(
+            exp.model_dim, 2, out_channels=self.n_rooms)
+
         self.apply(lambda x: exp.init_weights(x))
 
+
     def forward(self, x):
-        '''
-        - analyze
-        - choose events
-        - generate events
-        - find best fit
-        - sum over events
-        '''
-        pass
+        orig = x
+
+        batch = x.shape[0]
+        spec = exp.pooled_filter_bank(x)
+        x = self.net(spec)
+
+        pos = pos_encoded(
+            batch, exp.n_frames, 16, device=x.device).permute(0, 2, 1)
+
+        x = torch.cat([x, pos], dim=1)
+        x = self.reduce(x)
+
+        x, indices = self.sparse.forward(x)
+
+        g, _ = torch.max(x, dim=1, keepdim=True)
+
+        rm = F.gumbel_softmax(self.to_room(g), tau=1, hard=True, dim=-1)
+        mx = torch.sigmoid(self.to_mix(g)).view(-1, 1, 1)
+
+        events = self.atoms.forward(x)
+
+        # find the best fit
+        orig_spec = torch.fft.rfft(orig, dim=-1, norm='ortho')
+        event_spec = torch.fft.rfft(events, dim=-1, norm='ortho')
+        fits = orig_spec * event_spec
+        fits = torch.fft.irfft(fits, dim=-1, norm='ortho')
+
+        indices = torch.argmax(fits, dim=-1, keepdim=True) #/ exp.n_samples
+
+        shifted = torch.zeros(batch * n_events, 1, exp.n_samples)
+        for i in range(batch * n_events):
+            idx = indices[i, 0, 0]
+            evt = events[i, 0, :exp.n_samples - idx]
+            shifted[i, 0, idx:] = evt
+
+        # events = fft_shift(events, indices)
+        events = shifted
+
+        events = events.view(batch, n_events, exp.n_samples)
+
+        events = torch.sum(events, dim=1, keepdim=True)
+
+        wet = self.verb.forward(events, rm)
+
+        events = (events * mx) + (wet * (1 - mx))
+        return events
 
 
 model = Model().to(device)
@@ -192,7 +265,7 @@ def train(batch):
     loss = exp.perceptual_loss(recon, batch)
     loss.backward()
     optim.step()
-    return 
+    return loss, recon
 
 
 @readme
