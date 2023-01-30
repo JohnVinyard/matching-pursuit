@@ -5,6 +5,7 @@ from torch.nn import functional as F
 import numpy as np
 from config.dotenv import Config
 from data.datastore import batch_stream
+from modules.activation import Sine
 from modules.linear import LinearOutputStack
 
 from modules.pos_encode import ExpandUsingPosEncodings
@@ -64,7 +65,7 @@ class FFTUpsampleBlock(nn.Module):
         self.channels = in_channels
         self.size = size
         self.factor = factor
-        self.new_time = int(self.size * self.factor) 
+        self.new_time = int(self.size * self.factor)
         self.orig_coeffs = self.size // 2 + 1
         self.n_coeffs = self.new_time // 2 + 1
 
@@ -77,7 +78,7 @@ class FFTUpsampleBlock(nn.Module):
 
         self.inferred = nn.Parameter(c)
         self.final = nn.Conv1d(in_channels, out_channels, 3, 1, 1)
-    
+
     def upsample(self, x):
         batch = x.shape[0]
 
@@ -141,12 +142,13 @@ class PosEncodedUpsample(nn.Module):
             channels, size, 16, latent_dim, multiply, learnable_encodings, concat=concat, filter_bank=filter_bank)
 
         if self.transformer:
-            encoder = nn.TransformerEncoderLayer(channels, 4, channels, batch_first=True)
+            encoder = nn.TransformerEncoderLayer(
+                channels, 4, channels, batch_first=True)
             self.net = nn.Sequential(
-                    nn.TransformerEncoder(encoder, layers, norm=None),
-                    nn.Linear(channels, 1)
-                )
-            
+                nn.TransformerEncoder(encoder, layers, norm=None),
+                nn.Linear(channels, 1)
+            )
+
             # self.net = nn.Sequential(
             #     Transformer(channels, layers),
             #     nn.Linear(channels, out_channels)
@@ -154,8 +156,6 @@ class PosEncodedUpsample(nn.Module):
         else:
             self.net = LinearOutputStack(
                 channels, layers, out_channels=out_channels, activation=activation)
-
-            
 
         self.apply(init_weights)
 
@@ -178,7 +178,8 @@ class ConvUpsample(nn.Module):
             out_channels,
             from_latent=True,
             batch_norm=False,
-            norm=nn.Identity()):
+            norm=nn.Identity(),
+            activation_factory=lambda: nn.LeakyReLU(0.2)):
 
         super().__init__()
         self.latent_dim = latent_dim
@@ -210,19 +211,24 @@ class ConvUpsample(nn.Module):
         self.net = nn.Sequential(*[nn.Sequential(
             layer(channels, size),
             nn.BatchNorm1d(channels) if batch_norm else norm,
-            nn.LeakyReLU(0.2),
+            activation_factory(),
+            # nn.LeakyReLU(0.2),
+            # Sine()
         ) for _, size in iter_layers(start_size, end_size)])
 
         self.final = nn.Conv1d(channels, self.out_channels, 3, 1, 1)
 
         self.apply(init_weights)
 
+    def __iter__(self):
+        return iter(self.net)
+
     def forward(self, x):
         if self.from_latent:
             x = x.reshape(-1, self.latent_dim)
             x = self.begin(x)
             x = x.view(-1, self.channels, self.start_size)
-        
+
         x = self.net(x)
         x = self.final(x)
         return x
@@ -321,7 +327,8 @@ class Experiment(object):
             optim.step()
 
             if i % 1000 == 0:
-                print(i, loss.item() if len(losses) == 0 else np.mean(losses[-10:]))
+                print(i, loss.item() if len(losses)
+                      == 0 else np.mean(losses[-10:]))
 
             losses.append(loss.item())
 
@@ -341,22 +348,21 @@ if __name__ == '__main__':
 
     results = {}
 
-
     latent_dim = 16
     channels = 32
     size = 128
 
     params = [
         ExperimentParams('learned', lambda: ConvUpsample(
-            latent_dim, channels, 4, size, 'learned', 1)), 
+            latent_dim, channels, 4, size, 'learned', 1)),
         ExperimentParams('pos_multiply_learned', lambda: PosEncodedUpsample(
             latent_dim, channels, size, 1, 5, transformer=False, multiply=True, learnable_encodings=True)),
-        
+
         ExperimentParams('fft_learned', lambda: ConvUpsample(
             latent_dim, channels, 4, size, 'fft_learned', 1)),
         ExperimentParams('fft', lambda: ConvUpsample(
             latent_dim, channels, 4, size, 'fft', 1)),
-        
+
         ExperimentParams('pos', lambda: PosEncodedUpsample(
             latent_dim, channels, size, 1, 5, transformer=False)),
         ExperimentParams('pos_learned', lambda: PosEncodedUpsample(
@@ -365,24 +371,24 @@ if __name__ == '__main__':
             latent_dim, channels, size, 1, 5, transformer=False, multiply=True)),
         ExperimentParams('pos_transformer', lambda: PosEncodedUpsample(
             latent_dim, channels, size, 1, 5, transformer=True)),
-        
+
 
         ExperimentParams('linear', lambda: ConvUpsample(
             latent_dim, channels, 4, size, 'linear', 1)),
         ExperimentParams('nearest', lambda: ConvUpsample(
             latent_dim, channels, 4, size, 'nearest', 1))
-        
+
     ]
 
     for param in params:
         exp = Experiment(**param.__dict__)
         name, real, fake = exp.run()
         results[name] = (real, fake)
-    
+
     best = sorted(results.items(), key=lambda x: x[1], reverse=True)
 
     print('==========================================')
     for b in best:
         print(b)
-    
+
     input('waiting....')

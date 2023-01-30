@@ -33,3 +33,4 @@ from .transfer import \
 from .fft import fft_shift
 from .physical import Window, harmonics, BlockwiseResonatorModel, scale_and_rotate
 from .filter_bank import SynthesisBank
+from .perceptual import PerceptualAudioModel

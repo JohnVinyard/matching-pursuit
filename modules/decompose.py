@@ -42,6 +42,12 @@ def fft_frequency_decompose(x, min_size):
 
 def fft_resample(x, desired_size, is_lowest_band):
     batch, channels, time = x.shape
+
+    # env = torch.ones_like(x)
+    # env[..., :10] = torch.linspace(0, 1, 10)
+    # env[..., -10:] = torch.linspace(1, 0, 10)
+    # x = x * env
+
     coeffs = torch.fft.rfft(x, norm='ortho')
     # (batch, channels, coeffs, 2)
     n_coeffs = coeffs.shape[2]
