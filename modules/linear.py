@@ -40,10 +40,11 @@ class ResidualStack(nn.Module):
             shortcut=True):
 
         super().__init__()
+        self.activation = activation
         self.channels = channels
         self.layers = layers
         self.net = nn.Sequential(
-            *[ResidualBlock(channels, bias, activation, shortcut) for _ in range(layers)]
+            *[ResidualBlock(channels, bias, self.activation, shortcut) for _ in range(layers)]
         )
 
     def forward(self, x):

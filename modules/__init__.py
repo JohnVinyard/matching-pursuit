@@ -11,7 +11,7 @@ from .stft import geom_basis, stft, log_stft, stft_relative_phase, short_time_tr
 from .psychoacoustic import PsychoacousticFeature
 from .pos_encode import pos_encoded, ExpandUsingPosEncodings, LearnedPosEncodings, hard_pos_encoding
 from .transformer import ForwardBlock, FourierMixer, Transformer
-from .reverb import NeuralReverb
+from .reverb import NeuralReverb, ReverbGenerator
 # from .phase import AudioCodec, MelScale
 from .pif import AuditoryImage
 # from .metaformer import MetaFormer, PoolMixer, MetaFormerBlock
@@ -30,7 +30,7 @@ from .shape import Reshape
 from .transfer import \
     TransferFunction, STFTTransferFunction, ImpulseGenerator, \
     PosEncodedImpulseGenerator, schedule_atoms, Position, fft_convolve, differentiable_fft_shift, scalar_position
-from .fft import fft_shift
+from .fft import fft_shift, fft_convolve, simple_fft_convolve
 from .physical import Window, harmonics, BlockwiseResonatorModel, scale_and_rotate
 from .filter_bank import SynthesisBank
 from .perceptual import PerceptualAudioModel

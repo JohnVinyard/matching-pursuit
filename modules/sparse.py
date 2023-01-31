@@ -13,14 +13,17 @@ from upsample import PosEncodedUpsample
 import zounds
 
 
-def sparsify(x, n_to_keep):
+def sparsify(x, n_to_keep, return_indices=False):
     orig_shape = x.shape
     x = x.reshape(x.shape[0], -1)
     values, indices = torch.topk(x, n_to_keep, dim=-1)
     out = torch.zeros_like(x)
     out = torch.scatter(out, dim=-1, index=indices, src=values)
     out = out.reshape(*orig_shape)
-    return out
+    if return_indices:
+        return out, indices, values
+    else:
+        return out
 
 
 def to_sparse_vectors_with_context(x, n_elements):
@@ -39,8 +42,7 @@ def to_sparse_vectors_with_context(x, n_elements):
         val = x[tuple(index)]
         one_hot[batch, el, index[1]] = val
 
-    context = torch.sum(x, dim=-1, keepdim=True).repeat(1,
-                                                        1, n_elements).permute(0, 2, 1)
+    context = torch.sum(x, dim=-1, keepdim=True).repeat(1, 1, n_elements).permute(0, 2, 1)
 
     return one_hot, context, positions
 

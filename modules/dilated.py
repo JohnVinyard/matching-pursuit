@@ -22,8 +22,6 @@ class DilatedBlock(nn.Module):
         return next, out
 
 
-
-
 class DilatedStack(nn.Module):
     def __init__(self, channels, dilations):
         super().__init__()

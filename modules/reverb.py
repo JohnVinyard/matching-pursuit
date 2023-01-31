@@ -5,8 +5,10 @@ import pathlib
 import zounds
 import numpy as np
 from librosa import load, to_mono
+from config.dotenv import Config
 
-from modules.fft import fft_convolve
+from modules.fft import fft_convolve, simple_fft_convolve
+from modules.linear import LinearOutputStack
 
 
 class NeuralReverb(nn.Module):
@@ -54,7 +56,8 @@ class NeuralReverb(nn.Module):
         # choose a linear mixture of "rooms"
         mix = (reverb_mix[:, None, :] @ self.rooms)
 
-        x = fft_convolve(mix, x)
+        # x = fft_convolve(mix, x)
+        x = simple_fft_convolve(mix, x)
 
         # reverb_spec = torch.fft.rfft(mix, dim=-1, norm='ortho')
         # signal_spec = torch.fft.rfft(x, dim=-1, norm='ortho')
@@ -65,6 +68,32 @@ class NeuralReverb(nn.Module):
         # x = torch.fft.irfft(x, dim=-1, n=self.size, norm='ortho')
 
         return x
+
+
+class ReverbGenerator(nn.Module):
+    def __init__(self, channels, layers, samplerate, n_samples):
+        super().__init__()
+        self.channels = channels
+        self.layeres = layers
+        self.samplerate = samplerate
+        self.n_samples = n_samples
+
+        self.verb = NeuralReverb.from_directory(
+            Config.impulse_response_path(), samplerate, n_samples)
+        
+        self.n_rooms = self.verb.n_rooms
+
+        self.to_mix = LinearOutputStack(channels, layers, out_channels=1)
+        self.to_room = LinearOutputStack(
+            channels, layers, out_channels=self.n_rooms)
+        
+    
+    def forward(self, context, dry):
+        rm = torch.softmax(self.to_room(context).view(-1, self.n_rooms), dim=-1)
+        mx = torch.sigmoid(self.to_mix(context).view(-1, 1, 1))
+        wet = self.verb.forward(dry, rm)
+        mixed = (dry * mx) + (wet * (1 - mx))
+        return mixed
 
 
 if __name__ == '__main__':
