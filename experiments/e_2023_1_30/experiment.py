@@ -8,7 +8,7 @@ from modules.linear import LinearOutputStack
 from modules.perceptual import PerceptualAudioModel
 from modules.psychoacoustic import PsychoacousticFeature
 from modules.reverb import ReverbGenerator
-from modules.softmax import sparse_softmax
+from modules.softmax import hard_softmax, sparse_softmax
 from modules.sparse import sparsify, sparsify_vectors
 from train.experiment_runner import BaseExperimentRunner
 from train.optim import optimizer
@@ -28,7 +28,8 @@ exp = Experiment(
 
 
 def softmax(x):
-    return sparse_softmax(x)
+    # return sparse_softmax(x)
+    return hard_softmax(x)
 
 
 class TransferFunctionModel(nn.Module):
@@ -107,9 +108,9 @@ class TransferFunctionModel(nn.Module):
 
         atoms = F.pad(atoms, (0, self.transfer_size - self.atom_size))
 
-        x = fft_convolve(atoms, transfers)
+        x = fft_convolve(atoms, transfers) + atoms
 
-        output = torch.zeros(batch, 1, self.n_samples * 2)
+        output = torch.zeros(batch, 1, self.n_samples * 2, device=x.device)
 
         for i in range(batch):
             for e in range(self.n_events):
@@ -191,7 +192,7 @@ class Model(nn.Module):
 
 
 # TODO: Multi-band/samplerate version of this
-loss_model = PerceptualAudioModel(exp, norm_second_order=False)
+loss_model = PerceptualAudioModel(exp, norm_second_order=False).to(device)
 
 
 def experiment_loss(a, b):
@@ -204,8 +205,9 @@ model = TransferFunctionModel(
     n_atoms=512,
     atom_size=512,
     n_transfers=512,
-    transfer_size=2048,
+    transfer_size=8192,
     n_events=32).to(device)
+
 optim = optimizer(model, lr=1e-3)
 
 

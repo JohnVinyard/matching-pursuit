@@ -160,7 +160,7 @@ class Atoms(nn.Module):
         osc = torch.sin(torch.cumsum(all_tones * np.pi, dim=-1))
 
         dist = Uniform(-self.noise_level, self.noise_level)
-        noise = dist.sample((batch, 1, self.n_samples)).view(batch, 1, self.n_samples)
+        noise = dist.sample((batch, 1, self.n_samples)).view(batch, 1, self.n_samples).to(osc.device)
         # noise = torch.zeros(batch, 1, self.n_samples).uniform_(-100, 100)
         # noise_spec = torch.fft.rfft(noise, dim=-1, norm='ortho')
 
@@ -286,7 +286,7 @@ class Model(nn.Module):
 
         indices = torch.argmax(fits, dim=-1, keepdim=True) #/ exp.n_samples
 
-        shifted = torch.zeros(batch * n_events, 1, exp.n_samples)
+        shifted = torch.zeros(batch * n_events, 1, exp.n_samples, device=fits.device)
         for i in range(batch * n_events):
             idx = indices[i, 0, 0]
             evt = events[i, 0, :exp.n_samples - idx] #* fits[i, 0, idx]
@@ -310,7 +310,7 @@ class Model(nn.Module):
 model = Model().to(device)
 optim = optimizer(model, lr=1e-4)
 
-loss_model = PerceptualAudioModel(exp, norm_second_order=True)
+loss_model = PerceptualAudioModel(exp, norm_second_order=True).to(device)
 
 def train(batch):
     optim.zero_grad()

@@ -42,7 +42,7 @@ class Model(nn.Module):
 
         self.upsample = ConvUpsample(
             exp.model_dim, 
-            exp.model_dim, 
+            512, 
             128, 
             end_size=exp.n_samples, 
             out_channels=1, 
@@ -87,7 +87,7 @@ class Model(nn.Module):
         return x
 
 
-loss_model = PerceptualAudioModel(exp, norm_second_order=False)
+loss_model = PerceptualAudioModel(exp, norm_second_order=False).to(device)
 
 model = Model().to(device)
 optim = optimizer(model, lr=1e-3)
