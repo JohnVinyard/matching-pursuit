@@ -34,3 +34,4 @@ from .fft import fft_shift, fft_convolve, simple_fft_convolve
 from .physical import Window, harmonics, BlockwiseResonatorModel, scale_and_rotate
 from .filter_bank import SynthesisBank
 from .perceptual import PerceptualAudioModel
+from .softmax import hard_softmax, sparse_softmax
