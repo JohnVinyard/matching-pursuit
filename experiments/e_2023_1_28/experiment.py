@@ -8,9 +8,10 @@ from modules.dilated import DilatedStack
 from modules.linear import LinearOutputStack
 from modules.normalization import ExampleNorm
 from modules.perceptual import PerceptualAudioModel
+from modules.pos_encode import ExpandUsingPosEncodings
 from train.experiment_runner import BaseExperimentRunner
 from train.optim import optimizer
-from upsample import ConvUpsample
+from upsample import ConvUpsample, PosEncodedUpsample
 from torch import nn
 import torch
 from torch.nn import functional as F
@@ -34,7 +35,12 @@ class Model(nn.Module):
         self.audio = \
             nn.Sequential(
                 DilatedStack(exp.model_dim, [1, 3, 9, 1]), 
-                AudioModel(exp.n_samples, exp.model_dim, exp.samplerate, exp.n_frames, exp.n_frames * 4)
+                AudioModel(
+                    exp.n_samples, 
+                    exp.model_dim, 
+                    exp.samplerate, 
+                    exp.n_frames, 
+                    exp.n_frames * 8)
             )
 
         self.embed = nn.Conv1d(1024, exp.model_dim, 1, 1, 0)
@@ -42,13 +48,27 @@ class Model(nn.Module):
 
         self.upsample = ConvUpsample(
             exp.model_dim, 
-            512, 
+            128, 
             128, 
             end_size=exp.n_samples, 
-            out_channels=1, 
+            out_channels=128, 
             from_latent=False,
             mode='learned',
-            activation_factory=lambda: Sine()
+            # activation_factory=lambda: Sine()
+        )
+
+        self.upsample = PosEncodedUpsample(
+            128,
+            128,
+            exp.n_samples,
+            128, 
+            layers=5,
+            multiply=True,
+            learnable_encodings=True,
+            transformer=False,
+            concat=False,
+            filter_bank=False,
+            activation=torch.relu
         )
 
         
@@ -64,7 +84,13 @@ class Model(nn.Module):
         x = x.permute(0, 3, 1, 2).reshape(-1, exp.model_dim * 8, pooled.shape[-1])
         x = self.embed(x)
 
-        return self.audio(x)
+        x = self.audio(x)
+
+        # x = self.upsample(x)
+        # x = F.pad(x, (0, 1))
+        # x = exp.fb.transposed_convolve(x)
+
+        return x
 
         # x = self.upsample(x)
 

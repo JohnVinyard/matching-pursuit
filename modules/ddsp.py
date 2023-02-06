@@ -551,7 +551,7 @@ class AudioModel(nn.Module):
             n_samples, 
             constrain=True, 
             lowest_freq=40 / samplerate.nyquist,
-            amp_activation=lambda x: x ** 2,
+            amp_activation=torch.relu,
             complex_valued=False)
         
         self.noise = NoiseModel(

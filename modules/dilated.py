@@ -3,16 +3,21 @@ import torch
 from torch.nn import functional as F
 
 class DilatedBlock(nn.Module):
-    def __init__(self, channels, dilation):
+    def __init__(self, channels, dilation, dropout=None):
         super().__init__()
         self.channels = channels
         self.out = nn.Conv1d(channels, channels, 1, 1, 0)
         self.next = nn.Conv1d(channels, channels, 1, 1, 0)
         self.scale = nn.Conv1d(channels, channels, 3, 1, dilation=dilation, padding=dilation)
         self.gate = nn.Conv1d(channels, channels, 3, 1, dilation=dilation, padding=dilation)
+        self.dropout = dropout
     
     def forward(self, x):
         batch = x.shape[0]
+
+        if self.dropout:
+            x = F.dropout(x, p=self.dropout)
+        
         skip = x
         scale = self.scale(x)
         gate = self.gate(x)
@@ -23,9 +28,9 @@ class DilatedBlock(nn.Module):
 
 
 class DilatedStack(nn.Module):
-    def __init__(self, channels, dilations):
+    def __init__(self, channels, dilations, dropout=None):
         super().__init__()
-        self.stack = nn.Sequential(*[DilatedBlock(channels, d) for d in dilations])
+        self.stack = nn.Sequential(*[DilatedBlock(channels, d, dropout=dropout) for d in dilations])
         self.channels = channels
     
     def forward(self, x, return_features=False):

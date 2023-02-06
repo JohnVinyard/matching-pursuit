@@ -13,6 +13,7 @@ from modules.normalization import ExampleNorm, max_norm, unit_norm
 from modules.perceptual import PerceptualAudioModel
 from modules.pos_encode import pos_encoded
 from modules.reverb import NeuralReverb
+from modules.softmax import hard_softmax
 from modules.sparse import VectorwiseSparsity
 from modules.stft import stft
 from train.experiment_runner import BaseExperimentRunner
@@ -44,8 +45,9 @@ def activation(x):
 upsample_mode = 'nearest'
 
 def softmax(x):
+    return hard_softmax(x)
     # return torch.softmax(x, dim=-1)
-    return F.gumbel_softmax(x, tau=1, hard=True, dim=-1)
+    # return F.gumbel_softmax(x, tau=1, hard=True, dim=-1)
 
 class Atoms(nn.Module):
     def __init__(
@@ -161,8 +163,6 @@ class Atoms(nn.Module):
 
         dist = Uniform(-self.noise_level, self.noise_level)
         noise = dist.sample((batch, 1, self.n_samples)).view(batch, 1, self.n_samples).to(osc.device)
-        # noise = torch.zeros(batch, 1, self.n_samples).uniform_(-100, 100)
-        # noise_spec = torch.fft.rfft(noise, dim=-1, norm='ortho')
 
         noise_filter_size = 64
         filt = osc[:, :, :noise_filter_size]
@@ -170,10 +170,6 @@ class Atoms(nn.Module):
         filt = F.pad(filt, (0, self.n_samples - noise_filter_size))
 
         bl_noise = fft_convolve(noise, filt)
-
-        # filt_spec = torch.fft.rfft(filt, dim=-1, norm='ortho')
-        # filtered = noise_spec * filt_spec
-        # bl_noise = torch.fft.irfft(filtered, dim=-1, norm='ortho')
 
         mix = self.unit_activation(self.mix.forward(x))
         mix = F.interpolate(mix, size=self.n_samples, mode='linear')
@@ -212,7 +208,12 @@ class Atoms(nn.Module):
 class Model(nn.Module):
     def __init__(self):
         super().__init__()
-        self.net = DilatedStack(exp.model_dim, [1, 3, 9, 27, 1])
+
+        # self.net = DilatedStack(exp.model_dim, [1, 3, 9, 27, 1])
+
+        encoder = nn.TransformerEncoderLayer(exp.model_dim, 4, exp.model_dim, batch_first=True)
+        self.net = nn.TransformerEncoder(encoder, 4)
+
         self.reduce = nn.Conv1d(exp.model_dim + 33, exp.model_dim, 1, 1, 0)
 
         self.sparse = VectorwiseSparsity(
@@ -246,13 +247,17 @@ class Model(nn.Module):
 
         batch = x.shape[0]
         spec = exp.pooled_filter_bank(x)
-        x = self.net(spec)
 
         pos = pos_encoded(
             batch, exp.n_frames, 16, device=x.device).permute(0, 2, 1)
 
-        x = torch.cat([x, pos], dim=1)
+        x = torch.cat([spec, pos], dim=1)
         x = self.reduce(x)
+
+        x = x.permute(0, 2, 1)
+        x = self.net(x)
+        x = x.permute(0, 2, 1)
+
 
         x, indices = self.sparse.forward(x)
         x = self.norm(x)
@@ -263,42 +268,19 @@ class Model(nn.Module):
         mx = torch.sigmoid(self.to_mix(g)).view(-1, 1, 1)
 
         events = self.atoms.forward(x.view(-1, exp.model_dim))
-        # events = unit_norm(events, dim=-1)
-
-        # find the best fit
-        # orig_spec = torch.fft.rfft(orig.view(-1, 1, exp.n_samples), dim=-1, norm='ortho')
-        # event_spec = torch.fft.rfft(events.view(-1, n_events, exp.n_samples), dim=-1, norm='ortho')
-        # fits = orig_spec * event_spec
-        # fits = torch.fft.irfft(fits, dim=-1, norm='ortho')
-        # fits = fits.view(batch * n_events, 1, exp.n_samples)
-
-        fits = fft_convolve(
-            orig.view(-1, 1, exp.n_samples), 
-            events.view(-1, n_events, exp.n_samples))
-        
-        fits = fits.view(batch * n_events, 1, exp.n_samples)
-
-        # account for boundary effects 
-        # TODO: Give events unit norm and then multiplby activation!!
-        # TODO: convolve in feature domain, not time
-        # weighting = torch.linspace(1, 2, exp.n_samples)
-        # fits = fits * weighting[None, None, :]
-
-        indices = torch.argmax(fits, dim=-1, keepdim=True) #/ exp.n_samples
-
-        shifted = torch.zeros(batch * n_events, 1, exp.n_samples, device=fits.device)
-        for i in range(batch * n_events):
-            idx = indices[i, 0, 0]
-            evt = events[i, 0, :exp.n_samples - idx] #* fits[i, 0, idx]
-            shifted[i, 0, idx:] = evt
-
-        # events = fft_shift(events, indices)
-        events = shifted
-
         events = events.view(batch, n_events, exp.n_samples)
 
-        events = torch.mean(events, dim=1, keepdim=True)
 
+        output = torch.zeros(batch, 1, exp.n_samples * 2, device=events.device)
+
+        for b in range(batch):
+            for e in range(n_events):
+                idx = indices[b, e] * exp.step_size
+                evt = events[b, e]
+                output[b, 0, idx: idx + exp.n_samples] += evt
+
+
+        events = output[..., :exp.n_samples]
 
         wet = self.verb.forward(events, rm.view(batch, -1))
 
