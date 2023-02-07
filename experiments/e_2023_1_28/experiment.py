@@ -57,19 +57,19 @@ class Model(nn.Module):
             # activation_factory=lambda: Sine()
         )
 
-        self.upsample = PosEncodedUpsample(
-            128,
-            128,
-            exp.n_samples,
-            128, 
-            layers=5,
-            multiply=True,
-            learnable_encodings=True,
-            transformer=False,
-            concat=False,
-            filter_bank=False,
-            activation=torch.relu
-        )
+        # self.upsample = PosEncodedUpsample(
+        #     128,
+        #     128,
+        #     exp.n_samples,
+        #     128, 
+        #     layers=5,
+        #     multiply=True,
+        #     learnable_encodings=True,
+        #     transformer=False,
+        #     concat=False,
+        #     filter_bank=False,
+        #     activation=torch.relu
+        # )
 
         
         band_sizes = [512, 1024, 2048, 4096, 8192, 16384, 32768]
@@ -84,11 +84,11 @@ class Model(nn.Module):
         x = x.permute(0, 3, 1, 2).reshape(-1, exp.model_dim * 8, pooled.shape[-1])
         x = self.embed(x)
 
-        x = self.audio(x)
+        # x = self.audio(x)
 
-        # x = self.upsample(x)
-        # x = F.pad(x, (0, 1))
-        # x = exp.fb.transposed_convolve(x)
+        x = self.upsample(x)
+        x = F.pad(x, (0, 1))
+        x = exp.fb.transposed_convolve(x)
 
         return x
 
