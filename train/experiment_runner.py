@@ -35,4 +35,4 @@ class BaseExperimentRunner(object):
             l, r = self.train(item)
             self.fake = r
 
-            print(l.item())
+            print(i, l.item())
