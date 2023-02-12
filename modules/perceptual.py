@@ -18,7 +18,7 @@ class PerceptualAudioModel(nn.Module):
             20, exp.samplerate.nyquist), 128)
 
         orig_filters = filters = morlet_filter_bank(
-            exp.samplerate, exp.kernel_size, scale, scaling_factor=0.1, normalize=True)
+            exp.samplerate, exp.kernel_size, scale, scaling_factor=0.25, normalize=True)
         filters = np.fft.rfft(filters, axis=-1, norm='ortho')
 
         self.register_buffer('orig', torch.from_numpy(orig_filters))

@@ -25,15 +25,15 @@ from util.readmedocs import readme
 exp = Experiment(
     samplerate=zounds.SR22050(),
     n_samples=2**15,
-    weight_init=0.1,
+    weight_init=0.05,
     model_dim=128,
     kernel_size=512)
 
 
 def softmax(x):
     # return torch.softmax(x, dim=-1)
-    # return sparse_softmax(x, normalize=True)
-    return hard_softmax(x, invert=False)
+    return sparse_softmax(x, normalize=True)
+    # return hard_softmax(x, invert=True)
 
 
 
@@ -41,18 +41,19 @@ class ImpulseBank(nn.Module):
     def __init__(self, n_atoms):
         super().__init__()
         self.n_atoms = n_atoms
-        self.latent_size = 16
-        self.latent_frames = 16
+        self.latent_size = 8
+        self.latent_frames = 8
+        self.n_samples = 128
 
         self.latents = nn.Parameter(torch.zeros(
             self.n_atoms, self.latent_size, self.latent_frames).uniform_(-1, 1))
 
         self.model = NoiseModel(
-            self.latent_size, self.latent_frames, 64, 512, exp.model_dim, squared=True, mask_after=1)
+            self.latent_size, self.latent_frames, self.n_samples // 4, self.n_samples, exp.model_dim, squared=True, mask_after=1)
     
     def forward(self, x):
         # first, generate the dictionary
-        d = self.model.forward(self.latents).view(-1, 512)
+        d = self.model.forward(self.latents).view(-1, self.n_samples)
         d = max_norm(d)
         return x @ d
 
@@ -208,13 +209,13 @@ model = TransferFunctionModel(
     n_samples=exp.n_samples,
     channels=exp.model_dim,
     n_atoms=512,
-    atom_size=512,
+    atom_size=128,
     n_transfers=512,
     transfer_size=exp.n_samples,
-    n_events=64).to(device)
+    n_events=16).to(device)
 
 
-optim = optimizer(model, lr=1e-4)
+optim = optimizer(model, lr=1e-3)
 
 
 def train(batch):
