@@ -15,7 +15,7 @@ class PerceptualAudioModel(nn.Module):
         self.norm_second_order = norm_second_order
 
         scale = zounds.MelScale(zounds.FrequencyBand(
-            20, exp.samplerate.nyquist), 128)
+            1, exp.samplerate.nyquist), 128)
 
         orig_filters = filters = morlet_filter_bank(
             exp.samplerate, exp.kernel_size, scale, scaling_factor=0.25, normalize=True)

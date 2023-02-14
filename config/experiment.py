@@ -34,7 +34,7 @@ class Experiment(object):
         self.model_dim = model_dim
         self.kernel_size = kernel_size
 
-        band = zounds.FrequencyBand(40, self.samplerate.nyquist)
+        band = zounds.FrequencyBand(1, self.samplerate.nyquist)
 
         self.scale = zounds.MelScale(band, model_dim)
         self.fb = zounds.learn.FilterBank(

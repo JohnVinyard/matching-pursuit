@@ -47,7 +47,7 @@ class DilatedBlock(nn.Module):
 
     def forward(self, x):
         orig = x
-        # x = F.dropout(x, p=0.1)
+        x = F.dropout(x, p=0.1)
         x = self.dilated(x)
         x = self.conv(x)
         x = x + orig
@@ -164,7 +164,7 @@ class AnalysisBand(nn.Module):
             # masked = masked[..., :n_samples]
             # masked = masked.view(batch, self.n_atoms, n_samples)
 
-            # x = F.dropout(x, p=0.01)
+            x = F.dropout(x, p=0.01)
 
             # x = self.gain * x
 
@@ -269,7 +269,7 @@ class TransferFunctionModel(nn.Module):
         return verb
 
 
-loss_model = PerceptualAudioModel(exp, norm_second_order=False).to(device)
+# loss_model = PerceptualAudioModel(exp, norm_second_order=False).to(device)
 # loss_model = PsychoacousticFeature()
 
 
