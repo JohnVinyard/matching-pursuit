@@ -270,7 +270,7 @@ class TransferFunctionModel(nn.Module):
 
 
 # loss_model = PerceptualAudioModel(exp, norm_second_order=False).to(device)
-# loss_model = PsychoacousticFeature()
+loss_model = PsychoacousticFeature([128] * 6)
 
 
 def multiband_features(x):
@@ -287,13 +287,13 @@ def experiment_loss(a, b):
 
     # return loss_model.loss(a, b)
 
-    # a, _ = loss_model.forward(a)
-    # b, _ = loss_model.forward(b)
-    # return F.mse_loss(a, b)
+    a, _ = loss_model.forward(a)
+    b, _ = loss_model.forward(b)
+    return F.mse_loss(a, b)
 
-    a = multiband_features(a)
-    b = multiband_features(b)
-    return F.l1_loss(a, b)
+    # a = multiband_features(a)
+    # b = multiband_features(b)
+    # return F.l1_loss(a, b)
 
 
 model = TransferFunctionModel().to(device)
