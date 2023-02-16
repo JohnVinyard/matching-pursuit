@@ -287,13 +287,13 @@ def experiment_loss(a, b):
 
     # return loss_model.loss(a, b)
 
-    a, _ = loss_model.forward(a)
-    b, _ = loss_model.forward(b)
-    return F.mse_loss(a, b)
+    # a, _ = loss_model.forward(a)
+    # b, _ = loss_model.forward(b)
+    # return F.mse_loss(a, b)
 
-    # a = multiband_features(a)
-    # b = multiband_features(b)
-    # return F.l1_loss(a, b)
+    a = multiband_features(a)
+    b = multiband_features(b)
+    return F.l1_loss(a, b)
 
 
 model = TransferFunctionModel().to(device)
@@ -335,3 +335,4 @@ class MultibandKSparse(BaseExperimentRunner):
     def __init__(self, stream):
         super().__init__(stream, train, exp)
         self.feature_maps = feature_maps
+        self.model = model
