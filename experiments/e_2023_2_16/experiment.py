@@ -7,7 +7,7 @@ from modules.linear import LinearOutputStack
 from modules.normalization import ExampleNorm, max_norm
 from modules.pos_encode import pos_encoded
 from modules.reverb import ReverbGenerator
-from modules.softmax import hard_softmax
+from modules.softmax import hard_softmax, sparse_softmax
 from modules.sparse import sparsify, sparsify_vectors
 from perceptual.feature import NormalizedSpectrogram
 from train.experiment_runner import BaseExperimentRunner
@@ -28,6 +28,27 @@ exp = Experiment(
     model_dim=128,
     kernel_size=512)
 
+def choice_softmax(x):
+    # return sparse_softmax(x, normalize=False)
+    return hard_softmax(x, invert=True)
+
+class DilatedBlock(nn.Module):
+    def __init__(self, channels, dilation):
+        super().__init__()
+        self.dilated = nn.Conv1d(
+            channels, channels, 3, padding=dilation, dilation=dilation, bias=False)
+        self.conv = nn.Conv1d(channels, channels, 1, 1, 0, bias=False)
+
+    def forward(self, x):
+        orig = x
+        x = F.dropout(x, p=0.1)
+        x = self.dilated(x)
+        x = self.conv(x)
+        x = x + orig
+        x = F.leaky_relu(x, 0.2)
+        return x
+
+
 class ImpulseDictionary(nn.Module):
     def __init__(self, n_atoms, n_samples):
         super().__init__()
@@ -40,14 +61,14 @@ class ImpulseDictionary(nn.Module):
         self.n_coeffs = self.window_size // 2 + 1
         self.n_frames = self.n_samples // self.step_size
 
-        self.spectral_shapes = nn.Parameter(torch.zeros(self.n_atoms, self.n_coeffs, 1).uniform_(-1, 1))
-        self.envelopes = nn.Parameter(torch.zeros(self.n_atoms, 1, self.n_frames).uniform_(0, 1))
+        self.spectral_shapes = nn.Parameter(torch.zeros(self.n_atoms, self.n_coeffs, self.n_frames).uniform_(-1, 1))
     
     def forward(self):
-        normed = unit_norm(self.spectral_shapes, axis=1)
-        normed = normed.repeat(1, 1, self.n_frames)
-        with_envelope = normed * (self.envelopes ** 2)
-        as_samples = noise_bank2(with_envelope)
+        # normed = unit_norm(torch.sin(self.spectral_shapes), axis=1)
+        # normed = normed.repeat(1, 1, self.n_frames)
+        # with_envelope = normed * (self.envelopes ** 2)
+        # params = self.spectral_shapes
+        as_samples = noise_bank2(self.spectral_shapes)
         return as_samples.view(1, self.n_atoms, self.n_samples)
 
 class TransferFunctionDictionary(nn.Module):
@@ -60,20 +81,23 @@ class TransferFunctionDictionary(nn.Module):
 
         self.osc = nn.Parameter(torch.zeros(self.n_atoms, self.n_frequencies).uniform_(0, 1))
         self.amp = nn.Parameter(torch.zeros(self.n_atoms, self.n_frequencies).uniform_(0, 1))
+
+
         self.decay = nn.Parameter(torch.zeros(self.n_atoms, self.n_frequencies).uniform_(0, 1))
     
     def forward(self):
-        osc = torch.clamp(self.osc.view(self.n_atoms, self.n_frequencies, 1), 0, 1) ** 2
+        osc = torch.sigmoid(self.osc.view(self.n_atoms, self.n_frequencies, 1)) ** 2
         freq = (osc * np.pi).repeat(1, 1, self.n_samples)
         osc = torch.sin(torch.cumsum(freq, dim=-1))
         osc = osc * (self.amp.view(self.n_atoms, self.n_frequencies, 1) ** 2)
 
-        dec = self.decay.view(self.n_atoms, self.n_frequencies, 1).repeat(1, 1, self.n_frames)
-        dec = torch.cumprod(dec, dim=-1)
+        dec = 0.7 + (torch.sigmoid(self.decay.view(self.n_atoms, self.n_frequencies, 1).repeat(1, 1, self.n_frames)) * 0.299999)
+        dec = torch.exp(torch.cumsum(torch.log(dec), dim=-1))
+        # dec = torch.cumprod(dec, dim=-1)
         dec = F.interpolate(dec, size=self.n_samples, mode='linear')
 
         osc = osc * dec
-        osc = torch.sum(osc, dim=1, keepdim=True)
+        osc = torch.mean(osc, dim=1, keepdim=True)
         return osc.view(1, self.n_atoms, self.n_samples)
 
 
@@ -85,7 +109,14 @@ class Model(nn.Module):
         self.n_atoms = n_atoms
         self.atom_size = atom_size
 
-        self.encoder = DilatedStack(channels, [1, 3, 9, 1], dropout=0.1)
+        # self.encoder = DilatedStack(channels, [1, 3, 9, 1], dropout=0.1)
+
+        self.encoder = nn.Sequential(
+            DilatedBlock(channels, 1),
+            DilatedBlock(channels, 3),
+            DilatedBlock(channels, 9),
+            DilatedBlock(channels, 1),
+        )
         
         self.reduce = nn.Conv1d(channels + 33, channels, 1, 1, 0)
 
@@ -135,10 +166,10 @@ class Model(nn.Module):
         seq = self.seq_generator.forward(x)
 
         attn = torch.sigmoid(self.attn.forward(x))
-        events, indices = sparsify_vectors(x, attn, self.k_sparse, normalize=True, dense=False)
+        events, indices = sparsify_vectors(x, attn, self.k_sparse, normalize=False, dense=False)
 
         impulse_choice = self.to_impulse_choice.forward(events)
-        impulse_choice = hard_softmax(impulse_choice, invert=True)
+        impulse_choice = choice_softmax(impulse_choice)
 
         d = self.impulse_dict.forward()
         t = self.transfer_dict.forward()
@@ -149,12 +180,13 @@ class Model(nn.Module):
             torch.zeros(batch, self.k_sparse, exp.n_samples - self.atom_size, device=impulses.device)], dim=-1)
 
         transfer_choice = self.to_transfer_choice.forward(events)
-        transfer_choice = hard_softmax(transfer_choice, invert=True)
+        transfer_choice = choice_softmax(transfer_choice)
         transfers = transfer_choice @ t
 
-        mixture = torch.sigmoid(self.to_mixture.forward(events))
+        mixture = (torch.sin(self.to_mixture.forward(events)) + 1) * 0.5
 
-        d = (mixture * fft_convolve(impulses, transfers)) + ((1 - mixture) * impulses)
+        d = ((1 - mixture) * fft_convolve(impulses, transfers)) + (mixture * impulses)
+        # d = fft_convolve(impulses, transfers) + impulses
 
         seq = F.dropout(seq, 0.01)
         seq, indices, values = sparsify(
@@ -171,7 +203,7 @@ model = Model(
     exp.model_dim,
     n_heads=4,
     n_layers=6,
-    atom_size=8192,
+    atom_size=4096,
     n_atoms=512,
     k_sparse=8).to(device)
 
@@ -181,7 +213,7 @@ optim = optimizer(model, lr=1e-3)
 def train(batch):
     optim.zero_grad()
     recon = model.forward(batch)
-    loss = exp.perceptual_loss(recon, batch) + (F.mse_loss(recon, batch) * 100)
+    loss = exp.perceptual_loss(recon, batch)
     loss.backward()
     optim.step()
     return loss, recon

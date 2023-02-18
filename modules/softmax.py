@@ -21,3 +21,9 @@ def sparse_softmax(x, normalize=False):
     x_forward = torch.scatter(x_forward, dim=-1, index=indices, src=values)
     y = x_backward + (x_forward - x_backward).detach()
     return y
+
+def soft_clamp(x):
+    x_backward = x
+    x_forward = torch.clamp(x_backward, 0, 1)
+    y = x_backward + (x_forward - x_backward).detach()
+    return y
