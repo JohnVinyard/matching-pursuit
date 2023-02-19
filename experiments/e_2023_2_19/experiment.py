@@ -52,6 +52,10 @@ class LowRankLayerWeights(nn.Module):
         return w
 
 
+class FilmModifier(nn.Module):
+    def __init__():
+        super().__init__()
+
 class Layer(nn.Module):
     def __init__(
             self,
