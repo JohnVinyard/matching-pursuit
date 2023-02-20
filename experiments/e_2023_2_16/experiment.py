@@ -156,11 +156,13 @@ class Model(nn.Module):
             channels, 3, out_channels=self.n_atoms)
         self.to_mixture = LinearOutputStack(channels, 3, out_channels=1)
 
+        self.atom_dictionary = nn.Parameter(torch.zeros(self.n_atoms, self.atom_size).uniform_(-1, 1))
+
         self.impulse_dict = ImpulseDictionary(n_atoms, self.atom_size)
         self.transfer_dict = TransferFunctionDictionary(
             n_atoms, exp.n_samples, 16, exp.n_samples // exp.step_size)
 
-        self.seq_generator = nn.Conv1d(channels, self.k_sparse, 1, 1, 0)
+        self.seq_generator = nn.Conv1d(channels, self.n_atoms, 1, 1, 0)
 
 
         self.to_impulse = nn.Conv1d(channels, self.n_atoms, 1, 1, 0)
@@ -194,24 +196,29 @@ class Model(nn.Module):
         impulse_choice = self.to_impulse_choice.forward(events)
         impulse_choice = choice_softmax(impulse_choice)
 
-        d = self.impulse_dict.forward()
-        t = self.transfer_dict.forward()
+        # d = self.impulse_dict.forward()
+        # t = self.transfer_dict.forward()
 
-        impulses = impulse_choice @ d
-        impulses = torch.cat([
-            impulses,
-            torch.zeros(batch, self.k_sparse, exp.n_samples - self.atom_size, device=impulses.device)], dim=-1)
+        # impulses = impulse_choice @ d
+        # impulses = torch.cat([
+        #     impulses,
+        #     torch.zeros(batch, self.k_sparse, exp.n_samples - self.atom_size, device=impulses.device)], dim=-1)
 
-        transfer_choice = self.to_transfer_choice.forward(events)
-        transfer_choice = choice_softmax(transfer_choice)
-        transfers = transfer_choice @ t
+        # transfer_choice = self.to_transfer_choice.forward(events)
+        # transfer_choice = choice_softmax(transfer_choice)
+        # transfers = transfer_choice @ t
 
-        d = fft_convolve(impulses, transfers) + impulses
+        # d = fft_convolve(impulses, transfers) + impulses
+
+        d = self.atom_dictionary
+        d = torch.cat([d, torch.zeros(self.n_atoms, exp.n_samples - self.atom_size, device=d.device)], dim=-1)[None, ...]
 
         seq = F.dropout(seq, 0.05)
         seq, indices, values = sparsify(
             seq, self.k_sparse, return_indices=True)
 
+        print(seq.shape, d.shape)
+        
         output = fft_convolve(seq, d)[..., :exp.n_samples]
         output = torch.sum(output, dim=1, keepdim=True)
 
@@ -223,9 +230,9 @@ model = Model(
     exp.model_dim,
     n_heads=4,
     n_layers=6,
-    atom_size=256,
+    atom_size=512,
     n_atoms=512,
-    k_sparse=64).to(device)
+    k_sparse=128).to(device)
 
 optim = optimizer(model, lr=1e-3)
 
