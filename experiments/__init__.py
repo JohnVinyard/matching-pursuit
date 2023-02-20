@@ -1,1 +1,1 @@
-from .e_2023_2_9 import MultibandKSparse as Current
+from .e_2023_2_19 import NERFRedux as Current

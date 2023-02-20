@@ -3,6 +3,7 @@ from config.experiment import Experiment
 from modules.dilated import DilatedStack
 from modules.normalization import ExampleNorm
 from modules.pos_encode import pos_encoded
+from modules.sparse import sparsify
 from modules.stft import stft
 from perceptual.feature import NormalizedSpectrogram
 from train.experiment_runner import BaseExperimentRunner
@@ -108,7 +109,7 @@ class FilmLayer(nn.Module):
     def forward(self, x, context):
         w, b = self.weights.forward(x, context)
         x = self.base(x)
-        x = (x * w[:, None, :]) + b[:, None, :]
+        x = (x * w) + b
         x = self.activation(x)
         return x
 
@@ -124,33 +125,27 @@ class Network(nn.Module):
         super().__init__()
         self.channels = channels
 
-        # encoder = nn.TransformerEncoderLayer(channels, 4, channels, batch_first=True)
-        # self.encoder = nn.TransformerEncoder(encoder, 4, norm=ExampleNorm())
 
         self.reduce = nn.Conv1d(33 + channels, channels, 1, 1, 0)
         self.encoder = DilatedStack(channels, [1, 3, 9, 1])
+        self.encoder2 = DilatedStack(channels, [1, 3, 9, 27, 81, 1])
 
         def activation(x):
-            # return torch.sin(x * 30)
             return torch.tanh(x)
-            # return F.leaky_relu(x, 0.2)
-        
-        # self.norm_spec = NormalizedSpectrogram(
-        #     512, exp.model_dim, exp.model_dim, exp.model_dim, exp.model_dim)
         
         self.embed_pos = nn.Linear(33, channels, bias=False)
 
         self.layers = nn.Sequential(*[
             layer(channels, weight, activation) for _ in range(n_layers)
         ])
-        self.final = nn.Linear(channels, 256, bias=False)
+        self.final = nn.Linear(channels, 1, bias=False)
         self.norm = ExampleNorm()
         self.apply(lambda p: exp.init_weights(p))
     
     def forward(self, pos, x):
         batch = x.shape[0]
 
-        spec = exp.pooled_filter_bank(x)
+        spec = exp.fb.forward(x, normalize=False)
         spec_pos = pos_encoded(x.shape[0], spec.shape[-1], 16, device=x.device).permute(0, 2, 1)
 
         spec = torch.cat([spec_pos, spec], dim=1)
@@ -158,44 +153,30 @@ class Network(nn.Module):
         ns = self.encoder.forward(spec)
         ns = self.norm(ns)
 
-        ns = torch.mean(ns, dim=-1)
+        # ns = torch.mean(ns, dim=-1)
+        ns = sparsify(ns, 16, return_indices=False)
+        ns = self.encoder2(ns).permute(0, 2, 1)
         context = ns
 
         x = self.embed_pos(pos)
         for layer in self.layers:
             x = layer.forward(x, context)
+        
         x = self.final(x)
-        return x.view(batch, exp.n_samples, 256)
+        return x.view(batch, 1, exp.n_samples)
 
 
 model = Network(exp.model_dim, 6, FilmLayer, FilmModifier).to(device)
 optim = optimizer(model, lr=1e-3)
 
 def train(batch):
-    batch = torch.clamp(batch, -1, 1)
-
-    discrete = (mu_law(batch.data.cpu().numpy()) + 1) * 0.5
-    discrete = discrete * 255
-    discrete = torch.from_numpy(discrete).long().to(device)
-
     optim.zero_grad()
     pos = pos_encoded(batch.shape[0], exp.n_samples, 16, device=device)
-
     recon = model.forward(pos, batch)
-
-
-    # loss = F.mse_loss(recon, batch) + F.mse_loss(a, b)
-    r = recon.view(-1, 256)
-    loss = F.cross_entropy(r, discrete.view(-1))
-
+    loss = F.mse_loss(recon, batch)
     loss.backward()
     optim.step()
-
-    indices = torch.argmax(recon, dim=-1)
-    indices = indices.float().data.cpu().numpy()
-    indices = (indices / 255)
-    indices = (indices * 2) - 1
-    return loss, indices
+    return loss, recon
 
 
 @readme
