@@ -1,1 +1,1 @@
-from .e_2023_2_19 import NERFRedux as Current
+from .e_2023_2_20 import ApproximateConvolution as Current
