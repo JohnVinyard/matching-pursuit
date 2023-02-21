@@ -30,7 +30,7 @@ from torch.nn.init import orthogonal_
 exp = Experiment(
     samplerate=zounds.SR22050(),
     n_samples=2**15,
-    weight_init=0.1,
+    weight_init=0.05,
     model_dim=128,
     kernel_size=512)
 
