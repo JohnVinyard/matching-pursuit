@@ -198,20 +198,12 @@ class TransferFunctionModel(nn.Module):
         return verb
 
 
-loss_model = PsychoacousticFeature([128] * 6)
-
-
-def multiband_features(x):
-    bands = fft_frequency_decompose(x, 512)
-    return torch.cat([b for b in bands.values()], dim=-1)
+loss_model = PsychoacousticFeature()
 
 
 def experiment_loss(a, b):
-    # a = multiband_features(a)
-    # b = multiband_features(b)
-    # return F.l1_loss(a, b)
-    # a, _ = loss_model.forward(a)
-    # b, _ = loss_model.forward(b)
+    a, _ = loss_model.forward(a)
+    b, _ = loss_model.forward(b)
     return F.mse_loss(a, b)
 
 
