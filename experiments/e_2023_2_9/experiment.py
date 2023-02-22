@@ -79,8 +79,7 @@ class AnalysisBand(nn.Module):
         bank = morlet_filter_bank(
             exp.samplerate, self.atom_size, scale, 0.1, normalize=True)
 
-        self.atoms = nn.Parameter(orthogonal_(
-            torch.zeros(self.n_atoms, self.atom_size), gain=5))
+        self.atoms = nn.Parameter(torch.zeros(self.n_atoms, self.atom_size).uniform_(-1, 1))
         # self.atoms = nn.Parameter(torch.from_numpy(bank.real).float())
 
         # time-frequency mask
@@ -119,7 +118,7 @@ class AnalysisBand(nn.Module):
         x = F.pad(x, (self.kernel_size, 0))
         x = F.conv1d(x, self.bank)[..., :n_samples]
 
-        x = self.norm(x)
+        # x = self.norm(x)
 
         pos = pos_encoded(batch, n_samples, 16,
                           device=x.device).permute(0, 2, 1)
@@ -202,9 +201,17 @@ loss_model = PsychoacousticFeature()
 
 
 def experiment_loss(a, b):
-    a, _ = loss_model.forward(a)
-    b, _ = loss_model.forward(b)
-    return F.mse_loss(a, b)
+    # a, _ = loss_model.forward(a)
+    # b, _ = loss_model.forward(b)
+    # return F.mse_loss(a, b)
+
+    loss = 0
+    a = fft_frequency_decompose(a, 512)
+    b = fft_frequency_decompose(b, 512)
+    for x, y in zip(a.values(), b.values()):
+        loss = loss + F.mse_loss(x, y)
+    return loss
+
 
 
 model = TransferFunctionModel().to(device)
