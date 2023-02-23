@@ -34,7 +34,7 @@ class BaseExperimentRunner(object):
         for i, item in enumerate(self.iter_items()):
             self.real = item
 
-            l, r = self.train(item)
+            l, r = self.train(item, i)
             self.fake = r
 
             print(i, l.item())

@@ -1,10 +1,8 @@
 import zounds
-from modules.phase import MelScale
 from modules.pif import AuditoryImage
 from modules.psychoacoustic import PsychoacousticFeature
 
 from util import device
-from util.music import MusicalScale
 from util.weight_init import make_initializer
 import torch
 from torch.nn import functional as F

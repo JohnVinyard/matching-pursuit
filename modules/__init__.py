@@ -1,9 +1,5 @@
 from .erb import erb, scaled_erb
 
-# from .ddsp import \
-#     OscillatorBank, NoiseModel, band_filtered_noise, \
-#     UnconstrainedOscillatorBank, HarmonicModel
-
 from .decompose import fft_frequency_decompose, fft_frequency_recompose
 # from .multiresolution import EncoderShell, DecoderShell, BandEncoder, ConvBandDecoder, ConvExpander
 from .linear import LinearOutputStack
@@ -22,8 +18,7 @@ from .scattering import MoreCorrectScattering
 from .normalization import UnitNorm, ExampleNorm, limit_norm, unit_norm, max_norm
 from .sparse import \
     VectorwiseSparsity, ElementwiseSparsity, AtomPlacement, \
-    to_sparse_vectors_with_context, sparsify, sparsify_vectors, \
-    SparseEncoderModel
+    to_sparse_vectors_with_context, sparsify, sparsify_vectors
 from .normal_pdf import pdf
 from .waveguide import TransferFunctionSegmentGenerator
 from .shape import Reshape

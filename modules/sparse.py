@@ -1,30 +1,39 @@
 import torch
 from torch import jit
 from torch import nn
-from config.dotenv import Config
-from modules.dilated import DilatedStack
-from modules.linear import LinearOutputStack
+from torch.nn import functional as F
 
-from modules.normalization import ExampleNorm, unit_norm
-from modules.pos_encode import pos_encoded
-from modules.reverb import NeuralReverb
-from perceptual.feature import CochleaModel, NormalizedSpectrogram, Periodicity
-from upsample import PosEncodedUpsample
-import zounds
-
-
-def sparsify(x, n_to_keep, return_indices=False):
+def sparsify(x, n_to_keep, return_indices=False, soft=False):
 
     orig = x
-
     orig_shape = x.shape
+
+    x = x.view(-1, 1, x.shape[1], x.shape[-1])
+    pooled = F.avg_pool2d(x, (3, 9), stride=(1, 1), padding=(1, 4))
+    sharpened = x - pooled
+
+    sharpened = sharpened.view(x.shape[0], -1)
     x = x.reshape(x.shape[0], -1)
-    values, indices = torch.topk(x, n_to_keep, dim=-1)
+
+    # get peaks from sharpened
+    values, indices = torch.topk(sharpened, n_to_keep, dim=-1)
+    # get values from original
+    values = torch.gather(x, dim=-1, index=indices)
+
     out = torch.zeros_like(x)
     out = torch.scatter(out, dim=-1, index=indices, src=values)
     out = out.reshape(*orig_shape)
 
-    # out = orig + (out - orig).detach()
+    if soft:
+        backward = orig
+        backard_norm = torch.norm(backward, dim=(1, 2), keepdim=True)
+        backward = backward / (backard_norm + 1e-12)
+
+        forward = out
+        forward_norm = torch.norm(forward, dim=(1, 2), keepdim=True)
+        backward = backward * forward_norm
+
+        forward = backward + (forward - backward).detach()
 
     if return_indices:
         return out, indices, values
@@ -48,7 +57,8 @@ def to_sparse_vectors_with_context(x, n_elements):
         val = x[tuple(index)]
         one_hot[batch, el, index[1]] = val
 
-    context = torch.sum(x, dim=-1, keepdim=True).repeat(1, 1, n_elements).permute(0, 2, 1)
+    context = torch.sum(x, dim=-1, keepdim=True).repeat(1,
+                                                        1, n_elements).permute(0, 2, 1)
 
     return one_hot, context, positions
 
@@ -182,133 +192,133 @@ class VectorwiseSparsity(nn.Module):
         return x
 
 
-class SparseEncoderModel(nn.Module):
-    def __init__(
-            self,
-            atoms,
-            samplerate,
-            n_samples,
-            model_dim,
-            n_bands,
-            n_events,
-            total_params,
-            filter_bank,
-            scale,
-            window_size,
-            step_size,
-            n_frames,
-            unit_activation,
-            collapse=False,
-            transformer_context=False):
+# class SparseEncoderModel(nn.Module):
+#     def __init__(
+#             self,
+#             atoms,
+#             samplerate,
+#             n_samples,
+#             model_dim,
+#             n_bands,
+#             n_events,
+#             total_params,
+#             filter_bank,
+#             scale,
+#             window_size,
+#             step_size,
+#             n_frames,
+#             unit_activation,
+#             collapse=False,
+#             transformer_context=False):
 
-        super().__init__()
-        self.atoms = atoms
-        self.samplerate = samplerate
-        self.n_samples = n_samples
-        self.model_dim = model_dim
-        self.n_bands = n_bands
-        self.n_events = n_events
-        self.total_params = total_params
-        self.filter_bank = filter_bank
-        self.scale = scale
-        self.window_size = window_size
-        self.step_size = step_size
-        self.n_frames = n_frames
-        self.unit_activation = unit_activation
-        self.collapse = collapse
-        self.transformer_context = transformer_context
+#         super().__init__()
+#         self.atoms = atoms
+#         self.samplerate = samplerate
+#         self.n_samples = n_samples
+#         self.model_dim = model_dim
+#         self.n_bands = n_bands
+#         self.n_events = n_events
+#         self.total_params = total_params
+#         self.filter_bank = filter_bank
+#         self.scale = scale
+#         self.window_size = window_size
+#         self.step_size = step_size
+#         self.n_frames = n_frames
+#         self.unit_activation = unit_activation
+#         self.collapse = collapse
+#         self.transformer_context = transformer_context
 
-        self.hearing_model = CochleaModel(
-            samplerate, 
-            zounds.MelScale(zounds.FrequencyBand(20, samplerate.nyquist - 10), 128),
-            kernel_size=512)
-        
-        self.periodicity = Periodicity(512, 256)
-        
-        self.audio_feature = NormalizedSpectrogram(
-            pool_window=512, 
-            n_bins=128, 
-            loudness_gradations=256, 
-            embedding_dim=64, 
-            out_channels=128)
+#         self.hearing_model = CochleaModel(
+#             samplerate,
+#             zounds.MelScale(zounds.FrequencyBand(20, samplerate.nyquist - 10), 128),
+#             kernel_size=512)
 
-        if self.transformer_context:
-            encoder = nn.TransformerEncoderLayer(model_dim, 4, model_dim, batch_first=True)
-            self.context = nn.TransformerEncoder(encoder, 6)
-        else:
-            self.context = DilatedStack(model_dim, [1, 3, 9, 27, 1])
+#         self.periodicity = Periodicity(512, 256)
 
-        self.verb = NeuralReverb.from_directory(
-            Config.impulse_response_path(), samplerate, n_samples)
+#         self.audio_feature = NormalizedSpectrogram(
+#             pool_window=512,
+#             n_bins=128,
+#             loudness_gradations=256,
+#             embedding_dim=64,
+#             out_channels=128)
 
-        self.n_rooms = self.verb.n_rooms
-        
+#         if self.transformer_context:
+#             encoder = nn.TransformerEncoderLayer(model_dim, 4, model_dim, batch_first=True)
+#             self.context = nn.TransformerEncoder(encoder, 6)
+#         else:
+#             self.context = DilatedStack(model_dim, [1, 3, 9, 27, 1])
 
-        self.reduce = nn.Conv1d(scale.n_bands + 33, model_dim, 1, 1, 0)
-        self.norm = ExampleNorm()
+#         self.verb = NeuralReverb.from_directory(
+#             Config.impulse_response_path(), samplerate, n_samples)
 
-        self.sparse = VectorwiseSparsity(
-            model_dim, keep=n_events, channels_last=False, dense=False, normalize=True)
+#         self.n_rooms = self.verb.n_rooms
 
-        self.to_mix = LinearOutputStack(model_dim, 2, out_channels=1)
-        self.to_room = LinearOutputStack(
-            model_dim, 2, out_channels=self.n_rooms)
 
-        self.to_params = LinearOutputStack(
-            model_dim, 2, out_channels=total_params)
-        
-        if collapse:
-            self.to_latent = PosEncodedUpsample(
-                model_dim, 
-                model_dim, 
-                size=n_events, 
-                out_channels=model_dim, 
-                layers=4)
+#         self.reduce = nn.Conv1d(scale.n_bands + 33, model_dim, 1, 1, 0)
+#         self.norm = ExampleNorm()
 
-    def forward(self, x):
-        batch = x.shape[0]
+#         self.sparse = VectorwiseSparsity(
+#             model_dim, keep=n_events, channels_last=False, dense=False, normalize=True)
 
-        # x = self.hearing_model.forward(x)
-        # p = self.periodicity.forward(x)
-        # x = self.audio_feature.forward(x)
-        # print(x.shape, p.shape)
+#         self.to_mix = LinearOutputStack(model_dim, 2, out_channels=1)
+#         self.to_room = LinearOutputStack(
+#             model_dim, 2, out_channels=self.n_rooms)
 
-        x = self.filter_bank.forward(x, normalize=False)
-        x = self.filter_bank.temporal_pooling(
-            x, self.window_size, self.step_size)[..., :self.n_frames]
-        # x = self.norm(x)
+#         self.to_params = LinearOutputStack(
+#             model_dim, 2, out_channels=total_params)
 
-        pos = pos_encoded(
-            batch, self.n_frames, 16, device=x.device).permute(0, 2, 1)
+#         if collapse:
+#             self.to_latent = PosEncodedUpsample(
+#                 model_dim,
+#                 model_dim,
+#                 size=n_events,
+#                 out_channels=model_dim,
+#                 layers=4)
 
-        x = torch.cat([x, pos], dim=1)
-        x = self.reduce(x)
+#     def forward(self, x):
+#         batch = x.shape[0]
 
-        if self.transformer_context:
-            x = x.permute(0, 2, 1)
-            x = self.context(x)
-            x = x.permute(0, 2, 1)
-        else:
-            x = self.context(x)
+#         # x = self.hearing_model.forward(x)
+#         # p = self.periodicity.forward(x)
+#         # x = self.audio_feature.forward(x)
+#         # print(x.shape, p.shape)
 
-        # x = self.norm(x)
+#         x = self.filter_bank.forward(x, normalize=False)
+#         x = self.filter_bank.temporal_pooling(
+#             x, self.window_size, self.step_size)[..., :self.n_frames]
+#         # x = self.norm(x)
 
-        x, indices = self.sparse(x)
+#         pos = pos_encoded(
+#             batch, self.n_frames, 16, device=x.device).permute(0, 2, 1)
 
-        orig_verb_params, _ = torch.max(x, dim=1)
-        verb_params = orig_verb_params
+#         x = torch.cat([x, pos], dim=1)
+#         x = self.reduce(x)
 
-        # expand to params
-        mx = torch.sigmoid(self.to_mix(verb_params)).view(batch, 1, 1)
-        rm = torch.softmax(self.to_room(verb_params), dim=-1)
+#         if self.transformer_context:
+#             x = x.permute(0, 2, 1)
+#             x = self.context(x)
+#             x = x.permute(0, 2, 1)
+#         else:
+#             x = self.context(x)
 
-        if self.collapse:
-            x = self.to_latent(orig_verb_params).permute(0, 2, 1)
-            x = x.reshape(-1, self.model_dim)
+#         # x = self.norm(x)
 
-        params = self.unit_activation(self.to_params(x))
-        atoms = self.atoms(params)
+#         x, indices = self.sparse(x)
 
-        wet = self.verb.forward(atoms, torch.softmax(rm, dim=-1))
-        final = (mx * wet) + ((1 - mx) * atoms)
-        return final
+#         orig_verb_params, _ = torch.max(x, dim=1)
+#         verb_params = orig_verb_params
+
+#         # expand to params
+#         mx = torch.sigmoid(self.to_mix(verb_params)).view(batch, 1, 1)
+#         rm = torch.softmax(self.to_room(verb_params), dim=-1)
+
+#         if self.collapse:
+#             x = self.to_latent(orig_verb_params).permute(0, 2, 1)
+#             x = x.reshape(-1, self.model_dim)
+
+#         params = self.unit_activation(self.to_params(x))
+#         atoms = self.atoms(params)
+
+#         wet = self.verb.forward(atoms, torch.softmax(rm, dim=-1))
+#         final = (mx * wet) + ((1 - mx) * atoms)
+#         return final
