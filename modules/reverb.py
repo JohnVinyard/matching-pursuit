@@ -83,16 +83,24 @@ class ReverbGenerator(nn.Module):
         
         self.n_rooms = self.verb.n_rooms
 
-        self.to_mix = LinearOutputStack(channels, layers, out_channels=1)
+        self.to_mix = LinearOutputStack(channels, layers, out_channels=2)
         self.to_room = LinearOutputStack(
             channels, layers, out_channels=self.n_rooms)
         
     
     def forward(self, context, dry):
         rm = torch.softmax(self.to_room(context).view(-1, self.n_rooms), dim=-1)
-        mx = torch.sigmoid(self.to_mix(context).view(-1, 1, 1))
+        # mx = torch.sigmoid(self.to_mix(context).view(-1, 1, 1))
+
+        mx = torch.softmax(self.to_mix(context), dim=-1).view(-1, 1, 1, 2)
+
+        
         wet = self.verb.forward(dry, rm)
-        mixed = (dry * mx) + (wet * (1 - mx))
+        stacked = torch.stack([dry, wet], dim=-1)
+
+        mixed = stacked * mx
+        mixed = torch.sum(mixed, dim=-1)
+        # mixed = (dry * mx) + (wet * (1 - mx))
         return mixed
 
 

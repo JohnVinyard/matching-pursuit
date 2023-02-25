@@ -57,6 +57,9 @@ class Model(nn.Module):
             sparsity_amt=1)
     
         self.up = nn.Conv1d(self.channels, 2048, 1, 1, 0)
+
+        self.atoms = nn.Parameter(torch.zeros(2048, 1024).uniform_(-1, 1))
+
         self.down = nn.Conv1d(2048, self.channels, 1, 1, 0)
 
         self.verb = ReverbGenerator(channels, 3, exp.samplerate, n_samples)
@@ -96,19 +99,23 @@ class Model(nn.Module):
 
         encoded = F.dropout(encoded, p=0.05)
         encoded = sparsify(encoded, non_zero_elements, return_indices=False, soft=True)
-        encoded = self.down(encoded)
+        encoded = F.pad(encoded, (0, 1024))
+        final = F.conv_transpose1d(encoded, self.atoms.view(2048, 1, 1024))[..., :exp.n_samples]
+
+        # encoded = self.down(encoded)
 
         # if debug:
         #     zeros = encoded == 0
         #     total = zeros.sum().item() 
         #     assert total == (zero_elements * batch)
 
-        decoded = self.decoder(encoded)
-        decoded = F.pad(decoded, (0, 1))
-        final = exp.fb.transposed_convolve(decoded)
+        # decoded = self.decoder(encoded)
+        # decoded = F.pad(decoded, (0, 1))
+        # final = exp.fb.transposed_convolve(decoded)
         # means = torch.mean(final, dim=-1, keepdim=True)
         # final = final - means
-        # final = self.verb.forward(context, final)
+
+        final = self.verb.forward(context, final)
         return final
 
 model = Model(exp.model_dim, exp.n_samples).to(device)

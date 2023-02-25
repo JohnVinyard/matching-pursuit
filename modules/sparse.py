@@ -10,7 +10,9 @@ def sparsify(x, n_to_keep, return_indices=False, soft=False):
 
     x = x.view(-1, 1, x.shape[1], x.shape[-1])
     pooled = F.avg_pool2d(x, (3, 9), stride=(1, 1), padding=(1, 4))
-    sharpened = x - pooled
+
+    # we're looking at the *ratio* with the local neighborhood
+    sharpened = (x + 1e-8) / pooled
 
     sharpened = sharpened.view(x.shape[0], -1)
     x = x.reshape(x.shape[0], -1)
