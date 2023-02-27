@@ -1,5 +1,6 @@
 import numpy as np
 from config.experiment import Experiment
+from modules import stft
 from modules.decompose import fft_frequency_decompose, fft_frequency_recompose
 from modules.dilated import DilatedStack
 from modules.normalization import ExampleNorm
@@ -98,6 +99,7 @@ class SynthesisBand(nn.Module):
         self.band_size = band_size
         self.atom_size = atom_size
         self.atoms = nn.Parameter(torch.zeros(n_atoms, 1, atom_size).uniform_(-1, 1))
+        self.gain = nn.Parameter(torch.zeros(1).fill_(1))
     
     def forward(self, x):
         full_size = x.shape[-1]
@@ -112,7 +114,7 @@ class SynthesisBand(nn.Module):
         down = F.pad(down, (0, 1))
         output = F.conv_transpose1d(down, self.atoms, stride=1, padding=self.atoms.shape[-1] // 2)
         output = output[..., :self.band_size]
-
+        output = output * self.gain
         return output
 
 class Loss(nn.Module):
@@ -134,7 +136,24 @@ class Loss(nn.Module):
     def forward(self, x):
         x = fft_frequency_decompose(x, band_sizes[0])
         # analysis = {k: self.bands[str(k)].forward(x[k]) for k in x}
-        analysis = x
+        # analysis = x
+
+        analysis = {}
+        norms = {}
+
+        for key, signal in x.items():
+            norms[key] = torch.norm(signal, dim=-1, keepdim=True)
+
+            if signal.shape[-1] == exp.n_samples:
+                # motivated by the loss of phase-locking above ~5khz
+                # just use a magnitude spectrogram, simulating place-only
+                # encoding
+                analysis[key] = stft(signal, 512, 256, pad=True)
+            else:
+                analysis[key] = signal
+        
+        analysis['norm'] = torch.cat(list(norms.values()), dim=-1)
+
         return analysis
 
 class Model(nn.Module):
@@ -195,4 +214,5 @@ def train(batch, i):
 class SparseMultibandSynthesis(BaseExperimentRunner):
     def __init__(self, stream):
         super().__init__(stream, train, exp)
+        self.model = model
     
