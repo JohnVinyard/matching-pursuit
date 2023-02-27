@@ -1,1 +1,1 @@
-from .e_2023_2_22 import AdversarialSparseAutoencoder as Current
+from .e_2023_2_26 import SparseMultibandSynthesis as Current

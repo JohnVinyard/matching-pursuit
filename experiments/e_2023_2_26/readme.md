@@ -1,0 +1,1 @@
+Analysis once, synthesis per-band

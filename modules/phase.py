@@ -2,8 +2,7 @@ import numpy as np
 import torch
 from torch.nn import functional as F
 import zounds
-from config.dotenv import Config
-from data.datastore import batch_stream
+# from data.datastore import batch_stream
 import librosa
 from scipy.signal import morlet, hann
 
@@ -269,52 +268,53 @@ class AudioCodec(object):
                 audio[0].data.cpu().numpy().reshape(-1), zounds.SR22050()).pad_with_silence()
 
 
-if __name__ == '__main__':
-    app = zounds.ZoundsApp(globals=globals(), locals=locals())
-    app.start_in_thread(9999)
+# if __name__ == '__main__':
+#     app = zounds.ZoundsApp(globals=globals(), locals=locals())
+#     app.start_in_thread(9999)
 
-    n_samples = 2 ** 15
-    samplerate = zounds.SR22050()
-    window_size = 512
-    step_size = window_size // 2
+#     n_samples = 2 ** 15
+#     samplerate = zounds.SR22050()
+#     window_size = 512
+#     step_size = window_size // 2
 
-    stream = batch_stream(Config.audio_path(), '*.wav', 1, n_samples)
 
-    basis = MelScale()
-    transformer = AudioCodec(basis)
+#     stream = batch_stream(Config.audio_path(), '*.wav', 1, n_samples)
 
-    while True:
-        batch = next(stream)
-        o = zounds.AudioSamples(
-            batch.squeeze(), samplerate).pad_with_silence()
-        batch = torch.from_numpy(batch).float()
-        spec = transformer.to_frequency_domain(batch)
+#     basis = MelScale()
+#     transformer = AudioCodec(basis)
 
-        mag = spec[..., 0].data.cpu().numpy().squeeze()
-        phase = spec[..., 1].data.cpu().numpy().squeeze()
+#     while True:
+#         batch = next(stream)
+#         o = zounds.AudioSamples(
+#             batch.squeeze(), samplerate).pad_with_silence()
+#         batch = torch.from_numpy(batch).float()
+#         spec = transformer.to_frequency_domain(batch)
 
-        recon = transformer.to_time_domain(spec)
-        r = zounds.AudioSamples(recon.data.cpu()
-                                .numpy().squeeze(), samplerate).pad_with_silence()
-        input('Next...')
+#         mag = spec[..., 0].data.cpu().numpy().squeeze()
+#         phase = spec[..., 1].data.cpu().numpy().squeeze()
 
-    # Synthetic Test
-    # frequencies = basis.center_frequencies
-    # hz = frequencies * samplerate.nyquist
-    # indices = [10, 100, 150, 200]
+#         recon = transformer.to_time_domain(spec)
+#         r = zounds.AudioSamples(recon.data.cpu()
+#                                 .numpy().squeeze(), samplerate).pad_with_silence()
+#         input('Next...')
 
-    # synth = zounds.SineSynthesizer(samplerate)
-    # audio = synth.synthesize(zounds.Seconds(5), hz[indices])
-    # ta = torch.from_numpy(audio).reshape(1, -1)
-    # print(ta.shape)
+#     # Synthetic Test
+#     # frequencies = basis.center_frequencies
+#     # hz = frequencies * samplerate.nyquist
+#     # indices = [10, 100, 150, 200]
 
-    # spec = transformer.to_frequency_domain(ta)
+#     # synth = zounds.SineSynthesizer(samplerate)
+#     # audio = synth.synthesize(zounds.Seconds(5), hz[indices])
+#     # ta = torch.from_numpy(audio).reshape(1, -1)
+#     # print(ta.shape)
 
-    # mag = spec[..., 0].data.cpu().numpy()
-    # phase = spec[..., 1].data.cpu().numpy()
+#     # spec = transformer.to_frequency_domain(ta)
 
-    # phases = phase[:, :, indices].squeeze()
+#     # mag = spec[..., 0].data.cpu().numpy()
+#     # phase = spec[..., 1].data.cpu().numpy()
 
-    # mean_phases = phases[1:-1].mean(axis=0)
+#     # phases = phase[:, :, indices].squeeze()
 
-    input()
+#     # mean_phases = phases[1:-1].mean(axis=0)
+
+#     input()

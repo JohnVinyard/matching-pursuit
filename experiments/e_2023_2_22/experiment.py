@@ -98,7 +98,8 @@ class Model(nn.Module):
         # encoded = encoded.view(batch, -1, exp.n_samples)
 
         encoded = F.dropout(encoded, p=0.05)
-        encoded = sparsify(encoded, non_zero_elements, return_indices=False, soft=True)
+        encoded = sparsify(
+            encoded, non_zero_elements, return_indices=False, soft=False)
         encoded = F.pad(encoded, (0, 1024))
         final = F.conv_transpose1d(encoded, self.atoms.view(2048, 1, 1024))[..., :exp.n_samples]
 
