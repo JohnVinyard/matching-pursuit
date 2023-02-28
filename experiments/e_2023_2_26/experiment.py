@@ -23,13 +23,15 @@ exp = Experiment(
     model_dim=128,
     kernel_size=512)
 
-n_bands = 6
 
+n_bands = 6
 
 scattering_window_size = 64
 n_log_samples = int(np.log2(exp.n_samples))
 band_sizes = [2**i for i in range(n_log_samples, n_log_samples - n_bands, -1)][::-1]
 
+# atom sizes are constant in time btut vary in size
+# TODO: try the opposite, constant in size but variable in time
 atom_sizes = {k: k // 16 for k in band_sizes}
 
 k_sparse = 64
@@ -144,13 +146,13 @@ class Loss(nn.Module):
         for key, signal in x.items():
             norms[key] = torch.norm(signal, dim=-1, keepdim=True)
 
-            if signal.shape[-1] == exp.n_samples:
-                # motivated by the loss of phase-locking above ~5khz
-                # just use a magnitude spectrogram, simulating place-only
-                # encoding
-                analysis[key] = stft(signal, 512, 256, pad=True)
-            else:
-                analysis[key] = signal
+            # if signal.shape[-1] == exp.n_samples:
+            #     # motivated by the loss of phase-locking above ~5khz
+            #     # just use a magnitude spectrogram, simulating place-only
+            #     # encoding
+            #     analysis[key] = stft(signal, 512, 256, pad=True)
+            # else:
+            analysis[key] = signal
         
         analysis['norm'] = torch.cat(list(norms.values()), dim=-1)
 
@@ -175,7 +177,7 @@ class Model(nn.Module):
         self.verb = ReverbGenerator(channels, 3, exp.samplerate, exp.n_samples)
         self.apply(lambda p: exp.init_weights(p))
     
-    def forward(self, x):
+    def forward(self, x, debug=False):
         batch = x.shape[0]
         x = F.conv1d(x, filter_bank.view(n_filters_per_band, 1, kernel_size), padding=kernel_size // 2)
         x = x[..., :exp.n_samples]
@@ -187,27 +189,40 @@ class Model(nn.Module):
 
         encoded = F.dropout(encoded, p=0.05)
         encoded = sparsify(
-            encoded, k_sparse, return_indices=False, soft=False, sharpen=False)
+            encoded, k_sparse, return_indices=False, soft=True, sharpen=True)
+
+        atoms = (encoded > 0).sum().item()
+        if debug:
+            print('NON-ZERO', atoms / batch)
+        assert (atoms / batch) <= 64
+
         
         bands = {k: self.synth_bands[str(k)].forward(encoded) for k in band_sizes}
         
         final = fft_frequency_recompose(bands, exp.n_samples)
 
         final = self.verb.forward(context, final)
-        return final
+        return final, encoded
 
 model = Model(exp.model_dim).to(device)
+
+# try:
+#     model.load_state_dict(torch.load('model.dat'))
+#     print('loaded weights from model')
+# except IOError:
+#     print('failed to load weights')
+
 optim = optimizer(model, lr=1e-3)
 
 loss_model = Loss().to(device)
 
 def train(batch, i):
     optim.zero_grad()
-    recon = model.forward(batch)
+    recon, encoded = model.forward(batch, debug=True)
     loss = loss_model.loss(recon, batch)
     loss.backward()
     optim.step()
-    return loss, recon
+    return loss, recon, encoded
 
 
 @readme
@@ -215,4 +230,17 @@ class SparseMultibandSynthesis(BaseExperimentRunner):
     def __init__(self, stream):
         super().__init__(stream, train, exp)
         self.model = model
+        self.encoded = None
+    
+    @property
+    def enc(self):
+        return self.encoded[0].data.cpu().numpy()
+    
+    def run(self):
+        for i, item in enumerate(self.iter_items()):
+            l, r, e = train(item, i)
+            self.fake = r
+            self.real = item
+            self.encoded = e
+            print(i, l.item())
     

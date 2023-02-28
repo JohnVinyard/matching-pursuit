@@ -12,12 +12,12 @@ def sparsify(x, n_to_keep, return_indices=False, soft=False, sharpen=False):
         x = x.view(-1, 1, x.shape[1], x.shape[-1])
         pooled = F.avg_pool2d(x, (3, 9), stride=(1, 1), padding=(1, 4))
 
-        # we're looking at the *ratio* with the local neighborhood
-        sharpened = (x + 1e-8) / pooled
+        sharpened = x - pooled
 
         sharpened = sharpened.view(x.shape[0], -1)
         x = x.reshape(x.shape[0], -1)
     else:
+        x = x.reshape(x.shape[0], -1)
         sharpened = x
 
     # get peaks from sharpened
@@ -62,8 +62,7 @@ def to_sparse_vectors_with_context(x, n_elements):
         val = x[tuple(index)]
         one_hot[batch, el, index[1]] = val
 
-    context = torch.sum(x, dim=-1, keepdim=True).repeat(1,
-                                                        1, n_elements).permute(0, 2, 1)
+    context = torch.sum(x, dim=-1, keepdim=True).repeat(1, 1, n_elements).permute(0, 2, 1)
 
     return one_hot, context, positions
 
