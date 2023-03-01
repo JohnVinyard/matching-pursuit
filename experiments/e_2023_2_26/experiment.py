@@ -32,9 +32,9 @@ band_sizes = [2**i for i in range(n_log_samples, n_log_samples - n_bands, -1)][:
 
 # atom sizes are constant in time btut vary in size
 # TODO: try the opposite, constant in size but variable in time
-atom_sizes = {k: k // 16 for k in band_sizes}
+atom_sizes = {k: k // 4 for k in band_sizes}
 
-k_sparse = 64
+k_sparse = 128
 n_atoms = 1024
 
 
@@ -48,7 +48,7 @@ filter_bank = torch.from_numpy(morlet_filter_bank(
     exp.samplerate, 
     kernel_size, 
     scale=scale, 
-    scaling_factor=np.linspace(0.1, 0.5, n_filters_per_band),
+    scaling_factor=0.1,
     normalize=True).real).float().view(1, n_filters_per_band, kernel_size).to(device)
 
 
@@ -113,8 +113,8 @@ class SynthesisBand(nn.Module):
         else:
             down = x
         
-        down = F.pad(down, (0, 1))
-        output = F.conv_transpose1d(down, self.atoms, stride=1, padding=self.atoms.shape[-1] // 2)
+        down = F.pad(down, (0, self.atoms.shape[-1] + 1))
+        output = F.conv_transpose1d(down, self.atoms, stride=1)
         output = output[..., :self.band_size]
         output = output * self.gain
         return output
@@ -137,24 +137,24 @@ class Loss(nn.Module):
     
     def forward(self, x):
         x = fft_frequency_decompose(x, band_sizes[0])
-        # analysis = {k: self.bands[str(k)].forward(x[k]) for k in x}
+        analysis = {k: self.bands[str(k)].forward(x[k]) for k in x}
         # analysis = x
 
-        analysis = {}
-        norms = {}
+        # analysis = {}
+        # norms = {}
 
-        for key, signal in x.items():
-            norms[key] = torch.norm(signal, dim=-1, keepdim=True)
+        # for key, signal in x.items():
+        #     norms[key] = torch.norm(signal, dim=-1, keepdim=True)
 
-            # if signal.shape[-1] == exp.n_samples:
-            #     # motivated by the loss of phase-locking above ~5khz
-            #     # just use a magnitude spectrogram, simulating place-only
-            #     # encoding
-            #     analysis[key] = stft(signal, 512, 256, pad=True)
-            # else:
-            analysis[key] = signal
+        #     # if signal.shape[-1] == exp.n_samples:
+        #     #     # motivated by the loss of phase-locking above ~5khz
+        #     #     # just use a magnitude spectrogram, simulating place-only
+        #     #     # encoding
+        #     #     analysis[key] = stft(signal, 512, 256, pad=True)
+        #     # else:
+        #     analysis[key] = signal
         
-        analysis['norm'] = torch.cat(list(norms.values()), dim=-1)
+        # analysis['norm'] = torch.cat(list(norms.values()), dim=-1)
 
         return analysis
 
@@ -189,12 +189,12 @@ class Model(nn.Module):
 
         encoded = F.dropout(encoded, p=0.05)
         encoded = sparsify(
-            encoded, k_sparse, return_indices=False, soft=True, sharpen=True)
+            encoded, k_sparse, return_indices=False, soft=True, sharpen=False)
 
         atoms = (encoded > 0).sum().item()
         if debug:
             print('NON-ZERO', atoms / batch)
-        assert (atoms / batch) <= 64
+        assert (atoms / batch) <= k_sparse
 
         
         bands = {k: self.synth_bands[str(k)].forward(encoded) for k in band_sizes}
