@@ -127,7 +127,7 @@ class Loss(nn.Module):
     def loss(self, a, b):
         a = self.forward(a)
         b = self.forward(b)
-        losses = {k: F.mse_loss(a[k], b[k]) for k in band_sizes}
+        losses = {k: F.l1_loss(a[k], b[k]) for k in band_sizes}
         
         loss = 0
         for k, v in losses.items():
@@ -218,7 +218,7 @@ loss_model = Loss().to(device)
 
 def train(batch, i):
     optim.zero_grad()
-    recon, encoded = model.forward(batch, debug=True)
+    recon, encoded = model.forward(batch, debug=False)
     loss = loss_model.loss(recon, batch)
     loss.backward()
     optim.step()
