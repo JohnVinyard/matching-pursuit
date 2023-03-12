@@ -30,3 +30,4 @@ from .physical import Window, harmonics, BlockwiseResonatorModel, scale_and_rota
 from .filter_bank import SynthesisBank
 from .perceptual import PerceptualAudioModel
 from .softmax import hard_softmax, sparse_softmax
+from .matchingpursuit import dictionary_learning_step

@@ -3,7 +3,8 @@ from torch.nn import functional as F
 from functools import reduce
 import numpy as np
 
-def fft_convolve(*args):
+def fft_convolve(*args) -> torch.Tensor:
+
     n_samples = args[0].shape[-1]
 
     # pad to avoid wraparound artifacts

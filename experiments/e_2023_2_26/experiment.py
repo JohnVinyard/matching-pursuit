@@ -3,7 +3,7 @@ from config.experiment import Experiment
 from modules import stft
 from modules.decompose import fft_frequency_decompose, fft_frequency_recompose
 from modules.dilated import DilatedStack
-from modules.normalization import ExampleNorm
+from modules.normalization import ExampleNorm, unit_norm
 from modules.reverb import ReverbGenerator
 from modules.sparse import sparsify
 from modules.phase import morlet_filter_bank
@@ -34,9 +34,8 @@ band_sizes = [2**i for i in range(n_log_samples, n_log_samples - n_bands, -1)][:
 # TODO: try the opposite, constant in size but variable in time
 atom_sizes = {k: k // 4 for k in band_sizes}
 
-k_sparse = 128
+k_sparse = 64
 n_atoms = 1024
-
 
 n_filters_per_band = exp.model_dim
 kernel_size = 128
@@ -127,7 +126,7 @@ class Loss(nn.Module):
     def loss(self, a, b):
         a = self.forward(a)
         b = self.forward(b)
-        losses = {k: F.l1_loss(a[k], b[k]) for k in band_sizes}
+        losses = {k: F.mse_loss(a[k], b[k]) for k in band_sizes}
         
         loss = 0
         for k, v in losses.items():
@@ -137,43 +136,52 @@ class Loss(nn.Module):
     
     def forward(self, x):
         x = fft_frequency_decompose(x, band_sizes[0])
-        analysis = {k: self.bands[str(k)].forward(x[k]) for k in x}
-        # analysis = x
-
-        # analysis = {}
-        # norms = {}
-
-        # for key, signal in x.items():
-        #     norms[key] = torch.norm(signal, dim=-1, keepdim=True)
-
-        #     # if signal.shape[-1] == exp.n_samples:
-        #     #     # motivated by the loss of phase-locking above ~5khz
-        #     #     # just use a magnitude spectrogram, simulating place-only
-        #     #     # encoding
-        #     #     analysis[key] = stft(signal, 512, 256, pad=True)
-        #     # else:
-        #     analysis[key] = signal
-        
-        # analysis['norm'] = torch.cat(list(norms.values()), dim=-1)
-
+        # analysis = {k: self.bands[str(k)].forward(x[k]) for k in x}
+        analysis = x
         return analysis
+
+class DilatedBlock(nn.Module):
+    def __init__(self, channels, dilation):
+        super().__init__()
+        self.dilated = nn.Conv1d(channels, channels, 3, padding=dilation, dilation=dilation)
+        self.conv = nn.Conv1d(channels, channels, 1, 1, 0)
+    
+    def forward(self, x):
+        orig = x
+        x = self.dilated(x)
+        x = self.conv(x)
+        x = x + orig
+        x = F.leaky_relu(x, 0.2)
+        return x
+
 
 class Model(nn.Module):
     def __init__(self, channels):
         super().__init__()
         self.channels = channels
-        self.encoder = DilatedStack(
-            channels, 
-            [1, 3, 9, 27, 81, 1], 
-            dropout=0.1, 
-            padding='only-future', 
-            soft_sparsity=False, 
-            internally_sparse=False, 
-            sparsity_amt=1)
+        # self.encoder = DilatedStack(
+        #     channels, 
+        #     [1, 3, 9, 27, 81, 1], 
+        #     dropout=0.1, 
+        #     padding='only-future', 
+        #     soft_sparsity=False, 
+        #     internally_sparse=False, 
+        #     sparsity_amt=1)
+
+        self.encoder = nn.Sequential(*[
+            DilatedBlock(channels, 1),
+            DilatedBlock(channels, 3),
+            DilatedBlock(channels, 9),
+            DilatedBlock(channels, 27),
+            DilatedBlock(channels, 81),
+            DilatedBlock(channels, 243),
+            DilatedBlock(channels, 1),
+        ])
     
         self.synth_bands = nn.ModuleDict({str(k): SynthesisBand(k, atom_sizes[k]) for k in band_sizes})
     
         self.up = nn.Conv1d(self.channels, n_atoms, 1, 1, 0)
+        self.mask = nn.Conv1d(self.channels, n_atoms, 1, 1, 0)
         self.verb = ReverbGenerator(channels, 3, exp.samplerate, exp.n_samples)
         self.apply(lambda p: exp.init_weights(p))
     
@@ -185,11 +193,20 @@ class Model(nn.Module):
 
         context = torch.mean(encoded, dim=-1)
 
+        # saliency map
+        encoded = F.dropout(encoded, p=0.05)
+        mask = self.mask(encoded)
+        mask = torch.tanh(mask)
         encoded = self.up(encoded)
 
-        encoded = F.dropout(encoded, p=0.05)
+        encoded = encoded * mask
+
+
+        # TODO: Generate queries, keys and values (normalized) in order
+        # to choose the most salient moments, regardless of raw 
+        # amplitude
         encoded = sparsify(
-            encoded, k_sparse, return_indices=False, soft=True, sharpen=False)
+            encoded, k_sparse, return_indices=False, soft=False, sharpen=False)
 
         atoms = (encoded > 0).sum().item()
         if debug:

@@ -3,18 +3,21 @@ from torch import jit
 from torch import nn
 from torch.nn import functional as F
 
-def sparsify(x, n_to_keep, return_indices=False, soft=False, sharpen=False):
+def sparsify(x, n_to_keep, return_indices=False, soft=False, sharpen=False, salience=None):
 
     orig = x
     orig_shape = x.shape
 
     if sharpen:
         x = x.view(-1, 1, x.shape[1], x.shape[-1])
-        pooled = F.avg_pool2d(x, (3, 9), stride=(1, 1), padding=(1, 4))
+        pooled = F.avg_pool2d(x, (9, 27), stride=(1, 1), padding=(4, 13))
 
         sharpened = x - pooled
 
         sharpened = sharpened.view(x.shape[0], -1)
+        x = x.reshape(x.shape[0], -1)
+    elif salience is not None:
+        sharpened = salience.view(x.shape[0], -1)
         x = x.reshape(x.shape[0], -1)
     else:
         x = x.reshape(x.shape[0], -1)
@@ -29,6 +32,11 @@ def sparsify(x, n_to_keep, return_indices=False, soft=False, sharpen=False):
     out = torch.scatter(out, dim=-1, index=indices, src=values)
     out = out.reshape(*orig_shape)
 
+
+    if salience is not None:
+        salience = salience.view(*out.shape)
+        out = out * salience
+
     if soft:
         backward = orig
         backard_norm = torch.norm(backward, dim=(1, 2), keepdim=True)
@@ -39,6 +47,7 @@ def sparsify(x, n_to_keep, return_indices=False, soft=False, sharpen=False):
         backward = backward * forward_norm
 
         forward = backward + (forward - backward).detach()
+        out = forward
 
     if return_indices:
         return out, indices, values
