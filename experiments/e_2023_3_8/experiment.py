@@ -3,7 +3,7 @@ from config.experiment import Experiment
 from modules import stft
 from modules.decompose import fft_frequency_decompose, fft_frequency_recompose
 from modules.dilated import DilatedStack
-from modules.matchingpursuit import dictionary_learning_step, sparse_code
+from modules.matchingpursuit import dictionary_learning_step, sparse_code, compare_conv
 from modules.normalization import ExampleNorm, unit_norm
 from modules.reverb import ReverbGenerator
 from modules.sparse import sparsify
@@ -27,11 +27,15 @@ exp = Experiment(
 
 
 
-n_atoms = 512
-atom_size = 512
+n_atoms = 1024
+atom_size = 2048
 
 d = torch.zeros(n_atoms, atom_size, requires_grad=False).uniform_(-1, 1).to(device)
 d = unit_norm(d, dim=-1)
+
+approx = 0.1
+
+ex1, ex2 = compare_conv()
 
 def train():
     pass
@@ -41,9 +45,14 @@ class BasicMatchingPursuit(BaseExperimentRunner):
     def __init__(self, stream):
         super().__init__(stream, train, exp)
         self.encoded = None
+        self.ex1 = ex1.data.cpu().numpy().squeeze()
+        self.ex2 = ex2.data.cpu().numpy().squeeze()
+
+        print(self.ex1.shape, self.ex2.shape)
+        print(self.ex1.max(), self.ex2.max())
     
-    def recon(self):
-        instances, scatter = sparse_code(self.real[:1, ...], d, n_steps=100, device=device)
+    def recon(self, steps=256):
+        instances, scatter = sparse_code(self.real[:1, ...], d, n_steps=steps, device=device, approx=approx)
         all_instances = []
         for k, v in instances.items():
             all_instances.extend(v)
@@ -59,7 +68,7 @@ class BasicMatchingPursuit(BaseExperimentRunner):
             self.real = item
 
             with torch.no_grad():
-                new_d = dictionary_learning_step(item, d, n_steps=100, device=device)
+                new_d = dictionary_learning_step(item, d, n_steps=100, device=device, approx=approx)
                 d[:] = new_d
             
             
