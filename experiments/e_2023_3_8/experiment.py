@@ -17,6 +17,7 @@ from util import device, playable
 from torch.nn import functional as F
 import torch
 
+
 exp = Experiment(
     samplerate=zounds.SR22050(),
     n_samples=2**15,
@@ -41,19 +42,25 @@ class BasicMatchingPursuit(BaseExperimentRunner):
         super().__init__(stream, train, exp)
         self.encoded = None
     
-    @property
     def recon(self):
-        instances, scatter = sparse_code(self.real, d, n_steps=100, device=device)
-        recon = scatter(self.real.shape, instances)
+        instances, scatter = sparse_code(self.real[:1, ...], d, n_steps=100, device=device)
+        all_instances = []
+        for k, v in instances.items():
+            all_instances.extend(v)
+        
+        recon = scatter(self.real[:1, ...].shape, all_instances)
         return playable(recon, exp.samplerate)
     
-    @property
     def view_dict(self):
-        return np.fft.rfft(d.data.cpu().numpy(), axis=-1, norm='ortho')
+        return np.rot90(np.abs(np.fft.rfft(d.data.cpu().numpy(), axis=-1, norm='ortho')))
     
     def run(self):
         for i, item in enumerate(self.iter_items()):
+            self.real = item
+
             with torch.no_grad():
                 new_d = dictionary_learning_step(item, d, n_steps=100, device=device)
                 d[:] = new_d
-    
+            
+            
+            

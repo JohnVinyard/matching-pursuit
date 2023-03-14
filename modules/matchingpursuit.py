@@ -8,7 +8,6 @@ from collections import defaultdict
 from torch.nn import functional as F
 
 
-
 def sparse_code(signal: Tensor, d: Tensor, n_steps=100, device=None):
     signal = signal.view(signal.shape[0], 1, -1)
     batch, _, n_samples = signal.shape
@@ -53,7 +52,7 @@ def sparse_code(signal: Tensor, d: Tensor, n_steps=100, device=None):
         sparse = scatter_segments(residual.shape, local_instances)
         residual -= sparse
     
-    print(torch.norm(residual, dim=-1).mean())
+    print(torch.norm(residual).item())
 
     return instances, scatter_segments
 
@@ -97,5 +96,6 @@ def dictionary_learning_step(signal: Tensor, d: Tensor, n_steps: int = 100, devi
         residual = residual - sparse    
 
 
+    d = unit_norm(d)
 
     return d
