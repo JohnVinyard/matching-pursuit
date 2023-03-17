@@ -4,10 +4,10 @@ from torch.nn import functional as F
 from modules.normalization import max_norm
 
 
-def hard_softmax(x, dim=-1, invert=False):
+def hard_softmax(x, dim=-1, invert=False, tau=1):
     return F.gumbel_softmax(
         torch.exp(max_norm(x)) if invert else x, 
-        tau=1, 
+        tau=tau, 
         dim=dim, 
         hard=True)
 

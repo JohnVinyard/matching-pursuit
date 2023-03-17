@@ -195,11 +195,12 @@ class AtomScheduler(nn.Module):
 
 
 class PosEncodedImpulseGenerator(nn.Module):
-    def __init__(self, n_frames, final_size, softmax=lambda x: torch.softmax(x, dim=-1)):
+    def __init__(self, n_frames, final_size, softmax=lambda x: torch.softmax(x, dim=-1), scale_frequencies=False):
         super().__init__()
         self.n_frames = n_frames
         self.final_size = final_size
         self.softmax = softmax
+        self.scale_frequencies = scale_frequencies
     
     def forward(self, p):
         batch, _ = p.shape
@@ -208,6 +209,11 @@ class PosEncodedImpulseGenerator(nn.Module):
         p = p / (norms + 1e-8)
 
         pos = pos_encoded(batch, self.n_frames, 16, device=p.device)
+
+        if self.scale_frequencies:
+            scaling = torch.linspace(1, 0, steps=33, device=p.device) ** 2
+            pos = pos * scaling[None, None, :]
+
         norms = torch.norm(pos, dim=-1, keepdim=True)
         pos = pos / (norms + 1e-8)
 
