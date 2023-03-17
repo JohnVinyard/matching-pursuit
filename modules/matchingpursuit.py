@@ -10,66 +10,6 @@ import numpy as np
 from scipy.fft import rfft, irfft
 
 
-# def batch_fft_convolve1d(signal, d, use_gpu=True):
-#     """
-#     Convolves the dictionary/filterbank `d` with `signal`
-
-#     Parameters
-#     ------------
-#     signal - A signal of shape `(batch_size, signal_size)`fft_convolve
-#     d - A dictionary/filterbank of shape `(n_components, atom_size)`
-
-#     Returns
-#     ------------
-#     x - the results of convolving the dictionary with the batched signals
-#         of dimensions `(batch, n_components, signal_size)`fft_convofft_convolvelve
-#     """
-#     signal_size = signal.shape[1]
-#     atom_size = d.shape[1]
-#     diff = signal_size - atom_size
-
-#     half_width = atom_size // 2
-
-#     # TODO: Is it possible to leverage the zero padding and/or
-#     # difference in atom and signal size to avoid multiplying
-#     # every frequency position
-#     px = np.pad(signal, [(0, 0), (half_width, half_width)])
-#     py = np.pad(d, [(0, 0), (0, px.shape[1] - atom_size)])
-
-#     if use_gpu:
-#         px = torch.from_numpy(px).to(device).float()
-#         py = torch.from_numpy(py).to(device).float()
-
-#         fpx = torch.rfft(px, signal_ndim=1)[:, None, ...]
-
-#         fpy = torch.rfft(
-#             torch.flip(py, dims=(-1,)), 
-#             signal_ndim=1)[None, ...]
-
-#         # print(fpx.shape, fpy.shape)
-
-#         real = (fpx[..., 0] * fpy[..., 0]) - (fpx[..., 1] * fpy[..., 1])
-#         imag = (fpx[..., 0] * fpy[..., 1]) + (fpx[..., 1] * fpy[..., 0])
-
-#         # print(real.shape, imag.shape)
-#         # TODO: This is wrong!
-#         # c = fpx[:, None, ...] * fpy[None, ...]
-#         c = torch.cat([real[..., None], imag[..., None]], dim=-1)
-
-#         # raise Exception()
-#         new_size = (c.shape[-2] - 1) * 2
-#         c = torch.irfft(c, signal_ndim=1, signal_sizes=(new_size,))
-#         c = c.data.cpu().numpy()
-#     else:
-#         fpx = rfft(px, axis=-1)
-#         fpy = rfft(py[..., ::-1], axis=-1)
-#         c = fpx[:, None, :] * fpy[None, :, :]
-#         c = irfft(c, axis=-1)
-
-#     c = np.roll(c, signal_size - diff, axis=-1)
-#     c = c[..., atom_size - 1:-1]
-
-#     return c
 
 def torch_conv(signal, atom):
     n_samples = signal.shape[-1]
@@ -90,14 +30,31 @@ def fft_convolve(signal, atoms, approx=None):
     padded = F.pad(atoms, (0, signal.shape[-1] - atom_size))
 
     sig = torch.fft.rfft(signal, dim=-1)
-    atom = torch.fft.rfft(torch.flip(padded, dims=(-1,)), dim=-1)
+    atom = torch.fft.rfft(torch.flip(padded, dims=(-1,)), dim=-1)[None, ...]
 
-    if approx is not None:
-        size = sig.shape[-1]
-        n_bins = int(size * approx)
+
+    if isinstance(approx, slice):
+        slce = approx
         fm_spec = torch.zeros(batch, n_atoms, sig.shape[-1], device=signal.device, dtype=sig.dtype)
-        app = sig[..., :n_bins] * atom[None, :, :n_bins]
-        fm_spec[..., :n_bins] = app
+        app = sig[..., slce] * atom[None, :, slce]
+        fm_spec[..., slce] = app
+    elif isinstance(approx, int) and approx < n_samples:
+        fm_spec = torch.zeros(batch, n_atoms, sig.shape[-1], device=signal.device, dtype=sig.dtype)
+
+        # choose local peaks
+        mags = torch.abs(sig)
+        # window_size = atom_size // 64 + 1
+        # padding = window_size // 2
+        # avg = F.avg_pool1d(mags, window_size, 1, padding=padding)
+        # mags = mags / avg
+
+        values, indices = torch.topk(mags, k=approx, dim=-1)
+        sig = torch.gather(sig, dim=-1, index=indices)
+
+        # TODO: How can I use broadcasting rules to avoid this copy?
+        atom = torch.gather(atom.repeat(batch, 1, 1), dim=-1, index=indices)
+        sparse = sig * atom
+        fm_spec = torch.scatter(fm_spec, dim=-1, index=indices, src=sparse)
     else:
         fm_spec = sig * atom
     
@@ -187,6 +144,7 @@ def dictionary_learning_step(signal: Tensor, d: Tensor, n_steps: int = 100, devi
 
     instances, scatter_segments = sparse_code(signal, d, n_steps=n_steps, device=device, approx=approx)
 
+    # TODO: Factor this out into its own
     
     for index in instances.keys():
         inst = instances[index]
