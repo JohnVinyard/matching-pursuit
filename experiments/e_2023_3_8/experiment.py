@@ -3,10 +3,13 @@ import numpy as np
 from config.experiment import Experiment
 from modules import stft
 from modules.decompose import fft_frequency_decompose, fft_frequency_recompose
+from modules.dilated import DilatedStack
+from modules.linear import LinearOutputStack
 from modules.matchingpursuit import dictionary_learning_step, sparse_code, compare_conv
 from modules.normalization import unit_norm
 from modules.pointcloud import decode_events, encode_events
 from train.experiment_runner import BaseExperimentRunner
+from torch import nn
 from util.readmedocs import readme
 import zounds
 from util import device, playable
@@ -130,6 +133,45 @@ class MultibandDictionaryLearning(object):
 
         recon = fft_frequency_recompose(recon_bands, batch.shape[-1])
         return recon, events
+
+
+
+class Predictor(nn.Module):
+    """
+    Analyze a sequence of atoms with absolute positions
+    and magnitudes.
+
+    Output a new atom, relative position and relative magnitude
+    """
+    def __init__(self, channels, n_atoms=512 * 7):
+        super().__init__()
+
+        self.embed = nn.Embedding(n_atoms, embedding_dim=channels)
+        self.pos_amp = nn.Linear(2, channels)
+
+        self.net = DilatedStack(channels, [1, 3, 9, 27, 81, 1], dropout=0.1, padding='only-past')
+
+
+        self.to_atom = LinearOutputStack(channels, 3, out_channels=n_atoms)
+        self.to_pos_amp_pred = LinearOutputStack(channels, 3, out_channels=2)
+    
+    def forward(self, x):
+        x = x.permute(0, 2, 1)
+        atoms = x[:, :, 0].long()
+        atoms = self.embed.forward(atoms)
+
+        pos_amp = x[:, :, 1:3]
+        pos_amp = self.pos_amp.forward(pos_amp)
+
+        x = torch.cat([atoms, pos_amp], dim=-1)
+        x = x.permute(0, 2, 1)
+        x = self.net(x)
+        x = x.permute(0, 2, 1)
+
+        a = self.to_atom(x)
+        pa = self.to_pos_amp_pred(x)
+        return a, pa
+
 
 
 def to_slice(n_samples, percentage):

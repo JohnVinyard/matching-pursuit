@@ -19,6 +19,7 @@ import numpy as np
 from collections import defaultdict
 
 
+
 def encode_events(event_dict: 'dict[int, tuple[int, int, float, float]]', n_atoms: int):
     """
     Take a dictionary encoding:
@@ -56,10 +57,10 @@ def encode_events(event_dict: 'dict[int, tuple[int, int, float, float]]', n_atom
     x = torch.gather(x, dim=-1, index=indices)
 
     # take the amplitude and position difference between successive atoms
-    pos_amp = x[:, 1:3, :]
-    pos_amp = torch.cat([torch.zeros(pos_amp.shape[0], pos_amp.shape[1], 1, device=pos_amp.device), pos_amp], dim=-1)
-    pos_amp = torch.diff(pos_amp, dim=-1)
-    x[:, 1:3, :] = pos_amp
+    # pos_amp = x[:, 1:3, :]
+    # pos_amp = torch.cat([torch.zeros(pos_amp.shape[0], pos_amp.shape[1], 1, device=pos_amp.device), pos_amp], dim=-1)
+    # pos_amp = torch.diff(pos_amp, dim=-1)
+    # x[:, 1:3, :] = pos_amp
 
     return x
 
@@ -73,9 +74,9 @@ def decode_events(events: torch.Tensor, band_dicts: 'dict[int, torch.Tensor]', n
     batch, _, n_events = events.shape
 
     # regain absolute positions and magnitudes
-    pos_amp = events[:, 1:3, :]
-    pos_amp = torch.cumsum(pos_amp, dim=-1)
-    events[:, 1:3, :] = pos_amp
+    # pos_amp = events[:, 1:3, :]
+    # pos_amp = torch.cumsum(pos_amp, dim=-1)
+    # events[:, 1:3, :] = pos_amp
 
     events = events.view(-1, 4, n_events).permute(2, 0, 1) # (n_events, batch, 4)
     event_dict = defaultdict(list)
