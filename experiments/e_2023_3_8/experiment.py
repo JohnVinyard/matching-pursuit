@@ -5,6 +5,7 @@ from modules import stft
 from modules.decompose import fft_frequency_decompose, fft_frequency_recompose
 from modules.matchingpursuit import dictionary_learning_step, sparse_code, compare_conv
 from modules.normalization import unit_norm
+from modules.pointcloud import encode_events
 from train.experiment_runner import BaseExperimentRunner
 from util.readmedocs import readme
 import zounds
@@ -61,7 +62,7 @@ class BandSpec(object):
             all_instances.extend(v)
 
         recon = scatter(batch.shape, all_instances)
-        return recon
+        return recon, all_instances, scatter
 
 
 class MultibandDictionaryLearning(object):
@@ -85,12 +86,18 @@ class MultibandDictionaryLearning(object):
     
     def recon(self, batch, steps=16):
         bands = fft_frequency_decompose(batch, self.min_size)
-        recon_bands = {
-            size: self.bands[size].recon(bands[size], steps) 
-            for size, spec in self.bands.items()
-        }
+
+        recon_bands = {}
+        events = {}
+        scatter = {}
+        for size, spec in self.bands.items():
+            r, e, s = self.bands[size].recon(bands[size], steps)
+            recon_bands[size] = r
+            events[size] = e
+            scatter[size] = s
+
         recon = fft_frequency_recompose(recon_bands, batch.shape[-1])
-        return recon
+        return recon, events
 
 
 def to_slice(n_samples, percentage):
@@ -101,18 +108,20 @@ def to_slice(n_samples, percentage):
     end = start + size
     return slice(start, end)
 
+n_atoms = 512
+steps = 64
+
 model = MultibandDictionaryLearning([
-    BandSpec(512,   512, 128,  slce=None, device=device),
-    BandSpec(1024,  512, 128,  slce=None, device=device),
-    BandSpec(2048,  512, 128,  slce=None, device=device),
-    BandSpec(4096,  512, 128, slce=None, device=device),
-    BandSpec(8192,  512, 128, slce=None, device=device),
-    BandSpec(16384, 512, 128, slce=None, device=device),
-    BandSpec(32768, 512, 128, slce=None, device=device),
+    BandSpec(512,   n_atoms, 128,  slce=None, device=device),
+    BandSpec(1024,  n_atoms, 128,  slce=None, device=device),
+    BandSpec(2048,  n_atoms, 128,  slce=None, device=device),
+    BandSpec(4096,  n_atoms, 128, slce=None, device=device),
+    BandSpec(8192,  n_atoms, 128, slce=None, device=device),
+    BandSpec(16384, n_atoms, 128, slce=None, device=device),
+    BandSpec(32768, n_atoms, 128, slce=None, device=device),
 ])
 model.load()
 
-steps = 64
 
 def train():
     pass
@@ -124,7 +133,9 @@ class BasicMatchingPursuit(BaseExperimentRunner):
         self.encoded = None
     
     def recon(self, steps=steps):
-        recon = model.recon(self.real[:1, ...], steps=steps)
+        recon, events = model.recon(self.real[:1, ...], steps=steps)
+        x = encode_events(events, steps)
+        print(x.shape)
         return playable(recon, exp.samplerate)
 
     def store(self):
@@ -140,6 +151,8 @@ class BasicMatchingPursuit(BaseExperimentRunner):
             with torch.no_grad():
                 print('====================================')
                 model.learn(item, steps=steps)
+            
+            self.recon()
             
             
             

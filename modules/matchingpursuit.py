@@ -96,9 +96,11 @@ def sparse_code(signal: Tensor, d: Tensor, n_steps=100, device=None, approx=None
 
     for i in range(n_steps):
 
-        # padded = F.pad(residual, (0, atom_size))
-        # fm = F.conv1d(padded, d.view(n_atoms, 1, atom_size))[..., :n_samples]
-        fm = fft_convolve(residual, d, approx=approx)
+        if approx is None:
+            padded = F.pad(residual, (0, atom_size))
+            fm = F.conv1d(padded, d.view(n_atoms, 1, atom_size))[..., :n_samples]
+        else:
+            fm = fft_convolve(residual, d, approx=approx)
 
         fm = fm.reshape(batch, -1)
         value, mx = torch.max(fm, dim=-1)
