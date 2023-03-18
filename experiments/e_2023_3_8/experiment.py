@@ -168,6 +168,12 @@ class BasicMatchingPursuit(BaseExperimentRunner):
         recon, events = model.recon(self.real[:1, ...], steps=steps)
         return playable(recon, exp.samplerate)
     
+    def encode_for_transformer(self, batch, steps):
+        encoding = model.encode(batch, steps=steps) # size -> (all_instances, scatter, shape)
+        e = {k: v[0] for k, v in encoding.items()} # size -> all_instances
+        events = encode_events(e, steps) # tensor (batch, 4, N)
+        return events
+    
     def round_trip(self, steps):
         encoding = model.encode(self.real[:1, ...], steps=steps) # size -> (all_instances, scatter, shape)
         e = {k: v[0] for k, v in encoding.items()} # size -> all_instances
