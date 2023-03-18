@@ -31,4 +31,4 @@ from .filter_bank import SynthesisBank
 from .perceptual import PerceptualAudioModel
 from .softmax import hard_softmax, sparse_softmax
 from .matchingpursuit import dictionary_learning_step, compare_conv, torch_conv, fft_convolve
-from .pointcloud import encode_events
+from .pointcloud import encode_events, decode_events

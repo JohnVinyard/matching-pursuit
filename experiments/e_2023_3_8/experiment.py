@@ -5,7 +5,7 @@ from modules import stft
 from modules.decompose import fft_frequency_decompose, fft_frequency_recompose
 from modules.matchingpursuit import dictionary_learning_step, sparse_code, compare_conv
 from modules.normalization import unit_norm
-from modules.pointcloud import encode_events
+from modules.pointcloud import decode_events, encode_events
 from train.experiment_runner import BaseExperimentRunner
 from util.readmedocs import readme
 import zounds
@@ -54,14 +54,28 @@ class BandSpec(object):
         self.d = unit_norm(d)
         return d
     
-    def recon(self, batch, steps=16):
+    def encode(self, batch, steps=16):
         instances, scatter = sparse_code(
             batch, self.d, steps, device=self.device, approx=self.slce)
         all_instances = []
         for k, v in instances.items():
             all_instances.extend(v)
+        return all_instances, scatter, batch.shape
+    
+    def decode(self, shape, all_instances, scatter):
+        return scatter(shape, all_instances)
+    
+    def recon(self, batch, steps=16):
+        # instances, scatter = sparse_code(
+        #     batch, self.d, steps, device=self.device, approx=self.slce)
+        # all_instances = []
+        # for k, v in instances.items():
+        #     all_instances.extend(v)
 
-        recon = scatter(batch.shape, all_instances)
+        all_instances, scatter, shape = self.encode(batch, steps)
+
+        # recon = scatter(batch.shape, all_instances)
+        recon = self.decode(shape, all_instances, scatter)
         return recon, all_instances, scatter
 
 
@@ -70,6 +84,11 @@ class MultibandDictionaryLearning(object):
         super().__init__()
         self.bands = {spec.size: spec for spec in specs}
         self.min_size = min(map(lambda spec: spec.size, specs))
+        self.n_samples = exp.n_samples
+    
+    @property
+    def band_dicts(self):
+        return {size: band.d for size, band in self.bands.items()}
     
     def store(self):
         for band in self.bands.values():
@@ -83,6 +102,19 @@ class MultibandDictionaryLearning(object):
         bands = fft_frequency_decompose(batch, self.min_size)
         for size, band in bands.items():
             self.bands[size].learn(band, steps)
+    
+    def encode(self, batch, steps):
+        bands = fft_frequency_decompose(batch, self.min_size)
+        return {size: band.encode(bands[size], steps) for size, band in self.bands.items()}
+    
+    def decode(self, d):
+        output = {}
+        for size, tup in d.items():
+            all_instances, scatter, shape = tup
+            recon = self.bands[size].decode(shape, all_instances, scatter)
+            output[size] = recon
+        recon = fft_frequency_recompose(output, self.n_samples)
+        return recon
     
     def recon(self, batch, steps=16):
         bands = fft_frequency_decompose(batch, self.min_size)
@@ -134,8 +166,15 @@ class BasicMatchingPursuit(BaseExperimentRunner):
     
     def recon(self, steps=steps):
         recon, events = model.recon(self.real[:1, ...], steps=steps)
-        x = encode_events(events, steps)
-        print(x.shape)
+        return playable(recon, exp.samplerate)
+    
+    def round_trip(self, steps):
+        encoding = model.encode(self.real[:1, ...], steps=steps) # size -> (all_instances, scatter, shape)
+        e = {k: v[0] for k, v in encoding.items()} # size -> all_instances
+        events = encode_events(e, steps) # tensor
+        d = decode_events(events, model.band_dicts, steps) # size -> all_instances
+        d = {k: (d[k], *encoding[k][1:]) for k in d.keys()} # size -> (all_instances, scatter, shape)
+        recon = model.decode(d)
         return playable(recon, exp.samplerate)
 
     def store(self):
@@ -152,7 +191,6 @@ class BasicMatchingPursuit(BaseExperimentRunner):
                 print('====================================')
                 model.learn(item, steps=steps)
             
-            self.recon()
             
             
             

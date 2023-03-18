@@ -89,6 +89,7 @@ def sparse_code(signal: Tensor, d: Tensor, n_steps=100, device=None, approx=None
             [torch.zeros_like(x), x, torch.zeros_like(x)], dim=-1)
         base = n_samples
         for ai, j, p, a in inst:
+            p = int(p)
             target[j, :, base + p: base + p + atom_size] += a
         return target[..., n_samples: n_samples * 2]
 
