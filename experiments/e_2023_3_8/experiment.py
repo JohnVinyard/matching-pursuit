@@ -32,6 +32,21 @@ class BandSpec(object):
             n_atoms, atom_size, requires_grad=False).uniform_(-1, 1).to(device)
         self.d = unit_norm(d)
     
+    @property
+    def filename(self):
+        return f'band_{self.size}.dat'
+    
+    def load(self):
+        try:
+            d = torch.load(self.filename)
+            self.d = d
+            print(f'loaded {self.filename}')
+        except IOError:
+            print(f'failed to load ${self.filename}')
+    
+    def store(self):
+        torch.save(self.d, self.filename)
+    
     def learn(self, batch, steps=16):
         d = dictionary_learning_step(
             batch, self.d, steps, device=self.device, approx=self.slce)
@@ -54,6 +69,14 @@ class MultibandDictionaryLearning(object):
         super().__init__()
         self.bands = {spec.size: spec for spec in specs}
         self.min_size = min(map(lambda spec: spec.size, specs))
+    
+    def store(self):
+        for band in self.bands.values():
+            band.store()
+    
+    def load(self):
+        for band in self.bands.values():
+            band.load()
     
     def learn(self, batch, steps=16):
         bands = fft_frequency_decompose(batch, self.min_size)
@@ -87,6 +110,7 @@ model = MultibandDictionaryLearning([
     BandSpec(16384, 512, 128, slce=None, device=device),
     BandSpec(32768, 512, 128, slce=None, device=device),
 ])
+model.load()
 
 steps = 64
 
@@ -102,6 +126,9 @@ class BasicMatchingPursuit(BaseExperimentRunner):
     def recon(self, steps=steps):
         recon = model.recon(self.real[:1, ...], steps=steps)
         return playable(recon, exp.samplerate)
+
+    def store(self):
+        model.store()
 
     def spec(self, steps=steps):
         return np.abs(zounds.spectral.stft(self.recon(steps)))

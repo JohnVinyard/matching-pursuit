@@ -96,6 +96,8 @@ class Resonance(nn.Module):
 
         self.register_buffer('bank', bank)
 
+        # self.bank = nn.Parameter(torch.zeros(n_frequencies, n_samples).uniform_(-1, 1))
+
     def forward(self, balance: torch.Tensor, decay: torch.Tensor):
         balance = balance.view(-1, self.n_frequencies)
         decay = decay.view(-1, 1)
@@ -107,9 +109,9 @@ class Resonance(nn.Module):
         windowed = \
             x.unfold(-1, size=512, step=256) * torch.hamming_window(512,
                                                                    device=x.device)[None, None, None, :]
+        windowed = max_norm(windowed, dim=-1)
 
         decay = decay.repeat(1, windowed.shape[-2])
-
         decay = torch.exp(torch.cumsum(torch.log(decay + 1e-8), dim=-1))
 
         x = windowed * decay[:, None, :, None]
@@ -211,8 +213,8 @@ class Model(nn.Module):
 
         b = torch.relu(self.to_balance.forward(events))
         d = torch.sigmoid(self.to_decay.forward(events))
-        i = torch.softmax(self.to_impulse.forward(events), dim=-1)
-        f = torch.softmax(self.to_filter.forward(events), dim=-1)
+        i = hard_softmax(self.to_impulse.forward(events), invert=True, tau=0.01)
+        f = hard_softmax(self.to_filter.forward(events), invert=True, tau=0.01)
         a = self.to_amp.forward(events) ** 2
         t = self.to_time.forward(events)
 

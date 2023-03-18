@@ -7,3 +7,11 @@ audio
 sparse_coded
 .ipynb_checkpoints
 .env
+
+band_512.dat
+band_1024.dat
+band_2048.dat
+band_4096.dat
+band_8192.dat
+band_16384.dat
+band_32768.dat
