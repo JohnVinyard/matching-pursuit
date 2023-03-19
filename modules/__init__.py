@@ -30,5 +30,5 @@ from .physical import Window, harmonics, BlockwiseResonatorModel, scale_and_rota
 from .filter_bank import SynthesisBank
 from .perceptual import PerceptualAudioModel
 from .softmax import hard_softmax, sparse_softmax
-from .matchingpursuit import dictionary_learning_step, compare_conv, torch_conv, fft_convolve
+from .matchingpursuit import dictionary_learning_step, compare_conv, torch_conv, fft_convolve, build_scatter_segments
 from .pointcloud import encode_events, decode_events

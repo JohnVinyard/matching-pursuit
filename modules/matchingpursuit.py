@@ -74,15 +74,7 @@ def compare_conv():
     fm_torch = torch_conv(signal, atoms)
     return fm_fft, fm_torch
 
-def build_scatter_segments(batch_size, n_samples, atom_size):
-    raise NotImplementedError()
-
-def sparse_code(signal: Tensor, d: Tensor, n_steps=100, device=None, approx=None):
-    signal = signal.view(signal.shape[0], 1, -1)
-    batch, _, n_samples = signal.shape
-    n_atoms, atom_size = d.shape
-    d = unit_norm(d, dim=-1)
-    residual = signal
+def build_scatter_segments(n_samples, atom_size):
 
     def scatter_segments(x, inst):
         if isinstance(x, tuple):
@@ -94,6 +86,28 @@ def sparse_code(signal: Tensor, d: Tensor, n_steps=100, device=None, approx=None
             p = int(p)
             target[j, :, base + p: base + p + atom_size] += a
         return target[..., n_samples: n_samples * 2]
+    
+    return scatter_segments
+
+def sparse_code(signal: Tensor, d: Tensor, n_steps=100, device=None, approx=None):
+    signal = signal.view(signal.shape[0], 1, -1)
+    batch, _, n_samples = signal.shape
+    n_atoms, atom_size = d.shape
+    d = unit_norm(d, dim=-1)
+    residual = signal
+
+    # def scatter_segments(x, inst):
+    #     if isinstance(x, tuple):
+    #         x = torch.zeros(*x, device=device)
+    #     target = torch.cat(
+    #         [torch.zeros_like(x), x, torch.zeros_like(x)], dim=-1)
+    #     base = n_samples
+    #     for ai, j, p, a in inst:
+    #         p = int(p)
+    #         target[j, :, base + p: base + p + atom_size] += a
+    #     return target[..., n_samples: n_samples * 2]
+
+    scatter_segments = build_scatter_segments(n_samples, atom_size)
 
     instances = defaultdict(list)
 
