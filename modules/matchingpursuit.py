@@ -74,6 +74,7 @@ def compare_conv():
     fm_torch = torch_conv(signal, atoms)
     return fm_fft, fm_torch
 
+
 def build_scatter_segments(n_samples, atom_size):
 
     def scatter_segments(x, inst):
@@ -86,26 +87,30 @@ def build_scatter_segments(n_samples, atom_size):
             p = int(p)
             target[j, :, base + p: base + p + atom_size] += a
         return target[..., n_samples: n_samples * 2]
-    
+
     return scatter_segments
 
-def sparse_code(signal: Tensor, d: Tensor, n_steps=100, device=None, approx=None):
+
+def flatten_atom_dict(atom_dict):
+    all_instances = []
+    for k, v in atom_dict.items():
+        all_instances.extend(v)
+    return all_instances
+
+
+def sparse_code(
+        signal: Tensor,
+        d: Tensor,
+        n_steps=100,
+        device=None,
+        approx=None,
+        flatten=False):
+
     signal = signal.view(signal.shape[0], 1, -1)
     batch, _, n_samples = signal.shape
     n_atoms, atom_size = d.shape
     d = unit_norm(d, dim=-1)
     residual = signal
-
-    # def scatter_segments(x, inst):
-    #     if isinstance(x, tuple):
-    #         x = torch.zeros(*x, device=device)
-    #     target = torch.cat(
-    #         [torch.zeros_like(x), x, torch.zeros_like(x)], dim=-1)
-    #     base = n_samples
-    #     for ai, j, p, a in inst:
-    #         p = int(p)
-    #         target[j, :, base + p: base + p + atom_size] += a
-    #     return target[..., n_samples: n_samples * 2]
 
     scatter_segments = build_scatter_segments(n_samples, atom_size)
 
@@ -115,7 +120,8 @@ def sparse_code(signal: Tensor, d: Tensor, n_steps=100, device=None, approx=None
 
         if approx is None:
             padded = F.pad(residual, (0, atom_size))
-            fm = F.conv1d(padded, d.view(n_atoms, 1, atom_size))[..., :n_samples]
+            fm = F.conv1d(padded, d.view(
+                n_atoms, 1, atom_size))[..., :n_samples]
         else:
             fm = fft_convolve(residual, d, approx=approx)
 
@@ -138,9 +144,12 @@ def sparse_code(signal: Tensor, d: Tensor, n_steps=100, device=None, approx=None
         sparse = scatter_segments(residual.shape, local_instances)
         residual -= sparse
 
-    # print(torch.norm(residual, dim=-1).mean().item())
+    print(torch.norm(residual, dim=-1).mean().item())
 
-    return instances, scatter_segments
+    if not flatten:
+        return instances, scatter_segments
+    else:
+        return flatten_atom_dict(instances), scatter_segments
 
 
 def dictionary_learning_step(

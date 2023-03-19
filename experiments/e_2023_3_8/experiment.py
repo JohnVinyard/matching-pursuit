@@ -95,6 +95,10 @@ class MultibandDictionaryLearning(object):
     @property
     def band_dicts(self):
         return {size: band.d for size, band in self.bands.items()}
+    
+    @property
+    def band_sizes(self):
+        return list(self.bands.keys())
 
     def partial_decoding_dict(self, batch_size):
         return {
@@ -188,6 +192,10 @@ class Predictor(nn.Module):
                 next_one = torch.zeros(batch_size, 4, device=x.device)
                 next_one[:, 0] = a
 
+                band_index = a // n_atoms
+                
+                next_one[:, -1] = model.band_sizes[band_index]
+
                 next_one[:, 1:3] = new_pos_amp.view(1, 2)
                 next_one = next_one.view(batch_size, 4, 1)
 
@@ -258,6 +266,7 @@ class BasicMatchingPursuit(BaseExperimentRunner):
     def __init__(self, stream):
         super().__init__(stream, train, exp)
         self.encoded = None
+        self.predictor = predictor
 
     def recon(self, steps=steps):
         recon, events = model.recon(self.real[:1, ...], steps=steps)
@@ -357,3 +366,4 @@ class BasicMatchingPursuit(BaseExperimentRunner):
             optim.step()
 
             self.generate()
+

@@ -95,9 +95,10 @@ def decode_events(events: torch.Tensor, band_dicts: 'dict[int, torch.Tensor]', n
             # positions should be a number of samples
             p *= s
 
-            i = size_index[s]
+            i = size_index[int(s)]
             ai -= i * n_atoms
 
+            print(s, i, ai)
             a = band_dicts[s][ai] * a
 
             event_dict[s].append((ai, b, p, a))
