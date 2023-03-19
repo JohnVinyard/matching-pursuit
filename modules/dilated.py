@@ -81,7 +81,7 @@ class DilatedStack(nn.Module):
         
         self.channels = channels
         self.padding = padding
-        self.sparsity_amt = sparsity_amt
+        self.sparsity_amt = sparsity_amt or 1
         self.soft_sparsity = soft_sparsity
 
     def forward(self, x, return_features=False):

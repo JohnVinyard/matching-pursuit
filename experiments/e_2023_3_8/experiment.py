@@ -8,12 +8,14 @@ from modules.linear import LinearOutputStack
 from modules.matchingpursuit import dictionary_learning_step, sparse_code, compare_conv
 from modules.normalization import unit_norm
 from modules.pointcloud import decode_events, encode_events
+from time_distance import optimizer
 from train.experiment_runner import BaseExperimentRunner
 from torch import nn
 from util.readmedocs import readme
 import zounds
 from util import device, playable
 import torch
+from torch.nn import functional as F
 
 
 exp = Experiment(
@@ -149,11 +151,40 @@ class Predictor(nn.Module):
         self.embed = nn.Embedding(n_atoms, embedding_dim=channels)
         self.pos_amp = nn.Linear(2, channels)
 
-        self.net = DilatedStack(channels, [1, 3, 9, 27, 81, 1], dropout=0.1, padding='only-past')
+        self.reduce = nn.Conv1d(channels * 2, channels, 1, 1, 0)
 
+        self.net = DilatedStack(channels, [1, 3, 9, 27, 81, 1], dropout=0.1)
 
         self.to_atom = LinearOutputStack(channels, 3, out_channels=n_atoms)
         self.to_pos_amp_pred = LinearOutputStack(channels, 3, out_channels=2)
+
+        self.apply(lambda x: exp.init_weights(x))
+    
+
+    def generate(self, x, steps):
+        output = x
+        batch_size = x.shape[0]
+
+        with torch.no_grad():
+            for i in range(steps):
+                seed = output[:, :, i:]
+
+                a, pa = self.forward(seed)
+                a = a.view(batch_size, -1)
+                p = p.view(batch_size, 2)
+                a = torch.argmax(a, dim=-1, keepdim=True)
+
+                last_pos_amp = seed[:, 1:3, :]
+                new_pos_amp = last_pos_amp + p
+
+                next_one = torch.zeros(batch_size, 4)
+                next_one[:, 0] = a
+                next_one[:, 1:3] = new_pos_amp
+                next_one = next_one.view(batch_size, 4, 1)
+
+                output = torch.cat([output, next_one], dim=-1)
+        return output
+
     
     def forward(self, x):
         x = x.permute(0, 2, 1)
@@ -165,11 +196,12 @@ class Predictor(nn.Module):
 
         x = torch.cat([atoms, pos_amp], dim=-1)
         x = x.permute(0, 2, 1)
+        x = self.reduce.forward(x)
         x = self.net(x)
         x = x.permute(0, 2, 1)
 
-        a = self.to_atom(x)
-        pa = self.to_pos_amp_pred(x)
+        a = self.to_atom(x)[:, -1:, :]
+        pa = self.to_pos_amp_pred(x)[:, -1:, :]
         return a, pa
 
 
@@ -184,6 +216,8 @@ def to_slice(n_samples, percentage):
 
 n_atoms = 512
 steps = 64
+n_training_atoms = 8
+dictionary_learning_iterations = 100
 
 model = MultibandDictionaryLearning([
     BandSpec(512,   n_atoms, 128,  slce=None, device=device),
@@ -196,6 +230,8 @@ model = MultibandDictionaryLearning([
 ])
 model.load()
 
+predictor = Predictor(exp.model_dim, n_atoms * len(model.bands)).to(device)
+optim = optimizer(predictor)
 
 def train():
     pass
@@ -209,6 +245,9 @@ class BasicMatchingPursuit(BaseExperimentRunner):
     def recon(self, steps=steps):
         recon, events = model.recon(self.real[:1, ...], steps=steps)
         return playable(recon, exp.samplerate)
+
+    def generate(self, steps=500):
+        pass
     
     def encode_for_transformer(self, batch, steps):
         encoding = model.encode(batch, steps=steps) # size -> (all_instances, scatter, shape)
@@ -235,9 +274,49 @@ class BasicMatchingPursuit(BaseExperimentRunner):
         for i, item in enumerate(self.iter_items()):
             self.real = item
 
-            with torch.no_grad():
-                print('====================================')
-                model.learn(item, steps=steps)
+            batch_size = item.shape[0]
+
+            print('========================================')
+
+            if i < dictionary_learning_iterations:
+                with torch.no_grad():
+                    model.learn(item, steps=steps)
+                    print(i, 'sparse coding step')
+                
+            
+            transformer_encoded = self.encode_for_transformer(item, steps=steps)
+            transformer_encoded = transformer_encoded[:, :3, :]
+
+            inputs = transformer_encoded[:, :, :-1]
+            atom_targets = transformer_encoded[:, 0, -1:]
+            rel_targets = torch.diff(transformer_encoded[:, 1:, -2:], dim=-1)
+
+            pred_atoms, pred_pos_amp = predictor.forward(inputs)
+            pred_atoms = pred_atoms.view(batch_size, -1)
+
+            atom_loss = F.cross_entropy(
+                pred_atoms, 
+                atom_targets.view(-1).long()
+            )
+
+            print(
+                torch.argmax(pred_atoms, dim=-1).view(-1), 
+                atom_targets.view(-1).long())
+
+            rel_loss = F.mse_loss(
+                pred_pos_amp.view(batch_size, 2), 
+                rel_targets.view(batch_size, 2)
+            )
+            print(rel_loss.item())
+
+            loss = atom_loss + rel_loss
+            loss.backward()
+            print(i, 'MODEL LOSS', loss.item())
+            optim.step()
+
+
+
+
             
             
             

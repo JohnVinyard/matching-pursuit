@@ -74,6 +74,8 @@ def compare_conv():
     fm_torch = torch_conv(signal, atoms)
     return fm_fft, fm_torch
 
+def build_scatter_segments(batch_size, n_samples, atom_size):
+    raise NotImplementedError()
 
 def sparse_code(signal: Tensor, d: Tensor, n_steps=100, device=None, approx=None):
     signal = signal.view(signal.shape[0], 1, -1)
@@ -122,7 +124,7 @@ def sparse_code(signal: Tensor, d: Tensor, n_steps=100, device=None, approx=None
         sparse = scatter_segments(residual.shape, local_instances)
         residual -= sparse
 
-    print(torch.norm(residual, dim=-1).mean().item())
+    # print(torch.norm(residual, dim=-1).mean().item())
 
     return instances, scatter_segments
 
