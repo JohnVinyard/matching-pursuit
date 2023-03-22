@@ -14,6 +14,7 @@ from torch import nn
 from torch.nn import functional as F
 
 
+
 exp = Experiment(
     samplerate=zounds.SR22050(),
     n_samples=2**15,
@@ -24,9 +25,8 @@ exp = Experiment(
 
 n_atoms = 512
 atom_size = 512
-steps = 256
+steps = 128
 approx = None
-n_dict_learning_steps = 100
 
 d = torch.zeros(n_atoms, atom_size, device=device).uniform_(-1, 1)
 d = unit_norm(d)
@@ -55,7 +55,7 @@ def events_to_tensor(events):
         amp = torch.norm(a[i])
 
         t[b_index, 0, i] = at_index
-        t[b_index, 1, i] = pos
+        t[b_index, 1, i] = pos / exp.n_samples
         t[b_index, 2, i] = amp
     
 
@@ -80,7 +80,7 @@ def tensor_to_events(events, d):
     for b, seq in enumerate(events):
         for i in range(seq.shape[-1]):
             ai, p, a = events[b, :, i]
-            output.append((ai, b, p, d[int(ai)] * a))
+            output.append((ai, b, int(p * exp.n_samples), d[int(ai)] * a))
     
     return output
 
@@ -219,20 +219,22 @@ class SingleBandMatchingPursuit(BaseExperimentRunner):
 
     def run(self):
         for i, item in enumerate(self.iter_items()):
+            optim.zero_grad()
 
             batch_size = item.shape[0]
 
-            if i <= n_dict_learning_steps:
-                with torch.no_grad():
-                    self.real = item
-                    new_d = dictionary_learning_step(
-                        item,
-                        d,
-                        steps,
-                        device=device,
-                        approx=approx)
+            # print('=============================')
 
-                    d[:] = unit_norm(new_d)
+            with torch.no_grad():
+                self.real = item
+                new_d = dictionary_learning_step(
+                    item,
+                    d,
+                    steps,
+                    device=device,
+                    approx=approx)
+
+                d[:] = unit_norm(new_d)
             
 
             instances, scatter = sparse_code(
@@ -240,10 +242,12 @@ class SingleBandMatchingPursuit(BaseExperimentRunner):
             transformer_encoded = events_to_tensor(instances)
 
             inputs = transformer_encoded[:, :, :-1]
+
             atom_targets = transformer_encoded[:, 0, -1:]
             rel_targets = torch.diff(transformer_encoded[:, 1:, -2:], dim=-1)
 
             pred_atoms, pred_pos_amp = predictor.forward(inputs)
+
             pred_atoms = pred_atoms.view(batch_size, -1)
 
             atom_loss = F.cross_entropy(
@@ -259,6 +263,7 @@ class SingleBandMatchingPursuit(BaseExperimentRunner):
                 pred_pos_amp.view(batch_size, 2),
                 rel_targets.view(batch_size, 2)
             )
+
             print(rel_loss.item())
 
             loss = atom_loss + rel_loss

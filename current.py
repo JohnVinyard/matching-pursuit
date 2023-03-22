@@ -12,7 +12,37 @@ import torch
 
 torch.backends.cudnn.benchmark = True
 
-def new_experiment():
+def templatized_experiment(class_name):
+    experiment_template = f'''
+import torch
+from torch import nn
+from torch.nn import functional as F
+import zounds
+from config.experiment import Experiment
+from train.experiment_runner import BaseExperimentRunner
+from util import device
+from util.readmedocs import readme
+
+
+exp = Experiment(
+    samplerate=zounds.SR22050(),
+    n_samples=2**15,
+    weight_init=0.1,
+    model_dim=128,
+    kernel_size=512)
+
+
+def train(batch, i):
+    pass
+
+@readme
+class {class_name}(BaseExperimentRunner):
+    def __init__(self, stream):
+        super().__init__(stream, train, exp)
+    '''
+    return experiment_template
+
+def new_experiment(class_name=None):
     dt = datetime.now()
     dirname = f'e_{dt.year}_{dt.month}_{dt.day}'
 
@@ -30,8 +60,9 @@ def new_experiment():
     with open(os.path.join(exp_path, '__init__.py'), 'w'):
         pass
 
-    with open(os.path.join(exp_path, 'experiment.py'), 'w'):
-        pass
+    with open(os.path.join(exp_path, 'experiment.py'), 'w') as f:
+        if class_name:
+            f.write(templatized_experiment(class_name))
 
     with open(os.path.join(exp_path, 'readme.md'), 'w'):
         pass
@@ -44,11 +75,12 @@ if __name__ == '__main__':
     parser.add_argument('--batch-size', type=int, default=4)
     parser.add_argument('--normalize', action='store_true')
     parser.add_argument('--nsamples', type=int, default=14)
+    parser.add_argument('--classname', type=str, default=None)
 
     args = parser.parse_args()
 
     if args.new:
-        new_experiment()
+        new_experiment(args.classname)
     else:
         app = zounds.ZoundsApp(locals=locals(), globals=globals())
         app.start_in_thread(os.environ['PORT'])

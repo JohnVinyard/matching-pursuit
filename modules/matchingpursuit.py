@@ -8,6 +8,8 @@ from torch.nn import functional as F
 from util import device
 import numpy as np
 from scipy.fft import rfft, irfft
+from torch.nn import functional as F
+from torch import nn
 
 
 def torch_conv(signal, atom):
@@ -83,9 +85,18 @@ def build_scatter_segments(n_samples, atom_size):
         target = torch.cat(
             [torch.zeros_like(x), x, torch.zeros_like(x)], dim=-1)
         base = n_samples
+
         for ai, j, p, a in inst:
             p = int(p)
-            target[j, :, base + p: base + p + atom_size] += a
+            start = base + p
+            end = start + atom_size
+
+            try:
+                target[j, :, start: end] += a
+            except RuntimeError:
+                print(
+                    f'Out-of-bounds with start {start - base} and end {end - base}')
+
         return target[..., n_samples: n_samples * 2]
 
     return scatter_segments
@@ -96,6 +107,85 @@ def flatten_atom_dict(atom_dict):
     for k, v in atom_dict.items():
         all_instances.extend(v)
     return all_instances
+
+
+def sparse_feature_map(
+        signal: Tensor,
+        d: Tensor,
+        n_steps=100,
+        device=None,
+        approx=None,
+        pooling=None):
+
+    signal = signal.view(signal.shape[0], 1, -1)
+    batch, _, n_samples = signal.shape
+    n_atoms, atom_size = d.shape
+    d = unit_norm(d, dim=-1)
+
+    residual = signal.clone()
+
+    fm = torch.zeros(
+        signal.shape[0], d.shape[1], signal.shape[-1], device=device)
+
+    for i in range(n_steps):
+        if approx is None:
+            padded = F.pad(residual, (0, atom_size))
+            f = F.conv1d(
+                padded, d.view( n_atoms, 1, atom_size))[..., :n_samples]
+        else:
+            f = fft_convolve(residual, d, approx=approx)
+
+        values, indices = torch.max(f.reshape(batch, -1), dim=-1)
+
+        atom_indices = indices // n_samples
+        positions = indices % n_samples
+
+        for b in range(batch):
+            v = values[b]
+            ai = atom_indices[b]
+            p = positions[b]
+            fm[b, ai, p] += v
+
+            start = p
+            end = start + atom_size
+            slce = residual[b, :, start:end]
+            size = slce.shape[-1]
+            slce[:] = slce[:] - (d[ai, :size] * v)
+            
+        # # TODO: Just place the atoms, rather than this wasteful transposed conv
+        # orig_f = f = sparsify(f, n_to_keep=1, return_indices=False)
+        # f = F.pad(f, (0, 1))
+        # sparse_signal = F.conv_transpose1d(f, d.view(n_atoms, 1, atom_size), padding=atom_size // 2)
+
+        # residual = residual - sparse_signal
+
+        # fm = fm + orig_f
+    
+    if pooling is not None:
+        window, step = pooling
+        fm = F.max_pool1d(fm, window, step, padding=step)
+        print('POOLED', fm.shape)
+
+    return fm
+
+
+def sparse_coding_loss(
+        recon, target, d: Tensor, n_steps=100, device=None, approx=None, pooling=None):
+
+    r_map = sparse_feature_map(recon, d, n_steps, device=device, pooling=pooling)
+
+    with torch.no_grad():
+        t_map = sparse_feature_map(target, d, n_steps, device=device, pooling=pooling)
+
+    r_max = r_map.max()
+    t_max = t_map.max()
+
+    mx = max(r_max.item(), t_max.item())
+
+    r_map = r_map / mx
+    t_map = t_map / mx
+
+    return F.binary_cross_entropy(r_map, t_map)
 
 
 def sparse_code(
@@ -110,7 +200,7 @@ def sparse_code(
     batch, _, n_samples = signal.shape
     n_atoms, atom_size = d.shape
     d = unit_norm(d, dim=-1)
-    residual = signal
+    residual = signal.clone()
 
     scatter_segments = build_scatter_segments(n_samples, atom_size)
 
@@ -163,7 +253,7 @@ def dictionary_learning_step(
     batch, _, n_samples = signal.shape
     n_atoms, atom_size = d.shape
     d = unit_norm(d, dim=-1)
-    residual = signal
+    residual = signal.clone()
 
     def gather_segments(x, inst):
         source = torch.cat(
@@ -203,3 +293,47 @@ def dictionary_learning_step(
     d = unit_norm(d)
 
     return d
+
+
+class SparseCodingLoss(nn.Module):
+
+    def __init__(
+            self,
+            n_atoms,
+            atom_size,
+            n_steps,
+            approx,
+            learning_steps,
+            device=None,
+            pooling=None):
+
+        super().__init__()
+        self.approx = approx
+        self.n_steps = n_steps
+        self.learning_steps = learning_steps
+        self._steps_executed = 0
+        self.d = unit_norm(torch.zeros(n_atoms, atom_size, device=device).uniform_(-1, 1))
+        self.pooling = pooling
+
+    def _learning_step(self, signal):
+        with torch.no_grad():
+            self.d[:] = dictionary_learning_step(
+                signal,
+                self.d,
+                n_steps=self.n_steps,
+                device=signal.device,
+                approx=self.approx)
+            self._steps_executed += 1
+            print('LEARNING STEP', self._steps_executed)
+
+    def loss(self, recon: torch.Tensor, target: torch.Tensor):
+        if self._steps_executed < self.learning_steps:
+            self._learning_step(target)
+
+        return sparse_coding_loss(
+            recon,
+            target,
+            self.d,
+            n_steps=self.n_steps,
+            device=recon.device,
+            pooling=self.pooling)

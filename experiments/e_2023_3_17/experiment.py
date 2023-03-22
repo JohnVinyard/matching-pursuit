@@ -7,6 +7,7 @@ from modules.ddsp import overlap_add
 from modules.dilated import DilatedStack
 from modules.fft import fft_convolve
 from modules.linear import LinearOutputStack
+from modules.matchingpursuit import SparseCodingLoss
 from modules.normalization import max_norm
 from modules.reverb import ReverbGenerator
 from modules.softmax import hard_softmax, sparse_softmax
@@ -239,11 +240,20 @@ model = Model(exp.model_dim).to(device)
 
 optim = optimizer(model, lr=1e-4)
 
+loss_module = SparseCodingLoss(
+    512, 
+    512, 
+    128, 
+    approx=None, 
+    learning_steps=256, 
+    device=device,
+    pooling=(512, 256))
 
 def train(batch, i):
     optim.zero_grad()
     recon = model.forward(batch, debug=False)
-    loss = exp.perceptual_loss(recon, batch)
+    loss = loss_module.loss(recon, batch)
+    # loss = exp.perceptual_loss(recon, batch)
     loss.backward()
     optim.step()
     return loss, recon
