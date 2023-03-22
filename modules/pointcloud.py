@@ -8,9 +8,7 @@ transformers should intake a concatenation of:
 - (band, atom_embedding, position_embedding, amplitude_embedding)
 
 Tasks:
-- transform point clouds for transformer (or other GNN) consumption
 - transformer training objective (correct atom, relative time, relative magnitude)
-- greedy point cloud alignment and loss
 - batch HPSS algorithm
 - set autoencoder, using alignment loss
 '''
@@ -18,7 +16,33 @@ import torch
 import numpy as np
 from collections import defaultdict
 
+def greedy_set_alignment(a: torch.Tensor, z: torch.Tensor):
+    batch, n_elements, n_features = a.shape
+    diff = torch.cdist(a, z)
+    indices = torch.argsort(diff, dim=-1)
+    
+    output_indices = []
 
+    for b in range(batch):
+        seen = set()
+        sort_indices = []
+
+        for e in range(n_elements):
+            fits = indices[b, e, :]
+            i = 0
+
+            while fits[i].item() in seen:
+                i += 1
+            
+            sort_indices.append(fits[i].item())
+            seen.add(fits[i].item())
+        
+        sort_indices = torch.from_numpy(np.array(sort_indices))[None, ...].to(a.device)
+        output_indices.append(sort_indices)
+    
+    output_indices = torch.cat(output_indices, dim=0)
+    arranged = torch.gather(z, dim=1, index=output_indices[..., None].repeat(1, 1, n_features))
+    return arranged
 
 def encode_events(event_dict: 'dict[int, tuple[int, int, float, float]]', n_atoms: int):
     """
@@ -108,3 +132,7 @@ def decode_events(events: torch.Tensor, band_dicts: 'dict[int, torch.Tensor]', n
     
 
 
+if __name__ == '__main__':
+    a = torch.zeros(4, 128, 3).uniform_(-1, 1)
+    b = torch.zeros(4, 128, 3).uniform_(-1, 1)
+    greedy_set_alignment(a, b)
