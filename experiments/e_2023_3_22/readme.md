@@ -1,0 +1,1 @@
+Try learning a GAN using the point-cloud/set representation

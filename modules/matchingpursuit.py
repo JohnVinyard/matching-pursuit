@@ -239,7 +239,8 @@ def sparse_code(
     if not flatten:
         return instances, scatter_segments
     else:
-        return flatten_atom_dict(instances), scatter_segments
+        flattened = flatten_atom_dict(instances) 
+        return flattened, scatter_segments
 
 
 def dictionary_learning_step(
