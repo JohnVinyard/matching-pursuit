@@ -16,11 +16,17 @@ import torch
 import numpy as np
 from collections import defaultdict
 
-def greedy_set_alignment(a: torch.Tensor, z: torch.Tensor):
+
+def greedy_set_alignment(
+        a: torch.Tensor,
+        z: torch.Tensor,
+        return_indices=False,
+        full_feature_count=None):
+
     batch, n_elements, n_features = a.shape
     diff = torch.cdist(a, z)
     indices = torch.argsort(diff, dim=-1)
-    
+
     output_indices = []
 
     for b in range(batch):
@@ -33,16 +39,24 @@ def greedy_set_alignment(a: torch.Tensor, z: torch.Tensor):
 
             while fits[i].item() in seen:
                 i += 1
-            
+
             sort_indices.append(fits[i].item())
             seen.add(fits[i].item())
-        
-        sort_indices = torch.from_numpy(np.array(sort_indices))[None, ...].to(a.device)
+
+        sort_indices = torch.from_numpy(np.array(sort_indices))[
+            None, ...].to(a.device)
         output_indices.append(sort_indices)
-    
+
     output_indices = torch.cat(output_indices, dim=0)
-    arranged = torch.gather(z, dim=1, index=output_indices[..., None].repeat(1, 1, n_features))
+    output_indices = output_indices[..., None].repeat(
+        1, 1, full_feature_count or n_features)
+
+    if return_indices:
+        return output_indices
+    
+    arranged = torch.gather(z, dim=1, index=output_indices)
     return arranged
+
 
 def encode_events(event_dict: 'dict[int, tuple[int, int, float, float]]', n_atoms: int):
     """
@@ -72,7 +86,7 @@ def encode_events(event_dict: 'dict[int, tuple[int, int, float, float]]', n_atom
         z = torch.cat([at, p, a, s], dim=1)
         x.append(z)
         i += 1
-    
+
     x = torch.cat(x, dim=-1)
 
     # sort all elements by ascending time
@@ -88,6 +102,7 @@ def encode_events(event_dict: 'dict[int, tuple[int, int, float, float]]', n_atom
 
     return x
 
+
 def decode_events(events: torch.Tensor, band_dicts: 'dict[int, torch.Tensor]', n_atoms: int):
     """
     Take a tensor of shape
@@ -102,7 +117,8 @@ def decode_events(events: torch.Tensor, band_dicts: 'dict[int, torch.Tensor]', n
     # pos_amp = torch.cumsum(pos_amp, dim=-1)
     # events[:, 1:3, :] = pos_amp
 
-    events = events.view(-1, 4, n_events).permute(2, 0, 1) # (n_events, batch, 4)
+    events = events.view(-1, 4, n_events).permute(2,
+                                                  0, 1)  # (n_events, batch, 4)
     event_dict = defaultdict(list)
 
     size_index = {size: i for i, size in enumerate(band_dicts.keys())}
@@ -126,13 +142,21 @@ def decode_events(events: torch.Tensor, band_dicts: 'dict[int, torch.Tensor]', n
             a = band_dicts[s][ai] * a
 
             event_dict[s].append((ai, b, p, a))
-    
-    return event_dict
 
-    
+    return event_dict
 
 
 if __name__ == '__main__':
-    a = torch.zeros(4, 128, 3).uniform_(-1, 1)
-    b = torch.zeros(4, 128, 3).uniform_(-1, 1)
-    greedy_set_alignment(a, b)
+
+    a = torch.zeros(1, 7, 3).uniform_(-1, 1)
+    b = torch.zeros(1, 7, 3).uniform_(-1, 1)
+
+    srt = greedy_set_alignment(a, b)
+
+    dist = ((a - srt) ** 2).mean()
+    rand_dist = ((a - b) ** 2).mean()
+    print('=========================')
+    print(dist.item())
+    print(rand_dist.item())
+
+

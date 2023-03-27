@@ -234,7 +234,7 @@ def sparse_code(
         sparse = scatter_segments(residual.shape, local_instances)
         residual -= sparse
 
-    print(torch.norm(residual, dim=-1).mean().item())
+    # print('SPARSE CODING', torch.norm(residual, dim=-1).mean().item())
 
     if not flatten:
         return instances, scatter_segments
