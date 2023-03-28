@@ -21,7 +21,7 @@ from experiments.e_2023_3_8.experiment import model
 exp = Experiment(
     samplerate=zounds.SR22050(),
     n_samples=2**15,
-    weight_init=0.1,
+    weight_init=0.05,
     model_dim=128,
     kernel_size=512)
 
@@ -58,36 +58,36 @@ class Generator(nn.Module):
         self.internal_dim = internal_dim
         self.n_events = n_events
 
-        self.embed = nn.Linear(self.latent_dim + 33, internal_dim)
-        self.process = SetProcessor(internal_dim, internal_dim)
+        # self.embed = nn.Linear(self.latent_dim + 33, internal_dim)
+        # self.process = SetProcessor(internal_dim, internal_dim)
 
         self.to_atom = nn.Linear(self.internal_dim, model.total_atoms)
         self.to_pos = nn.Linear(self.internal_dim, 1)
         self.to_amp = nn.Linear(self.internal_dim, 1)
 
-        # self.net = ExpandUsingPosEncodings(
-        #     internal_dim,
-        #     n_events,
-        #     n_freqs=16,
-        #     latent_dim=latent_dim,
-        #     multiply=False,
-        #     learnable_encodings=False,
-        #     concat=False)
+        self.net = ExpandUsingPosEncodings(
+            internal_dim,
+            n_events,
+            n_freqs=16,
+            latent_dim=latent_dim,
+            multiply=False,
+            learnable_encodings=False,
+            concat=False)
         
-        # self.process = LinearOutputStack(
-        #     internal_dim, layers=6, out_channels=internal_dim)
+        self.process = LinearOutputStack(
+            internal_dim, layers=5, out_channels=internal_dim)
 
         self.apply(lambda x: exp.init_weights(x))
 
     def forward(self, x):
-        x = x.view(-1, 1, self.latent_dim).repeat(1, self.n_events, 1)
-        pos = pos_encoded(x.shape[0], self.n_events, 16, device=x.device)
-        x = torch.cat([x, pos], dim=-1)
-        x = self.embed(x)
-        x = self.process(x)
-
-        # x = self.net(x[:, None, :])
+        # x = x.view(-1, 1, self.latent_dim).repeat(1, self.n_events, 1)
+        # pos = pos_encoded(x.shape[0], self.n_events, 16, device=x.device)
+        # x = torch.cat([x, pos], dim=-1)
+        # x = self.embed(x)
         # x = self.process(x)
+
+        x = self.net(x[:, None, :])
+        x = self.process(x)
 
         atom = self.to_atom.forward(x)
         pos = torch.sigmoid(self.to_pos.forward(x))
@@ -124,8 +124,7 @@ class Discriminator(nn.Module):
         # x = self.embed(x)
         x = self.processor(x)
         x = self.judge(x)
-        # x = x[:, -1, :]
-        x = torch.mean(x, dim=1)
+        x = x[:, -1, :]
         return x
 
 
