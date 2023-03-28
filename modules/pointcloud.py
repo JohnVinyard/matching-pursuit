@@ -58,7 +58,10 @@ def greedy_set_alignment(
     return arranged
 
 
-def encode_events(event_dict: 'dict[int, tuple[int, int, float, float]]', n_atoms: int):
+def encode_events(
+        event_dict: 'dict[int, tuple[int, int, float, float]]', 
+        n_atoms: int, 
+        dict_size: int):
     """
     Take a dictionary encoding:
         band_size -> [(index, batch, position, atom),]
@@ -78,7 +81,7 @@ def encode_events(event_dict: 'dict[int, tuple[int, int, float, float]]', n_atom
         a = torch.cat(amplitude).float().view(batch_size, -1, n_atoms)
         a = torch.norm(a, dim=1, keepdim=True)
 
-        at = torch.from_numpy(np.array(atom_index) + (i * n_atoms)).long()
+        at = torch.from_numpy(np.array(atom_index) + (i * dict_size)).long()
         at = at.view(batch_size, 1, -1).to(a.device)
 
         s = torch.zeros_like(at).fill_(size)
@@ -103,7 +106,7 @@ def encode_events(event_dict: 'dict[int, tuple[int, int, float, float]]', n_atom
     return x
 
 
-def decode_events(events: torch.Tensor, band_dicts: 'dict[int, torch.Tensor]', n_atoms: int):
+def decode_events(events: torch.Tensor, band_dicts: 'dict[int, torch.Tensor]', n_atoms: int, dict_size: int):
     """
     Take a tensor of shape
         (batch, 4, n_events) - channels being (atom_index, position, amplitude, band_size)
@@ -136,9 +139,8 @@ def decode_events(events: torch.Tensor, band_dicts: 'dict[int, torch.Tensor]', n
             p *= s
 
             i = size_index[int(s)]
-            ai -= i * n_atoms
+            ai = ai % dict_size
 
-            print(s, i, ai)
             a = band_dicts[s][ai] * a
 
             event_dict[s].append((ai, b, p, a))

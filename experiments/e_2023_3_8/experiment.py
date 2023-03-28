@@ -38,10 +38,20 @@ class BandSpec(object):
         d = torch.zeros(
             n_atoms, atom_size, requires_grad=False).uniform_(-1, 1).to(device)
         self.d = unit_norm(d)
+    
+    def shape(self, batch_size):
+        return (batch_size, 1, self.size)
 
     @property
     def filename(self):
         return f'band_{self.size}.dat'
+    
+    @property
+    def scatter_func(self):
+        return build_scatter_segments(self.size, self.atom_size)
+    
+    def get_atom(self, index, norm):
+        return self.d[index] * norm
 
     def load(self):
         try:
@@ -91,6 +101,19 @@ class MultibandDictionaryLearning(object):
         self.bands = {spec.size: spec for spec in specs}
         self.min_size = min(map(lambda spec: spec.size, specs))
         self.n_samples = exp.n_samples
+    
+    def get_atom(self, size, index, norm):
+        return self.bands[size].get_atom(index, norm)
+    
+    def size_at_index(self, index):
+        return list(self.bands.keys())[index]
+    
+    def shape_dict(self, batch_size):
+        return {size: band.shape(batch_size) for size, band in self.bands.items()}
+    
+    @property
+    def total_atoms(self):
+        return sum(v.n_atoms for v in self.bands.values())
 
     @property
     def band_dicts(self):
@@ -123,10 +146,15 @@ class MultibandDictionaryLearning(object):
         bands = fft_frequency_decompose(batch, self.min_size)
         return {size: band.encode(bands[size], steps) for size, band in self.bands.items()}
 
-    def decode(self, d):
+    def decode(self, d, shapes=None):
         output = {}
         for size, tup in d.items():
-            all_instances, scatter, shape = tup
+            if shapes is not None:
+                all_instances = tup
+                scatter = self.bands[size].scatter_func
+                shape = shapes[size]
+            else:
+                all_instances, scatter, shape = tup
             recon = self.bands[size].decode(shape, all_instances, scatter)
             output[size] = recon
         recon = fft_frequency_recompose(output, self.n_samples)
@@ -236,18 +264,18 @@ def to_slice(n_samples, percentage):
 
 
 n_atoms = 512
-steps = 64
-n_training_atoms = 8
-dictionary_learning_iterations = 100
+steps = 32
+# n_training_atoms = 8
+# dictionary_learning_iterations = 100
 
 model = MultibandDictionaryLearning([
     BandSpec(512,   n_atoms, 128,  slce=None, device=device),
-    BandSpec(1024,  n_atoms, 128,  slce=None, device=device),
-    BandSpec(2048,  n_atoms, 128,  slce=None, device=device),
-    BandSpec(4096,  n_atoms, 128, slce=None, device=device),
-    BandSpec(8192,  n_atoms, 128, slce=None, device=device),
-    BandSpec(16384, n_atoms, 128, slce=None, device=device),
-    BandSpec(32768, n_atoms, 128, slce=None, device=device),
+    BandSpec(1024,  n_atoms, 256,  slce=None, device=device),
+    BandSpec(2048,  n_atoms, 512,  slce=None, device=device),
+    BandSpec(4096,  n_atoms, 1024, slce=None, device=device),
+    BandSpec(8192,  n_atoms, 2048, slce=None, device=device),
+    BandSpec(16384, n_atoms, 4096, slce=None, device=device),
+    BandSpec(32768, n_atoms, 4096, slce=None, device=device),
 ])
 model.load()
 
@@ -272,44 +300,44 @@ class BasicMatchingPursuit(BaseExperimentRunner):
         recon, events = model.recon(self.real[:1, ...], steps=steps)
         return playable(recon, exp.samplerate)
 
-    def generate(self, steps=total_atoms):
+    # def generate(self, steps=total_atoms):
 
-        coding_steps = 64
+    #     coding_steps = 64
 
-        with torch.no_grad():
-            encoded = self.encode_for_transformer(self.real[:1, ...], coding_steps)
+    #     with torch.no_grad():
+    #         encoded = self.encode_for_transformer(self.real[:1, ...], coding_steps)
 
-        f, s = predictor.generate(encoded, steps=steps)
+    #     f, s = predictor.generate(encoded, steps=steps)
 
-        fa = self.decode_to_audio(f, steps=coding_steps)
-        fs = self.decode_to_audio(s, steps=coding_steps)
+    #     fa = self.decode_to_audio(f, steps=coding_steps)
+    #     fs = self.decode_to_audio(s, steps=coding_steps)
 
-        n = zounds.AudioSamples.concat(fa, fs)
-        return zounds.AudioSamples(n, exp.samplerate)
+    #     n = zounds.AudioSamples.concat(fa, fs)
+    #     return zounds.AudioSamples(n, exp.samplerate)
 
-    def encode_for_transformer(self, batch, steps):
-        # size -> (all_instances, scatter, shape)
-        encoding = model.encode(batch, steps=steps)
-        e = {k: v[0] for k, v in encoding.items()}  # size -> all_instances
-        events = encode_events(e, steps)  # tensor (batch, 4, N)
-        return events
+    # def encode_for_transformer(self, batch, steps):
+    #     # size -> (all_instances, scatter, shape)
+    #     encoding = model.encode(batch, steps=steps)
+    #     e = {k: v[0] for k, v in encoding.items()}  # size -> all_instances
+    #     events = encode_events(e, steps)  # tensor (batch, 4, N)
+    #     return events
     
-    def decode_to_audio(self, events, steps):
-        with torch.no_grad():
-            encoding = model.partial_decoding_dict(self.real.shape[0])
-            d = decode_events(events, model.band_dicts, steps)  # size -> all_instances
-            # size -> (all_instances, scatter, shape)
-            d = {k: (d[k], *encoding[k]) for k in d.keys()}
-            recon = model.decode(d)
-            return playable(recon, exp.samplerate)
+    # def decode_to_audio(self, events, steps):
+    #     with torch.no_grad():
+    #         encoding = model.partial_decoding_dict(self.real.shape[0])
+    #         d = decode_events(events, model.band_dicts, steps)  # size -> all_instances
+    #         # size -> (all_instances, scatter, shape)
+    #         d = {k: (d[k], *encoding[k]) for k in d.keys()}
+    #         recon = model.decode(d)
+    #         return playable(recon, exp.samplerate)
 
     def round_trip(self, steps):
         # size -> (all_instances, scatter, shape)
         encoding = model.encode(self.real[:1, ...], steps=steps)
         e = {k: v[0] for k, v in encoding.items()}  # size -> all_instances
-        events = encode_events(e, steps)  # tensor
+        events = encode_events(e, steps, n_atoms)  # tensor
 
-        d = decode_events(events, model.band_dicts, steps)  # size -> all_instances
+        d = decode_events(events, model.band_dicts, steps, n_atoms)  # size -> all_instances
         # size -> (all_instances, scatter, shape)
         d = {k: (d[k], *encoding[k][1:]) for k in d.keys()}
         recon = model.decode(d)
@@ -327,43 +355,42 @@ class BasicMatchingPursuit(BaseExperimentRunner):
 
             batch_size = item.shape[0]
 
-            print('========================================')
+            print(i, '========================================')
 
-            if i < dictionary_learning_iterations:
-                with torch.no_grad():
-                    model.learn(item, steps=steps)
-                    print(i, 'sparse coding step')
+            with torch.no_grad():
+                model.learn(item, steps=steps)
+                print(i, 'sparse coding step')
 
-            transformer_encoded = self.encode_for_transformer(
-                item, steps=steps)
-            transformer_encoded = transformer_encoded[:, :3, :]
+            # transformer_encoded = self.encode_for_transformer(
+            #     item, steps=steps)
+            # transformer_encoded = transformer_encoded[:, :3, :]
 
-            inputs = transformer_encoded[:, :, :-1]
-            atom_targets = transformer_encoded[:, 0, -1:]
-            rel_targets = torch.diff(transformer_encoded[:, 1:, -2:], dim=-1)
+            # inputs = transformer_encoded[:, :, :-1]
+            # atom_targets = transformer_encoded[:, 0, -1:]
+            # rel_targets = torch.diff(transformer_encoded[:, 1:, -2:], dim=-1)
 
-            pred_atoms, pred_pos_amp = predictor.forward(inputs)
-            pred_atoms = pred_atoms.view(batch_size, -1)
+            # pred_atoms, pred_pos_amp = predictor.forward(inputs)
+            # pred_atoms = pred_atoms.view(batch_size, -1)
 
-            atom_loss = F.cross_entropy(
-                pred_atoms,
-                atom_targets.view(-1).long()
-            )
+            # atom_loss = F.cross_entropy(
+            #     pred_atoms,
+            #     atom_targets.view(-1).long()
+            # )
 
-            print(
-                torch.argmax(pred_atoms, dim=-1).view(-1),
-                atom_targets.view(-1).long())
+            # print(
+            #     torch.argmax(pred_atoms, dim=-1).view(-1),
+            #     atom_targets.view(-1).long())
 
-            rel_loss = F.mse_loss(
-                pred_pos_amp.view(batch_size, 2),
-                rel_targets.view(batch_size, 2)
-            )
-            print(rel_loss.item())
+            # rel_loss = F.mse_loss(
+            #     pred_pos_amp.view(batch_size, 2),
+            #     rel_targets.view(batch_size, 2)
+            # )
+            # print(rel_loss.item())
 
-            loss = atom_loss + rel_loss
-            loss.backward()
-            print(i, 'MODEL LOSS', loss.item())
-            optim.step()
+            # loss = atom_loss + rel_loss
+            # loss.backward()
+            # print(i, 'MODEL LOSS', loss.item())
+            # optim.step()
 
-            self.generate()
+            # self.generate()
 
