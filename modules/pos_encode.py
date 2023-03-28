@@ -128,7 +128,7 @@ class ExpandUsingPosEncodings(nn.Module):
         factor = self.time_dim // x.shape[1]
         x = self.embed_latent(x).view(
             batch_size, -1, self.channels).repeat(1, factor, 1)
-        
+
 
         if self.multiply:
             x = x * pos

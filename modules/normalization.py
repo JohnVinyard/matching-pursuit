@@ -40,6 +40,19 @@ class ExampleNorm(nn.Module):
         return x / (stds + self.epsilon)
 
 
+class MaxNorm(nn.Module):
+    def __init__(self, epsilon=1e-8):
+        super().__init__()
+        self.epsilon = epsilon
+    
+    def forward(self, x):
+        orig_shape = x.shape
+        x = x.view(x.shape[0], -1)
+        mx, _ = torch.max(torch.abs(x), dim=-1, keepdim=True)
+        x = x / (mx + self.epsilon)
+        x = x.view(*orig_shape)
+        return x
+    
 def limit_norm(x, dim=2, max_norm=0.9999):
     norm = torch.norm(x, dim=dim, keepdim=True)
     unit_norm = x / (norm + 1e-8)

@@ -7,7 +7,7 @@ from config.experiment import Experiment
 from modules.dilated import DilatedStack
 from modules.linear import LinearOutputStack
 from modules.matchingpursuit import dictionary_learning_step, flatten_atom_dict, sparse_code
-from modules.normalization import ExampleNorm, unit_norm
+from modules.normalization import ExampleNorm, MaxNorm, unit_norm
 from modules.pointcloud import encode_events, greedy_set_alignment
 from modules.pos_encode import ExpandUsingPosEncodings, pos_encoded
 from modules.softmax import hard_softmax
@@ -21,7 +21,7 @@ from experiments.e_2023_3_8.experiment import model
 exp = Experiment(
     samplerate=zounds.SR22050(),
     n_samples=2**15,
-    weight_init=0.05,
+    weight_init=0.1,
     model_dim=128,
     kernel_size=512)
 
@@ -58,36 +58,36 @@ class Generator(nn.Module):
         self.internal_dim = internal_dim
         self.n_events = n_events
 
-        # self.embed = nn.Linear(self.latent_dim + 33, internal_dim)
-        # self.process = SetProcessor(internal_dim, internal_dim)
+        self.embed = nn.Linear(self.latent_dim + 33, internal_dim)
+        self.process = SetProcessor(internal_dim, internal_dim)
 
         self.to_atom = nn.Linear(self.internal_dim, model.total_atoms)
         self.to_pos = nn.Linear(self.internal_dim, 1)
         self.to_amp = nn.Linear(self.internal_dim, 1)
 
-        self.net = ExpandUsingPosEncodings(
-            internal_dim,
-            n_events,
-            n_freqs=16,
-            latent_dim=latent_dim,
-            multiply=False,
-            learnable_encodings=False,
-            concat=True)
+        # self.net = ExpandUsingPosEncodings(
+        #     internal_dim,
+        #     n_events,
+        #     n_freqs=16,
+        #     latent_dim=latent_dim,
+        #     multiply=False,
+        #     learnable_encodings=False,
+        #     concat=False)
         
-        self.process = LinearOutputStack(
-            internal_dim, layers=6, out_channels=internal_dim, in_channels=internal_dim * 2)
+        # self.process = LinearOutputStack(
+        #     internal_dim, layers=6, out_channels=internal_dim)
 
         self.apply(lambda x: exp.init_weights(x))
 
     def forward(self, x):
-        # x = x.view(-1, 1, self.latent_dim).repeat(1, self.n_events, 1)
-        # pos = pos_encoded(x.shape[0], self.n_events, 16, device=x.device)
-        # x = torch.cat([x, pos], dim=-1)
-        # x = self.embed(x)
-        # x = self.process(x)
-
-        x = self.net(x)
+        x = x.view(-1, 1, self.latent_dim).repeat(1, self.n_events, 1)
+        pos = pos_encoded(x.shape[0], self.n_events, 16, device=x.device)
+        x = torch.cat([x, pos], dim=-1)
+        x = self.embed(x)
         x = self.process(x)
+
+        # x = self.net(x[:, None, :])
+        # x = self.process(x)
 
         atom = self.to_atom.forward(x)
         pos = torch.sigmoid(self.to_pos.forward(x))
@@ -144,7 +144,7 @@ class Autoencoder(nn.Module):
     def forward(self, x):
         encoded = self.encoder.forward(x)
         decoded = self.decoder.forward(encoded)
-        return decoded
+        return decoded, encoded
 
 
 def canonical_ordering(a: torch.Tensor):
@@ -173,7 +173,10 @@ def set_alignment_loss(a: torch.Tensor, b: torch.Tensor):
     # atom_loss = F.binary_cross_entropy(ap_atoms, bp_atoms)
     targets = torch.argmax(bp_atoms, dim=-1).view(-1)
     atom_loss = F.cross_entropy(ap_atoms.view(
-        targets.shape[0], model.total_atoms), targets)
+        targets.shape[0], model.total_atoms), targets, reduction='none')
+    
+    target_amp = b[..., 1].view(-1)
+    atom_loss = (atom_loss * target_amp).mean()
 
     pos_amp_loss = pos_amp_loss * 1
     atom_loss = atom_loss * 1
@@ -191,11 +194,11 @@ optim = optimizer(ae, lr=1e-3)
 
 def train_ae(batch):
     optim.zero_grad()
-    recon = ae.forward(batch)
+    recon, encoded = ae.forward(batch)
     loss = set_alignment_loss(recon, batch)
     loss.backward()
     optim.step()
-    return loss, recon
+    return loss, recon, encoded
 
 
 
@@ -245,6 +248,11 @@ class MatchingPursuitGAN(BaseExperimentRunner):
         super().__init__(stream, train, exp)
         self.fake = None
         self.vec = None
+        self.ae = ae
+        self.encoded = None
+    
+    def z(self):
+        return self.encoded.squeeze().data.cpu().numpy()
 
     def pos_amp(self):
         return self.fake.data.cpu().numpy()[0, :, :2]
@@ -283,7 +291,8 @@ class MatchingPursuitGAN(BaseExperimentRunner):
                 vec = to_atom_vectors(instances)
                 self.vec = vec
 
-            l, fake = train_ae(vec)
+            l, fake, e = train_ae(vec)
+            self.encoded = e
             self.fake = fake
             print(l.item())
 
