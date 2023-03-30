@@ -42,9 +42,13 @@ class {class_name}(BaseExperimentRunner):
     '''
     return experiment_template
 
-def new_experiment(class_name=None):
+def new_experiment(class_name=None, postfix=''):
     dt = datetime.now()
-    dirname = f'e_{dt.year}_{dt.month}_{dt.day}'
+
+    if postfix and not postfix.startswith('_'):
+        postfix = '_' + postfix
+
+    dirname = f'e_{dt.year}_{dt.month}_{dt.day}{postfix}'
 
     path, _ = os.path.split(__file__)
 
@@ -76,11 +80,12 @@ if __name__ == '__main__':
     parser.add_argument('--normalize', action='store_true')
     parser.add_argument('--nsamples', type=int, default=14)
     parser.add_argument('--classname', type=str, default=None)
+    parser.add_argument('--postfix', type=str, default='')
 
     args = parser.parse_args()
 
     if args.new:
-        new_experiment(args.classname)
+        new_experiment(args.classname, args.postfix)
     else:
         app = zounds.ZoundsApp(locals=locals(), globals=globals())
         app.start_in_thread(os.environ['PORT'])

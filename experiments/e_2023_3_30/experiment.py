@@ -65,6 +65,12 @@ def differentiable_index(impulse):
 
 def best_match(signal, search_pattern):
     affinity_map = F.conv1d(signal.view(1, 1, -1), search_pattern.view(1, 1, -1)).view(-1)
+    # given a feature map, take the softmax, then multiply by any number of channels
+    # with different sampling kernels
+
+    # in this case, your target(s) are indices or positions, OR you have
+    # a way to infer these (e.g., computing the best matching positions)
+    
     affinity_map = torch.softmax(affinity_map, dim=-1)
     index = torch.argmax(affinity_map, dim=-1)
     forward = dirac_impulse(
