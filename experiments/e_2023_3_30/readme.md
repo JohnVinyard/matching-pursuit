@@ -1,0 +1,1 @@
+Can I finally introduce a loss that will solve the "puzzle pieces" problem?
