@@ -27,8 +27,7 @@ class Model(nn.Module):
         super().__init__()
         self.register_buffer('signal', signal)
         self.position = nn.Parameter(torch.zeros(1).fill_(initial_position_value))
-
-        self.activation = lambda x: torch.clamp(x, 0, 1)
+        self.activation = lambda x: x
     
     @property
     def current_position_value(self):
@@ -42,10 +41,7 @@ class Model(nn.Module):
         )
 
 def sampling_kernel(size, device=None):
-    # x = torch.eye(size, device=device, requires_grad=True)
-    # rng = torch.arange(1, size + 1, device=device, dtype=torch.float32, requires_grad=True)
     rng = torch.linspace(0, 1, size, device=device)
-    # kernel = x * rng[None, ...]
     kernel = rng
     return kernel
 
@@ -69,25 +65,12 @@ def differentiable_index(impulse):
 
 def best_match(signal, search_pattern):
     affinity_map = F.conv1d(signal.view(1, 1, -1), search_pattern.view(1, 1, -1)).view(-1)
-
     affinity_map = torch.softmax(affinity_map, dim=-1)
-    # affinity_map = F.gumbel_softmax(torch.exp(affinity_map), tau=0.1, hard=True, dim=-1)
-    # values, indices = torch.topk(affinity_map, k=1, dim=-1)
-    # output = torch.zeros_like(signal)
-    # output = torch.scatter(output, dim=-1, index=indices, src=values)
-
-
-    # x_backward = x
-    # x_forward = torch.clamp(x_backward, 0, 1)
-    # y = x_backward + (x_forward - x_backward).detach()
-    # return y
-
     index = torch.argmax(affinity_map, dim=-1)
     forward = dirac_impulse(
         affinity_map.shape[-1], position=index, device=affinity_map.device)
     backward = affinity_map
     output = backward + (forward - backward).detach()
-
     return output
 
 def generate_signal(size, padded_size=None, device=None):
@@ -99,9 +82,7 @@ def generate_signal(size, padded_size=None, device=None):
             p, 
             torch.zeros(padded_size - p.shape[-1], device=p.device)
         ])
-    
     return p
-
 
 def experiment(
         name,
@@ -138,13 +119,13 @@ def experiment(
             print(f'For iteration {i}, target {target_position:4f}, current position {model.current_position_value:.4f}, loss is {l.item()}')
     
     with torch.no_grad():
-        print(f'final model position is {model.current_position_value:.2f}')
+        print(f'final model position is {model.current_position_value:.2f} at iteration {i}')
         final_estimate = model.forward()
         overlay = target + final_estimate
         return overlay
 
 def index_loss(a, b):
-    return (a - b).mean() ** 2
+    return torch.abs(a - b).sum()
 
 def positional_loss(a, b, pattern):
     a_impulse = best_match(a, pattern)
@@ -205,40 +186,52 @@ class ScalarPositioning(BaseExperimentRunner):
         #     signal_size=signal_size,
         #     target_position=0.5,
         #     starting_position=0.9,
-        #     iterations=1000,
+        #     iterations=iterations,
         #     loss=lambda a, b: F.mse_loss(a, b),
         #     device=device
         # )
 
-        # # hypothesis - total failure
+        # # # hypothesis - total failure
         # self.mse_far_overlay = experiment(
         #     name='start lower, MSE loss',
         #     total_size=total_size,
         #     signal_size=signal_size,
         #     target_position=0.5,
         #     starting_position=0.1,
-        #     iterations=1000,
+        #     iterations=iterations,
         #     loss=lambda a, b: F.mse_loss(a, b),
         #     device=device
         # )
 
-        # # hypothesis - perfect success
+        # # # hypothesis - perfect success
         # self.mse_close_overlay = experiment(
         #     name='start close, MSE loss',
         #     total_size=total_size,
         #     signal_size=signal_size,
         #     target_position=0.5,
         #     starting_position=0.5 + (overlap_range * 0.5),
-        #     iterations=1000,
+        #     iterations=iterations,
         #     loss=lambda a, b: F.mse_loss(a, b),
         #     device=device
         # )
 
 
+        # # hypothesis - success
+        # self.mse_far_overlay = experiment(
+        #     name='start higher, MSE loss',
+        #     total_size=total_size,
+        #     signal_size=signal_size,
+        #     target_position=0.5,
+        #     starting_position=0.9,
+        #     iterations=iterations,
+        #     loss=lambda a, b: positional_loss(a, b, search_signal),
+        #     device=device
+        # )
+
         for i in range(10):
             # hypothesis - success
             self.mse_far_overlay = experiment(
-                name='start higher, MSE loss',
+                name='start lower, MSE loss',
                 total_size=total_size,
                 signal_size=signal_size,
                 target_position=0.5,
@@ -247,16 +240,4 @@ class ScalarPositioning(BaseExperimentRunner):
                 loss=lambda a, b: positional_loss(a, b, search_signal),
                 device=device
             )
-
-        # hypothesis - success
-        # self.mse_far_overlay = experiment(
-        #     name='start lower, MSE loss',
-        #     total_size=total_size,
-        #     signal_size=signal_size,
-        #     target_position=0.5,
-        #     starting_position=0.1,
-        #     iterations=iterations,
-        #     loss=lambda a, b: positional_loss(a, b, search_signal),
-        #     device=device
-        # )
     
