@@ -6,10 +6,9 @@ import zounds
 from config.experiment import Experiment
 from modules.dilated import DilatedStack
 from modules.linear import LinearOutputStack
-from modules.normalization import ExampleNorm
+from modules.normalization import ExampleNorm, unit_norm
 from modules.pointcloud import encode_events
 from modules.pos_encode import ExpandUsingPosEncodings
-from modules.softmax import hard_softmax
 from scalar_scheduling import pos_encoded
 from time_distance import optimizer
 from train.experiment_runner import BaseExperimentRunner
@@ -80,7 +79,7 @@ class Generator(nn.Module):
 
         self.nerf_like = nerf_like
 
-        self.to_atom = nn.Linear(self.internal_dim, model.total_atoms)
+        self.to_atom = nn.Linear(self.internal_dim, model.embedding_dim)
         self.to_pos = nn.Linear(self.internal_dim, 1)
         self.to_amp = nn.Linear(self.internal_dim, 1)
         self.softmax = softmax
@@ -132,7 +131,8 @@ class Discriminator(nn.Module):
             out_dim=1,
             set_processor=TransformerSetProcessor,
             reduction='last',
-            judgement_activation=lambda x: x):
+            judgement_activation=lambda x: x,
+            process_edges=False):
 
         super().__init__()
         self.n_atoms = n_atoms
@@ -141,23 +141,30 @@ class Discriminator(nn.Module):
         self.embed_pos_amp = nn.Linear(2, internal_dim // 2)
         self.embed_atom = nn.Linear(n_atoms, internal_dim // 2)
 
+        self.embed_edges = nn.Linear(2 + n_atoms, internal_dim)
+
         self.processor = set_processor(internal_dim, internal_dim)
         self.judge = nn.Linear(internal_dim, out_dim)
         self.out_dim = out_dim
         self.reduction = reduction
         self.judgement_activation = judgement_activation
 
+        self.process_edges = process_edges
+        self.edges = ProduceEdges(n_edges=256)
+
         self.apply(lambda x: exp.init_weights(x))
 
     def forward(self, x):
 
-        pos_amp = x[:, :, :2]
-        atoms = x[:, :, 2:]
-
-        pos_amp = self.embed_pos_amp(pos_amp)
-        atoms = self.embed_atom(atoms)
-
-        x = torch.cat([pos_amp, atoms], dim=-1)
+        if self.process_edges:
+            x = self.edges.forward(x)
+            x = self.embed_edges(x)
+        else:
+            pos_amp = x[:, :, :2]
+            atoms = x[:, :, 2:]
+            pos_amp = self.embed_pos_amp(pos_amp)
+            atoms = self.embed_atom(atoms)
+            x = torch.cat([pos_amp, atoms], dim=-1)
 
         x = self.processor(x)
 
@@ -174,23 +181,72 @@ class Discriminator(nn.Module):
         return x
 
 
-# class Autoencoder(nn.Module):
-#     def __init__(self, n_atoms, internal_dim, latent_dim, n_events):
-#         super().__init__()
-#         self.n_atoms = n_atoms
-#         self.internal_dim = internal_dim
-#         self.latent_dim = latent_dim
-#         self.n_events = n_events
+class CanonicalOrdering(nn.Module):
+    """
+    Project embeddings into a single dimension and order them
+    """
 
-#         self.encoder = Discriminator(n_atoms, internal_dim, latent_dim)
-#         self.decoder = Generator(latent_dim, internal_dim, n_events)
-#         self.apply(lambda x: exp.init_weights(x))
+    def __init__(self, embedding_dim):
+        super().__init__()
+        self.embedding_dim = embedding_dim
 
-#     def forward(self, x):
-#         encoded = self.encoder.forward(x)
-#         decoded = self.decoder.forward(encoded)
-#         return decoded, encoded
+        self.register_buffer(
+            'projection', 
+            torch.zeros(embedding_dim, 1).uniform_(-1, 1))
+    
+    def forward(self, x):
+        x = x @ self.projection
+        indices = torch.argsort(x, dim=-1)
+        values = torch.gather(x, dim=-1, index=indices)
+        return values
 
+
+class ProduceEdges(nn.Module):
+    def __init__(self, n_edges: float = None):
+        super().__init__()
+        self.n_edges = n_edges
+
+    
+    def forward(self, embeddings: torch.Tensor):
+
+        # (Batch, n embeddings)
+        batch, size, dim = embeddings.shape
+
+        dist = torch.cdist(embeddings, embeddings)
+
+        dist_flat = dist.view(batch, -1)
+        srt = torch.argsort(dist_flat, dim=-1)
+
+        rows = srt // size
+        columns = srt % size
+
+
+        output = torch.zeros(
+            batch, self.n_edges, dim, device=embeddings.device)
+
+        # KLUDGE: this will contain duplicates of each element
+        for b in range(dist.shape[0]):
+            for i in range(self.n_edges):
+                x = embeddings[b, rows[b, i]]
+                y = embeddings[b, columns[b, i]]
+                edge = (x - y)
+                output[b, i, :] = edge
+
+        
+        return output
+
+
+class SetRelationshipLoss(nn.Module):
+    def __init__(self, embedding_dim, threshold):
+        super().__init__()
+        self.embedding_dim = embedding_dim
+        self.threshold = threshold
+        self.edges = ProduceEdges(threshold)
+        self.ordering = CanonicalOrdering(embedding_dim)
+    
+    def forward(self, x):
+        pass
+        
 
 
 # TODO: Move into point cloud
@@ -207,6 +263,8 @@ def canonical_ordering(a: torch.Tensor):
 def set_alignment_loss(a: torch.Tensor, b: torch.Tensor):
     a = canonical_ordering(a)
     b = canonical_ordering(b)
+
+    return F.mse_loss(a, b)
 
     srt = b
 
@@ -241,17 +299,18 @@ gen = Generator(
     n_events=n_events, 
     nerf_like=False, 
     set_processor=TransformerSetProcessor,
-    softmax=lambda x: hard_softmax(x, invert=True, tau=0.1)).to(device)
+    softmax=lambda x: unit_norm(torch.abs(x), dim=-1)).to(device)
 gen_optim = optimizer(gen, lr=1e-4)
 
 
 disc = Discriminator(
-    n_atoms=model.total_atoms,
+    n_atoms=model.embedding_dim,
     internal_dim=512,
     out_dim=1,
     set_processor=DilatedStackSetProcessor,
     reduction='mean',
-    judgement_activation=lambda x: x).to(device)
+    judgement_activation=lambda x: x,
+    process_edges=True).to(device)
 disc_optim = optimizer(disc, lr=1e-4)
 
 
@@ -308,13 +367,14 @@ def encode_for_transformer(encoding, steps=32, n_atoms=512):
 def to_atom_vectors(instances):
     vec = encode_for_transformer(instances).permute(0, 2, 1)
     final = torch.zeros(vec.shape[0], vec.shape[1],
-                        2 + model.total_atoms, device=device)
+                        2 + model.embedding_dim, device=device)
 
     for b, item in enumerate(vec):
         final[b, :, 0] = item[:, 1]
         final[b, :, 1] = item[:, 2]
-        oh = F.one_hot(item[:, 0][None, ...].long(),
-                       num_classes=model.total_atoms)
+        # oh = F.one_hot(item[:, 0][None, ...].long(),
+        #                num_classes=model.total_atoms)
+        oh = model.to_embeddings(item[:, 0].long())
         final[b, :, 2:] = oh
 
     return final
@@ -325,9 +385,13 @@ def to_instances(vectors):
 
     for b, batch in enumerate(vectors):
         for i, vec in enumerate(batch):
-            # atom index
+
+            # atom index (NOW EMBEDDINGS)
             atom_index = vec[..., 2:]
-            index = torch.argmax(atom_index, dim=-1).view(-1).item()
+
+            # index = torch.argmax(atom_index, dim=-1).view(-1).item()
+            index = model.to_indices(atom_index.view(-1, model.embedding_dim))
+
             size_key = index // 512
             size_key = model.size_at_index(size_key)
 
@@ -335,6 +399,7 @@ def to_instances(vectors):
             pos = int(vec[..., 0] * size_key)
             amp = vec[..., 1]
             atom = model.get_atom(size_key, index, amp)
+
             event = (index, b, pos, atom)
             instances[size_key].append(event)
 
@@ -349,8 +414,10 @@ class MatchingPursuitGAN(BaseExperimentRunner):
         self.vec = None
         self.encoded = None
     
-
-    def view_embeddings(self, size):
+    def view_embeddings(self, size: int = None):
+        if size is None:
+            return model.embeddings.data.cpu().numpy()
+        
         band = model.bands[size]
         return band.embeddings.data.cpu().numpy()
 
@@ -392,28 +459,13 @@ class MatchingPursuitGAN(BaseExperimentRunner):
             self.view_embeddings(size)
             print(f'{size} initialized...')
         
-
-        # get a small, random set of embeddings
-        start = torch.randperm(511)[:9]
-        embeddings = model.bands[512].to_embeddings(start)
-        indices = model.bands[512].to_indices(embeddings)
-
-        print('orig', start)
-        print('recovered', indices)
-
         for i, item in enumerate(self.iter_items()):
             self.real = item
-
 
             with torch.no_grad():
                 instances = model.encode(item, steps=steps)
                 vec = to_atom_vectors(instances)
                 self.vec = vec
-
-            # l, fake, e = train_ae(vec)
-            # self.encoded = e
-            # self.fake = fake
-            # print(l.item())
 
             if i % 2 == 0:
                 l, r = train_gen(vec)
@@ -424,3 +476,4 @@ class MatchingPursuitGAN(BaseExperimentRunner):
                 print('D', l.item())
             
 
+            self.listen()

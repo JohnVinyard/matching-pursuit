@@ -58,7 +58,6 @@ class BandSpec(object):
     def shape(self, batch_size):
         return (batch_size, 1, self.size)
     
-
     def to_embeddings(self, indices):
         return self.embeddings[indices]
     
@@ -185,6 +184,8 @@ class MultibandDictionaryLearning(object):
         self.bands = {spec.size: spec for spec in specs}
         self.min_size = min(map(lambda spec: spec.size, specs))
         self.n_samples = exp.n_samples
+
+        self._embeddings = None
     
     def get_atom(self, size, index, norm):
         return self.bands[size].get_atom(index, norm)
@@ -212,6 +213,25 @@ class MultibandDictionaryLearning(object):
             size: (build_scatter_segments(size, self.bands[size].atom_size), (batch_size, 1, size)) 
             for size in self.bands.keys()
         }
+    
+    @property
+    def embeddings(self):
+        if self._embeddings is not None:
+            return self._embeddings
+        self._embeddings = torch.cat([band.embeddings for band in self.bands.values()])
+        return self._embeddings
+    
+    @property
+    def embedding_dim(self):
+        return self.embeddings.shape[-1]
+
+    def to_embeddings(self, indices):
+        return self.embeddings[indices]
+    
+    def to_indices(self, embeddings):
+        diff = torch.cdist(self.embeddings, embeddings, p=0)
+        indices = torch.argmin(diff, dim=0)
+        return indices
 
     def store(self):
         for band in self.bands.values():
