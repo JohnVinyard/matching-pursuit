@@ -348,6 +348,11 @@ class MatchingPursuitGAN(BaseExperimentRunner):
         self.fake = None
         self.vec = None
         self.encoded = None
+    
+
+    def view_embeddings(self, size):
+        band = model.bands[size]
+        return band.embeddings.data.cpu().numpy()
 
     def z(self):
         return self.encoded.squeeze().data.cpu().numpy()
@@ -381,8 +386,15 @@ class MatchingPursuitGAN(BaseExperimentRunner):
             return playable(recon, exp.samplerate)
 
     def run(self):
+        # initialize embeddings
+        print('initializing embeddings')
+        for size in model.band_sizes:
+            self.view_embeddings(size)
+            print(f'{size} initialized...')
+
         for i, item in enumerate(self.iter_items()):
             self.real = item
+
 
             with torch.no_grad():
                 instances = model.encode(item, steps=steps)
@@ -401,3 +413,5 @@ class MatchingPursuitGAN(BaseExperimentRunner):
             else:
                 l = train_disc(vec)
                 print('D', l.item())
+            
+

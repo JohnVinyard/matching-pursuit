@@ -2,7 +2,7 @@ from typing import List
 import numpy as np
 from config.experiment import Experiment
 from modules import stft
-from modules.decompose import fft_frequency_decompose, fft_frequency_recompose
+from modules.decompose import fft_frequency_decompose, fft_frequency_recompose, fft_resample
 from modules.dilated import DilatedStack
 from modules.linear import LinearOutputStack
 from modules.matchingpursuit import build_scatter_segments, dictionary_learning_step, sparse_code, compare_conv
@@ -27,7 +27,16 @@ exp = Experiment(
 
 
 class BandSpec(object):
-    def __init__(self, size, n_atoms, atom_size, slce=None, device=None):
+    def __init__(
+            self, 
+            size, 
+            n_atoms, 
+            atom_size, 
+            slce=None, 
+            device=None, 
+            full_size=8192,
+            samplerate=zounds.SR22050()):
+        
         super().__init__()
         self.size = size
         self.n_atoms = n_atoms
@@ -35,12 +44,78 @@ class BandSpec(object):
         self.slce = slce
         self.device = device
 
+        self.full_size = full_size
+        self.ratio = full_size // self.atom_size
+        self.atom_full_size = int(self.atom_size * self.ratio)
+        self.samplerate = samplerate
+
         d = torch.zeros(
             n_atoms, atom_size, requires_grad=False).uniform_(-1, 1).to(device)
         self.d = unit_norm(d)
+
+        self._embeddings = None
     
     def shape(self, batch_size):
         return (batch_size, 1, self.size)
+
+    @property
+    def embeddings(self):
+        if self._embeddings is not None:
+            return self._embeddings
+        
+        # compute embeddings for each element in the dictionary
+        """
+        1. resample to canonical size/sampling rate
+        1. compute spectrogram
+        1. compute MFCCs
+        1. compute chroma
+        1. global pooling operation(s)
+        """
+        with torch.no_grad():
+            n_bands = 128
+            kernel_size = 256
+            summary_bands = 16
+            spec_win_size = n_bands // summary_bands
+
+            samplerate = zounds.SR22050()
+            band = zounds.FrequencyBand(20, samplerate.nyquist - 100)
+            scale = zounds.MelScale(band, n_bands)
+            chroma = zounds.ChromaScale(band)
+            chroma_basis = chroma._basis(scale, zounds.OggVorbisWindowingFunc())
+            chroma_basis = torch.from_numpy(chroma_basis).to(self.d.device).float()
+
+            filters = zounds.learn.FilterBank(samplerate, kernel_size, scale, 0.1, normalize_filters=True).to(device)
+            upsampled = fft_resample(
+                self.d.view(self.n_atoms, 1, self.atom_size), 
+                self.atom_full_size, 
+                is_lowest_band=True)
+            
+            
+            spec = filters.forward(upsampled, normalize=False)
+
+            summary = F.avg_pool1d(spec.permute(0, 2, 1), spec_win_size, spec_win_size)
+            summary = unit_norm(summary.permute(0, 2, 1), dim=1)
+            summary = torch.mean(summary, dim=-1)
+
+            n_frames = self.full_size // 256
+            spec = F.avg_pool1d(spec, 512, 256, padding=256)[..., :n_frames]
+
+            mfcc = torch.fft.rfft(spec, dim=1, norm='ortho')
+            mfcc = torch.abs(mfcc)
+            mfcc = unit_norm(mfcc[:, 1:13, :], dim=1)
+            mfcc = torch.mean(mfcc, dim=-1)
+
+            chroma = spec.permute(0, 2, 1) @ chroma_basis.T
+            chroma = chroma.permute(0, 2, 1)
+            chroma = unit_norm(chroma, dim=1)
+            chroma = torch.mean(chroma, dim=-1)
+
+            final = torch.cat([mfcc, chroma, summary], dim=-1)
+
+            self._embeddings = final
+        
+            return self._embeddings
+
 
     @property
     def filename(self):
@@ -269,13 +344,13 @@ steps = 32
 # dictionary_learning_iterations = 100
 
 model = MultibandDictionaryLearning([
-    BandSpec(512,   n_atoms, 128,  slce=None, device=device),
-    BandSpec(1024,  n_atoms, 256,  slce=None, device=device),
-    BandSpec(2048,  n_atoms, 512,  slce=None, device=device),
-    BandSpec(4096,  n_atoms, 1024, slce=None, device=device),
-    BandSpec(8192,  n_atoms, 2048, slce=None, device=device),
-    BandSpec(16384, n_atoms, 4096, slce=None, device=device),
-    BandSpec(32768, n_atoms, 4096, slce=None, device=device),
+    BandSpec(512,   n_atoms, 128,  slce=None, device=device, full_size=8192),
+    BandSpec(1024,  n_atoms, 256,  slce=None, device=device, full_size=8192),
+    BandSpec(2048,  n_atoms, 512,  slce=None, device=device, full_size=8192),
+    BandSpec(4096,  n_atoms, 1024, slce=None, device=device, full_size=8192),
+    BandSpec(8192,  n_atoms, 2048, slce=None, device=device, full_size=8192),
+    BandSpec(16384, n_atoms, 4096, slce=None, device=device, full_size=8192),
+    BandSpec(32768, n_atoms, 4096, slce=None, device=device, full_size=4096),
 ])
 model.load()
 
