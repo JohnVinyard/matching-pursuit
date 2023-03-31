@@ -57,6 +57,15 @@ class BandSpec(object):
     
     def shape(self, batch_size):
         return (batch_size, 1, self.size)
+    
+
+    def to_embeddings(self, indices):
+        return self.embeddings[indices]
+    
+    def to_indices(self, embeddings):
+        diff = torch.cdist(self.embeddings, embeddings)
+        indices = torch.argmin(diff, dim=0)
+        return indices
 
     @property
     def embeddings(self):

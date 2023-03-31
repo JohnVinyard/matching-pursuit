@@ -391,6 +391,15 @@ class MatchingPursuitGAN(BaseExperimentRunner):
         for size in model.band_sizes:
             self.view_embeddings(size)
             print(f'{size} initialized...')
+        
+
+        # get a small, random set of embeddings
+        start = torch.randperm(511)[:9]
+        embeddings = model.bands[512].to_embeddings(start)
+        indices = model.bands[512].to_indices(embeddings)
+
+        print('orig', start)
+        print('recovered', indices)
 
         for i, item in enumerate(self.iter_items()):
             self.real = item
