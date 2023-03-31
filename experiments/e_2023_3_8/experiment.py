@@ -62,7 +62,7 @@ class BandSpec(object):
         return self.embeddings[indices]
     
     def to_indices(self, embeddings):
-        diff = torch.cdist(self.embeddings, embeddings)
+        diff = torch.cdist(self.embeddings, embeddings, p=2)
         indices = torch.argmin(diff, dim=0)
         return indices
 
@@ -229,7 +229,7 @@ class MultibandDictionaryLearning(object):
         return self.embeddings[indices]
     
     def to_indices(self, embeddings):
-        diff = torch.cdist(self.embeddings, embeddings, p=0)
+        diff = torch.cdist(self.embeddings, embeddings, p=2)
         indices = torch.argmin(diff, dim=0)
         return indices
 

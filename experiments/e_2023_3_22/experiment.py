@@ -19,7 +19,7 @@ from experiments.e_2023_3_8.experiment import model
 exp = Experiment(
     samplerate=zounds.SR22050(),
     n_samples=2**15,
-    weight_init=0.1,
+    weight_init=0.05,
     model_dim=128,
     kernel_size=512)
 
@@ -29,6 +29,8 @@ def train(batch, i):
 
 
 latent_dim = 128
+steps = 32
+n_events = steps * 7
 
 
 class TransformerSetProcessor(nn.Module):
@@ -195,10 +197,11 @@ class CanonicalOrdering(nn.Module):
             torch.zeros(embedding_dim, 1).uniform_(-1, 1))
     
     def forward(self, x):
-        x = x @ self.projection
-        indices = torch.argsort(x, dim=-1)
-        values = torch.gather(x, dim=-1, index=indices)
-        return values
+        batch = x.shape[0]
+        z = x @ self.projection
+        indices = torch.argsort(z, dim=-1)
+        values = torch.gather(x, dim=1, index=indices)
+        return values.view(batch, -1)
 
 
 class ProduceEdges(nn.Module):
@@ -206,48 +209,94 @@ class ProduceEdges(nn.Module):
         super().__init__()
         self.n_edges = n_edges
 
+        size = 2 + model.embedding_dim
+        self.indices = torch.triu_indices(size, size)
+        self.rows = self.indices[0]
+        self.cols = self.indices[1]
+
+        self.rand = torch.randperm(self.rows.shape[-1])[:self.n_edges]
+
+        self.rows = self.rows[self.rand]
+        self.cols = self.cols[self.rand]
+
     
     def forward(self, embeddings: torch.Tensor):
 
         # (Batch, n embeddings)
         batch, size, dim = embeddings.shape
 
-        dist = torch.cdist(embeddings, embeddings)
-
-        dist_flat = dist.view(batch, -1)
-        srt = torch.argsort(dist_flat, dim=-1)
-
-        rows = srt // size
-        columns = srt % size
-
+        # dist = torch.cdist(embeddings, embeddings)
 
         output = torch.zeros(
             batch, self.n_edges, dim, device=embeddings.device)
-
-        # KLUDGE: this will contain duplicates of each element
-        for b in range(dist.shape[0]):
+        
+        for b in range(batch):
             for i in range(self.n_edges):
-                x = embeddings[b, rows[b, i]]
-                y = embeddings[b, columns[b, i]]
-                edge = (x - y)
-                output[b, i, :] = edge
+                r = self.rows[i]
+                c = self.cols[i]
+                x = embeddings[b, r]
+                y = embeddings[b, c]
+                eg = (x - y)
+                output[b, i, :] = eg
 
         
         return output
 
 
-class SetRelationshipLoss(nn.Module):
-    def __init__(self, embedding_dim, threshold):
+class AutoEncoder(nn.Module):
+    def __init__(self):
         super().__init__()
-        self.embedding_dim = embedding_dim
-        self.threshold = threshold
-        self.edges = ProduceEdges(threshold)
-        self.ordering = CanonicalOrdering(embedding_dim)
+        self.encoder = Discriminator(
+            model.embedding_dim, 
+            internal_dim=512, 
+            out_dim=latent_dim, 
+            set_processor=DilatedStackSetProcessor, 
+            reduction='mean', 
+            judgement_activation=lambda x: x, 
+            process_edges=False)
+        
+        self.decoder = Generator(
+            latent_dim=latent_dim,
+            internal_dim=512,
+            n_events=n_events,
+            nerf_like=True,
+            set_processor=DilatedStackSetProcessor,
+            softmax=lambda x: unit_norm(torch.abs(x), dim=-1)
+        )
+
+        self.apply(lambda x: exp.init_weights(x))
     
     def forward(self, x):
-        pass
-        
+        encoded = self.encoder.forward(x)
+        decoded = self.decoder.forward(encoded)
+        return decoded, encoded
 
+
+class SetRelationshipLoss(nn.Module):
+    def __init__(self, embedding_dim, n_edges):
+        super().__init__()
+
+        self.embedding_dim = embedding_dim
+        self.n_edges = n_edges
+
+        self.edges = ProduceEdges(self.n_edges)
+        self.ordering = CanonicalOrdering(embedding_dim)
+    
+    def _extract_and_order(self, x):
+        edges = self.edges.forward(x)
+        ordered = self.ordering.forward(edges)
+        return ordered
+    
+
+    def forward(self, recon, target):
+        r = self._extract_and_order(recon)
+        t = self._extract_and_order(target)
+        return F.mse_loss(r, t)
+
+        
+set_loss = SetRelationshipLoss(
+    embedding_dim=model.embedding_dim + 2, 
+    n_edges=256).to(device)
 
 # TODO: Move into point cloud
 def canonical_ordering(a: torch.Tensor):
@@ -290,15 +339,14 @@ def set_alignment_loss(a: torch.Tensor, b: torch.Tensor):
     return loss
 
 
-steps = 32
-n_events = steps * 7
+
 
 gen = Generator(
     latent_dim=latent_dim, 
     internal_dim=512, 
     n_events=n_events, 
     nerf_like=False, 
-    set_processor=TransformerSetProcessor,
+    set_processor=DilatedStackSetProcessor,
     softmax=lambda x: unit_norm(torch.abs(x), dim=-1)).to(device)
 gen_optim = optimizer(gen, lr=1e-4)
 
@@ -310,7 +358,7 @@ disc = Discriminator(
     set_processor=DilatedStackSetProcessor,
     reduction='mean',
     judgement_activation=lambda x: x,
-    process_edges=True).to(device)
+    process_edges=False).to(device)
 disc_optim = optimizer(disc, lr=1e-4)
 
 
@@ -341,19 +389,19 @@ def train_disc(batch):
 
 
 
-# ae = Autoencoder(model.total_atoms, 512, latent_dim=128,
-#                  n_events=n_events).to(device)
-# optim = optimizer(ae, lr=1e-3)
+
+ae = AutoEncoder().to(device)
+optim = optimizer(ae, lr=1e-3)
 
 
-# def train_ae(batch):
-#     optim.zero_grad()
-#     recon, encoded = ae.forward(batch)
-#     loss = set_alignment_loss(recon, batch)
-#     loss.backward()
-#     optim.step()
-#     return loss, recon, encoded
-
+def train_ae(batch):
+    optim.zero_grad()
+    recon, encoded = ae.forward(batch)
+    loss = set_alignment_loss(recon, batch)
+    # loss = set_loss.forward(recon, batch)
+    loss.backward()
+    optim.step()
+    return loss, recon, encoded
 
 
 
@@ -467,13 +515,15 @@ class MatchingPursuitGAN(BaseExperimentRunner):
                 vec = to_atom_vectors(instances)
                 self.vec = vec
 
-            if i % 2 == 0:
-                l, r = train_gen(vec)
-                self.fake = r
-                print('G', l.item())
-            else:
-                l = train_disc(vec)
-                print('D', l.item())
+            # if i % 2 == 0:
+            #     l, r = train_gen(vec)
+            #     self.fake = r
+            #     print('G', l.item())
+            # else:
+            #     l = train_disc(vec)
+            #     print('D', l.item())
             
-
-            self.listen()
+            l, f, e = train_ae(vec)
+            self.encoded = e
+            self.fake = f
+            print(l.item())
