@@ -17,6 +17,37 @@ import numpy as np
 from collections import defaultdict
 
 
+def extract_graph_edges(inp: torch.Tensor, threshold: float):
+    batch, elements, dim = inp.shape
+
+    # compute the distance matrix
+    dist = torch.cdist(inp, inp)
+
+    # only consider the upper diagonal matrix
+    upper = torch.triu(dist)
+    mask = upper == 0
+    upper[mask] = np.inf
+
+
+    # find indices that are below a given threshold
+    b, x, y = torch.where(upper <= threshold)
+    n_edges = len(b)
+
+    output = torch.zeros(batch, n_edges, dim)
+    for item in range(n_edges):
+
+        first = inp[b[item], x[item]]
+        second = inp[b[item], y[item]]
+        edge = first - second
+
+        output[b[item], item, :] = edge
+    
+    return output
+
+
+
+# TODO: probably remove, this is not generally useful as it
+# doesn't have a stable-ish alignment between elements
 def greedy_set_alignment(
         a: torch.Tensor,
         z: torch.Tensor,
@@ -150,15 +181,9 @@ def decode_events(events: torch.Tensor, band_dicts: 'dict[int, torch.Tensor]', n
 
 if __name__ == '__main__':
 
-    a = torch.zeros(1, 7, 3).uniform_(-1, 1)
-    b = torch.zeros(1, 7, 3).uniform_(-1, 1)
-
-    srt = greedy_set_alignment(a, b)
-
-    dist = ((a - srt) ** 2).mean()
-    rand_dist = ((a - b) ** 2).mean()
-    print('=========================')
-    print(dist.item())
-    print(rand_dist.item())
+    while True:
+        x = torch.zeros(3, 128, 512).uniform_(-1, 1)
+        edges = extract_graph_edges(x, threshold=10)
+        print(edges.shape)
 
 
