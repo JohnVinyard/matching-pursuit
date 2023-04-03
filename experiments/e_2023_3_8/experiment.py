@@ -28,15 +28,15 @@ exp = Experiment(
 
 class BandSpec(object):
     def __init__(
-            self, 
-            size, 
-            n_atoms, 
-            atom_size, 
-            slce=None, 
-            device=None, 
+            self,
+            size,
+            n_atoms,
+            atom_size,
+            slce=None,
+            device=None,
             full_size=8192,
             samplerate=zounds.SR22050()):
-        
+
         super().__init__()
         self.size = size
         self.n_atoms = n_atoms
@@ -55,12 +55,16 @@ class BandSpec(object):
 
         self._embeddings = None
     
+    @property
+    def embedding_dim(self):
+        return self.embeddings.shape[-1]
+
     def shape(self, batch_size):
         return (batch_size, 1, self.size)
-    
+
     def to_embeddings(self, indices):
         return self.embeddings[indices]
-    
+
     def to_indices(self, embeddings):
         diff = torch.cdist(self.embeddings, embeddings, p=2)
         indices = torch.argmin(diff, dim=0)
@@ -70,7 +74,7 @@ class BandSpec(object):
     def embeddings(self):
         if self._embeddings is not None:
             return self._embeddings
-        
+
         # compute embeddings for each element in the dictionary
         """
         1. resample to canonical size/sampling rate
@@ -79,6 +83,7 @@ class BandSpec(object):
         1. compute chroma
         1. global pooling operation(s)
         """
+
         with torch.no_grad():
             n_bands = 128
             kernel_size = 256
@@ -89,19 +94,22 @@ class BandSpec(object):
             band = zounds.FrequencyBand(20, samplerate.nyquist - 100)
             scale = zounds.MelScale(band, n_bands)
             chroma = zounds.ChromaScale(band)
-            chroma_basis = chroma._basis(scale, zounds.OggVorbisWindowingFunc())
-            chroma_basis = torch.from_numpy(chroma_basis).to(self.d.device).float()
+            chroma_basis = chroma._basis(
+                scale, zounds.OggVorbisWindowingFunc())
+            chroma_basis = torch.from_numpy(
+                chroma_basis).to(self.d.device).float()
 
-            filters = zounds.learn.FilterBank(samplerate, kernel_size, scale, 0.1, normalize_filters=True).to(device)
+            filters = zounds.learn.FilterBank(
+                samplerate, kernel_size, scale, 0.1, normalize_filters=True).to(device)
             upsampled = fft_resample(
-                self.d.view(self.n_atoms, 1, self.atom_size), 
-                self.atom_full_size, 
+                self.d.view(self.n_atoms, 1, self.atom_size),
+                self.atom_full_size,
                 is_lowest_band=True)
-            
-            
+
             spec = filters.forward(upsampled, normalize=False)
 
-            summary = F.avg_pool1d(spec.permute(0, 2, 1), spec_win_size, spec_win_size)
+            summary = F.avg_pool1d(spec.permute(
+                0, 2, 1), spec_win_size, spec_win_size)
             summary = unit_norm(summary.permute(0, 2, 1), dim=1)
             summary = torch.mean(summary, dim=-1)
 
@@ -121,18 +129,17 @@ class BandSpec(object):
             final = torch.cat([mfcc, chroma, summary], dim=-1)
 
             self._embeddings = final
-        
-            return self._embeddings
 
+            return self._embeddings
 
     @property
     def filename(self):
         return f'band_{self.size}.dat'
-    
+
     @property
     def scatter_func(self):
         return build_scatter_segments(self.size, self.atom_size)
-    
+
     def get_atom(self, index, norm):
         return self.d[index] * norm
 
@@ -153,9 +160,20 @@ class BandSpec(object):
         self.d = unit_norm(d)
         return d
 
-    def encode(self, batch, steps=16):
-        instances, scatter = sparse_code(
-            batch, self.d, steps, device=self.device, approx=self.slce)
+    def encode(self, batch, steps=16, extract_embeddings=None):
+        encoding = sparse_code(
+            batch,
+            self.d,
+            steps,
+            device=self.device,
+            approx=self.slce,
+            extract_atom_embedding=extract_embeddings)
+        
+        if extract_embeddings:
+            return encoding
+
+        instances, scatter = encoding
+
         all_instances = []
         for k, v in instances.items():
             all_instances.extend(v)
@@ -186,16 +204,29 @@ class MultibandDictionaryLearning(object):
         self.n_samples = exp.n_samples
 
         self._embeddings = None
-    
+
     def get_atom(self, size, index, norm):
         return self.bands[size].get_atom(index, norm)
-    
+
     def size_at_index(self, index):
         return list(self.bands.keys())[index]
+
+    def index_of_size(self, band_size):
+        sizes = list([b.size for b in self.bands.values()])
+        index = sizes.index(band_size)
+        return index
     
     def shape_dict(self, batch_size):
         return {size: band.shape(batch_size) for size, band in self.bands.items()}
     
+
+    def index_of_dict_size(self, size):
+        for i, d in enumerate(self.band_dicts.values()):
+            if size == d.shape[-1]:
+                return i
+        
+        raise IndexError(f'{size} not found in f{self.shape_dict(1)}')
+
     @property
     def total_atoms(self):
         return sum(v.n_atoms for v in self.bands.values())
@@ -203,31 +234,33 @@ class MultibandDictionaryLearning(object):
     @property
     def band_dicts(self):
         return {size: band.d for size, band in self.bands.items()}
-    
+
     @property
     def band_sizes(self):
         return list(self.bands.keys())
 
     def partial_decoding_dict(self, batch_size):
         return {
-            size: (build_scatter_segments(size, self.bands[size].atom_size), (batch_size, 1, size)) 
+            size: (build_scatter_segments(
+                size, self.bands[size].atom_size), (batch_size, 1, size))
             for size in self.bands.keys()
         }
-    
+
     @property
     def embeddings(self):
         if self._embeddings is not None:
             return self._embeddings
-        self._embeddings = torch.cat([band.embeddings for band in self.bands.values()])
+        self._embeddings = torch.cat(
+            [band.embeddings for band in self.bands.values()])
         return self._embeddings
-    
+
     @property
     def embedding_dim(self):
         return self.embeddings.shape[-1]
 
     def to_embeddings(self, indices):
         return self.embeddings[indices]
-    
+
     def to_indices(self, embeddings):
         diff = torch.cdist(self.embeddings, embeddings, p=2)
         indices = torch.argmin(diff, dim=0)
@@ -246,9 +279,9 @@ class MultibandDictionaryLearning(object):
         for size, band in bands.items():
             self.bands[size].learn(band, steps)
 
-    def encode(self, batch, steps):
+    def encode(self, batch, steps, extract_embeddings=None):
         bands = fft_frequency_decompose(batch, self.min_size)
-        return {size: band.encode(bands[size], steps) for size, band in self.bands.items()}
+        return {size: band.encode(bands[size], steps, extract_embeddings) for size, band in self.bands.items()}
 
     def decode(self, d, shapes=None):
         output = {}
@@ -280,84 +313,6 @@ class MultibandDictionaryLearning(object):
         return recon, events
 
 
-class Predictor(nn.Module):
-    """
-    Analyze a sequence of atoms with absolute positions
-    and magnitudes.
-
-    Output a new atom, relative position and relative magnitude
-    """
-
-    def __init__(self, channels, n_atoms=512 * 7):
-        super().__init__()
-
-        self.embed = nn.Embedding(n_atoms, embedding_dim=channels)
-        self.pos_amp = nn.Linear(2, channels)
-
-        self.reduce = nn.Conv1d(channels * 2, channels, 1, 1, 0)
-
-        self.net = DilatedStack(channels, [1, 3, 9, 27, 81, 1], dropout=0.1)
-
-        self.to_atom = LinearOutputStack(channels, 3, out_channels=n_atoms)
-        self.to_pos_amp_pred = LinearOutputStack(channels, 3, out_channels=2)
-
-        self.apply(lambda x: exp.init_weights(x))
-
-    def generate(self, x, steps):
-
-
-        output = x
-        batch_size = x.shape[0]
-
-        with torch.no_grad():
-            for i in range(steps):
-                seed = output[:, :, i:]
-
-                a, pa = self.forward(seed)
-                a = a.view(batch_size, -1)
-                p = pa.view(batch_size, 2, 1)
-                a = torch.argmax(a, dim=-1, keepdim=True)
-
-                last_pos_amp = seed[:, 1:3, -1:]
-                new_pos_amp = last_pos_amp + p
-
-                next_one = torch.zeros(batch_size, 4, device=x.device)
-                next_one[:, 0] = a
-
-                band_index = a // n_atoms
-                
-                next_one[:, -1] = model.band_sizes[band_index]
-
-                next_one[:, 1:3] = new_pos_amp.view(1, 2)
-                next_one = next_one.view(batch_size, 4, 1)
-
-                output = torch.cat([output, next_one], dim=-1)
-
-
-        first = output[:, :, :steps // 2]
-        second = output[:, :, steps // 2:]
-
-        return first, second
-
-    def forward(self, x):
-        x = x.permute(0, 2, 1)
-        atoms = x[:, :, 0].long()
-        atoms = self.embed.forward(atoms)
-
-        pos_amp = x[:, :, 1:3]
-        pos_amp = self.pos_amp.forward(pos_amp)
-
-        x = torch.cat([atoms, pos_amp], dim=-1)
-        x = x.permute(0, 2, 1)
-        x = self.reduce.forward(x)
-        x = self.net(x)
-        x = x.permute(0, 2, 1)
-
-        a = self.to_atom(x)[:, -1:, :]
-        pa = self.to_pos_amp_pred(x)[:, -1:, :]
-        return a, pa
-
-
 def to_slice(n_samples, percentage):
     n_coeffs = n_samples // 2 + 1
     start = n_coeffs // 2
@@ -385,8 +340,6 @@ model.load()
 
 total_atoms = n_atoms * len(model.bands)
 
-predictor = Predictor(exp.model_dim, total_atoms).to(device)
-optim = optimizer(predictor)
 
 
 def train():
@@ -398,7 +351,6 @@ class BasicMatchingPursuit(BaseExperimentRunner):
     def __init__(self, stream):
         super().__init__(stream, train, exp)
         self.encoded = None
-        self.predictor = predictor
 
     def recon(self, steps=steps):
         recon, events = model.recon(self.real[:1, ...], steps=steps)
@@ -425,7 +377,7 @@ class BasicMatchingPursuit(BaseExperimentRunner):
     #     e = {k: v[0] for k, v in encoding.items()}  # size -> all_instances
     #     events = encode_events(e, steps)  # tensor (batch, 4, N)
     #     return events
-    
+
     # def decode_to_audio(self, events, steps):
     #     with torch.no_grad():
     #         encoding = model.partial_decoding_dict(self.real.shape[0])
@@ -441,7 +393,8 @@ class BasicMatchingPursuit(BaseExperimentRunner):
         e = {k: v[0] for k, v in encoding.items()}  # size -> all_instances
         events = encode_events(e, steps, n_atoms)  # tensor
 
-        d = decode_events(events, model.band_dicts, steps, n_atoms)  # size -> all_instances
+        d = decode_events(events, model.band_dicts, steps,
+                          n_atoms)  # size -> all_instances
         # size -> (all_instances, scatter, shape)
         d = {k: (d[k], *encoding[k][1:]) for k in d.keys()}
         recon = model.decode(d)
@@ -497,4 +450,3 @@ class BasicMatchingPursuit(BaseExperimentRunner):
             # optim.step()
 
             # self.generate()
-

@@ -194,7 +194,8 @@ def sparse_code(
         n_steps=100,
         device=None,
         approx=None,
-        flatten=False):
+        flatten=False,
+        extract_atom_embedding=None):
 
     signal = signal.view(signal.shape[0], 1, -1)
     batch, _, n_samples = signal.shape
@@ -206,6 +207,9 @@ def sparse_code(
 
     instances = defaultdict(list)
 
+    if extract_atom_embedding is not None:
+        embeddings = []
+
     for i in range(n_steps):
 
         if approx is None:
@@ -214,6 +218,9 @@ def sparse_code(
                 n_atoms, 1, atom_size))[..., :n_samples]
         else:
             fm = fft_convolve(residual, d, approx=approx)
+        
+        if extract_atom_embedding is not None:
+            embeddings.append(extract_atom_embedding(fm, d))
 
         fm = fm.reshape(batch, -1)
         value, mx = torch.max(fm, dim=-1)
@@ -234,7 +241,8 @@ def sparse_code(
         sparse = scatter_segments(residual.shape, local_instances)
         residual -= sparse
 
-    # print('SPARSE CODING', torch.norm(residual, dim=-1).mean().item())
+    if extract_atom_embedding is not None:
+        return embeddings
 
     if not flatten:
         return instances, scatter_segments

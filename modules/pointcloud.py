@@ -15,6 +15,51 @@ Tasks:
 import torch
 import numpy as np
 from collections import defaultdict
+from torch import nn
+
+class CanonicalOrdering(nn.Module):
+    """
+    Project embeddings into a single dimension and order them
+    """
+
+    def __init__(self, embedding_dim, dim=None):
+        super().__init__()
+        self.embedding_dim = embedding_dim
+
+        if dim is None:
+            self.register_buffer(
+                'projection', 
+                torch.zeros(embedding_dim, 1).uniform_(-1, 1))
+        else:
+            x = torch.zeros(embedding_dim, 1)
+            x[dim] = 1
+            self.register_buffer('projection', x)
+
+    
+    def forward(self, x):
+        batch, t, dim = x.shape
+        z = x @ self.projection
+        indices = torch.argsort(z, dim=1)
+
+        # values = torch.zeros_like(x)
+        # for b in range(batch):
+        #     for p in range(t):
+        #         index = indices[b, p]
+        #         values[b, p, :] = x[b, indices[b, p], :]
+
+        values = torch.gather(x, dim=1, index=indices.repeat(1, 1, dim))
+        return values.view(batch, t, dim)
+        # return values
+
+
+class ProduceEdges(nn.Module):
+    def __init__(self, threshold: float = None):
+        super().__init__()
+        self.threshold = threshold
+    
+    def forward(self, embeddings: torch.Tensor):
+        edges = extract_graph_edges(embeddings, threshold=self.threshold)
+        return edges
 
 
 def extract_graph_edges(inp: torch.Tensor, threshold: float):
