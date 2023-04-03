@@ -33,7 +33,7 @@ def extract_graph_edges(inp: torch.Tensor, threshold: float):
     b, x, y = torch.where(upper <= threshold)
     n_edges = len(b)
 
-    output = torch.zeros(batch, n_edges, dim)
+    output = torch.zeros(batch, n_edges, dim, device=inp.device)
     for item in range(n_edges):
 
         first = inp[b[item], x[item]]

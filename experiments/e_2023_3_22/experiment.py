@@ -7,7 +7,7 @@ from config.experiment import Experiment
 from modules.dilated import DilatedStack
 from modules.linear import LinearOutputStack
 from modules.normalization import ExampleNorm, unit_norm
-from modules.pointcloud import encode_events
+from modules.pointcloud import encode_events, extract_graph_edges
 from modules.pos_encode import ExpandUsingPosEncodings
 from scalar_scheduling import pos_encoded
 from time_distance import optimizer
@@ -72,12 +72,15 @@ class Generator(nn.Module):
             n_events,
             nerf_like=True,
             set_processor=TransformerSetProcessor,
-            softmax=lambda x: x):
+            softmax=lambda x: x,
+            snap_embeddings=False):
 
         super().__init__()
         self.latent_dim = latent_dim
         self.internal_dim = internal_dim
         self.n_events = n_events
+
+        self.snap_embeddings = snap_embeddings
 
         self.nerf_like = nerf_like
 
@@ -118,6 +121,19 @@ class Generator(nn.Module):
 
         atom = self.to_atom.forward(x)
         atom = self.softmax(atom)
+
+        if self.snap_embeddings:
+            orig_shape = atom.shape
+            atom = atom.view(-1, model.embedding_dim)
+            indices = model.to_indices(atom)
+            orig = model.to_embeddings(indices)
+
+            forward = orig
+            backward = atom
+            y = backward + (forward - backward).detach()
+            atom = y.view(*orig_shape)
+        
+
         pos = torch.sigmoid(self.to_pos.forward(x))
         amp = torch.abs(self.to_amp.forward(x))
 
@@ -152,7 +168,7 @@ class Discriminator(nn.Module):
         self.judgement_activation = judgement_activation
 
         self.process_edges = process_edges
-        self.edges = ProduceEdges(n_edges=256)
+        self.edges = ProduceEdges(threshold=0.2)
 
         self.apply(lambda x: exp.init_weights(x))
 
@@ -197,50 +213,22 @@ class CanonicalOrdering(nn.Module):
             torch.zeros(embedding_dim, 1).uniform_(-1, 1))
     
     def forward(self, x):
-        batch = x.shape[0]
+        batch, t, dim = x.shape
         z = x @ self.projection
         indices = torch.argsort(z, dim=-1)
-        values = torch.gather(x, dim=1, index=indices)
-        return values.view(batch, -1)
+        values = torch.gather(x, dim=1, index=indices.repeat(1, 1, dim))
+        return values.view(batch, t, dim)
 
 
 class ProduceEdges(nn.Module):
-    def __init__(self, n_edges: float = None):
+    def __init__(self, threshold: float = None):
         super().__init__()
-        self.n_edges = n_edges
-
-        size = 2 + model.embedding_dim
-        self.indices = torch.triu_indices(size, size)
-        self.rows = self.indices[0]
-        self.cols = self.indices[1]
-
-        self.rand = torch.randperm(self.rows.shape[-1])[:self.n_edges]
-
-        self.rows = self.rows[self.rand]
-        self.cols = self.cols[self.rand]
-
+        self.threshold = threshold
     
     def forward(self, embeddings: torch.Tensor):
+        edges = extract_graph_edges(embeddings, threshold=self.threshold)
+        return edges
 
-        # (Batch, n embeddings)
-        batch, size, dim = embeddings.shape
-
-        # dist = torch.cdist(embeddings, embeddings)
-
-        output = torch.zeros(
-            batch, self.n_edges, dim, device=embeddings.device)
-        
-        for b in range(batch):
-            for i in range(self.n_edges):
-                r = self.rows[i]
-                c = self.cols[i]
-                x = embeddings[b, r]
-                y = embeddings[b, c]
-                eg = (x - y)
-                output[b, i, :] = eg
-
-        
-        return output
 
 
 class AutoEncoder(nn.Module):
@@ -253,7 +241,7 @@ class AutoEncoder(nn.Module):
             set_processor=DilatedStackSetProcessor, 
             reduction='mean', 
             judgement_activation=lambda x: x, 
-            process_edges=False)
+            process_edges=True)
         
         self.decoder = Generator(
             latent_dim=latent_dim,
@@ -261,7 +249,8 @@ class AutoEncoder(nn.Module):
             n_events=n_events,
             nerf_like=True,
             set_processor=DilatedStackSetProcessor,
-            softmax=lambda x: unit_norm(torch.abs(x), dim=-1)
+            softmax=lambda x: torch.abs(x),
+            snap_embeddings=True
         )
 
         self.apply(lambda x: exp.init_weights(x))
@@ -298,8 +287,17 @@ set_loss = SetRelationshipLoss(
     embedding_dim=model.embedding_dim + 2, 
     n_edges=256).to(device)
 
+
+canonical = CanonicalOrdering(model.embedding_dim + 2).to(device)
+
+
 # TODO: Move into point cloud
-def canonical_ordering(a: torch.Tensor):
+def canonical_ordering(a: torch.Tensor, random_projection: bool = False):
+
+    if random_projection:
+        return canonical.forward(a)
+
+
     # pos
     indices = torch.argsort(a[..., 0], dim=-1)[..., None].repeat(1, 1, a.shape[-1])
 
@@ -308,35 +306,30 @@ def canonical_ordering(a: torch.Tensor):
     values = torch.gather(a, dim=1, index=indices)
     return values
 
+
 # TODO: move into point cloud
-def set_alignment_loss(a: torch.Tensor, b: torch.Tensor):
-    a = canonical_ordering(a)
-    b = canonical_ordering(b)
+def set_alignment_loss(a: torch.Tensor, b: torch.Tensor, process_edges: bool = False, trheshold: float = 0.5):
+    if process_edges:
+        a = extract_graph_edges(a, trheshold)
+        a = canonical.forward(a)
+        a_size = a.shape[1]
 
+        b = extract_graph_edges(b, trheshold)
+        b = canonical.forward(b)
+        b_size = b.shape[1]
+
+        min_size = max(min(a_size, b_size), 256)
+
+        a = a[:, :min_size, :]
+        b = b[:, :min_size, :]
+
+    else:
+        a = canonical_ordering(a, random_projection=True)
+        b = canonical_ordering(b, random_projection=True)
+
+    # TODO: Try fourier features/positional encodings
+    # for amp and time
     return F.mse_loss(a, b)
-
-    srt = b
-
-    apa = a[..., :2]
-    bpa = srt[..., :2]
-
-    ap_atoms = a[..., 2:]
-    bp_atoms = srt[..., 2:]
-
-    pos_amp_loss = F.mse_loss(apa, bpa)
-    # atom_loss = F.binary_cross_entropy(ap_atoms, bp_atoms)
-    targets = torch.argmax(bp_atoms, dim=-1).view(-1)
-    atom_loss = F.cross_entropy(ap_atoms.view(
-        targets.shape[0], model.total_atoms), targets, reduction='none')
-
-    target_amp = b[..., 1].view(-1)
-    atom_loss = (atom_loss * target_amp).mean()
-
-    pos_amp_loss = pos_amp_loss * 1
-    atom_loss = atom_loss * 1
-
-    loss = pos_amp_loss + atom_loss
-    return loss
 
 
 
@@ -356,7 +349,7 @@ disc = Discriminator(
     internal_dim=512,
     out_dim=1,
     set_processor=DilatedStackSetProcessor,
-    reduction='mean',
+    reduction='last',
     judgement_activation=lambda x: x,
     process_edges=False).to(device)
 disc_optim = optimizer(disc, lr=1e-4)
@@ -369,8 +362,13 @@ def train_gen(batch):
     gen_optim.zero_grad()
     x = generate_latent(batch.shape[0])
     fake = gen.forward(x)
+
+    atoms = fake[:, :, 2:].reshape(-1, model.embedding_dim)
+    indices = model.to_indices(atoms)
+    residual = model.embeddings[indices] - atoms
+
     j = disc.forward(fake)
-    loss = torch.abs(1 - j).mean()
+    loss = torch.abs(1 - j).mean() + torch.norm(residual, dim=-1).mean()
     loss.backward()
     gen_optim.step()
     return loss, fake
@@ -397,7 +395,8 @@ optim = optimizer(ae, lr=1e-3)
 def train_ae(batch):
     optim.zero_grad()
     recon, encoded = ae.forward(batch)
-    loss = set_alignment_loss(recon, batch)
+    loss = set_alignment_loss(
+        recon, batch, process_edges=False, trheshold=0.5)
     # loss = set_loss.forward(recon, batch)
     loss.backward()
     optim.step()
