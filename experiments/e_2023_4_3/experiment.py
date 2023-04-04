@@ -98,8 +98,6 @@ def extract_atom_embedding(fm: torch.Tensor, d: torch.Tensor) -> torch.Tensor:
     full[:, start: stop] = a
     a = full @ model.embeddings
 
-    # print(scalar_pos.item(), scalar_amp.item(), a.max().item())
-
     embedding = torch.cat([
         position, 
         v, 
@@ -113,7 +111,7 @@ class SparseCodingLoss(nn.Module):
         super().__init__()
         self.embedding_dim = embedding_dim
         self.sparse_coding_steps = sparse_coding_steps
-        self.ordering = CanonicalOrdering(embedding_dim, dim=0)
+        self.ordering = CanonicalOrdering(embedding_dim)
     
     def _extract_embeddings(self, x):
         embeddings = model.encode(
@@ -127,14 +125,15 @@ class SparseCodingLoss(nn.Module):
         
         embeddings = torch.cat(final_embeddings, dim=1)
         embeddings = self.ordering.forward(embeddings)
-        trace['embedding'] = embeddings
         return embeddings
     
     def forward(self, a, b):
-        # print('RECON')
+
         ae = self._extract_embeddings(a)
-        # print('ORIG')
+        trace['recon_embeddings'] = ae
+
         be = self._extract_embeddings(b)
+        trace['orig_embeddings'] = be
 
         return F.mse_loss(ae, be)
 
@@ -148,9 +147,8 @@ class Generator(nn.Module):
     
     def forward(self, x):
         x = self.net(x)
-        x = max_norm(x, dim=-1)
+        # x = max_norm(x, dim=-1)
         return x
-
 
 
 gen = OverfitRawAudio((1, 1, exp.n_samples), std=1e-5).to(device)
@@ -181,7 +179,10 @@ class PointCloudAudioLoss(BaseExperimentRunner):
 
         self.example = example.data.cpu().numpy()
     
-    def view_embeddings(self):
-        return trace['embedding'].data.cpu().numpy()[0]
+    def recon_embeddings(self):
+        return trace['recon_embeddings'].data.cpu().numpy()[0]
+    
+    def orig_embeddings(self):
+        return trace['orig_embeddings'].data.cpu().numpy()[0]
     
     
