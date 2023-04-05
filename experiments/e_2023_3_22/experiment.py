@@ -1,4 +1,5 @@
 from collections import defaultdict
+import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -64,14 +65,14 @@ class DilatedStackSetProcessor(nn.Module):
         x = x.permute(0, 2, 1)
         return x
 
-snap_embeddings = True
+snap_embeddings = True # biggest positive contribution yet
 encode_edges = False
-canonical_ordering_dim = 0
+canonical_ordering_dim = 0 # canonical ordering by time seems to work best
 nerf_generator = False
 max_amp = 15
-encode_pos_and_amp = False
-encoder_class = TransformerSetProcessor
-decoder_class = TransformerSetProcessor
+encode_pos_and_amp = False # this seems to negatively affect convergence by quite a bit
+encoder_class = DilatedStackSetProcessor
+decoder_class = DilatedStackSetProcessor
 
 
 class Generator(nn.Module):
@@ -297,8 +298,8 @@ def pos_encode_feature(x, n_freqs):
 def compute_full_embedding(a: torch.Tensor):
     pos, amp, atom = a[..., :1], a[..., 1:2], a[..., 2:]
 
-    pos = pos_encode_feature(pos, n_freqs=16)
-    amp = pos_encode_feature(amp, n_freqs=16)
+    pos = pos_encode_feature(pos * np.pi, n_freqs=16)
+    amp = pos_encode_feature((amp / 20) * np.pi, n_freqs=16)
 
     final = torch.cat([pos, amp, atom], dim=-1)
     return final
