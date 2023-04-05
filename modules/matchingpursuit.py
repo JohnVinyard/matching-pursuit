@@ -242,7 +242,7 @@ def sparse_code(
         residual -= sparse
 
     if extract_atom_embedding is not None:
-        return embeddings
+        return embeddings, residual
 
     if not flatten:
         return instances, scatter_segments

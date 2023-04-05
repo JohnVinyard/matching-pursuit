@@ -30,6 +30,9 @@ class BaseExperimentRunner(object):
             item = item.view(-1, 1, self.exp.n_samples)
             yield item
 
+    def after_training_iteration(self):
+        pass
+
     def run(self):
         for i, item in enumerate(self.iter_items()):
             self.real = item
@@ -38,3 +41,5 @@ class BaseExperimentRunner(object):
             self.fake = r
 
             print(i, l.item())
+
+            self.after_training_iteration()

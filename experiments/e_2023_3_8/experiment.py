@@ -74,7 +74,12 @@ class BandSpec(object):
     def embeddings(self):
         if self._embeddings is not None:
             return self._embeddings
+        
 
+        # self._embeddings = torch.eye(self.n_atoms, device=device)
+        # self._embeddings = torch.zeros(self.n_atoms, 40, device=device).uniform_(-1, 1)
+        # return self._embeddings
+    
         # compute embeddings for each element in the dictionary
         """
         1. resample to canonical size/sampling rate
@@ -83,6 +88,7 @@ class BandSpec(object):
         1. compute chroma
         1. global pooling operation(s)
         """
+
 
         with torch.no_grad():
             n_bands = 128
@@ -161,7 +167,7 @@ class BandSpec(object):
         return d
 
     def encode(self, batch, steps=16, extract_embeddings=None):
-        encoding = sparse_code(
+        encoding, residual = sparse_code(
             batch,
             self.d,
             steps,
@@ -170,7 +176,7 @@ class BandSpec(object):
             extract_atom_embedding=extract_embeddings)
         
         if extract_embeddings:
-            return encoding
+            return encoding, residual
 
         instances, scatter = encoding
 

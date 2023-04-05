@@ -8,7 +8,7 @@ from config.experiment import Experiment
 from modules.matchingpursuit import sparse_code
 from modules.normalization import max_norm
 from modules.overfitraw import OverfitRawAudio
-from modules.pointcloud import CanonicalOrdering
+from modules.pointcloud import CanonicalOrdering, greedy_set_alignment
 from modules.sparse import sparsify
 from scalar_scheduling import pos_encode_feature
 from time_distance import optimizer
@@ -75,28 +75,29 @@ def extract_atom_embedding(fm: torch.Tensor, d: torch.Tensor) -> torch.Tensor:
     position = position * rng[None, None, :]
 
     # scalar time value
-    scalar_pos = position = torch.sum(position, dim=(1, 2)).view(batch, 1)
+    position = torch.sum(position, dim=(1, 2)).view(batch, 1) * 20
     # encoded time value
-    position = pos_encode_feature(position, n_freqs=16)
+    # position = pos_encode_feature(position * np.pi, n_freqs=16)
 
     # scalar amp value
-    scalar_amp = v = values.view(batch, 1)
+    v = values.view(batch, 1)
     # encoded amp value
-    v = pos_encode_feature(v, n_freqs=16)
+    # v = pos_encode_feature(v / 20, n_freqs=16)
 
     # atom embedding
     n_atoms, d_size = d.shape
 
-    # index = model.index_of_dict_size(d_size)
-    start = index * n_atoms
-    stop = start + n_atoms
+    # start = index * n_atoms
+    # stop = start + n_atoms
 
-    full = torch.zeros(batch, model.total_atoms, device=fm.device)
+    # full = torch.zeros(batch, model.total_atoms, device=fm.device, requires_grad=True)
     a = torch.sum(fm, dim=-1, keepdim=True) # (batch, n_atoms, 1)
-    oh = a = soft_dirac(a, dim=1).view(-1, n_atoms)
+    a = soft_dirac(a, dim=1).view(-1, n_atoms)
 
-    full[:, start: stop] = a
-    a = full @ model.embeddings
+    # full[:, start: stop] = a
+    # a = full @ model.embeddings
+
+    a = a @ list(model.bands.values())[index].embeddings
 
     embedding = torch.cat([
         position, 
@@ -111,31 +112,41 @@ class SparseCodingLoss(nn.Module):
         super().__init__()
         self.embedding_dim = embedding_dim
         self.sparse_coding_steps = sparse_coding_steps
-        self.ordering = CanonicalOrdering(embedding_dim)
+        self.ordering = CanonicalOrdering(embedding_dim, dim=1)
     
     def _extract_embeddings(self, x):
-        embeddings = model.encode(
+        results = model.encode(
             x, 
             steps=self.sparse_coding_steps, 
             extract_embeddings=extract_atom_embedding)
         
         final_embeddings = []
-        for e in embeddings.values():
+        residuals = []
+
+        for e, residual in results.values():
             final_embeddings.extend(e)
+            residuals.extend(residual)
         
         embeddings = torch.cat(final_embeddings, dim=1)
         embeddings = self.ordering.forward(embeddings)
-        return embeddings
+
+        residual = torch.cat(residuals, dim=-1)
+
+        return embeddings, residual
+    
+    def extract_embeddings(self, x):
+        return self._extract_embeddings(x)
     
     def forward(self, a, b):
-
-        ae = self._extract_embeddings(a)
+        ae, a_res = self._extract_embeddings(a)
         trace['recon_embeddings'] = ae
-
-        be = self._extract_embeddings(b)
+        be, b_res = self._extract_embeddings(b)
         trace['orig_embeddings'] = be
 
-        return F.mse_loss(ae, be)
+        a_res_norm = torch.norm(a_res.view(-1, exp.n_samples), dim=-1)
+        b_res_norm = torch.norm(b_res.view(-1, exp.n_samples), dim=-1)
+
+        return F.mse_loss(ae, be) + torch.abs(a_res_norm - b_res_norm).mean()
 
 
 class Generator(nn.Module):
@@ -151,22 +162,48 @@ class Generator(nn.Module):
         return x
 
 
-gen = OverfitRawAudio((1, 1, exp.n_samples), std=1e-5).to(device)
+gen = OverfitRawAudio((1, 1, exp.n_samples), std=1e-6).to(device)
 # gen = Generator().to(device)
 optim = optimizer(gen, lr=1e-2)
 
+n_pos_features = 1
+n_amp_features = 1
+total_embedding_dim = model.embedding_dim + n_pos_features + n_amp_features
+
 loss_func = SparseCodingLoss(
-    33 + 33 + model.embedding_dim, 
+    total_embedding_dim, 
     sparse_coding_steps=32).to(device)
 
 latent = torch.zeros(1, 128).uniform_(-1, 1).to(device)
 
+overfit_embeddings = []
+
 def train(batch, i):
+
+    b = batch.shape[0]
+
     optim.zero_grad()
     recon = gen.forward(latent.clone())
-    loss = loss_func.forward(recon, batch)
+
+    try:
+        orig_embeddings, orig_res = overfit_embeddings[0]
+    except IndexError:
+        with torch.no_grad():
+            orig_embeddings, orig_res = loss_func.extract_embeddings(batch)
+            trace['orig_embeddings'] = orig_embeddings
+            overfit_embeddings.append([orig_embeddings, orig_res])
+    
+    recon_embeddings, recon_res = loss_func.extract_embeddings(recon)
+
+    orig_res_norm = torch.norm(orig_res.view(b, -1), dim=-1)
+    recon_res_norm = torch.norm(recon_res.view(b, -1), dim=-1)
+    trace['recon_embeddings'] = recon_embeddings
+
+
+    loss = (F.mse_loss(recon_embeddings, orig_embeddings) * 10000) + recon_res_norm.mean()
     loss.backward()
     optim.step()
+
     return loss, recon
 
 @readme
@@ -184,5 +221,29 @@ class PointCloudAudioLoss(BaseExperimentRunner):
     
     def orig_embeddings(self):
         return trace['orig_embeddings'].data.cpu().numpy()[0]
+    
+
+    def recon_pos(self):
+        return self.recon_embeddings()[:, :33]
+    
+    def recon_amp(self):
+        return self.recon_embeddings()[:, 33:66]
+    
+    def recon_atom(self):
+        return self.recon_embeddings()[:, 66:]
+    
+    def orig_pos(self):
+        return self.orig_embeddings()[:, :33]
+    
+    def orig_amp(self):
+        return self.orig_embeddings()[:, 33:66]
+    
+    def orig_atom(self):
+        return self.orig_embeddings()[:, 66:]
+
+    def after_training_iteration(self):
+        # print('REAL AUDIO', self.real.max())
+        # print('RECON AUDIO', self.fake.max())
+        pass
     
     
