@@ -70,9 +70,10 @@ encode_edges = False
 canonical_ordering_dim = 0 # canonical ordering by time seems to work best
 nerf_generator = False
 max_amp = 15
-encode_pos_and_amp = False # this seems to negatively affect convergence by quite a bit
-encoder_class = DilatedStackSetProcessor
-decoder_class = DilatedStackSetProcessor
+encode_pos_and_amp = False # when True, this seems to negatively affect convergence by quite a bit
+encoder_class = TransformerSetProcessor
+decoder_class = TransformerSetProcessor
+aggregation_method = 'mean'
 
 
 class Generator(nn.Module):
@@ -231,7 +232,7 @@ class AutoEncoder(nn.Module):
             internal_dim=512, 
             out_dim=latent_dim, 
             set_processor=encoder_class, 
-            reduction='last', 
+            reduction=aggregation_method, 
             judgement_activation=lambda x: x, 
             process_edges=encode_edges)
         
