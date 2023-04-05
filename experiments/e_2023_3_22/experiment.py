@@ -70,10 +70,9 @@ encode_edges = False
 canonical_ordering_dim = 0 # canonical ordering by time seems to work best
 nerf_generator = False
 max_amp = 15
-encode_pos_and_amp = False # when True, this seems to negatively affect convergence by quite a bit
-encoder_class = TransformerSetProcessor
-decoder_class = TransformerSetProcessor
-aggregation_method = 'mean'
+encoder_class = DilatedStackSetProcessor
+decoder_class = DilatedStackSetProcessor
+aggregation_method = 'last'
 
 
 class Generator(nn.Module):
@@ -281,7 +280,7 @@ set_loss = SetRelationshipLoss(
     n_edges=256).to(device)
 
 
-pos_amp_dim = 33 if encode_pos_and_amp else 1
+pos_amp_dim = 1
 canonical = CanonicalOrdering(
     model.embedding_dim + (pos_amp_dim * 2), 
     dim=canonical_ordering_dim).to(device)
@@ -308,31 +307,27 @@ def compute_full_embedding(a: torch.Tensor):
 
 # TODO: move into point cloud
 def set_alignment_loss(a: torch.Tensor, b: torch.Tensor, process_edges: bool = False, trheshold: float = 0.5):
-    if process_edges:
-        a = extract_graph_edges(a, trheshold)
-        a = canonical.forward(a)
-        a_size = a.shape[1]
+    # if process_edges:
+    #     a = extract_graph_edges(a, trheshold)
+    #     a = canonical.forward(a)
+    #     a_size = a.shape[1]
 
-        b = extract_graph_edges(b, trheshold)
-        b = canonical.forward(b)
-        b_size = b.shape[1]
+    #     b = extract_graph_edges(b, trheshold)
+    #     b = canonical.forward(b)
+    #     b_size = b.shape[1]
 
-        min_size = max(min(a_size, b_size), 256)
+    #     min_size = max(min(a_size, b_size), 256)
 
-        a = a[:, :min_size, :]
-        b = b[:, :min_size, :]
+    #     a = a[:, :min_size, :]
+    #     b = b[:, :min_size, :]
 
-    else:
+    # else:
 
-        if encode_pos_and_amp:
-            a = compute_full_embedding(a)
-            b = compute_full_embedding(b)
+    #     if encode_pos_and_amp:
 
-        a = canonical.forward(a)
-        b = canonical.forward(b)
+    #     a = canonical.forward(a)
+    #     b = canonical.forward(b)
 
-    # TODO: Try fourier features/positional encodings
-    # for amp and time
     return F.mse_loss(a, b)
 
 
@@ -393,7 +388,7 @@ def train_disc(batch):
 
 
 ae = AutoEncoder().to(device)
-optim = optimizer(ae, lr=1e-4)
+optim = optimizer(ae, lr=1e-3)
 
 
 def train_ae(batch):
@@ -516,11 +511,11 @@ class MatchingPursuitGAN(BaseExperimentRunner):
         for i, item in enumerate(self.iter_items()):
             self.real = item
 
-            if self.vec is None:
-                with torch.no_grad():
-                    instances = model.encode(item, steps=steps)
-                    vec = to_atom_vectors(instances)
-                    self.vec = vec
+            with torch.no_grad():
+                instances = model.encode(item, steps=steps)
+                vec = to_atom_vectors(instances)
+                vec = canonical.forward(vec)
+                self.vec = vec
 
             # if i % 2 == 0:
             #     l, r = train_gen(vec)
@@ -530,7 +525,7 @@ class MatchingPursuitGAN(BaseExperimentRunner):
             #     l = train_disc(vec)
             #     print('D', l.item())
             
-            l, f, e = train_ae(self.vec)
+            l, f, e = train_ae(vec)
             self.encoded = e
             self.fake = f
             print(l.item())
