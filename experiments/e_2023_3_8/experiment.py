@@ -167,7 +167,7 @@ class BandSpec(object):
         return d
 
     def encode(self, batch, steps=16, extract_embeddings=None):
-        encoding, residual = sparse_code(
+        encoding = sparse_code(
             batch,
             self.d,
             steps,
@@ -176,7 +176,8 @@ class BandSpec(object):
             extract_atom_embedding=extract_embeddings)
         
         if extract_embeddings:
-            return encoding, residual
+            # tuple of (encoding, residual)
+            return encoding
 
         instances, scatter = encoding
 
