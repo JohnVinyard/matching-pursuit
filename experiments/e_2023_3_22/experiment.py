@@ -146,7 +146,7 @@ class Generator(nn.Module):
         
 
         pos = torch.sigmoid(self.to_pos.forward(x))
-        amp = torch.sigmoid(self.to_amp.forward(x)) * max_amp
+        amp = torch.abs(self.to_amp.forward(x))
 
         final = torch.cat([pos, amp, atom], dim=-1)
         return final
@@ -339,7 +339,8 @@ gen = Generator(
     n_events=n_events, 
     nerf_like=False, 
     set_processor=DilatedStackSetProcessor,
-    softmax=lambda x: unit_norm(torch.abs(x), dim=-1)).to(device)
+    softmax=lambda x: torch.abs(x),
+    snap_embeddings=True).to(device)
 gen_optim = optimizer(gen, lr=1e-4)
 
 
@@ -348,7 +349,7 @@ disc = Discriminator(
     internal_dim=512,
     out_dim=1,
     set_processor=DilatedStackSetProcessor,
-    reduction='last',
+    reduction=aggregation_method,
     judgement_activation=lambda x: x,
     process_edges=False).to(device)
 disc_optim = optimizer(disc, lr=1e-4)
@@ -361,13 +362,8 @@ def train_gen(batch):
     gen_optim.zero_grad()
     x = generate_latent(batch.shape[0])
     fake = gen.forward(x)
-
-    atoms = fake[:, :, 2:].reshape(-1, model.embedding_dim)
-    indices = model.to_indices(atoms)
-    residual = model.embeddings[indices] - atoms
-
     j = disc.forward(fake)
-    loss = torch.abs(1 - j).mean() + torch.norm(residual, dim=-1).mean()
+    loss = torch.abs(1 - j).mean()
     loss.backward()
     gen_optim.step()
     return loss, fake
@@ -459,6 +455,7 @@ class MatchingPursuitGAN(BaseExperimentRunner):
         self.fake = None
         self.vec = None
         self.encoded = None
+        self.model = ae
     
     def view_embeddings(self, size: int = None):
         if size is None:
