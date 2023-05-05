@@ -9,8 +9,12 @@ from datetime import datetime
 import os
 import numpy as np
 import torch
+from conjure.serve import serve_conjure
+
+from train.experiment_runner import BaseExperimentRunner
 
 torch.backends.cudnn.benchmark = True
+
 
 def templatized_experiment(class_name):
     experiment_template = f'''
@@ -41,6 +45,7 @@ class {class_name}(BaseExperimentRunner):
         super().__init__(stream, train, exp)
     '''
     return experiment_template
+
 
 def new_experiment(class_name=None, postfix=''):
     dt = datetime.now()
@@ -87,17 +92,25 @@ if __name__ == '__main__':
     if args.new:
         new_experiment(args.classname, args.postfix)
     else:
-        app = zounds.ZoundsApp(locals=locals(), globals=globals())
-        app.start_in_thread(os.environ['PORT'])
+        # app = zounds.ZoundsApp(locals=locals(), globals=globals())
+        # app.start_in_thread(os.environ['PORT'])
+
+        port = os.environ['PORT']
 
         stream = AudioIterator(
-            args.batch_size, 
-            2**args.nsamples, 
-            zounds.SR22050(), 
-            args.normalize, 
+            args.batch_size,
+            2**args.nsamples,
+            zounds.SR22050(),
+            args.normalize,
             args.overfit)
 
-        exp = Current(stream)
+        exp: BaseExperimentRunner = Current(stream, port=port)
+
+        serve_conjure(
+            exp.conjure_funcs,
+            port=port,
+            n_workers=2
+        )
 
         if exp.__doc__ is None or exp.__doc__.strip() == '':
             raise ValueError('Please write a little about your experiment')
