@@ -99,7 +99,7 @@ class PointcloudAutoencoder(BaseExperimentRunner):
         
         @numpy_conjure(self.collection)
         def orig_spec(x: np.ndarray):
-            return x
+            return x / (x.max() + 1e-12)
         
         @audio_conjure(self.collection)
         def fake_audio(x: zounds.AudioSamples):
@@ -108,7 +108,7 @@ class PointcloudAutoencoder(BaseExperimentRunner):
         
         @numpy_conjure(self.collection)
         def fake_spec(x: np.ndarray):
-            return x
+            return x / (x.max() + 1e-12)
         
         self.loss_func = loss_func
         self._orig_audio = orig_audio
@@ -119,8 +119,8 @@ class PointcloudAutoencoder(BaseExperimentRunner):
         return [
             loss_func,
             orig_audio,
-            # orig_spec,
-            fake_audio,
+            orig_spec,
+            # fake_audio,
             # fake_spec
         ]
 
