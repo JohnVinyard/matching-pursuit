@@ -24,8 +24,6 @@ class BaseExperimentRunner(object):
 
     @property
     def experiment_dir_name(self):
-        # print("File      Path:", Path(__file__).absolute())
-        # print("Directory Path:", Path().absolute()) # Directory of current working directory, not __file__
         return self.__module__.split('.')[1]
 
     @property

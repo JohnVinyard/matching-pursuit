@@ -4,6 +4,7 @@ from torch.nn import functional as F
 import zounds
 from config.experiment import Experiment
 from modules.dilated import DilatedStack
+from modules.normalization import max_norm
 from time_distance import optimizer
 from train.experiment_runner import BaseExperimentRunner
 from upsample import ConvUpsample
@@ -22,15 +23,16 @@ exp = Experiment(
 class AutoEncoder(nn.Module):
     def __init__(self):
         super().__init__()
-        self.encoder = DilatedStack(exp.model_dim, [1, 3, 9, 1])
-        self.decoder = ConvUpsample(128, 32, 8, end_size=exp.n_samples, mode='learned', out_channels=1)
+        self.encoder = DilatedStack(exp.model_dim, [1, 3, 9, 27, 81, 1])
+        self.decoder = ConvUpsample(128, 32, 8, end_size=exp.n_samples, mode='nearest', out_channels=1)
         self.apply(lambda x: exp.init_weights(x))
 
     def forward(self, x):
         spec = exp.pooled_filter_bank(x)
         encoded = self.encoder.forward(spec)
-        encoded = encoded.mean(dim=-1)
+        encoded, _ = encoded.max(dim=-1)
         decoded = self.decoder.forward(encoded)
+        decoded = max_norm(decoded)
         return decoded
 
 
@@ -88,7 +90,6 @@ class PointcloudAutoencoder(BaseExperimentRunner):
             Append values to a time series
             """
             d['values'] = np.concatenate([d['values'], l.data.cpu().numpy().reshape((1,))], axis=-1)
-            print(d['values'].shape)
             return d['values'].reshape((1, -1))
         
         @audio_conjure(self.collection)
@@ -118,9 +119,9 @@ class PointcloudAutoencoder(BaseExperimentRunner):
         return [
             loss_func,
             orig_audio,
-            orig_spec,
+            # orig_spec,
             fake_audio,
-            fake_spec
+            # fake_spec
         ]
 
     
