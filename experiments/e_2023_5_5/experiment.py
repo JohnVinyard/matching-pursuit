@@ -118,10 +118,10 @@ class PointcloudAutoencoder(BaseExperimentRunner):
 
         return [
             loss_func,
-            orig_audio,
+            # orig_audio,
             orig_spec,
-            fake_audio,
-            fake_spec
+            # fake_audio,
+            # fake_spec
         ]
 
     
