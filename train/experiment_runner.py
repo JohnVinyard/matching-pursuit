@@ -6,6 +6,7 @@ import zounds
 from conjure import LmdbCollection
 
 from pathlib import Path
+from conjure import time_series_conjure, audio_conjure, numpy_conjure
 
 
 class BaseExperimentRunner(object):
@@ -21,6 +22,68 @@ class BaseExperimentRunner(object):
             self.port = port
             self.collection = LmdbCollection(
                 str(self.experiment_path).encode(), port=self.port)
+        self.loss_func = None
+
+        self._orig_audio = None
+        self._orig_spec = None
+        self._fake_audio = None
+        self._fake_spec = None
+
+    def after_training_iteration(self, l):
+        self.loss_func(l)
+        self._orig_audio(self.orig())
+        self._orig_spec(self.real_spec())
+        self._fake_audio(self.listen())
+        self._fake_spec(self.fake_spec())
+
+    @property
+    def conjure_funcs(self):
+
+        d = {
+            'values': np.zeros((1,))
+        }
+
+        # TODO: Move into base class
+        @time_series_conjure(self.collection, 'loss')
+        def loss_func(l):
+            """
+            Append values to a time series
+            """
+            d['values'] = np.concatenate(
+                [d['values'], l.data.cpu().numpy().reshape((1,))], axis=-1)
+            return d['values'].reshape((1, -1))
+
+        @audio_conjure(self.collection)
+        def orig_audio(x: zounds.AudioSamples):
+            bio = x.encode()
+            return bio.read()
+
+        @numpy_conjure(self.collection)
+        def orig_spec(x: np.ndarray):
+            return (x / (x.max() + 1e-12))
+
+        @audio_conjure(self.collection)
+        def fake_audio(x: zounds.AudioSamples):
+            bio = x.encode()
+            return bio.read()
+
+        @numpy_conjure(self.collection)
+        def fake_spec(x: np.ndarray):
+            return (x / (x.max() + 1e-12))
+
+        self.loss_func = loss_func
+        self._orig_audio = orig_audio
+        self._orig_spec = orig_spec
+        self._fake_audio = fake_audio
+        self._fake_spec = fake_spec
+
+        return [
+            loss_func,
+            orig_audio,
+            orig_spec,
+            fake_audio,
+            fake_spec
+        ]
 
     @property
     def experiment_dir_name(self):
@@ -29,10 +92,6 @@ class BaseExperimentRunner(object):
     @property
     def experiment_path(self):
         return Path('experiments') / Path(self.experiment_dir_name) / Path('experiment_data')
-
-    @property
-    def conjure_funcs(self):
-        return []
 
     def orig(self) -> zounds.AudioSamples:
         return playable(self.real, self.exp.samplerate)
@@ -50,9 +109,6 @@ class BaseExperimentRunner(object):
         for i, item in enumerate(self.stream):
             item = item.view(-1, 1, self.exp.n_samples)
             yield item
-
-    def after_training_iteration(self, l):
-        pass
 
     def run(self):
         for i, item in enumerate(self.iter_items()):

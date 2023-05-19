@@ -92,9 +92,6 @@ if __name__ == '__main__':
     if args.new:
         new_experiment(args.classname, args.postfix)
     else:
-        # app = zounds.ZoundsApp(locals=locals(), globals=globals())
-        # app.start_in_thread(os.environ['PORT'])
-
         port = os.environ['PORT']
 
         stream = AudioIterator(
