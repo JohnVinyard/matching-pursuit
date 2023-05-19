@@ -7,7 +7,7 @@ import zounds
 from config.experiment import Experiment
 from modules.dilated import DilatedStack
 from modules.linear import LinearOutputStack
-from modules.normalization import ExampleNorm, unit_norm
+from modules.normalization import ExampleNorm, max_norm, unit_norm
 from modules.pointcloud import CanonicalOrdering, encode_events, extract_graph_edges
 from modules.pos_encode import ExpandUsingPosEncodings, pos_encode_feature
 from scalar_scheduling import pos_encoded
@@ -16,6 +16,7 @@ from train.experiment_runner import BaseExperimentRunner
 from util import device, playable
 from util.readmedocs import readme
 from experiments.e_2023_3_8.experiment import model
+from conjure import numpy_conjure
 
 exp = Experiment(
     samplerate=zounds.SR22050(),
@@ -25,14 +26,10 @@ exp = Experiment(
     kernel_size=512)
 
 
-def train(batch, i):
-    pass
-
 
 latent_dim = 128
 steps = 32
 n_events = steps * 7
-
 
 
 class TransformerSetProcessor(nn.Module):
@@ -305,34 +302,6 @@ def compute_full_embedding(a: torch.Tensor):
     return final
 
 
-# TODO: move into point cloud
-def set_alignment_loss(a: torch.Tensor, b: torch.Tensor, process_edges: bool = False, trheshold: float = 0.5):
-    # if process_edges:
-    #     a = extract_graph_edges(a, trheshold)
-    #     a = canonical.forward(a)
-    #     a_size = a.shape[1]
-
-    #     b = extract_graph_edges(b, trheshold)
-    #     b = canonical.forward(b)
-    #     b_size = b.shape[1]
-
-    #     min_size = max(min(a_size, b_size), 256)
-
-    #     a = a[:, :min_size, :]
-    #     b = b[:, :min_size, :]
-
-    # else:
-
-    #     if encode_pos_and_amp:
-
-    #     a = canonical.forward(a)
-    #     b = canonical.forward(b)
-
-    return F.mse_loss(a, b)
-
-
-
-
 gen = Generator(
     latent_dim=latent_dim, 
     internal_dim=512, 
@@ -390,13 +359,12 @@ optim = optimizer(ae, lr=1e-3)
 def train_ae(batch):
     optim.zero_grad()
     recon, encoded = ae.forward(batch)
-    loss = set_alignment_loss(
-        recon, batch, process_edges=False, trheshold=0.5)
-    # loss = set_loss.forward(recon, batch)
+    # No set alignment, we expect atoms to produced in the same
+    # order they were seen
+    loss = F.mse_loss(recon, batch)
     loss.backward()
     optim.step()
     return loss, recon, encoded
-
 
 
 
@@ -447,6 +415,9 @@ def to_instances(vectors):
 
     return instances
 
+def train(batch):
+    pass
+
 
 @readme
 class MatchingPursuitGAN(BaseExperimentRunner):
@@ -467,14 +438,14 @@ class MatchingPursuitGAN(BaseExperimentRunner):
     def z(self):
         return self.encoded.squeeze().data.cpu().numpy()
 
-    def pos_amp(self):
-        return self.fake.data.cpu().numpy()[0, :, :2]
+    # def pos_amp(self):
+    #     return self.fake.data.cpu().numpy()[0, :, :2]
 
-    def atoms(self):
-        return self.fake.data.cpu().numpy()[0, :, 2:]
+    # def atoms(self):
+    #     return self.fake.data.cpu().numpy()[0, :, 2:]
     
-    def real_atoms(self):
-        return self.vec.data.cpu().numpy()[0, :, 2:]
+    # def real_atoms(self):
+    #     return self.vec.data.cpu().numpy()[0, :, 2:]
 
     def listen(self):
         with torch.no_grad():
@@ -483,6 +454,9 @@ class MatchingPursuitGAN(BaseExperimentRunner):
             recon = model.decode(inst, shapes=model.shape_dict(f.shape[0]))
             return playable(recon, exp.samplerate)
 
+    # TODO: What happens to something like this?  It's typically something
+    # I would have tried once or twice at the beginning of a session to ensure
+    # that the implementation is correct
     def round_trip(self):
         with torch.no_grad():
             target = self.real[:1, ...]
@@ -497,9 +471,24 @@ class MatchingPursuitGAN(BaseExperimentRunner):
                 instances, shapes=model.shape_dict(target.shape[0]))
 
             return playable(recon, exp.samplerate)
+    
+    @property
+    def conjure_funcs(self):
+        funcs = super().conjure_funcs
+
+        @numpy_conjure()
+        def latent(x):
+            return max_norm(x)
+        
+        self._latent = latent
+        return [self._latent, *funcs]
+
+    def after_training_iteration(self, l):
+        val = super().after_training_iteration(l)
+        self._latent(self.z())
+        return val
 
     def run(self):
-        # initialize embeddings
         print('initializing embeddings')
         for size in model.band_sizes:
             self.view_embeddings(size)
@@ -514,15 +503,9 @@ class MatchingPursuitGAN(BaseExperimentRunner):
                 vec = canonical.forward(vec)
                 self.vec = vec
 
-            # if i % 2 == 0:
-            #     l, r = train_gen(vec)
-            #     self.fake = r
-            #     print('G', l.item())
-            # else:
-            #     l = train_disc(vec)
-            #     print('D', l.item())
-            
             l, f, e = train_ae(vec)
             self.encoded = e
             self.fake = f
-            print(l.item())
+            print(i, l.item())
+
+            self.after_training_iteration(l)
