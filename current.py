@@ -41,8 +41,8 @@ def train(batch, i):
 
 @readme
 class {class_name}(BaseExperimentRunner):
-    def __init__(self, stream):
-        super().__init__(stream, train, exp)
+    def __init__(self, stream, port=None):
+        super().__init__(stream, train, exp, port=port)
     '''
     return experiment_template
 

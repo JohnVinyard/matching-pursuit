@@ -3,6 +3,25 @@ from torch import jit
 from torch import nn
 from torch.nn import functional as F
 
+
+def soft_dirac(x: torch.Tensor, dim: int = -1) -> torch.Tensor:
+    x = torch.softmax(x, dim=dim)
+
+    values, indices = torch.max(x, dim=dim, keepdim=True)
+
+    output = torch.zeros_like(x, requires_grad=True)
+    ones = torch.ones_like(values, requires_grad=True)
+
+    output = torch.scatter(output, dim=dim, index=indices, src=ones)
+
+    forward = output
+    backward = x
+
+    y = backward + (forward - backward).detach()
+    return y
+
+
+
 def sparsify(x, n_to_keep, return_indices=False, soft=False, sharpen=False, salience=None):
 
     orig = x
@@ -31,7 +50,6 @@ def sparsify(x, n_to_keep, return_indices=False, soft=False, sharpen=False, sali
     out = torch.zeros_like(x)
     out = torch.scatter(out, dim=-1, index=indices, src=values)
     out = out.reshape(*orig_shape)
-
 
     if salience is not None:
         salience = salience.view(*out.shape)
@@ -71,7 +89,8 @@ def to_sparse_vectors_with_context(x, n_elements):
         val = x[tuple(index)]
         one_hot[batch, el, index[1]] = val
 
-    context = torch.sum(x, dim=-1, keepdim=True).repeat(1, 1, n_elements).permute(0, 2, 1)
+    context = torch.sum(x, dim=-1, keepdim=True).repeat(1,
+                                                        1, n_elements).permute(0, 2, 1)
 
     return one_hot, context, positions
 
@@ -103,6 +122,45 @@ def sparsify_vectors(x, attn, n_to_keep, normalize=True, dense=False):
     else:
         latents = torch.cat(latents, dim=0).view(batch, n_to_keep, channels)
         return latents, indices
+
+
+def to_key_points(x: torch.Tensor, n_to_keep: int = 64) -> torch.Tensor:
+    points = []
+    batch, width, height = x.shape
+
+    x = x.view(batch, -1)
+    indices = torch.argsort(x, dim=-1).flip(dims=(-1,))
+
+    w_range = torch.linspace(1, width + 1, width, device=x.device)
+    h_range = torch.linspace(1, height + 1, height, device=x.device)
+
+    for i in range(batch):
+        for j in range(n_to_keep):
+            index = indices[i, j]
+
+            row_index = index % width
+            col_index = index // height
+
+            value = x[i, index]
+            width_span = torch.zeros(width, device=x.device)
+            height_span = torch.zeros(height, device=x.device)
+
+            width_span[row_index] = value
+            width_span = soft_dirac(width_span, dim=-1)
+
+            height_span[col_index] = value
+            height_span = soft_dirac(height_span, dim=-1)
+
+            w_loc = w_range @ width_span
+            h_loc = h_range @ height_span
+
+            vec = torch.cat([value.view(1), w_loc.view(1), h_loc.view(1)])[None, :]
+
+            points.append(vec)
+    
+    points = torch.cat(points, dim=0)
+
+    return points.view(batch, -1, 3)
 
 
 class AtomPlacement(jit.ScriptModule):

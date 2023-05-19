@@ -27,3 +27,4 @@ def soft_clamp(x):
     x_forward = torch.clamp(x_backward, 0, 1)
     y = x_backward + (x_forward - x_backward).detach()
     return y
+

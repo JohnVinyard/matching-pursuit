@@ -1,13 +1,13 @@
 import zounds
-from modules.pif import AuditoryImage
-from modules.psychoacoustic import PsychoacousticFeature
+# from modules.pif import AuditoryImage
+# from modules.psychoacoustic import PsychoacousticFeature
 
 from util import device
 from util.weight_init import make_initializer
 import torch
 from torch.nn import functional as F
 
-from modules import AuditoryImage
+# from modules import AuditoryImage
 
 
 class Experiment(object):
@@ -45,34 +45,34 @@ class Experiment(object):
 
         self.init_weights = make_initializer(weight_init)
 
-        self.pif = PsychoacousticFeature().to(device)
+    #     self.pif = PsychoacousticFeature().to(device)
 
-        self.aim = AuditoryImage(
-            512, 
-            128, 
-            do_windowing=False, 
-            check_cola=False, 
-            residual=self.residual_loss).to(device)
+    #     self.aim = AuditoryImage(
+    #         512, 
+    #         128, 
+    #         do_windowing=False, 
+    #         check_cola=False, 
+    #         residual=self.residual_loss).to(device)
     
-    def pooled_filter_bank(self, x):
-        orig_shape = x.shape[-1]
-        x = self.fb.forward(x, normalize=False)
-        x = self.fb.temporal_pooling(x, 512, 256)
-        x = x[..., :orig_shape // 256]
-        return x
+    # def pooled_filter_bank(self, x):
+    #     orig_shape = x.shape[-1]
+    #     x = self.fb.forward(x, normalize=False)
+    #     x = self.fb.temporal_pooling(x, 512, 256)
+    #     x = x[..., :orig_shape // 256]
+    #     return x
 
-    def perceptual_feature(self, x):
-        # bands = self.pif.compute_feature_dict(x)
-        # return torch.cat(list(bands.values()), dim=-1)
+    # def perceptual_feature(self, x):
+    #     # bands = self.pif.compute_feature_dict(x)
+    #     # return torch.cat(list(bands.values()), dim=-1)
 
-        x = self.fb.forward(x, normalize=False)
-        x = self.aim.forward(x)
-        return x
+    #     x = self.fb.forward(x, normalize=False)
+    #     x = self.aim.forward(x)
+    #     return x
 
-    def perceptual_loss(self, a, b, norm='l2'):
-        a = self.perceptual_feature(a)
-        b = self.perceptual_feature(b)
-        if norm == 'l2':
-            return F.mse_loss(a, b)
-        else:
-            return torch.abs(a - b).sum()
+    # def perceptual_loss(self, a, b, norm='l2'):
+    #     a = self.perceptual_feature(a)
+    #     b = self.perceptual_feature(b)
+    #     if norm == 'l2':
+    #         return F.mse_loss(a, b)
+    #     else:
+    #         return torch.abs(a - b).sum()
