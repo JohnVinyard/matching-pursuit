@@ -208,7 +208,6 @@ class Discriminator(nn.Module):
 
 
 
-
 class ProduceEdges(nn.Module):
     def __init__(self, threshold: float = None):
         super().__init__()
@@ -351,7 +350,6 @@ def train_disc(batch):
 
 
 
-
 ae = AutoEncoder().to(device)
 optim = optimizer(ae, lr=1e-3)
 
@@ -382,8 +380,6 @@ def to_atom_vectors(instances):
     for b, item in enumerate(vec):
         final[b, :, 0] = item[:, 1]
         final[b, :, 1] = item[:, 2]
-        # oh = F.one_hot(item[:, 0][None, ...].long(),
-        #                num_classes=model.total_atoms)
         oh = model.to_embeddings(item[:, 0].long())
         final[b, :, 2:] = oh
 
@@ -421,8 +417,8 @@ def train(batch):
 
 @readme
 class MatchingPursuitGAN(BaseExperimentRunner):
-    def __init__(self, stream):
-        super().__init__(stream, train, exp)
+    def __init__(self, stream, port=None):
+        super().__init__(stream, train, exp, port=port)
         self.fake = None
         self.vec = None
         self.encoded = None
@@ -476,16 +472,20 @@ class MatchingPursuitGAN(BaseExperimentRunner):
     def conjure_funcs(self):
         funcs = super().conjure_funcs
 
-        @numpy_conjure()
-        def latent(x):
-            return max_norm(x)
+        @numpy_conjure(self.collection)
+        def latent(x: np.ndarray):
+            return x / (np.abs(x.max()) + 1e-12)
         
         self._latent = latent
-        return [self._latent, *funcs]
+        return [
+            self._latent, 
+            *funcs
+        ]
 
     def after_training_iteration(self, l):
         val = super().after_training_iteration(l)
-        self._latent(self.z())
+        l = self.z()
+        self._latent(l)
         return val
 
     def run(self):
