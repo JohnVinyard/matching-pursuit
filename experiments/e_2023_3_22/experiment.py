@@ -16,7 +16,7 @@ from train.experiment_runner import BaseExperimentRunner
 from util import device, playable
 from util.readmedocs import readme
 from experiments.e_2023_3_8.experiment import model
-from conjure import numpy_conjure
+from conjure import numpy_conjure, SupportedContentType
 
 exp = Experiment(
     samplerate=zounds.SR22050(),
@@ -40,7 +40,7 @@ class TransformerSetProcessor(nn.Module):
 
         encoder = nn.TransformerEncoderLayer(
             embedding_size, 4, dim, 0.1, batch_first=True)
-        self.net = nn.TransformerEncoder(encoder, 6, norm=ExampleNorm())
+        self.net = nn.TransformerEncoder(encoder, 6, norm=None)
         self.apply(lambda x: exp.init_weights(x))
 
     def forward(self, x):
@@ -67,9 +67,9 @@ encode_edges = False
 canonical_ordering_dim = 0 # canonical ordering by time seems to work best
 nerf_generator = False
 max_amp = 15
-encoder_class = DilatedStackSetProcessor
-decoder_class = DilatedStackSetProcessor
-aggregation_method = 'last'
+encoder_class = TransformerSetProcessor
+decoder_class = TransformerSetProcessor
+aggregation_method = 'mean'
 
 
 class Generator(nn.Module):
@@ -376,14 +376,14 @@ def to_atom_vectors(instances):
     vec = encode_for_transformer(instances).permute(0, 2, 1)
     final = torch.zeros(vec.shape[0], vec.shape[1],
                         2 + model.embedding_dim, device=device)
-
+    
     for b, item in enumerate(vec):
         final[b, :, 0] = item[:, 1]
         final[b, :, 1] = item[:, 2]
         oh = model.to_embeddings(item[:, 0].long())
         final[b, :, 2:] = oh
 
-    return final
+    return final.data.cpu().numpy()
 
 
 def to_instances(vectors):
@@ -415,6 +415,15 @@ def train(batch):
     pass
 
 
+def cached_encode(target, steps=32):
+    """
+    Encode individual audio segments
+    """
+    instances = model.encode(torch.from_numpy(target).to(device), steps=steps)
+    vecs = to_atom_vectors(instances)
+    return vecs
+
+
 @readme
 class MatchingPursuitGAN(BaseExperimentRunner):
     def __init__(self, stream, port=None):
@@ -423,6 +432,24 @@ class MatchingPursuitGAN(BaseExperimentRunner):
         self.vec = None
         self.encoded = None
         self.model = ae
+
+        def read_from_cache_hook(val):
+            print('READING FROM CACHE')
+
+        wrapper = numpy_conjure(self.collection, read_hook=read_from_cache_hook)
+        wrapped = wrapper(cached_encode)
+        self.cached_encode = wrapped
+    
+
+    def batch_encode(self, target):
+        target = target.data.cpu().numpy()
+        results = []
+
+        for i in range(target.shape[0]):
+            results.append(self.cached_encode(target[i: i + 1]))
+        
+        results = np.concatenate(results, axis=0)
+        return results
     
     def view_embeddings(self, size: int = None):
         if size is None:
@@ -434,14 +461,6 @@ class MatchingPursuitGAN(BaseExperimentRunner):
     def z(self):
         return self.encoded.squeeze().data.cpu().numpy()
 
-    # def pos_amp(self):
-    #     return self.fake.data.cpu().numpy()[0, :, :2]
-
-    # def atoms(self):
-    #     return self.fake.data.cpu().numpy()[0, :, 2:]
-    
-    # def real_atoms(self):
-    #     return self.vec.data.cpu().numpy()[0, :, 2:]
 
     def listen(self):
         with torch.no_grad():
@@ -458,8 +477,8 @@ class MatchingPursuitGAN(BaseExperimentRunner):
             target = self.real[:1, ...]
 
             # encode
-            instances = model.encode(target, steps=32)
-            vecs = to_atom_vectors(instances)
+            vecs = self.batch_encode(target)
+            vecs = torch.from_numpy(vecs).to(device)
 
             # decode
             instances = to_instances(vecs)
@@ -472,7 +491,7 @@ class MatchingPursuitGAN(BaseExperimentRunner):
     def conjure_funcs(self):
         funcs = super().conjure_funcs
 
-        @numpy_conjure(self.collection)
+        @numpy_conjure(self.collection, content_type=SupportedContentType.Spectrogram.value)
         def latent(x: np.ndarray):
             return x / (np.abs(x.max()) + 1e-12)
         
@@ -498,9 +517,11 @@ class MatchingPursuitGAN(BaseExperimentRunner):
             self.real = item
 
             with torch.no_grad():
-                instances = model.encode(item, steps=steps)
-                vec = to_atom_vectors(instances)
-                vec = canonical.forward(vec)
+                # encode as a dictionary where keys correspond to bands
+                # and values are lists of atoms, times and amplitudes
+                vec = self.batch_encode(item)
+                vec = torch.from_numpy(vec).to(device)
+                # vec = canonical.forward(vec)
                 self.vec = vec
 
             l, f, e = train_ae(vec)

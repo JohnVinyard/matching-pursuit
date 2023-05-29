@@ -32,7 +32,6 @@ exp = Experiment(
 def transform(signal):
     spec = codec.to_frequency_domain(signal.view(-1, exp.n_samples))
     spec = torch.abs(spec[..., 0])
-    # spec = stft(signal.view(-1, exp.n_samples), 512, 256, pad=True)
     kp = to_key_points(spec, n_to_keep=256)
     # kp = ordering.forward(kp)
     return kp
@@ -54,8 +53,8 @@ class Model(nn.Module):
         output = max_norm(output)
         return output
 
-model = Model().to(device)
-# model = OverfitRawAudio((1, exp.n_samples), std=1e-2, normalize=True).to(device)
+# model = Model().to(device)
+model = OverfitRawAudio((1, exp.n_samples), std=1e-1, normalize=False).to(device)
 optim = optimizer(model, lr=1e-3)
 
 def train(batch, i):

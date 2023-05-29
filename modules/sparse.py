@@ -131,8 +131,8 @@ def to_key_points(x: torch.Tensor, n_to_keep: int = 64) -> torch.Tensor:
     x = x.view(batch, -1)
     indices = torch.argsort(x, dim=-1).flip(dims=(-1,))
 
-    w_range = torch.linspace(1, width + 1, width, device=x.device)
-    h_range = torch.linspace(1, height + 1, height, device=x.device)
+    w_range = torch.linspace(0, 1, width, device=x.device, requires_grad=True)
+    h_range = torch.linspace(0, 1, height, device=x.device, requires_grad=True)
 
     for i in range(batch):
         for j in range(n_to_keep):

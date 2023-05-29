@@ -6,7 +6,7 @@ import zounds
 from conjure import LmdbCollection
 
 from pathlib import Path
-from conjure import time_series_conjure, audio_conjure, numpy_conjure
+from conjure import time_series_conjure, audio_conjure, numpy_conjure, SupportedContentType
 
 
 class BaseExperimentRunner(object):
@@ -58,7 +58,7 @@ class BaseExperimentRunner(object):
             bio = x.encode()
             return bio.read()
 
-        @numpy_conjure(self.collection)
+        @numpy_conjure(self.collection, content_type=SupportedContentType.Spectrogram.value)
         def orig_spec(x: np.ndarray):
             return (x / (x.max() + 1e-12))
 
@@ -67,7 +67,7 @@ class BaseExperimentRunner(object):
             bio = x.encode()
             return bio.read()
 
-        @numpy_conjure(self.collection)
+        @numpy_conjure(self.collection, content_type=SupportedContentType.Spectrogram.value)
         def fake_spec(x: np.ndarray):
             return (x / (x.max() + 1e-12))
 

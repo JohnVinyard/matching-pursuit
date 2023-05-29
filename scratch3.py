@@ -23,7 +23,8 @@ if __name__ == '__main__':
 
 
 
-    x = torch.zeros(8, 64, 128).normal_(0, 1)
-    print(x.shape)
-    kp = to_key_points(x)
-    print(kp.shape)
+    # x = torch.zeros(8, 64, 128).normal_(0, 1)
+
+    x = torch.eye(8)[None, ...]
+    kp = to_key_points(x, n_to_keep=8)
+    print(kp[0])

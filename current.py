@@ -86,6 +86,8 @@ if __name__ == '__main__':
     parser.add_argument('--nsamples', type=int, default=14)
     parser.add_argument('--classname', type=str, default=None)
     parser.add_argument('--postfix', type=str, default='')
+    parser.add_argument('--step', type=int, default=1)
+    parser.add_argument('--pattern', type=str, default='*.wav')
 
     args = parser.parse_args()
 
@@ -94,12 +96,16 @@ if __name__ == '__main__':
     else:
         port = os.environ['PORT']
 
+        print(args)
+        
         stream = AudioIterator(
             args.batch_size,
             2**args.nsamples,
             zounds.SR22050(),
             args.normalize,
-            args.overfit)
+            args.overfit,
+            step_size=args.step,
+            pattern=args.pattern)
 
         exp: BaseExperimentRunner = Current(stream, port=port)
 
