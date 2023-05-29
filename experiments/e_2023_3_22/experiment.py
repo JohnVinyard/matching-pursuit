@@ -63,9 +63,9 @@ class DilatedStackSetProcessor(nn.Module):
         return x
 
 snap_embeddings = True # biggest positive contribution yet
-encode_edges = False
-canonical_ordering_dim = 0 # canonical ordering by time seems to work best
-nerf_generator = False
+# encode_edges = False
+# canonical_ordering_dim = 0 # canonical ordering by time seems to work best
+nerf_generator = True
 max_amp = 15
 encoder_class = TransformerSetProcessor
 decoder_class = TransformerSetProcessor
@@ -104,8 +104,8 @@ class Generator(nn.Module):
                 n_freqs=16,
                 latent_dim=latent_dim,
                 multiply=False,
-                learnable_encodings=False,
-                concat=False)
+                learnable_encodings=True,
+                concat=True)
 
             self.process = LinearOutputStack(
                 internal_dim, layers=5, out_channels=internal_dim)
@@ -229,7 +229,8 @@ class AutoEncoder(nn.Module):
             set_processor=encoder_class, 
             reduction=aggregation_method, 
             judgement_activation=lambda x: x, 
-            process_edges=encode_edges)
+            # process_edges=encode_edges
+        )
         
         self.decoder = Generator(
             latent_dim=latent_dim,
@@ -277,9 +278,9 @@ set_loss = SetRelationshipLoss(
 
 
 pos_amp_dim = 1
-canonical = CanonicalOrdering(
-    model.embedding_dim + (pos_amp_dim * 2), 
-    dim=canonical_ordering_dim).to(device)
+# canonical = CanonicalOrdering(
+#     model.embedding_dim + (pos_amp_dim * 2), 
+#     dim=canonical_ordering_dim).to(device)
 
 def pos_encode_feature(x, n_freqs):
     output = [x]
