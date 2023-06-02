@@ -64,8 +64,8 @@ class DilatedStackSetProcessor(nn.Module):
 
 snap_embeddings = True # biggest positive contribution yet
 # encode_edges = False
-# canonical_ordering_dim = 0 # canonical ordering by time seems to work best
-nerf_generator = True
+canonical_ordering_dim = 0 # canonical ordering by time seems to work best
+nerf_generator = False
 max_amp = 15
 encoder_class = TransformerSetProcessor
 decoder_class = TransformerSetProcessor
@@ -278,9 +278,9 @@ set_loss = SetRelationshipLoss(
 
 
 pos_amp_dim = 1
-# canonical = CanonicalOrdering(
-#     model.embedding_dim + (pos_amp_dim * 2), 
-#     dim=canonical_ordering_dim).to(device)
+canonical = CanonicalOrdering(
+    model.embedding_dim + (pos_amp_dim * 2), 
+    dim=canonical_ordering_dim).to(device)
 
 def pos_encode_feature(x, n_freqs):
     output = [x]
@@ -522,7 +522,7 @@ class MatchingPursuitGAN(BaseExperimentRunner):
                 # and values are lists of atoms, times and amplitudes
                 vec = self.batch_encode(item)
                 vec = torch.from_numpy(vec).to(device)
-                # vec = canonical.forward(vec)
+                vec = canonical.forward(vec)
                 self.vec = vec
 
             l, f, e = train_ae(vec)

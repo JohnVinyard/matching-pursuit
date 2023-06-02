@@ -17,6 +17,8 @@ import numpy as np
 from collections import defaultdict
 from torch import nn
 
+
+
 class CanonicalOrdering(nn.Module):
     """
     Project embeddings into a single dimension and order them

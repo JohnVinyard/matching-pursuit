@@ -124,11 +124,48 @@ def sparsify_vectors(x, attn, n_to_keep, normalize=True, dense=False):
         return latents, indices
 
 
+def to_key_points_one_d(fm: torch.Tensor, n_to_keep: int = 64) -> torch.Tensor:
+    points = []
+    batch, channels, time = fm.shape
+
+    sp, indices, values = sparsify(fm, n_to_keep, return_indices=True)
+
+
+    rng = torch.linspace(0, 100, time, device=fm.device, requires_grad=True)
+
+    for i in range(batch):
+        for j in range(n_to_keep):
+            index = indices[i, j]
+            value = values[i, j]
+
+            time_index = index % time
+            channel_index = index // time
+
+            ch_span = torch.zeros(channels, device=fm.device)
+            ch_span[channel_index] = value
+            ch_span = soft_dirac(ch_span)
+
+            span = torch.zeros(time, device=fm.device)
+            span[time_index] = value
+            span = soft_dirac(span)
+            span = rng @ span
+
+
+
+            vec = torch.cat([span.view(1), ch_span.view(channels), value.view(1)]) 
+            points.append(vec)
+    
+    points = torch.cat(points, dim=0)
+    return points.view(batch, -1, channels + 2)
+
+
 def to_key_points(x: torch.Tensor, n_to_keep: int = 64) -> torch.Tensor:
     points = []
     batch, width, height = x.shape
 
-    x = x.view(batch, -1)
+    orig_x = x
+
+    x = x.reshape(batch, -1)
     indices = torch.argsort(x, dim=-1).flip(dims=(-1,))
 
     w_range = torch.linspace(0, 1, width, device=x.device, requires_grad=True)
@@ -145,10 +182,12 @@ def to_key_points(x: torch.Tensor, n_to_keep: int = 64) -> torch.Tensor:
             width_span = torch.zeros(width, device=x.device)
             height_span = torch.zeros(height, device=x.device)
 
-            width_span[row_index] = value
+            # width_span[row_index] = value
+            width_span[:] = orig_x[:, :, col_index]
             width_span = soft_dirac(width_span, dim=-1)
 
-            height_span[col_index] = value
+            # height_span[col_index] = value
+            height_span[:] = orig_x[:, row_index, :]
             height_span = soft_dirac(height_span, dim=-1)
 
             w_loc = w_range @ width_span
@@ -159,6 +198,7 @@ def to_key_points(x: torch.Tensor, n_to_keep: int = 64) -> torch.Tensor:
             points.append(vec)
     
     points = torch.cat(points, dim=0)
+
 
     return points.view(batch, -1, 3)
 

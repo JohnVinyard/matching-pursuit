@@ -4,6 +4,7 @@ from torch import nn
 from torch.nn import functional as F
 import zounds
 from config.experiment import Experiment
+from data.audioiter import AudioIterator
 from modules.normalization import max_norm
 from modules.overfitraw import OverfitRawAudio
 from modules.pointcloud import CanonicalOrdering
@@ -13,11 +14,14 @@ from upsample import ConvUpsample
 from util import device
 from util.readmedocs import readme
 from modules.phase import MelScale, AudioCodec
-from modules.sparse import to_key_points
+from modules.sparse import to_key_points, to_key_points_one_d
 from modules.stft import stft
 
 scale = MelScale()
 codec = AudioCodec(scale)
+
+iterator = AudioIterator(512, 2048, zounds.SR22050(), normalize=True).__iter__()
+kernel = next(iterator)
 
 exp = Experiment(
     samplerate=zounds.SR22050(),
@@ -26,13 +30,20 @@ exp = Experiment(
     model_dim=128,
     kernel_size=512)
 
-
-# ordering = CanonicalOrdering(3).to(device)
+# ordering = CanonicalOrdering(
+#         514, 
+#         dim=-1
+#     ).to(device)
 
 def transform(signal):
-    spec = codec.to_frequency_domain(signal.view(-1, exp.n_samples))
-    spec = torch.abs(spec[..., 0])
-    kp = to_key_points(spec, n_to_keep=256)
+    # spec = stft(signal, 512, 256, pad=True).view(-1, 128, 257)
+    # spec = codec.to_frequency_domain(signal.view(-1, exp.n_samples))
+    # spec = torch.abs(spec[..., 0])
+    # spec = exp.pooled_filter_bank(signal)
+
+    spec = F.conv1d(signal.view(-1, 1, exp.n_samples), kernel.view(512, 1, 2048), padding=1024)
+    # kp = to_key_points(spec, n_to_keep=256)
+    kp = to_key_points_one_d(spec, n_to_keep=256)
     # kp = ordering.forward(kp)
     return kp
 
@@ -50,7 +61,7 @@ class Model(nn.Module):
     
     def forward(self, x):
         output = self.net(self.latent)
-        output = max_norm(output)
+        # output = max_norm(output)
         return output
 
 # model = Model().to(device)

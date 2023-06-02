@@ -161,7 +161,7 @@ class Model(nn.Module):
         return final
 
 model = Model().to(device)
-optim = optimizer(model)
+optim = optimizer(model, lr=1e-3)
 
 
 def train(batch, i):
@@ -174,6 +174,6 @@ def train(batch, i):
 
 @readme
 class BandFilteredImpulseResponse(BaseExperimentRunner):
-    def __init__(self, stream):
-        super().__init__(stream, train, exp)
+    def __init__(self, stream, port=None):
+        super().__init__(stream, train, exp, port=port)
     
