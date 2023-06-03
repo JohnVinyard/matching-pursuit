@@ -65,10 +65,10 @@ class DilatedStackSetProcessor(nn.Module):
 snap_embeddings = True # biggest positive contribution yet
 # encode_edges = False
 canonical_ordering_dim = 0 # canonical ordering by time seems to work best
-nerf_generator = False
+nerf_generator = True
 max_amp = 15
-encoder_class = TransformerSetProcessor
-decoder_class = TransformerSetProcessor
+encoder_class = DilatedStackSetProcessor
+decoder_class = DilatedStackSetProcessor
 aggregation_method = 'mean'
 
 
@@ -238,7 +238,7 @@ class AutoEncoder(nn.Module):
             n_events=n_events,
             nerf_like=nerf_generator,
             set_processor=decoder_class,
-            softmax=lambda x: torch.abs(x),
+            softmax=lambda x: x,
             snap_embeddings=snap_embeddings
         )
 
@@ -250,31 +250,31 @@ class AutoEncoder(nn.Module):
         return decoded, encoded
 
 
-class SetRelationshipLoss(nn.Module):
-    def __init__(self, embedding_dim, n_edges):
-        super().__init__()
+# class SetRelationshipLoss(nn.Module):
+#     def __init__(self, embedding_dim, n_edges):
+#         super().__init__()
 
-        self.embedding_dim = embedding_dim
-        self.n_edges = n_edges
+#         self.embedding_dim = embedding_dim
+#         self.n_edges = n_edges
 
-        self.edges = ProduceEdges(self.n_edges)
-        self.ordering = CanonicalOrdering(embedding_dim)
+#         self.edges = ProduceEdges(self.n_edges)
+#         self.ordering = CanonicalOrdering(embedding_dim)
     
-    def _extract_and_order(self, x):
-        edges = self.edges.forward(x)
-        ordered = self.ordering.forward(edges)
-        return ordered
+#     def _extract_and_order(self, x):
+#         edges = self.edges.forward(x)
+#         ordered = self.ordering.forward(edges)
+#         return ordered
     
 
-    def forward(self, recon, target):
-        r = self._extract_and_order(recon)
-        t = self._extract_and_order(target)
-        return F.mse_loss(r, t)
+#     def forward(self, recon, target):
+#         r = self._extract_and_order(recon)
+#         t = self._extract_and_order(target)
+#         return F.mse_loss(r, t)
 
         
-set_loss = SetRelationshipLoss(
-    embedding_dim=model.embedding_dim + 2, 
-    n_edges=256).to(device)
+# set_loss = SetRelationshipLoss(
+#     embedding_dim=model.embedding_dim + 2, 
+#     n_edges=256).to(device)
 
 
 pos_amp_dim = 1
@@ -302,52 +302,52 @@ def compute_full_embedding(a: torch.Tensor):
     return final
 
 
-gen = Generator(
-    latent_dim=latent_dim, 
-    internal_dim=512, 
-    n_events=n_events, 
-    nerf_like=False, 
-    set_processor=DilatedStackSetProcessor,
-    softmax=lambda x: torch.abs(x),
-    snap_embeddings=True).to(device)
-gen_optim = optimizer(gen, lr=1e-4)
+# gen = Generator(
+#     latent_dim=latent_dim, 
+#     internal_dim=512, 
+#     n_events=n_events, 
+#     nerf_like=False, 
+#     set_processor=DilatedStackSetProcessor,
+#     softmax=lambda x: torch.abs(x),
+#     snap_embeddings=True).to(device)
+# gen_optim = optimizer(gen, lr=1e-4)
 
 
-disc = Discriminator(
-    n_atoms=model.embedding_dim,
-    internal_dim=512,
-    out_dim=1,
-    set_processor=DilatedStackSetProcessor,
-    reduction=aggregation_method,
-    judgement_activation=lambda x: x,
-    process_edges=False).to(device)
-disc_optim = optimizer(disc, lr=1e-4)
+# disc = Discriminator(
+#     n_atoms=model.embedding_dim,
+#     internal_dim=512,
+#     out_dim=1,
+#     set_processor=DilatedStackSetProcessor,
+#     reduction=aggregation_method,
+#     judgement_activation=lambda x: x,
+#     process_edges=False).to(device)
+# disc_optim = optimizer(disc, lr=1e-4)
 
 
-def generate_latent(batch_size):
-    return torch.zeros(batch_size, latent_dim, device=device).uniform_(-1, 1)
+# def generate_latent(batch_size):
+#     return torch.zeros(batch_size, latent_dim, device=device).uniform_(-1, 1)
 
-def train_gen(batch):
-    gen_optim.zero_grad()
-    x = generate_latent(batch.shape[0])
-    fake = gen.forward(x)
-    j = disc.forward(fake)
-    loss = torch.abs(1 - j).mean()
-    loss.backward()
-    gen_optim.step()
-    return loss, fake
+# def train_gen(batch):
+#     gen_optim.zero_grad()
+#     x = generate_latent(batch.shape[0])
+#     fake = gen.forward(x)
+#     j = disc.forward(fake)
+#     loss = torch.abs(1 - j).mean()
+#     loss.backward()
+#     gen_optim.step()
+#     return loss, fake
 
 
-def train_disc(batch):
-    disc_optim.zero_grad()
-    x = generate_latent(batch.shape[0])
-    fake = gen.forward(x)
-    fj = disc.forward(fake)
-    rj = disc.forward(batch)
-    loss = (torch.abs(1 - rj).mean() + torch.abs(0 - fj).mean()) * 0.5
-    loss.backward()
-    disc_optim.step()
-    return loss
+# def train_disc(batch):
+#     disc_optim.zero_grad()
+#     x = generate_latent(batch.shape[0])
+#     fake = gen.forward(x)
+#     fj = disc.forward(fake)
+#     rj = disc.forward(batch)
+#     loss = (torch.abs(1 - rj).mean() + torch.abs(0 - fj).mean()) * 0.5
+#     loss.backward()
+#     disc_optim.step()
+#     return loss
 
 
 
@@ -356,11 +356,20 @@ optim = optimizer(ae, lr=1e-3)
 
 
 def train_ae(batch):
+
     optim.zero_grad()
     recon, encoded = ae.forward(batch)
     # No set alignment, we expect atoms to produced in the same
     # order they were seen
-    loss = F.mse_loss(recon, batch)
+
+    # print(batch.shape, recon.shape)
+    targets = torch.argmax(batch[..., 2:], dim=-1).view(-1)
+
+
+    l1 = F.mse_loss(recon[..., :2], batch[..., :2])
+    l2 = F.cross_entropy(recon[..., 2:].view(-1, model.total_atoms), targets)
+
+    loss = l1 + l2
     loss.backward()
     optim.step()
     return loss, recon, encoded
@@ -437,8 +446,10 @@ class MatchingPursuitGAN(BaseExperimentRunner):
         def read_from_cache_hook(val):
             print('READING FROM CACHE')
 
-        wrapper = numpy_conjure(self.collection, read_hook=read_from_cache_hook)
-        wrapped = wrapper(cached_encode)
+        # wrapper = numpy_conjure(self.collection, read_hook=read_from_cache_hook)
+        # wrapped = wrapper(cached_encode)
+
+        wrapped = cached_encode
         self.cached_encode = wrapped
     
 

@@ -76,9 +76,10 @@ class BandSpec(object):
             return self._embeddings
         
 
-        # self._embeddings = torch.eye(self.n_atoms, device=device)
+        self._embeddings = torch.eye(self.n_atoms, device=device)
         # self._embeddings = torch.zeros(self.n_atoms, 40, device=device).uniform_(-1, 1)
-        # return self._embeddings
+        return self._embeddings
+    
     
         # compute embeddings for each element in the dictionary
         """
@@ -257,8 +258,11 @@ class MultibandDictionaryLearning(object):
     def embeddings(self):
         if self._embeddings is not None:
             return self._embeddings
-        self._embeddings = torch.cat(
-            [band.embeddings for band in self.bands.values()])
+        
+        # self._embeddings = torch.cat(
+        #     [band.embeddings for band in self.bands.values()])
+
+        self._embeddings = torch.eye(self.total_atoms).to(device)
         return self._embeddings
 
     @property
