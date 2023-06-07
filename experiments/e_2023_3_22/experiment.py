@@ -53,7 +53,7 @@ class DilatedStackSetProcessor(nn.Module):
         super().__init__()
         self.embedding_size = embedding_size
         self.dim = dim
-        self.net = DilatedStack(dim, [1, 3, 9, 27, 81, 1], 0.1)
+        self.net = DilatedStack(dim, [1, 3, 9, 27, 81, 1], dropout=0.1)
         self.apply(lambda x: exp.init_weights(x))
 
     def forward(self, x):
@@ -62,7 +62,7 @@ class DilatedStackSetProcessor(nn.Module):
         x = x.permute(0, 2, 1)
         return x
 
-snap_embeddings = True # biggest positive contribution yet
+snap_embeddings = False # biggest positive contribution yet
 # encode_edges = False
 canonical_ordering_dim = 0 # canonical ordering by time seems to work best
 nerf_generator = True
@@ -142,7 +142,7 @@ class Generator(nn.Module):
             atom = y.view(*orig_shape)
         
 
-        pos = torch.sigmoid(self.to_pos.forward(x))
+        pos = (torch.sin(self.to_pos.forward(x)) + 1) * 0.5
         amp = torch.abs(self.to_amp.forward(x))
 
         final = torch.cat([pos, amp, atom], dim=-1)
@@ -158,7 +158,8 @@ class Discriminator(nn.Module):
             set_processor=TransformerSetProcessor,
             reduction='last',
             judgement_activation=lambda x: x,
-            process_edges=False):
+            # process_edges=False
+        ):
 
         super().__init__()
         self.n_atoms = n_atoms
@@ -175,22 +176,23 @@ class Discriminator(nn.Module):
         self.reduction = reduction
         self.judgement_activation = judgement_activation
 
-        self.process_edges = process_edges
-        self.edges = ProduceEdges(threshold=0.2)
+        # self.process_edges = process_edges
+        # self.edges = ProduceEdges(threshold=0.2)
 
         self.apply(lambda x: exp.init_weights(x))
 
     def forward(self, x):
 
-        if self.process_edges:
-            x = self.edges.forward(x)
-            x = self.embed_edges(x)
-        else:
-            pos_amp = x[:, :, :2]
-            atoms = x[:, :, 2:]
-            pos_amp = self.embed_pos_amp(pos_amp)
-            atoms = self.embed_atom(atoms)
-            x = torch.cat([pos_amp, atoms], dim=-1)
+        # if self.process_edges:
+        #     x = self.edges.forward(x)
+        #     x = self.embed_edges(x)
+        # else:
+
+        pos_amp = x[:, :, :2]
+        atoms = x[:, :, 2:]
+        pos_amp = self.embed_pos_amp(pos_amp)
+        atoms = self.embed_atom(atoms)
+        x = torch.cat([pos_amp, atoms], dim=-1)
 
         x = self.processor(x)
 
@@ -208,14 +210,14 @@ class Discriminator(nn.Module):
 
 
 
-class ProduceEdges(nn.Module):
-    def __init__(self, threshold: float = None):
-        super().__init__()
-        self.threshold = threshold
+# class ProduceEdges(nn.Module):
+#     def __init__(self, threshold: float = None):
+#         super().__init__()
+#         self.threshold = threshold
     
-    def forward(self, embeddings: torch.Tensor):
-        edges = extract_graph_edges(embeddings, threshold=self.threshold)
-        return edges
+#     def forward(self, embeddings: torch.Tensor):
+#         edges = extract_graph_edges(embeddings, threshold=self.threshold)
+#         return edges
 
 
 
@@ -405,8 +407,8 @@ def to_instances(vectors):
             # atom index (NOW EMBEDDINGS)
             atom_index = vec[..., 2:]
 
-            # index = torch.argmax(atom_index, dim=-1).view(-1).item()
-            index = model.to_indices(atom_index.view(-1, model.embedding_dim))
+            index = torch.argmax(atom_index, dim=-1).view(-1).item()
+            # index = model.to_indices(atom_index.view(-1, model.embedding_dim))
 
             size_key = index // 512
             size_key = model.size_at_index(size_key)
@@ -446,10 +448,9 @@ class MatchingPursuitGAN(BaseExperimentRunner):
         def read_from_cache_hook(val):
             print('READING FROM CACHE')
 
-        # wrapper = numpy_conjure(self.collection, read_hook=read_from_cache_hook)
-        # wrapped = wrapper(cached_encode)
+        wrapper = numpy_conjure(self.collection, read_hook=read_from_cache_hook)
+        wrapped = wrapper(cached_encode)
 
-        wrapped = cached_encode
         self.cached_encode = wrapped
     
 

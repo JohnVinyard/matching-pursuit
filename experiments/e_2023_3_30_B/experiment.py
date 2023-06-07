@@ -4,6 +4,7 @@ from torch import nn
 from torch.nn import functional as F
 import zounds
 from config.experiment import Experiment
+from fft_basis import morlet_filter_bank
 from modules.dilated import DilatedStack
 from modules.fft import fft_shift
 from modules.linear import LinearOutputStack
@@ -15,6 +16,7 @@ from train.experiment_runner import BaseExperimentRunner
 from upsample import ConvUpsample
 from util import device
 from util.readmedocs import readme
+
 
 exp = Experiment(
     samplerate=zounds.SR22050(),
@@ -28,6 +30,8 @@ n_events = 8
 min_decay = 0.8
 
 
+
+
 class Resonance(nn.Module):
     def __init__(self, n_samples, n_frames, filter_size, n_filters):
         super().__init__()
@@ -37,7 +41,13 @@ class Resonance(nn.Module):
         self.filter_size = filter_size
         self.n_filters = n_filters
 
-        self.filters = nn.Parameter(torch.zeros(n_filters, filter_size).uniform_(-1, 1))
+        band = zounds.spectral.FrequencyBand(20, 3000)
+        scale = zounds.MelScale(band, self.n_filters)
+        bank = morlet_filter_bank(exp.samplerate, self.filter_size, scale, 0.1, normalize=True).real
+
+        self.filters = nn.Parameter(torch.from_numpy(bank).float())
+
+        # self.filters = nn.Parameter(torch.zeros(n_filters, filter_size).uniform_(-1, 1))
 
         self.to_mixture = LinearOutputStack(exp.model_dim, 3, out_channels=n_filters)
     
@@ -149,12 +159,12 @@ class Model(nn.Module):
         # learnings from today indicate that this is only helpful for small shifts,
         # if a somewhat-matching segment overlaps a generated event.
         # For events separated by silence, this won't help
-        final = fft_shift(
-            final.view(-1, n_events, exp.n_samples), 
-            t.view(-1, n_events, 1)
-        )
+        # final = fft_shift(
+        #     final.view(-1, n_events, exp.n_samples), 
+        #     t.view(-1, n_events, 1)
+        # )
 
-        final = torch.sum(final, dim=1, keepdim=True)
+        final = torch.sum(final.view(-1, n_events, exp.n_samples), dim=1, keepdim=True)
 
         final = self.verb.forward(g, final)
         

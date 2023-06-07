@@ -116,7 +116,7 @@ class BaseExperimentRunner(object):
 
             l, r = self.train(item, i)
             self.fake = r
-
             print(i, l.item())
-
             self.after_training_iteration(l)
+
+

@@ -131,7 +131,7 @@ def to_key_points_one_d(fm: torch.Tensor, n_to_keep: int = 64) -> torch.Tensor:
     sp, indices, values = sparsify(fm, n_to_keep, return_indices=True)
 
 
-    rng = torch.linspace(0, 100, time, device=fm.device, requires_grad=True)
+    rng = torch.linspace(0, 1, time, device=fm.device, requires_grad=True)
 
     for i in range(batch):
         for j in range(n_to_keep):
@@ -149,8 +149,6 @@ def to_key_points_one_d(fm: torch.Tensor, n_to_keep: int = 64) -> torch.Tensor:
             span[time_index] = value
             span = soft_dirac(span)
             span = rng @ span
-
-
 
             vec = torch.cat([span.view(1), ch_span.view(channels), value.view(1)]) 
             points.append(vec)
