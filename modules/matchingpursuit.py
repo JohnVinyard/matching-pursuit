@@ -2,7 +2,7 @@ import torch
 from torch import Tensor
 
 from modules.normalization import unit_norm
-from modules.sparse import sparsify
+from modules.sparse import soft_dirac, sparsify
 from collections import defaultdict
 from torch.nn import functional as F
 from util import device
@@ -137,14 +137,13 @@ def sparse_feature_map(
         else:
             f = fft_convolve(residual, d, approx=approx)
 
-
         values, indices = torch.max(f.reshape(batch, -1), dim=-1)
 
         if use_softmax:
-            flow = torch.softmax(f.reshape(batch, -1), dim=-1).sum(dim=-1, keepdim=True)
+            flow = torch.softmax(f.reshape(batch, -1),
+                                 dim=-1).sum(dim=-1, keepdim=True)
             values = values * flow.view(values.shape)
 
-        
         atom_indices = indices // n_samples
         positions = indices % n_samples
 
@@ -154,12 +153,13 @@ def sparse_feature_map(
             p = positions[b]
             fm[b, ai, p] += v
 
+            # subtract the atom from the residual
             start = p
             end = start + atom_size
             slce = residual[b, :, start:end]
             size = slce.shape[-1]
             slce[:] = slce[:] - (d[ai, :size] * v)
-    
+
     if pooling is not None:
         window, step = pooling
         fm = F.max_pool1d(fm, window, step, padding=step)
@@ -171,10 +171,12 @@ def sparse_feature_map(
 def sparse_coding_loss(
         recon, target, d: Tensor, n_steps=100, device=None, approx=None, pooling=None):
 
-    r_map = sparse_feature_map(recon, d, n_steps, device=device, pooling=pooling)
+    r_map = sparse_feature_map(
+        recon, d, n_steps, device=device, pooling=pooling)
 
     with torch.no_grad():
-        t_map = sparse_feature_map(target, d, n_steps, device=device, pooling=pooling)
+        t_map = sparse_feature_map(
+            target, d, n_steps, device=device, pooling=pooling)
 
     r_max = r_map.max()
     t_max = t_map.max()
@@ -186,6 +188,66 @@ def sparse_coding_loss(
 
     return F.binary_cross_entropy(r_map, t_map)
 
+
+def sparse_code_to_differentiable_key_points(
+        signal: Tensor,
+        d: Tensor,
+        n_steps=100,
+        device=None):
+    
+    # print('-------------------')
+
+    signal = signal.view(signal.shape[0], 1, -1)
+    batch, _, n_samples = signal.shape
+    n_atoms, atom_size = d.shape
+    d = unit_norm(d, dim=-1)
+    residual = signal.clone()
+
+    scatter_segments = build_scatter_segments(n_samples, atom_size)
+
+    vecs = []
+
+    for i in range(n_steps):
+
+        padded = F.pad(residual, (0, atom_size))
+        fm = F.conv1d(padded, d.view(
+            n_atoms, 1, atom_size))[..., :n_samples]
+
+        fm = fm.reshape(batch, -1)
+        value, mx = torch.max(fm, dim=-1)
+
+        atom_index = mx // n_samples  # (Batch,)
+        position = mx % n_samples  # (Batch,)
+        at = d[atom_index] * value[:, None]  # (Batch,)
+
+        local_instances = []
+
+        for j in range(batch):
+            ai = atom_index[j].item()
+
+            local_fm = fm[j].view(n_atoms, n_samples)
+
+            pos = position[j]
+            vec = local_fm[:, pos]
+
+            time = soft_dirac(local_fm[ai, :]) @ torch.linspace(0, 1, n_samples, device=d.device, requires_grad=True)
+            val = value[j]
+
+            vec = soft_dirac(vec.view(n_atoms))
+            # print('VEC MAX', torch.argmax(vec, dim=-1).item())
+
+            x = torch.cat([val.view(1), time.view(1), vec.view(n_atoms)])
+            vecs.append(x[None, :])
+
+            p = position[j][None, ...]
+            a = at[j][None, ...]
+            local_instances.append((ai, j, p, a))
+
+        sparse = scatter_segments(residual.shape, local_instances)
+        residual -= sparse
+
+    vecs = torch.cat(vecs, dim=0)
+    return vecs
 
 def sparse_code(
         signal: Tensor,

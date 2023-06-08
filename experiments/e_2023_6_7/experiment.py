@@ -9,7 +9,7 @@ from fft_shift import fft_shift
 from modules.atoms import unit_norm
 from modules.dilated import DilatedStack
 from modules.linear import LinearOutputStack
-from modules.matchingpursuit import sparse_feature_map
+from modules.matchingpursuit import sparse_code_to_differentiable_key_points, sparse_feature_map
 from modules.normalization import max_norm
 from modules.pos_encode import ExpandUsingPosEncodings
 from modules.sparse import to_key_points_one_d
@@ -42,7 +42,8 @@ def generate(batch_size):
 
     amps = torch.zeros(total_events, device=device).uniform_(0, 1)
     positions = torch.zeros(total_events, device=device).uniform_(0, 1)
-    atom_indices = torch.randperm(d_size)
+    atom_indices = torch.randperm(d_size)[:total_events]
+    # print('GENERATING PROCESS', atom_indices)
 
     output = _inner_generate(
         batch_size, total_events, amps, positions, atom_indices)
@@ -68,19 +69,26 @@ def _inner_generate(batch_size, total_events, amps, positions, atom_indices):
 
 
 def extract_key_points(x, d):
-    fm = sparse_feature_map(
-        x, 
-        d, 
-        n_steps=sparse_coding_iterations, 
-        device=device,
-        use_softmax=True
-    )
+    batch = x.shape[0]
 
-    x = to_key_points_one_d(
-        fm, 
-        n_to_keep=sparse_coding_iterations
-    ).permute(0, 2, 1)
+    # fm = sparse_feature_map(
+    #     x, 
+    #     d, 
+    #     n_steps=sparse_coding_iterations, 
+    #     device=device,
+    #     use_softmax=True
+    # )
 
+    # x = to_key_points_one_d(
+    #     fm, 
+    #     n_to_keep=sparse_coding_iterations
+    # ).permute(0, 2, 1)
+
+    x = sparse_code_to_differentiable_key_points(
+        x, d, n_steps=sparse_coding_iterations)
+    
+
+    x = x.view(sparse_coding_iterations, batch, d_size + 2).permute(1, 2, 0)
     return x
 
 
@@ -89,7 +97,6 @@ class Encoder(nn.Module):
     def __init__(self, channels, d: torch.Tensor = None):
         super().__init__()
 
-        self.dummy = nn.Parameter(torch.zeros(1))
         self.channels = channels
 
         if d is not None:
@@ -109,6 +116,8 @@ class Encoder(nn.Module):
     def forward(self, x):
         x = x.view(-1, 1, exp.n_samples)
 
+        x = extract_key_points(x, self.d)
+
         pos_amp = x[:, :2, :]
         atoms = x[:, 2:, :]
 
@@ -118,11 +127,11 @@ class Encoder(nn.Module):
         x = torch.cat([pa, at], dim=1)
         x = self.reduce_again(x)
 
-        pe = pos_encoded(x.shape[0], x.shape[-1], n_freqs=16, device=device).permute(0, 2, 1)
+        # pe = pos_encoded(x.shape[0], x.shape[-1], n_freqs=16, device=device).permute(0, 2, 1)
 
-        x = torch.cat([x, pe], dim=1)
-        x = self.reduce(x)
-        x = self.stack(x)
+        # x = torch.cat([x, pe], dim=1)
+        # x = self.reduce(x)
+        # x = self.stack(x)
         # x = torch.mean(x, dim=-1)
 
         return x
@@ -140,7 +149,8 @@ class Decoder(nn.Module):
 
     
     def forward(self, x):
-        x = self.net(x[:, None, :])
+        x = x.permute(0, 2, 1)
+        # x = self.net(x.permute(0, 2, 1))
 
         pos_amp = torch.sigmoid(self.to_pos_amp(x))
 
@@ -159,10 +169,7 @@ class Model(nn.Module):
         self.apply(lambda x: exp.init_weights(x))
     
     def forward(self, x):
-
         e = self.encoder(x)
-        return e
-    
         d = self.decoder(e)
         return d
 
@@ -173,19 +180,23 @@ optim = optimizer(model, lr=1e-3)
 def loss_func(a, b):
     # a = extract_key_points(a, d)
     b = extract_key_points(b, d)
+    # print(a.shape, b.shape)
 
     pos_amp = F.mse_loss(a[:, :2, :], b[:, :2, :])
 
-    real_atoms = a[:, 2:, :]
-    fake_atoms = b[:, 2:, :].permute(0, 2, 1)
+    real_atoms = b[:, 2:, :]
+    fake_atoms = a[:, 2:, :].permute(0, 2, 1)
     # fake_indices = torch.argmax(fake_atoms, dim=-1).view(-1)
 
     expected_indices = torch.argmax(real_atoms.permute(0, 2, 1), dim=-1).view(-1)
-    actual = fake_atoms.view(-1, d_size)
+    actual = fake_atoms.reshape(-1, d_size)
+    # print(expected_indices)
+    # print(fake_indices)
 
-    atom_loss = F.cross_entropy(torch.log(1e-12 + actual), expected_indices)
+    atom_loss = F.cross_entropy(actual, expected_indices)
 
-    total_loss = pos_amp + atom_loss
+    # print('POS_AMP', pos_amp.item(), 'ATOM', atom_loss.item())
+    total_loss = (pos_amp * 1) + (atom_loss * 1)
     return total_loss
 
 def train(batch, i):
@@ -214,6 +225,8 @@ class KeyPointLossToyExperiment(BaseExperimentRunner):
     
     def run(self):
         for i, item in enumerate(self.iter_items()):
+            # print('=============================')
+
             g = generate(item.shape[0])
             self.real = g
             l, r = train(g, i)
