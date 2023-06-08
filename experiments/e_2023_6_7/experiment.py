@@ -109,9 +109,6 @@ class Encoder(nn.Module):
     def forward(self, x):
         x = x.view(-1, 1, exp.n_samples)
 
-        x = extract_key_points(x, self.d)
-        return x
-    
         pos_amp = x[:, :2, :]
         atoms = x[:, 2:, :]
 
@@ -143,9 +140,7 @@ class Decoder(nn.Module):
 
     
     def forward(self, x):
-        # x = self.net(x[:, None, :])
-        # print(x.shape)
-        x = x.permute(0, 2, 1)
+        x = self.net(x[:, None, :])
 
         pos_amp = torch.sigmoid(self.to_pos_amp(x))
 
@@ -183,28 +178,12 @@ def loss_func(a, b):
 
     real_atoms = a[:, 2:, :]
     fake_atoms = b[:, 2:, :].permute(0, 2, 1)
-    fake_indices = torch.argmax(fake_atoms, dim=-1).view(-1)
+    # fake_indices = torch.argmax(fake_atoms, dim=-1).view(-1)
 
     expected_indices = torch.argmax(real_atoms.permute(0, 2, 1), dim=-1).view(-1)
     actual = fake_atoms.view(-1, d_size)
 
-
-
     atom_loss = F.cross_entropy(torch.log(1e-12 + actual), expected_indices)
-
-    print('====================================')
-    # test_expected = torch.zeros(1).fill_(5).long()
-    # test_acual = torch.zeros(1, 10)
-    # test_acual[0, 5] = 1
-
-    # test_loss = F.cross_entropy(torch.log(1e-12 + test_acual), test_expected)
-    # print('TEST LOSS', test_loss.item())
-
-    # print(actual.shape)
-    # print(expected_indices)
-    # print(fake_indices)
-    print('ATOM %', ((fake_indices == expected_indices).sum() / fake_indices.shape[0]).item())
-    print('ATOM', atom_loss.item(), 'POS_AMP', pos_amp.item())
 
     total_loss = pos_amp + atom_loss
     return total_loss
