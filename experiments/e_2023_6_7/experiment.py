@@ -8,6 +8,7 @@ from fft_basis import morlet_filter_bank
 from fft_shift import fft_shift
 from modules.atoms import unit_norm
 from modules.dilated import DilatedStack
+from modules.linear import LinearOutputStack
 from modules.matchingpursuit import sparse_feature_map
 from modules.normalization import max_norm
 from modules.pos_encode import ExpandUsingPosEncodings
@@ -22,7 +23,7 @@ import numpy as np
 exp = Experiment(
     samplerate=zounds.SR22050(),
     n_samples=2**15,
-    weight_init=0.05,
+    weight_init=0.1,
     model_dim=128,
     kernel_size=512)
 
@@ -96,13 +97,29 @@ class Encoder(nn.Module):
         else:
             self.d = nn.Parameter(torch.zeros(d_size, kernel_size).uniform_(-1, 1))
         
-        self.reduce = nn.Conv1d(33 + channels + 2, channels, 1, 1, 0)
+        self.reduce = nn.Conv1d(33 + channels, channels, 1, 1, 0)
+
+        self.pos_amp = nn.Conv1d(2, channels, 1, 1, 0)
+        self.atoms = nn.Conv1d(d_size, channels, 1, 1, 0)
+
+        self.reduce_again = nn.Conv1d(channels * 2, channels, 1, 1, 0)
+
         self.stack = DilatedStack(channels, [1, 3, 9, 1])
     
     def forward(self, x):
         x = x.view(-1, 1, exp.n_samples)
 
         x = extract_key_points(x, self.d)
+        return x
+    
+        pos_amp = x[:, :2, :]
+        atoms = x[:, 2:, :]
+
+        pa = self.pos_amp(pos_amp)
+        at = self.atoms(atoms)
+
+        x = torch.cat([pa, at], dim=1)
+        x = self.reduce_again(x)
 
         pe = pos_encoded(x.shape[0], x.shape[-1], n_freqs=16, device=device).permute(0, 2, 1)
 
@@ -120,14 +137,22 @@ class Decoder(nn.Module):
         self.channels = channels
         self.net = ExpandUsingPosEncodings(
             channels, time_dim=sparse_coding_iterations, n_freqs=16, latent_dim=channels)
-        self.expand = nn.Linear(channels, d_size + 2)
+        
+        self.to_pos_amp = LinearOutputStack(channels, 3, out_channels=2)
+        self.to_atom = LinearOutputStack(channels, 3, out_channels=d_size)
+
     
     def forward(self, x):
         # x = self.net(x[:, None, :])
         # print(x.shape)
         x = x.permute(0, 2, 1)
-        x = self.expand(x).permute(0, 2, 1)
-        x = torch.sigmoid(x)
+
+        pos_amp = torch.sigmoid(self.to_pos_amp(x))
+
+        atoms = self.to_atom(x)
+
+        x = torch.cat([pos_amp, atoms], dim=-1).permute(0, 2, 1)
+        # x = self.expand(x).permute(0, 2, 1)
         return x
 
 
@@ -141,6 +166,8 @@ class Model(nn.Module):
     def forward(self, x):
 
         e = self.encoder(x)
+        return e
+    
         d = self.decoder(e)
         return d
 
@@ -156,16 +183,35 @@ def loss_func(a, b):
 
     real_atoms = a[:, 2:, :]
     fake_atoms = b[:, 2:, :].permute(0, 2, 1)
+    fake_indices = torch.argmax(fake_atoms, dim=-1).view(-1)
 
     expected_indices = torch.argmax(real_atoms.permute(0, 2, 1), dim=-1).view(-1)
     actual = fake_atoms.view(-1, d_size)
 
-    atom_loss = F.cross_entropy(actual, expected_indices)
 
+
+    atom_loss = F.cross_entropy(torch.log(1e-12 + actual), expected_indices)
+
+    print('====================================')
+    test_expected = torch.zeros(1).fill_(5).long()
+    test_acual = torch.zeros(1, 10)
+    test_acual[0, 5] = 1
+    # test_acual = F.log_softmax(test_acual, dim=-1)
+
+    test_loss = F.cross_entropy(torch.log(1e-12 + test_acual), test_expected)
+    print('TEST LOSS', test_loss.item())
+
+    print(actual.shape)
+    print(expected_indices)
+    print(fake_indices)
+    print('ATOM %', ((fake_indices == expected_indices).sum() / fake_indices.shape[0]).item())
+    print('ATOM', atom_loss.item(), 'POS_AMP', pos_amp.item())
     total_loss = pos_amp + atom_loss
     return total_loss
 
 def train(batch, i):
+    optim.zero_grad()
+
     r = model.forward(batch)
     l = loss_func(r, batch)
     l.backward()
@@ -175,10 +221,6 @@ def train(batch, i):
         amps = r[0, :, :1].view(-1)
         positions = r[0, :, 1:2].view(-1)
         indices = torch.max(r[0, :, 2:], dim=-1)[1].view(-1)
-        # print('=======================')
-        # print(amps)
-        # print(positions)
-        # print(indices)
         r = _inner_generate(
             1, sparse_coding_iterations, amps, positions, indices)
     
