@@ -26,4 +26,11 @@ There will be several options for the generator:
 
 - loss with atom relationships
 - try a dense generator
+- try a dense generator built with learned dictionary and fft_shift positioning
 - Can I parameterize atoms beyond just position, atom and amplitude?
+
+# Conclusions
+
+It _is_ possible to learn a model that generates atom encodings using the same dictionary from the loss function
+
+It _is_ possible to learn positions, amps (AND ATOM INDICES?) with a dense model.

@@ -16,6 +16,7 @@ from modules.sparse import to_key_points_one_d
 from scalar_scheduling import pos_encode_feature, pos_encoded
 from time_distance import optimizer
 from train.experiment_runner import BaseExperimentRunner
+from upsample import ConvUpsample
 from util import device
 from util.readmedocs import readme
 import numpy as np
@@ -23,7 +24,7 @@ import numpy as np
 exp = Experiment(
     samplerate=zounds.SR22050(),
     n_samples=2**15,
-    weight_init=0.1,
+    weight_init=0.05,
     model_dim=128,
     kernel_size=512)
 
@@ -176,14 +177,70 @@ class Model(nn.Module):
         d = self.decoder(e)
         return d
 
-model = Model(channels=d_size).to(device)
+
+class DenseModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        self.encoder = nn.Sequential(
+            nn.Conv1d(1, 64, 7, 4, 3), # 8192
+            nn.BatchNorm1d(64),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(64, 128, 7, 4, 3), # 2048
+            nn.BatchNorm1d(128),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(128, 256, 7, 4, 3), # 512
+            nn.BatchNorm1d(256),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(256, 512, 7, 4, 3) # 128
+        )
+
+        self.decoder = nn.Sequential(
+            nn.Upsample(scale_factor=4, mode='nearest'), # 512
+            nn.Conv1d(512, 256, 7, 1, 3),
+            nn.BatchNorm1d(256),
+            nn.LeakyReLU(0.2),
+            nn.Upsample(scale_factor=4, mode='nearest'), # 2048
+            nn.Conv1d(256, 128, 7, 1, 3),
+            nn.BatchNorm1d(128),
+            nn.LeakyReLU(0.2),
+            nn.Upsample(scale_factor=4, mode='nearest'), # 8192
+            nn.Conv1d(128, 64, 7, 1, 3),
+            nn.BatchNorm1d(64),
+            nn.LeakyReLU(0.2),
+            nn.Upsample(scale_factor=4, mode='nearest'), # 32768
+            nn.Conv1d(64, 1, 7, 1, 3),
+        )
+
+        # self.decoder = ConvUpsample(
+        #     128, 
+        #     128, 
+        #     start_size=128, 
+        #     end_size=exp.n_samples, 
+        #     mode='learned', 
+        #     out_channels=1, 
+        #     from_latent=False,
+        #     batch_norm=True)
+
+        self.apply(lambda x: exp.init_weights(x))
+    
+    def forward(self, x):
+        x = x.view(-1, 1, exp.n_samples)
+        e = self.encoder(x)
+        d = self.decoder(e)
+        return d
+
+
+# model = Model(channels=d_size).to(device)
+model = DenseModel().to(device)
 optim = optimizer(model, lr=1e-3)
 
 
 def loss_func(a, b):
-    # a = extract_key_points(a, d)
     b = extract_key_points(b, d)
-    # print(a.shape, b.shape)
+
+    if a.shape != b.shape:
+        a = extract_key_points(a, d)
 
     pos_amp = F.mse_loss(a[:, :2, :], b[:, :2, :])
 
@@ -209,6 +266,9 @@ def train(batch, i):
     l = loss_func(r, batch)
     l.backward()
     optim.step()
+
+    if r.shape[-1] == exp.n_samples:
+        return l, r
 
     with torch.no_grad():
         r = r.permute(0, 2, 1)
