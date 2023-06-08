@@ -196,7 +196,7 @@ def loss_func(a, b):
     atom_loss = F.cross_entropy(actual, expected_indices)
 
     # print('POS_AMP', pos_amp.item(), 'ATOM', atom_loss.item())
-    total_loss = (pos_amp * 1) + (atom_loss * 1)
+    total_loss = (pos_amp * 100) + (atom_loss * 1)
     return total_loss
 
 def train(batch, i):
