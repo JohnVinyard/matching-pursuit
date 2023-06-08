@@ -193,19 +193,19 @@ def loss_func(a, b):
     atom_loss = F.cross_entropy(torch.log(1e-12 + actual), expected_indices)
 
     print('====================================')
-    test_expected = torch.zeros(1).fill_(5).long()
-    test_acual = torch.zeros(1, 10)
-    test_acual[0, 5] = 1
-    # test_acual = F.log_softmax(test_acual, dim=-1)
+    # test_expected = torch.zeros(1).fill_(5).long()
+    # test_acual = torch.zeros(1, 10)
+    # test_acual[0, 5] = 1
 
-    test_loss = F.cross_entropy(torch.log(1e-12 + test_acual), test_expected)
-    print('TEST LOSS', test_loss.item())
+    # test_loss = F.cross_entropy(torch.log(1e-12 + test_acual), test_expected)
+    # print('TEST LOSS', test_loss.item())
 
-    print(actual.shape)
-    print(expected_indices)
-    print(fake_indices)
+    # print(actual.shape)
+    # print(expected_indices)
+    # print(fake_indices)
     print('ATOM %', ((fake_indices == expected_indices).sum() / fake_indices.shape[0]).item())
     print('ATOM', atom_loss.item(), 'POS_AMP', pos_amp.item())
+
     total_loss = pos_amp + atom_loss
     return total_loss
 
@@ -218,9 +218,10 @@ def train(batch, i):
     optim.step()
 
     with torch.no_grad():
+        r = r.permute(0, 2, 1)
         amps = r[0, :, :1].view(-1)
         positions = r[0, :, 1:2].view(-1)
-        indices = torch.max(r[0, :, 2:], dim=-1)[1].view(-1)
+        indices = torch.argmax(r[0, :, 2:], dim=-1).view(-1)
         r = _inner_generate(
             1, sparse_coding_iterations, amps, positions, indices)
     

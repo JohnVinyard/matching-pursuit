@@ -124,9 +124,10 @@ def sparsify_vectors(x, attn, n_to_keep, normalize=True, dense=False):
         return latents, indices
 
 
-def to_key_points_one_d(fm: torch.Tensor, n_to_keep: int = 64) -> torch.Tensor:
+def to_key_points_one_d(fm: torch.Tensor, n_to_keep: int = 64, is_sparse=False) -> torch.Tensor:
     points = []
     batch, channels, time = fm.shape
+
 
     sp, indices, values = sparsify(fm, n_to_keep, return_indices=True)
 
@@ -150,7 +151,7 @@ def to_key_points_one_d(fm: torch.Tensor, n_to_keep: int = 64) -> torch.Tensor:
             span = soft_dirac(span)
             span = rng @ span
 
-            vec = torch.cat([span.view(1), ch_span.view(channels), value.view(1)]) 
+            vec = torch.cat([value.view(1), span.view(1), ch_span.view(channels)]) 
             points.append(vec)
     
     points = torch.cat(points, dim=0)
