@@ -24,7 +24,7 @@ import numpy as np
 exp = Experiment(
     samplerate=zounds.SR22050(),
     n_samples=2**15,
-    weight_init=0.05,
+    weight_init=0.1,
     model_dim=128,
     kernel_size=512)
 
@@ -36,6 +36,7 @@ band = zounds.FrequencyBand(20, 2000)
 scale = zounds.MelScale(band, d_size)
 d = morlet_filter_bank(exp.samplerate, kernel_size, scale, np.linspace(0.25, 0.01, d_size)).real
 d = torch.from_numpy(d).float().to(device)
+d.requires_grad = True
 
 
 def generate(batch_size):
@@ -209,26 +210,20 @@ class DenseModel(nn.Module):
             nn.BatchNorm1d(64),
             nn.LeakyReLU(0.2),
             nn.Upsample(scale_factor=4, mode='nearest'), # 32768
-            nn.Conv1d(64, 1, 7, 1, 3),
+            nn.Conv1d(64, 512, 7, 1, 3),
         )
 
-        # self.decoder = ConvUpsample(
-        #     128, 
-        #     128, 
-        #     start_size=128, 
-        #     end_size=exp.n_samples, 
-        #     mode='learned', 
-        #     out_channels=1, 
-        #     from_latent=False,
-        #     batch_norm=True)
 
         self.apply(lambda x: exp.init_weights(x))
     
     def forward(self, x):
         x = x.view(-1, 1, exp.n_samples)
         e = self.encoder(x)
-        d = self.decoder(e)
-        return d
+        x = self.decoder(e)
+        x = F.conv1d(x, d.view(1, 512, 256), padding=128)
+        x = x / 512
+        x = x[..., :exp.n_samples]
+        return x
 
 
 # model = Model(channels=d_size).to(device)
@@ -237,6 +232,7 @@ optim = optimizer(model, lr=1e-3)
 
 
 def loss_func(a, b):
+
     b = extract_key_points(b, d)
 
     if a.shape != b.shape:
@@ -244,22 +240,27 @@ def loss_func(a, b):
 
     pos_amp = F.mse_loss(a[:, :2, :], b[:, :2, :])
 
-    real_atoms = b[:, 2:, :]
     fake_atoms = a[:, 2:, :].permute(0, 2, 1)
-    # fake_indices = torch.argmax(fake_atoms, dim=-1).view(-1)
+    real_atoms = b[:, 2:, :].permute(0, 2, 1)
+    fake_indices = torch.argmax(fake_atoms, dim=-1).view(-1)
 
-    expected_indices = torch.argmax(real_atoms.permute(0, 2, 1), dim=-1).view(-1)
+    expected_indices = torch.argmax(real_atoms, dim=-1).view(-1)
+
     actual = fake_atoms.reshape(-1, d_size)
-    # print(expected_indices)
-    # print(fake_indices)
 
     atom_loss = F.cross_entropy(actual, expected_indices)
 
-    # print('POS_AMP', pos_amp.item(), 'ATOM', atom_loss.item())
+    # atom_loss = F.mse_loss(fake_atoms, real_atoms)
+
+    print(fake_indices)
+    print(expected_indices)
+    print('POS_AMP', pos_amp.item(), 'ATOM', atom_loss.item())
     total_loss = (pos_amp * 1) + (atom_loss * 1)
     return total_loss
 
 def train(batch, i):
+    print('===============================')
+
     optim.zero_grad()
 
     r = model.forward(batch)

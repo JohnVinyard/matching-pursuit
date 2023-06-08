@@ -233,7 +233,9 @@ def sparse_code_to_differentiable_key_points(
             time = soft_dirac(local_fm[ai, :]) @ torch.linspace(0, 1, n_samples, device=d.device, requires_grad=True)
             val = value[j]
 
-            vec = soft_dirac(vec.view(n_atoms))
+            vec = vec.view(n_atoms)
+            # vec = torch.softmax(vec.view(n_atoms), dim=-1)
+            # vec = soft_dirac(vec.view(n_atoms))
             # print('VEC MAX', torch.argmax(vec, dim=-1).item())
 
             x = torch.cat([val.view(1), time.view(1), vec.view(n_atoms)])
