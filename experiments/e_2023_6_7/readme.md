@@ -18,3 +18,12 @@ There will be several options for the generator:
     - raw audio fit
      
 
+
+# TODO
+- try the encoder with global pooling.  Is something still learned?
+    - No, but that's OK.  Compression isn't really my goal here, rather, I just want to make sure
+      that gradients are flowing
+
+- loss with atom relationships
+- try a dense generator
+- Can I parameterize atoms beyond just position, atom and amplitude?

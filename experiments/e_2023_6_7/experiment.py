@@ -27,7 +27,7 @@ exp = Experiment(
     model_dim=128,
     kernel_size=512)
 
-d_size = 256
+d_size = 512
 kernel_size = 256
 sparse_coding_iterations = 16
 
@@ -132,7 +132,10 @@ class Encoder(nn.Module):
         # x = torch.cat([x, pe], dim=1)
         # x = self.reduce(x)
         # x = self.stack(x)
-        # x = torch.mean(x, dim=-1)
+
+        # x = x[..., -1:]
+        # x = torch.mean(x, dim=-1, keepdim=True)
+        # x, _ = torch.max(x, dim=-1, keepdim=True)
 
         return x
 
@@ -149,8 +152,8 @@ class Decoder(nn.Module):
 
     
     def forward(self, x):
-        x = x.permute(0, 2, 1)
-        # x = self.net(x.permute(0, 2, 1))
+        # x = x.permute(0, 2, 1)
+        x = self.net(x.permute(0, 2, 1))
 
         pos_amp = torch.sigmoid(self.to_pos_amp(x))
 
@@ -196,7 +199,7 @@ def loss_func(a, b):
     atom_loss = F.cross_entropy(actual, expected_indices)
 
     # print('POS_AMP', pos_amp.item(), 'ATOM', atom_loss.item())
-    total_loss = (pos_amp * 100) + (atom_loss * 1)
+    total_loss = (pos_amp * 1) + (atom_loss * 1)
     return total_loss
 
 def train(batch, i):
