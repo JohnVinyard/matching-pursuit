@@ -24,9 +24,10 @@ class CanonicalOrdering(nn.Module):
     Project embeddings into a single dimension and order them
     """
 
-    def __init__(self, embedding_dim, dim=None):
+    def __init__(self, embedding_dim, dim=None, no_op=False):
         super().__init__()
         self.embedding_dim = embedding_dim
+        self.no_op = no_op
 
         if dim is None:
             self.register_buffer(
@@ -39,6 +40,9 @@ class CanonicalOrdering(nn.Module):
 
     
     def forward(self, x):
+        if self.no_op:
+            return x
+    
         batch, t, dim = x.shape
         z = x @ self.projection
         indices = torch.argsort(z, dim=1)

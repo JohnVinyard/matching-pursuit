@@ -7,9 +7,8 @@ import zounds
 from config.experiment import Experiment
 from modules.dilated import DilatedStack
 from modules.linear import LinearOutputStack
-from modules.normalization import ExampleNorm, max_norm, unit_norm
-from modules.pointcloud import CanonicalOrdering, encode_events, extract_graph_edges
-from modules.pos_encode import ExpandUsingPosEncodings, pos_encode_feature
+from modules.pointcloud import CanonicalOrdering, encode_events
+from modules.pos_encode import ExpandUsingPosEncodings
 from scalar_scheduling import pos_encoded
 from time_distance import optimizer
 from train.experiment_runner import BaseExperimentRunner
@@ -29,7 +28,7 @@ exp = Experiment(
 
 latent_dim = 128
 steps = 32
-n_events = steps * 7
+n_events = steps * 7 # encoding steps * number of bands
 
 
 class TransformerSetProcessor(nn.Module):
@@ -62,8 +61,7 @@ class DilatedStackSetProcessor(nn.Module):
         x = x.permute(0, 2, 1)
         return x
 
-snap_embeddings = False # biggest positive contribution yet
-# encode_edges = False
+do_canonical_ordering = True
 canonical_ordering_dim = 0 # canonical ordering by time seems to work best
 nerf_generator = True
 max_amp = 15
@@ -81,14 +79,12 @@ class Generator(nn.Module):
             nerf_like=True,
             set_processor=TransformerSetProcessor,
             softmax=lambda x: x,
-            snap_embeddings=False):
+        ):
 
         super().__init__()
         self.latent_dim = latent_dim
         self.internal_dim = internal_dim
         self.n_events = n_events
-
-        self.snap_embeddings = snap_embeddings
 
         self.nerf_like = nerf_like
 
@@ -130,17 +126,6 @@ class Generator(nn.Module):
         atom = self.to_atom.forward(x)
         atom = self.softmax(atom)
 
-        if self.snap_embeddings:
-            orig_shape = atom.shape
-            atom = atom.view(-1, model.embedding_dim)
-            indices = model.to_indices(atom)
-            orig = model.to_embeddings(indices)
-
-            forward = orig
-            backward = atom
-            y = backward + (forward - backward).detach()
-            atom = y.view(*orig_shape)
-        
 
         pos = (torch.sin(self.to_pos.forward(x)) + 1) * 0.5
         amp = torch.abs(self.to_amp.forward(x))
@@ -158,7 +143,6 @@ class Discriminator(nn.Module):
             set_processor=TransformerSetProcessor,
             reduction='last',
             judgement_activation=lambda x: x,
-            # process_edges=False
         ):
 
         super().__init__()
@@ -176,17 +160,11 @@ class Discriminator(nn.Module):
         self.reduction = reduction
         self.judgement_activation = judgement_activation
 
-        # self.process_edges = process_edges
-        # self.edges = ProduceEdges(threshold=0.2)
 
         self.apply(lambda x: exp.init_weights(x))
 
     def forward(self, x):
 
-        # if self.process_edges:
-        #     x = self.edges.forward(x)
-        #     x = self.embed_edges(x)
-        # else:
 
         pos_amp = x[:, :, :2]
         atoms = x[:, :, 2:]
@@ -210,16 +188,6 @@ class Discriminator(nn.Module):
 
 
 
-# class ProduceEdges(nn.Module):
-#     def __init__(self, threshold: float = None):
-#         super().__init__()
-#         self.threshold = threshold
-    
-#     def forward(self, embeddings: torch.Tensor):
-#         edges = extract_graph_edges(embeddings, threshold=self.threshold)
-#         return edges
-
-
 
 class AutoEncoder(nn.Module):
     def __init__(self):
@@ -231,7 +199,6 @@ class AutoEncoder(nn.Module):
             set_processor=encoder_class, 
             reduction=aggregation_method, 
             judgement_activation=lambda x: x, 
-            # process_edges=encode_edges
         )
         
         self.decoder = Generator(
@@ -241,7 +208,7 @@ class AutoEncoder(nn.Module):
             nerf_like=nerf_generator,
             set_processor=decoder_class,
             softmax=lambda x: x,
-            snap_embeddings=snap_embeddings
+            # snap_embeddings=snap_embeddings
         )
 
         self.apply(lambda x: exp.init_weights(x))
@@ -252,105 +219,13 @@ class AutoEncoder(nn.Module):
         return decoded, encoded
 
 
-# class SetRelationshipLoss(nn.Module):
-#     def __init__(self, embedding_dim, n_edges):
-#         super().__init__()
-
-#         self.embedding_dim = embedding_dim
-#         self.n_edges = n_edges
-
-#         self.edges = ProduceEdges(self.n_edges)
-#         self.ordering = CanonicalOrdering(embedding_dim)
-    
-#     def _extract_and_order(self, x):
-#         edges = self.edges.forward(x)
-#         ordered = self.ordering.forward(edges)
-#         return ordered
-    
-
-#     def forward(self, recon, target):
-#         r = self._extract_and_order(recon)
-#         t = self._extract_and_order(target)
-#         return F.mse_loss(r, t)
-
-        
-# set_loss = SetRelationshipLoss(
-#     embedding_dim=model.embedding_dim + 2, 
-#     n_edges=256).to(device)
 
 
 pos_amp_dim = 1
 canonical = CanonicalOrdering(
     model.embedding_dim + (pos_amp_dim * 2), 
-    dim=canonical_ordering_dim).to(device)
-
-def pos_encode_feature(x, n_freqs):
-    output = [x]
-    for i in range(n_freqs):
-        output.extend([
-            torch.sin((2 ** i) * x),
-            torch.cos((2 ** i) * x)
-        ])
-    x = torch.cat(output, dim=-1)
-    return x
-
-def compute_full_embedding(a: torch.Tensor):
-    pos, amp, atom = a[..., :1], a[..., 1:2], a[..., 2:]
-
-    pos = pos_encode_feature(pos * np.pi, n_freqs=16)
-    amp = pos_encode_feature((amp / 20) * np.pi, n_freqs=16)
-
-    final = torch.cat([pos, amp, atom], dim=-1)
-    return final
-
-
-# gen = Generator(
-#     latent_dim=latent_dim, 
-#     internal_dim=512, 
-#     n_events=n_events, 
-#     nerf_like=False, 
-#     set_processor=DilatedStackSetProcessor,
-#     softmax=lambda x: torch.abs(x),
-#     snap_embeddings=True).to(device)
-# gen_optim = optimizer(gen, lr=1e-4)
-
-
-# disc = Discriminator(
-#     n_atoms=model.embedding_dim,
-#     internal_dim=512,
-#     out_dim=1,
-#     set_processor=DilatedStackSetProcessor,
-#     reduction=aggregation_method,
-#     judgement_activation=lambda x: x,
-#     process_edges=False).to(device)
-# disc_optim = optimizer(disc, lr=1e-4)
-
-
-# def generate_latent(batch_size):
-#     return torch.zeros(batch_size, latent_dim, device=device).uniform_(-1, 1)
-
-# def train_gen(batch):
-#     gen_optim.zero_grad()
-#     x = generate_latent(batch.shape[0])
-#     fake = gen.forward(x)
-#     j = disc.forward(fake)
-#     loss = torch.abs(1 - j).mean()
-#     loss.backward()
-#     gen_optim.step()
-#     return loss, fake
-
-
-# def train_disc(batch):
-#     disc_optim.zero_grad()
-#     x = generate_latent(batch.shape[0])
-#     fake = gen.forward(x)
-#     fj = disc.forward(fake)
-#     rj = disc.forward(batch)
-#     loss = (torch.abs(1 - rj).mean() + torch.abs(0 - fj).mean()) * 0.5
-#     loss.backward()
-#     disc_optim.step()
-#     return loss
-
+    dim=canonical_ordering_dim, 
+    no_op=not do_canonical_ordering).to(device)
 
 
 ae = AutoEncoder().to(device)
@@ -361,8 +236,8 @@ def train_ae(batch):
 
     optim.zero_grad()
     recon, encoded = ae.forward(batch)
-    # No set alignment, we expect atoms to produced in the same
-    # order they were seen
+
+    recon = canonical.forward(recon)
 
     # print(batch.shape, recon.shape)
     targets = torch.argmax(batch[..., 2:], dim=-1).view(-1)
@@ -404,7 +279,7 @@ def to_instances(vectors):
     for b, batch in enumerate(vectors):
         for i, vec in enumerate(batch):
 
-            # atom index (NOW EMBEDDINGS)
+            # atom one-hot encoding
             atom_index = vec[..., 2:]
 
             index = torch.argmax(atom_index, dim=-1).view(-1).item()
