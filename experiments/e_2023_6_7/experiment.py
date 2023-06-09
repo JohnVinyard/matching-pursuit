@@ -32,6 +32,7 @@ d_size = 16
 kernel_size = 256
 sparse_coding_iterations = 16
 old_style = True
+raw_feature_map = True
 
 band = zounds.FrequencyBand(20, 2000)
 scale = zounds.MelScale(band, d_size)
@@ -72,7 +73,7 @@ def _inner_generate(batch_size, total_events, amps, positions, atom_indices):
     return output
 
 
-def extract_key_points(x, d, old_style=False):
+def extract_key_points(x, d, old_style=False, raw_feature_map=False):
     """
     Outputs a tensor of shape (batch, atom_encoding, n_events)
 
@@ -80,6 +81,16 @@ def extract_key_points(x, d, old_style=False):
 
     """
     batch = x.shape[0]
+
+    if raw_feature_map:
+        fm = sparse_feature_map(
+            x, 
+            d, 
+            n_steps=sparse_coding_iterations, 
+            device=device,
+            use_softmax=False
+        )
+        return fm
 
     if old_style:
         fm = sparse_feature_map(
@@ -238,7 +249,7 @@ class DenseModel(nn.Module):
             nn.BatchNorm1d(64),
             nn.LeakyReLU(0.2),
             nn.Upsample(scale_factor=4, mode='nearest'), # 32768
-            nn.Conv1d(64, d_size, 7, 1, 3),
+            nn.Conv1d(64, 1, 7, 1, 3),
         )
 
 
@@ -248,23 +259,29 @@ class DenseModel(nn.Module):
         x = x.view(-1, 1, exp.n_samples)
         e = self.encoder(x)
         x = self.decoder(e)
-        x = F.conv1d(x, d.view(1, d_size, kernel_size), padding=kernel_size // 2)
-        x = x / d_size
-        x = x[..., :exp.n_samples]
+        # x = F.conv1d(x, d.view(1, d_size, kernel_size), padding=kernel_size // 2)
+        # x = x / d_size
+        # x = x[..., :exp.n_samples]
         return x
 
 
-model = Model(channels=d_size, schedule=True).to(device)
-# model = DenseModel().to(device)
-optim = optimizer(model, lr=1e-3)
+# model = Model(channels=d_size, schedule=True).to(device)
+model = DenseModel().to(device)
+optim = optimizer(model, lr=1e-4)
 
 
 def loss_func(a, b):
 
-    b = extract_key_points(b, d, old_style=old_style)
+    b = extract_key_points(b, d, old_style=old_style, raw_feature_map=raw_feature_map)
 
     if a.shape != b.shape:
-        a = extract_key_points(a, d, old_style=old_style)
+        a = extract_key_points(a, d, old_style=old_style, raw_feature_map=raw_feature_map)
+    
+
+    if raw_feature_map:
+        loss = torch.abs(a - b).sum()
+        return loss
+    
 
     pos_amp = F.mse_loss(a[:, :2, :], b[:, :2, :])
 
@@ -282,8 +299,8 @@ def loss_func(a, b):
 
     # print(fake_indices)
     # print(expected_indices)
-    print('POS_AMP', pos_amp.item(), 'ATOM', atom_loss.item())
-    total_loss = (pos_amp * 100) + (atom_loss * 1)
+    # print('POS_AMP', pos_amp.item(), 'ATOM', atom_loss.item())
+    total_loss = (pos_amp * 1) + (atom_loss * 1)
     return total_loss
 
 def train(batch, i):

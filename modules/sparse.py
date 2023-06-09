@@ -47,7 +47,7 @@ def sparsify(x, n_to_keep, return_indices=False, soft=False, sharpen=False, sali
     # get values from original
     values = torch.gather(x, dim=-1, index=indices)
 
-    out = torch.zeros_like(x)
+    out = torch.zeros_like(x, requires_grad=True)
     out = torch.scatter(out, dim=-1, index=indices, src=values)
     out = out.reshape(*orig_shape)
 

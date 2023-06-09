@@ -81,7 +81,7 @@ def build_scatter_segments(n_samples, atom_size):
 
     def scatter_segments(x, inst):
         if isinstance(x, tuple):
-            x = torch.zeros(*x, device=device)
+            x = torch.zeros(*x, device=device, requires_grad=True)
         target = torch.cat(
             [torch.zeros_like(x), x, torch.zeros_like(x)], dim=-1)
         base = n_samples
@@ -134,6 +134,8 @@ def sparse_feature_map(
             padded = F.pad(residual, (0, atom_size))
             f = F.conv1d(
                 padded, d.view(n_atoms, 1, atom_size))[..., :n_samples]
+            f = sparsify(f, n_to_keep=n_steps)
+            return f
         else:
             f = fft_convolve(residual, d, approx=approx)
 
