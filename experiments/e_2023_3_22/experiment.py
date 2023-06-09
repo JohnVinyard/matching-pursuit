@@ -66,7 +66,7 @@ do_canonical_ordering = True
 canonical_ordering_dim = 0 # canonical ordering by time seems to work best
 encoder_class = TransformerSetProcessor
 decoder_class = TransformerSetProcessor
-aggregation_method = 'none'
+aggregation_method = 'mean'
 
 
 class Generator(nn.Module):
@@ -158,9 +158,9 @@ class Discriminator(nn.Module):
         x = self.processor(x)
 
         if self.reduction == 'last':
-            x = x[:, -1, :]
+            x = x[:, -1:, :]
         elif self.reduction == 'mean':
-            x = torch.mean(x, dim=1)
+            x = torch.mean(x, dim=1, keepdim=True)
         elif self.reduction == 'none':
             pass
         else:
@@ -222,8 +222,6 @@ def train_ae(batch):
 
     l1 = F.mse_loss(recon[..., :2], batch[..., :2])
     l2 = F.cross_entropy(recon[..., 2:].view(-1, model.total_atoms), targets)
-
-    # print('POS_AMP', l1.item(), 'ATOM', l2.item())
 
     loss = (l1 * 100) + (l2 * 1)
     loss.backward()
