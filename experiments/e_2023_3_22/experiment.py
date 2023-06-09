@@ -7,6 +7,7 @@ import zounds
 from config.experiment import Experiment
 from modules.dilated import DilatedStack
 from modules.linear import LinearOutputStack
+from modules.normalization import ExampleNorm
 from modules.pointcloud import CanonicalOrdering, encode_events
 from modules.pos_encode import ExpandUsingPosEncodings
 from scalar_scheduling import pos_encoded
@@ -25,7 +26,6 @@ exp = Experiment(
     kernel_size=512)
 
 
-
 latent_dim = 128
 steps = 32
 n_events = steps * 7 # encoding steps * number of bands
@@ -39,7 +39,7 @@ class TransformerSetProcessor(nn.Module):
 
         encoder = nn.TransformerEncoderLayer(
             embedding_size, 4, dim, 0.1, batch_first=True)
-        self.net = nn.TransformerEncoder(encoder, 6, norm=None)
+        self.net = nn.TransformerEncoder(encoder, 6, norm=nn.LayerNorm((dim,)))
         self.apply(lambda x: exp.init_weights(x))
 
     def forward(self, x):
@@ -47,27 +47,25 @@ class TransformerSetProcessor(nn.Module):
         return x
 
 
-class DilatedStackSetProcessor(nn.Module):
-    def __init__(self, embedding_size, dim):
-        super().__init__()
-        self.embedding_size = embedding_size
-        self.dim = dim
-        self.net = DilatedStack(dim, [1, 3, 9, 27, 81, 1], dropout=0.1)
-        self.apply(lambda x: exp.init_weights(x))
+# class DilatedStackSetProcessor(nn.Module):
+#     def __init__(self, embedding_size, dim):
+#         super().__init__()
+#         self.embedding_size = embedding_size
+#         self.dim = dim
+#         self.net = DilatedStack(dim, [1, 3, 9, 27, 81, 1], dropout=0.1)
+#         self.apply(lambda x: exp.init_weights(x))
 
-    def forward(self, x):
-        x = x.permute(0, 2, 1)
-        x = self.net(x)
-        x = x.permute(0, 2, 1)
-        return x
+#     def forward(self, x):
+#         x = x.permute(0, 2, 1)
+#         x = self.net(x)
+#         x = x.permute(0, 2, 1)
+#         return x
 
 do_canonical_ordering = True
 canonical_ordering_dim = 0 # canonical ordering by time seems to work best
-nerf_generator = True
-max_amp = 15
-encoder_class = DilatedStackSetProcessor
-decoder_class = DilatedStackSetProcessor
-aggregation_method = 'mean'
+encoder_class = TransformerSetProcessor
+decoder_class = TransformerSetProcessor
+aggregation_method = 'none'
 
 
 class Generator(nn.Module):
@@ -76,7 +74,6 @@ class Generator(nn.Module):
             latent_dim,
             internal_dim,
             n_events,
-            nerf_like=True,
             set_processor=TransformerSetProcessor,
             softmax=lambda x: x,
         ):
@@ -86,49 +83,33 @@ class Generator(nn.Module):
         self.internal_dim = internal_dim
         self.n_events = n_events
 
-        self.nerf_like = nerf_like
 
         self.to_atom = nn.Linear(self.internal_dim, model.embedding_dim)
         self.to_pos = nn.Linear(self.internal_dim, 1)
         self.to_amp = nn.Linear(self.internal_dim, 1)
         self.softmax = softmax
 
-        if nerf_like:
-            self.net = ExpandUsingPosEncodings(
-                internal_dim,
-                n_events,
-                n_freqs=16,
-                latent_dim=latent_dim,
-                multiply=False,
-                learnable_encodings=True,
-                concat=True)
-
-            self.process = LinearOutputStack(
-                internal_dim, layers=5, out_channels=internal_dim)
-        else:
-            self.embed = nn.Linear(self.latent_dim + 33, internal_dim)
-            self.process = set_processor(internal_dim, internal_dim)
+        self.embed = nn.Linear(self.latent_dim + 33, internal_dim)
+        self.process = set_processor(internal_dim, internal_dim)
 
         self.apply(lambda x: exp.init_weights(x))
 
     def forward(self, x):
 
-        if self.nerf_like:
-            x = self.net(x[:, None, :])
-            x = self.process(x)
-        else:
-            x = x.view(-1, 1, self.latent_dim).repeat(1, self.n_events, 1)
-            pos = pos_encoded(x.shape[0], self.n_events, 16, device=x.device)
-            x = torch.cat([x, pos], dim=-1)
-            x = self.embed(x)
-            x = self.process(x)
+        batch, time, channels = x.shape
+        factor = self.n_events // time
+
+        x = x.view(batch, time, self.latent_dim).repeat(1, factor, 1)
+        pos = pos_encoded(x.shape[0], self.n_events, 16, device=x.device)
+        x = torch.cat([x, pos], dim=-1)
+        x = self.embed(x)
+        x = self.process(x)
 
         atom = self.to_atom.forward(x)
         atom = self.softmax(atom)
 
-
-        pos = (torch.sin(self.to_pos.forward(x)) + 1) * 0.5
-        amp = torch.abs(self.to_amp.forward(x))
+        pos = torch.sigmoid(self.to_pos.forward(x))
+        amp = torch.sigmoid(self.to_amp.forward(x)) * 15
 
         final = torch.cat([pos, amp, atom], dim=-1)
         return final
@@ -160,12 +141,9 @@ class Discriminator(nn.Module):
         self.reduction = reduction
         self.judgement_activation = judgement_activation
 
-
         self.apply(lambda x: exp.init_weights(x))
 
     def forward(self, x):
-
-
         pos_amp = x[:, :, :2]
         atoms = x[:, :, 2:]
         pos_amp = self.embed_pos_amp(pos_amp)
@@ -178,6 +156,8 @@ class Discriminator(nn.Module):
             x = x[:, -1, :]
         elif self.reduction == 'mean':
             x = torch.mean(x, dim=1)
+        elif self.reduction == 'none':
+            pass
         else:
             raise ValueError(f'Unknown reduction type {self.reduction}')
         
@@ -205,10 +185,8 @@ class AutoEncoder(nn.Module):
             latent_dim=latent_dim,
             internal_dim=512,
             n_events=n_events,
-            nerf_like=nerf_generator,
             set_processor=decoder_class,
             softmax=lambda x: x,
-            # snap_embeddings=snap_embeddings
         )
 
         self.apply(lambda x: exp.init_weights(x))
@@ -233,18 +211,15 @@ optim = optimizer(ae, lr=1e-3)
 
 
 def train_ae(batch):
-
     optim.zero_grad()
     recon, encoded = ae.forward(batch)
-
-    recon = canonical.forward(recon)
-
-    # print(batch.shape, recon.shape)
+    # recon = canonical.forward(recon)
     targets = torch.argmax(batch[..., 2:], dim=-1).view(-1)
-
 
     l1 = F.mse_loss(recon[..., :2], batch[..., :2])
     l2 = F.cross_entropy(recon[..., 2:].view(-1, model.total_atoms), targets)
+
+    print('POS_AMP', l1.item(), 'ATOM', l2.item())
 
     loss = l1 + l2
     loss.backward()
@@ -321,7 +296,8 @@ class MatchingPursuitGAN(BaseExperimentRunner):
         self.model = ae
 
         def read_from_cache_hook(val):
-            print('READING FROM CACHE')
+            # print('READING FROM CACHE')
+            pass
 
         wrapper = numpy_conjure(self.collection, read_hook=read_from_cache_hook)
         wrapped = wrapper(cached_encode)
