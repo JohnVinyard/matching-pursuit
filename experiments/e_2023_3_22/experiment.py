@@ -110,7 +110,8 @@ class Generator(nn.Module):
 
         pos = torch.sigmoid(self.to_pos.forward(x))
         # amp = torch.sigmoid(self.to_amp.forward(x)) * 15
-        amp = torch.relu(self.to_amp.forward(x))
+        # amp = torch.relu(self.to_amp.forward(x))
+        amp = self.to_amp.forward(x) ** 2
 
         final = torch.cat([pos, amp, atom], dim=-1)
         return final
@@ -219,12 +220,12 @@ def train_ae(batch):
     fake_pos_amp = recon[..., :2]
     real_pos_amp = batch[..., :2]
 
-    weights = real_pos_amp[..., 1:2]
-    diff = torch.norm(fake_pos_amp - real_pos_amp, dim=-1, keepdim=True) * weights
+    # weights = real_pos_amp[..., 1:2]
+    # diff = torch.norm(fake_pos_amp - real_pos_amp, dim=-1, keepdim=True) * weights
 
-    # l1 = F.mse_loss(recon[..., :2], batch[..., :2])
+    l1 = F.mse_loss(recon[..., :2], batch[..., :2])
 
-    l1 = diff.mean()
+    # l1 = diff.mean()
     l2 = F.cross_entropy(recon[..., 2:].view(-1, model.total_atoms), targets)
 
     print('POS_AMP', l1.item(), 'ATOM', l2.item())
