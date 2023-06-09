@@ -24,11 +24,11 @@ import numpy as np
 exp = Experiment(
     samplerate=zounds.SR22050(),
     n_samples=2**15,
-    weight_init=0.1,
+    weight_init=0.05,
     model_dim=128,
     kernel_size=512)
 
-d_size = 512
+d_size = 16
 kernel_size = 256
 sparse_coding_iterations = 16
 
@@ -44,7 +44,8 @@ def generate(batch_size):
 
     amps = torch.zeros(total_events, device=device).uniform_(0, 1)
     positions = torch.zeros(total_events, device=device).uniform_(0, 1)
-    atom_indices = torch.randperm(d_size)[:total_events]
+    # atom_indices = torch.randperm(d_size)[:total_events]
+    atom_indices = (torch.zeros(total_events).uniform_(0, 1) * d_size).long()
     # print('GENERATING PROCESS', atom_indices)
 
     output = _inner_generate(
@@ -143,7 +144,7 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, channels):
+    def __init__(self, channels, schedule=False):
         super().__init__()
         self.channels = channels
         self.net = ExpandUsingPosEncodings(
@@ -151,6 +152,7 @@ class Decoder(nn.Module):
         
         self.to_pos_amp = LinearOutputStack(channels, 3, out_channels=2)
         self.to_atom = LinearOutputStack(channels, 3, out_channels=d_size)
+        self.schedule = schedule
 
     
     def forward(self, x):
@@ -161,16 +163,20 @@ class Decoder(nn.Module):
 
         atoms = self.to_atom(x)
 
+        if self.schedule:
+            # (batch, events, 2), (batch, events, d_size)
+            print('EVENT SHAPE', pos_amp.shape, atoms.shape)
+
         x = torch.cat([pos_amp, atoms], dim=-1).permute(0, 2, 1)
-        # x = self.expand(x).permute(0, 2, 1)
         return x
 
 
 class Model(nn.Module):
-    def __init__(self, channels):
+    def __init__(self, channels, schedule=False):
         super().__init__()
+        self.schedule = schedule
         self.encoder = Encoder(channels, d=d)
-        self.decoder = Decoder(channels)
+        self.decoder = Decoder(channels, schedule=schedule)
         self.apply(lambda x: exp.init_weights(x))
     
     def forward(self, x):
@@ -210,7 +216,7 @@ class DenseModel(nn.Module):
             nn.BatchNorm1d(64),
             nn.LeakyReLU(0.2),
             nn.Upsample(scale_factor=4, mode='nearest'), # 32768
-            nn.Conv1d(64, 512, 7, 1, 3),
+            nn.Conv1d(64, d_size, 7, 1, 3),
         )
 
 
@@ -220,14 +226,14 @@ class DenseModel(nn.Module):
         x = x.view(-1, 1, exp.n_samples)
         e = self.encoder(x)
         x = self.decoder(e)
-        x = F.conv1d(x, d.view(1, 512, 256), padding=128)
-        x = x / 512
+        x = F.conv1d(x, d.view(1, d_size, kernel_size), padding=kernel_size // 2)
+        x = x / d_size
         x = x[..., :exp.n_samples]
         return x
 
 
-# model = Model(channels=d_size).to(device)
-model = DenseModel().to(device)
+model = Model(channels=d_size, schedule=False).to(device)
+# model = DenseModel().to(device)
 optim = optimizer(model, lr=1e-3)
 
 
@@ -252,14 +258,14 @@ def loss_func(a, b):
 
     # atom_loss = F.mse_loss(fake_atoms, real_atoms)
 
-    print(fake_indices)
-    print(expected_indices)
-    print('POS_AMP', pos_amp.item(), 'ATOM', atom_loss.item())
+    # print(fake_indices)
+    # print(expected_indices)
+    # print('POS_AMP', pos_amp.item(), 'ATOM', atom_loss.item())
     total_loss = (pos_amp * 1) + (atom_loss * 1)
     return total_loss
 
 def train(batch, i):
-    print('===============================')
+    # print('===============================')
 
     optim.zero_grad()
 
