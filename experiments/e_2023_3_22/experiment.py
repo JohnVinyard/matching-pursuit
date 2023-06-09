@@ -39,7 +39,7 @@ class TransformerSetProcessor(nn.Module):
 
         encoder = nn.TransformerEncoderLayer(
             embedding_size, 4, dim, 0.1, batch_first=True)
-        self.net = nn.TransformerEncoder(encoder, 6, norm=nn.LayerNorm((dim,)))
+        self.net = nn.TransformerEncoder(encoder, 6, norm=nn.LayerNorm((n_events, dim)))
         self.apply(lambda x: exp.init_weights(x))
 
     def forward(self, x):
@@ -109,7 +109,8 @@ class Generator(nn.Module):
         atom = self.softmax(atom)
 
         pos = torch.sigmoid(self.to_pos.forward(x))
-        amp = torch.sigmoid(self.to_amp.forward(x)) * 15
+        # amp = torch.sigmoid(self.to_amp.forward(x)) * 15
+        amp = torch.relu(self.to_amp.forward(x))
 
         final = torch.cat([pos, amp, atom], dim=-1)
         return final
@@ -213,10 +214,17 @@ optim = optimizer(ae, lr=1e-3)
 def train_ae(batch):
     optim.zero_grad()
     recon, encoded = ae.forward(batch)
-    # recon = canonical.forward(recon)
     targets = torch.argmax(batch[..., 2:], dim=-1).view(-1)
 
-    l1 = F.mse_loss(recon[..., :2], batch[..., :2])
+    fake_pos_amp = recon[..., :2]
+    real_pos_amp = batch[..., :2]
+
+    weights = real_pos_amp[..., 1:2]
+    diff = torch.norm(fake_pos_amp - real_pos_amp, dim=-1, keepdim=True) * weights
+
+    # l1 = F.mse_loss(recon[..., :2], batch[..., :2])
+
+    l1 = diff.mean()
     l2 = F.cross_entropy(recon[..., 2:].view(-1, model.total_atoms), targets)
 
     print('POS_AMP', l1.item(), 'ATOM', l2.item())
