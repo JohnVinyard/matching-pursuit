@@ -142,16 +142,15 @@ def to_key_points_one_d(fm: torch.Tensor, n_to_keep: int = 64) -> torch.Tensor:
             time_index = index % time
             channel_index = index // time
 
-            # ch_span = torch.zeros(channels, device=fm.device)
-            # ch_span[channel_index] = value
-            ch_span = fm[i, :, time_index]
-            # ch_span = soft_dirac(ch_span)
+            ch_span = torch.zeros(channels, device=fm.device)
+            ch_span[channel_index] = value
+            # ch_span = fm[i, :, time_index]
+            ch_span = soft_dirac(ch_span)
 
-            # span = torch.zeros(time, device=fm.device)
-            # span[time_index] = value
-
-            span = fm[i, channel_index, :]
-            # span = soft_dirac(span)
+            span = torch.zeros(time, device=fm.device)
+            span[time_index] = value
+            # span = fm[i, channel_index, :]
+            span = soft_dirac(span)
             span = rng @ span
 
             vec = torch.cat([value.view(1), span.view(1), ch_span.view(channels)]) 

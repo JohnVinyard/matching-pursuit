@@ -24,13 +24,14 @@ import numpy as np
 exp = Experiment(
     samplerate=zounds.SR22050(),
     n_samples=2**15,
-    weight_init=0.05,
+    weight_init=0.1,
     model_dim=128,
     kernel_size=512)
 
 d_size = 16
 kernel_size = 256
 sparse_coding_iterations = 16
+old_style = True
 
 band = zounds.FrequencyBand(20, 2000)
 scale = zounds.MelScale(band, d_size)
@@ -71,21 +72,31 @@ def _inner_generate(batch_size, total_events, amps, positions, atom_indices):
     return output
 
 
-def extract_key_points(x, d):
+def extract_key_points(x, d, old_style=False):
+    """
+    Outputs a tensor of shape (batch, atom_encoding, n_events)
+
+    where atom_encoding = (2 + d_size)
+
+    """
     batch = x.shape[0]
 
-    # fm = sparse_feature_map(
-    #     x, 
-    #     d, 
-    #     n_steps=sparse_coding_iterations, 
-    #     device=device,
-    #     use_softmax=True
-    # )
+    if old_style:
+        fm = sparse_feature_map(
+            x, 
+            d, 
+            n_steps=sparse_coding_iterations, 
+            device=device,
+            use_softmax=True
+        )
 
-    # x = to_key_points_one_d(
-    #     fm, 
-    #     n_to_keep=sparse_coding_iterations
-    # ).permute(0, 2, 1)
+        x = to_key_points_one_d(
+            fm, 
+            n_to_keep=sparse_coding_iterations
+        ).permute(0, 2, 1)
+
+        return x
+    
 
     x = sparse_code_to_differentiable_key_points(
         x, d, n_steps=sparse_coding_iterations)
@@ -119,7 +130,7 @@ class Encoder(nn.Module):
     def forward(self, x):
         x = x.view(-1, 1, exp.n_samples)
 
-        x = extract_key_points(x, self.d)
+        x = extract_key_points(x, self.d, old_style=old_style)
 
         pos_amp = x[:, :2, :]
         atoms = x[:, 2:, :]
@@ -165,7 +176,18 @@ class Decoder(nn.Module):
 
         if self.schedule:
             # (batch, events, 2), (batch, events, d_size)
-            print('EVENT SHAPE', pos_amp.shape, atoms.shape)
+            # print('EVENT SHAPE', pos_amp.shape, atoms.shape)
+
+            batch = pos_amp.shape[0]
+
+            amp = pos_amp[:, :, :1]
+            pos = pos_amp[:, :, 1:]
+            atoms = torch.softmax(atoms, dim=-1)
+            atoms = (atoms @ d) * amp
+            output = torch.zeros(batch, sparse_coding_iterations, exp.n_samples, device=amp.device)
+            output[:, :, :kernel_size] = atoms
+            output = fft_shift(output, pos)
+            return output
 
         x = torch.cat([pos_amp, atoms], dim=-1).permute(0, 2, 1)
         return x
@@ -232,17 +254,17 @@ class DenseModel(nn.Module):
         return x
 
 
-model = Model(channels=d_size, schedule=False).to(device)
+model = Model(channels=d_size, schedule=True).to(device)
 # model = DenseModel().to(device)
 optim = optimizer(model, lr=1e-3)
 
 
 def loss_func(a, b):
 
-    b = extract_key_points(b, d)
+    b = extract_key_points(b, d, old_style=old_style)
 
     if a.shape != b.shape:
-        a = extract_key_points(a, d)
+        a = extract_key_points(a, d, old_style=old_style)
 
     pos_amp = F.mse_loss(a[:, :2, :], b[:, :2, :])
 
@@ -260,8 +282,8 @@ def loss_func(a, b):
 
     # print(fake_indices)
     # print(expected_indices)
-    # print('POS_AMP', pos_amp.item(), 'ATOM', atom_loss.item())
-    total_loss = (pos_amp * 1) + (atom_loss * 1)
+    print('POS_AMP', pos_amp.item(), 'ATOM', atom_loss.item())
+    total_loss = (pos_amp * 100) + (atom_loss * 1)
     return total_loss
 
 def train(batch, i):

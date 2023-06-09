@@ -33,4 +33,11 @@ There will be several options for the generator:
 
 It _is_ possible to learn a model that generates atom encodings using the same dictionary from the loss function
 
-It _is_ possible to learn positions, amps (AND ATOM INDICES?) with a dense model.
+It _is not_ possible to learn positions, amps and atom encodings with a dense model.
+
+Therefore, the ideal of a sparse loss, matching-pursuit-based loss paired with a dense, physics-inspired generator
+is not likely to work.
+
+Instead, the loss representation and the generator representation need to be isomorphic, e.g., both must be based
+on atoms derived from matching-pursuit, or more complex and differently-parameterized "events" that the loss can derive
+and the generator can produce.
