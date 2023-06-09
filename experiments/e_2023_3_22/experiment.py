@@ -5,6 +5,7 @@ from torch import nn
 from torch.nn import functional as F
 import zounds
 from config.experiment import Experiment
+from modules.activation import unit_sine
 from modules.dilated import DilatedStack
 from modules.linear import LinearOutputStack
 from modules.normalization import ExampleNorm
@@ -108,7 +109,9 @@ class Generator(nn.Module):
         atom = self.to_atom.forward(x)
         atom = self.softmax(atom)
 
-        pos = torch.sigmoid(self.to_pos.forward(x))
+        # pos = torch.sigmoid(self.to_pos.forward(x))
+        pos = unit_sine(self.to_pos.forward(x))
+
         # amp = torch.sigmoid(self.to_amp.forward(x)) * 15
         # amp = torch.relu(self.to_amp.forward(x))
         amp = self.to_amp.forward(x) ** 2
@@ -217,20 +220,12 @@ def train_ae(batch):
     recon, encoded = ae.forward(batch)
     targets = torch.argmax(batch[..., 2:], dim=-1).view(-1)
 
-    fake_pos_amp = recon[..., :2]
-    real_pos_amp = batch[..., :2]
-
-    # weights = real_pos_amp[..., 1:2]
-    # diff = torch.norm(fake_pos_amp - real_pos_amp, dim=-1, keepdim=True) * weights
-
     l1 = F.mse_loss(recon[..., :2], batch[..., :2])
-
-    # l1 = diff.mean()
     l2 = F.cross_entropy(recon[..., 2:].view(-1, model.total_atoms), targets)
 
-    print('POS_AMP', l1.item(), 'ATOM', l2.item())
+    # print('POS_AMP', l1.item(), 'ATOM', l2.item())
 
-    loss = l1 + l2
+    loss = (l1 * 100) + (l2 * 1)
     loss.backward()
     optim.step()
     return loss, recon, encoded
