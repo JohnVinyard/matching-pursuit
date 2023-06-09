@@ -11,6 +11,7 @@ from modules.linear import LinearOutputStack
 from modules.normalization import ExampleNorm
 from modules.pointcloud import CanonicalOrdering, encode_events
 from modules.pos_encode import ExpandUsingPosEncodings
+from modules.softmax import hard_softmax
 from scalar_scheduling import pos_encoded
 from time_distance import optimizer
 from train.experiment_runner import BaseExperimentRunner
@@ -66,7 +67,7 @@ do_canonical_ordering = True
 canonical_ordering_dim = 0 # canonical ordering by time seems to work best
 encoder_class = TransformerSetProcessor
 decoder_class = TransformerSetProcessor
-aggregation_method = 'mean'
+aggregation_method = 'last'
 
 
 class Generator(nn.Module):
@@ -213,6 +214,51 @@ canonical = CanonicalOrdering(
 
 ae = AutoEncoder().to(device)
 optim = optimizer(ae, lr=1e-3)
+
+gen = Generator(
+    latent_dim=latent_dim, 
+    internal_dim=512, 
+    n_events=n_events, 
+    set_processor=TransformerSetProcessor,
+    softmax=lambda x: hard_softmax(x, dim=-1, invert=True)).to(device)
+gen_optim = optimizer(gen, lr=1e-4)
+
+
+disc = Discriminator(
+    n_atoms=model.embedding_dim,
+    internal_dim=512,
+    out_dim=1,
+    set_processor=TransformerSetProcessor,
+    reduction=aggregation_method,
+    judgement_activation=torch.sigmoid).to(device)
+disc_optim = optimizer(disc, lr=1e-4)
+
+
+def generate_latent(batch_size):
+    return torch.zeros(batch_size, 1, latent_dim, device=device).uniform_(-1, 1)
+
+def train_gen(batch):
+    gen_optim.zero_grad()
+    x = generate_latent(batch.shape[0])
+    fake = gen.forward(x)
+    j = disc.forward(fake)
+    loss = torch.abs(1 - j).mean()
+    loss.backward()
+    gen_optim.step()
+    return loss, fake, x
+
+
+def train_disc(batch):
+    disc_optim.zero_grad()
+    x = generate_latent(batch.shape[0])
+    fake = gen.forward(x)
+    fj = disc.forward(fake)
+    rj = disc.forward(batch)
+    loss = (torch.abs(1 - rj).mean() + torch.abs(0 - fj).mean()) * 0.5
+    loss.backward()
+    disc_optim.step()
+    return loss
+
 
 
 def train_ae(batch):
@@ -394,5 +440,18 @@ class MatchingPursuitGAN(BaseExperimentRunner):
             self.encoded = e
             self.fake = f
             print(i, l.item())
+
+
+            # l = torch.zeros(1).fill_(0)
+
+            # if i % 2 == 0:
+            #     l, r, e = train_gen(vec)
+            #     self.fake = r
+            #     self.encoded = e
+            #     print('G', l.item())
+            # else:
+            #     dl = train_disc(vec)
+            #     print('D', dl.item())
+            
 
             self.after_training_iteration(l)
