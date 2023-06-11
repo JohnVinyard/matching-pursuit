@@ -11,6 +11,7 @@ from modules.dilated import DilatedStack
 from modules.linear import LinearOutputStack
 from modules.matchingpursuit import sparse_code_to_differentiable_key_points, sparse_feature_map
 from modules.normalization import max_norm
+from modules.overfitraw import OverfitRawAudio
 from modules.pos_encode import ExpandUsingPosEncodings
 from modules.sparse import to_key_points_one_d
 from scalar_scheduling import pos_encode_feature, pos_encoded
@@ -21,18 +22,18 @@ from util import device
 from util.readmedocs import readme
 import numpy as np
 
-exp = Experiment(
+exp = Experiment(   
     samplerate=zounds.SR22050(),
     n_samples=2**15,
     weight_init=0.1,
     model_dim=128,
     kernel_size=512)
 
-d_size = 16
+d_size = 256
 kernel_size = 256
 sparse_coding_iterations = 16
-old_style = True
-raw_feature_map = True
+overfit = True
+
 
 band = zounds.FrequencyBand(20, 2000)
 scale = zounds.MelScale(band, d_size)
@@ -42,13 +43,14 @@ d.requires_grad = True
 
 
 def generate(batch_size):
+    
     total_events = batch_size * sparse_coding_iterations
 
-    amps = torch.zeros(total_events, device=device).uniform_(0, 1)
+    amps = torch.zeros(total_events, device=device).uniform_(0.9, 1)
+    
     positions = torch.zeros(total_events, device=device).uniform_(0, 1)
-    # atom_indices = torch.randperm(d_size)[:total_events]
+
     atom_indices = (torch.zeros(total_events).uniform_(0, 1) * d_size).long()
-    # print('GENERATING PROCESS', atom_indices)
 
     output = _inner_generate(
         batch_size, total_events, amps, positions, atom_indices)
@@ -73,41 +75,16 @@ def _inner_generate(batch_size, total_events, amps, positions, atom_indices):
     return output
 
 
-def extract_key_points(x, d, old_style=False, raw_feature_map=False):
+def extract_key_points(x, d):
     """
     Outputs a tensor of shape (batch, atom_encoding, n_events)
 
     where atom_encoding = (2 + d_size)
 
     """
+
     batch = x.shape[0]
 
-    if raw_feature_map:
-        fm = sparse_feature_map(
-            x, 
-            d, 
-            n_steps=sparse_coding_iterations, 
-            device=device,
-            use_softmax=False
-        )
-        return fm
-
-    if old_style:
-        fm = sparse_feature_map(
-            x, 
-            d, 
-            n_steps=sparse_coding_iterations, 
-            device=device,
-            use_softmax=True
-        )
-
-        x = to_key_points_one_d(
-            fm, 
-            n_to_keep=sparse_coding_iterations
-        ).permute(0, 2, 1)
-
-        return x
-    
 
     x = sparse_code_to_differentiable_key_points(
         x, d, n_steps=sparse_coding_iterations)
@@ -141,7 +118,7 @@ class Encoder(nn.Module):
     def forward(self, x):
         x = x.view(-1, 1, exp.n_samples)
 
-        x = extract_key_points(x, self.d, old_style=old_style)
+        x = extract_key_points(x, self.d)
 
         pos_amp = x[:, :2, :]
         atoms = x[:, 2:, :]
@@ -236,19 +213,19 @@ class DenseModel(nn.Module):
         )
 
         self.decoder = nn.Sequential(
-            nn.Upsample(scale_factor=4, mode='nearest'), # 512
+            nn.Upsample(scale_factor=4, mode='linear'), # 512
             nn.Conv1d(512, 256, 7, 1, 3),
             nn.BatchNorm1d(256),
             nn.LeakyReLU(0.2),
-            nn.Upsample(scale_factor=4, mode='nearest'), # 2048
+            nn.Upsample(scale_factor=4, mode='linear'), # 2048
             nn.Conv1d(256, 128, 7, 1, 3),
             nn.BatchNorm1d(128),
             nn.LeakyReLU(0.2),
-            nn.Upsample(scale_factor=4, mode='nearest'), # 8192
+            nn.Upsample(scale_factor=4, mode='linear'), # 8192
             nn.Conv1d(128, 64, 7, 1, 3),
             nn.BatchNorm1d(64),
             nn.LeakyReLU(0.2),
-            nn.Upsample(scale_factor=4, mode='nearest'), # 32768
+            nn.Upsample(scale_factor=4, mode='linear'), # 32768
             nn.Conv1d(64, 1, 7, 1, 3),
         )
 
@@ -264,23 +241,24 @@ class DenseModel(nn.Module):
         # x = x[..., :exp.n_samples]
         return x
 
-
 # model = Model(channels=d_size, schedule=True).to(device)
-model = DenseModel().to(device)
-optim = optimizer(model, lr=1e-4)
+# model = DenseModel().to(device)
+model = OverfitRawAudio((1, 1, exp.n_samples), std=1e-5, normalize=False).to(device)
+optim = optimizer(model, lr=1e-3)
 
 
 def loss_func(a, b):
 
-    b = extract_key_points(b, d, old_style=old_style, raw_feature_map=raw_feature_map)
 
-    if a.shape != b.shape:
-        a = extract_key_points(a, d, old_style=old_style, raw_feature_map=raw_feature_map)
+    if b.shape[-1] != d_size + 2:
+        b = extract_key_points(b, d)
+
+    if a.shape[-1] != d_size + 2:
+        a = extract_key_points(a, d)
+
     
-
-    if raw_feature_map:
-        loss = torch.abs(a - b).sum()
-        return loss
+    loss = F.mse_loss(a[..., :2], b[..., :2])
+    return loss
     
 
     pos_amp = F.mse_loss(a[:, :2, :], b[:, :2, :])
@@ -325,23 +303,32 @@ def train(batch, i):
             1, sparse_coding_iterations, amps, positions, indices)
     
     return l, r
-    
+
+
+
 
 @readme
 class KeyPointLossToyExperiment(BaseExperimentRunner):
     def __init__(self, stream, port=None):
         super().__init__(stream, train, exp, port=port)
+        self.total_events = self.batch_size * sparse_coding_iterations
     
     def run(self):
-        for i, item in enumerate(self.iter_items()):
-            # print('=============================')
 
-            g = generate(item.shape[0])
+        g = generate(self.batch_size)        
+
+        for i, item in enumerate(self.iter_items()):
+            print('=======================')
+
             self.real = g
-            l, r = train(g, i)
+            l, r = train(g.clone().detach(), i)
             self.fake = r
             print('ITER', i, l.item())
             self.after_training_iteration(l)
+
+            if not overfit:
+                g = generate(self.batch_size)
+
 
             
     

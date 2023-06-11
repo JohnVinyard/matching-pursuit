@@ -49,25 +49,11 @@ class TransformerSetProcessor(nn.Module):
         return x
 
 
-# class DilatedStackSetProcessor(nn.Module):
-#     def __init__(self, embedding_size, dim):
-#         super().__init__()
-#         self.embedding_size = embedding_size
-#         self.dim = dim
-#         self.net = DilatedStack(dim, [1, 3, 9, 27, 81, 1], dropout=0.1)
-#         self.apply(lambda x: exp.init_weights(x))
-
-#     def forward(self, x):
-#         x = x.permute(0, 2, 1)
-#         x = self.net(x)
-#         x = x.permute(0, 2, 1)
-#         return x
-
 do_canonical_ordering = True
 canonical_ordering_dim = 0 # canonical ordering by time seems to work best
 encoder_class = TransformerSetProcessor
 decoder_class = TransformerSetProcessor
-aggregation_method = 'last'
+aggregation_method = 'sum'
 
 
 class Generator(nn.Module):
@@ -162,6 +148,8 @@ class Discriminator(nn.Module):
             x = x[:, -1:, :]
         elif self.reduction == 'mean':
             x = torch.mean(x, dim=1, keepdim=True)
+        elif self.reduction == 'sum':
+            x = torch.sum(x, dim=1, keepdim=True)
         elif self.reduction == 'none':
             pass
         else:
@@ -266,10 +254,13 @@ def train_ae(batch):
     recon, encoded = ae.forward(batch)
     targets = torch.argmax(batch[..., 2:], dim=-1).view(-1)
 
-    l1 = F.mse_loss(recon[..., :2], batch[..., :2])
+    # l1 = F.mse_loss(recon[..., :2], batch[..., :2])
+    weight = batch[..., 1:2]
+    diff = (recon[..., :2] - batch[..., :2])
+    l1 = (torch.norm(diff, dim=-1, keepdim=True) * weight).mean()
     l2 = F.cross_entropy(recon[..., 2:].view(-1, model.total_atoms), targets)
 
-    loss = (l1 * 100) + (l2 * 1)
+    loss = (l1 * 1) + (l2 * 1)
     loss.backward()
     optim.step()
     return loss, recon, encoded

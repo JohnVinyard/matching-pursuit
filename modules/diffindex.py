@@ -1,6 +1,23 @@
 import torch
 
 
+# TODO: Commented out because this isn't the correct implementation.  The *idea*
+# is that given a starting vector and target vector, find some A/transform matrix
+# that can transform source -> target.
+#
+#  Then, find the difference between this matrix and the identity matrix.  Is this
+# ultimately the same as taking the distance between the two vectors?
+#
+# def transform_matrix(source: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+#     # outer = torch.bmm(source[:, :, None], target[:, None, :])
+
+#     inv = torch.linalg.pinv(outer.permute(0, 2, 1))
+#     return inv
+
+#     # result = source @ inv
+#     # return result
+
+
 def to_hard_indices(soft, size):
     indices = torch.clamp(soft, -0.999, 0.999).view(-1)
     hard_indices = torch.round((((indices + 1) / 2) * size)).long()

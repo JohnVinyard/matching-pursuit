@@ -40,6 +40,25 @@ class Model(nn.Module):
             self.activation(self.position)
         )
 
+class DenseModel(nn.Module):
+    def __init__(self, signal, initial_position_value):
+        super().__init__()
+        self.signal = signal
+        self.params = nn.Parameter(torch.zeros(signal.shape[0]).uniform_(-1, 1))
+    
+    @property
+    def current_position_value(self):
+        with torch.no_grad():
+            bm = best_match(self.params, self.signal[:64])
+            index = torch.argmax(bm, dim=-1)
+            return index / self.signal.shape[0]
+    
+    def forward(self):
+        return self.params
+
+
+Model = DenseModel
+
 def sampling_kernel(size, device=None):
     rng = torch.linspace(0, 1, size, device=device)
     kernel = rng
@@ -182,8 +201,8 @@ def train(batch, i):
 
 @readme
 class ScalarPositioning(BaseExperimentRunner):
-    def __init__(self, stream):
-        super().__init__(stream, train, exp)
+    def __init__(self, stream, port=None):
+        super().__init__(stream, train, exp, port=port)
 
         self.mse_far_overlay = None
         self.mse_close_overlay = None
@@ -203,40 +222,40 @@ class ScalarPositioning(BaseExperimentRunner):
         search_signal = generate_signal(signal_size, device=device)
 
         # hypothesis - total failure
-        self.mse_far_overlay = experiment(
-            name='start higher, MSE loss',
-            total_size=total_size,
-            signal_size=signal_size,
-            target_position=0.5,
-            starting_position=0.9,
-            iterations=iterations,
-            loss=lambda a, b: F.mse_loss(a, b),
-            device=device
-        )
+        # self.mse_far_overlay = experiment(
+        #     name='start higher, MSE loss',
+        #     total_size=total_size,
+        #     signal_size=signal_size,
+        #     target_position=0.5,
+        #     starting_position=0.9,
+        #     iterations=iterations,
+        #     loss=lambda a, b: F.mse_loss(a, b),
+        #     device=device
+        # )
 
-        # hypothesis - total failure
-        self.mse_far_overlay = experiment(
-            name='start lower, MSE loss',
-            total_size=total_size,
-            signal_size=signal_size,
-            target_position=0.5,
-            starting_position=0.1,
-            iterations=iterations,
-            loss=lambda a, b: F.mse_loss(a, b),
-            device=device
-        )
+        # # hypothesis - total failure
+        # self.mse_far_overlay = experiment(
+        #     name='start lower, MSE loss',
+        #     total_size=total_size,
+        #     signal_size=signal_size,
+        #     target_position=0.5,
+        #     starting_position=0.1,
+        #     iterations=iterations,
+        #     loss=lambda a, b: F.mse_loss(a, b),
+        #     device=device
+        # )
 
-        # hypothesis - perfect success
-        self.mse_close_overlay = experiment(
-            name='start close, MSE loss',
-            total_size=total_size,
-            signal_size=signal_size,
-            target_position=0.5,
-            starting_position=0.5 + (overlap_range * 0.5),
-            iterations=iterations,
-            loss=lambda a, b: F.mse_loss(a, b),
-            device=device
-        )
+        # # hypothesis - perfect success
+        # self.mse_close_overlay = experiment(
+        #     name='start close, MSE loss',
+        #     total_size=total_size,
+        #     signal_size=signal_size,
+        #     target_position=0.5,
+        #     starting_position=0.5 + (overlap_range * 0.5),
+        #     iterations=iterations,
+        #     loss=lambda a, b: F.mse_loss(a, b),
+        #     device=device
+        # )
 
 
         # hypothesis - success
@@ -264,26 +283,26 @@ class ScalarPositioning(BaseExperimentRunner):
         )
 
         # hypothesis - success
-        self.mse_far_overlay = experiment(
-            name='start higher, self-similarity loss',
-            total_size=total_size,
-            signal_size=signal_size,
-            target_position=0.5,
-            starting_position=0.9,
-            iterations=iterations,
-            loss=lambda a, b: self_similarity_loss(a, b),
-            device=device
-        )
+        # self.mse_far_overlay = experiment(
+        #     name='start higher, self-similarity loss',
+        #     total_size=total_size,
+        #     signal_size=signal_size,
+        #     target_position=0.5,
+        #     starting_position=0.9,
+        #     iterations=iterations,
+        #     loss=lambda a, b: self_similarity_loss(a, b),
+        #     device=device
+        # )
 
-        # hypothesis - success
-        self.mse_far_overlay = experiment(
-            name='start lower, self-similarity loss',
-            total_size=total_size,
-            signal_size=signal_size,
-            target_position=0.5,
-            starting_position=0.1,
-            iterations=iterations,
-            loss=lambda a, b: self_similarity_loss(a, b),
-            device=device
-        )
+        # # hypothesis - success
+        # self.mse_far_overlay = experiment(
+        #     name='start lower, self-similarity loss',
+        #     total_size=total_size,
+        #     signal_size=signal_size,
+        #     target_position=0.5,
+        #     starting_position=0.1,
+        #     iterations=iterations,
+        #     loss=lambda a, b: self_similarity_loss(a, b),
+        #     device=device
+        # )
     

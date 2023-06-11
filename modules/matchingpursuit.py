@@ -2,7 +2,7 @@ import torch
 from torch import Tensor
 
 from modules.normalization import unit_norm
-from modules.sparse import soft_dirac, sparsify
+from modules.sparse import soft_dirac, sparsify, sparsify_vectors
 from collections import defaultdict
 from torch.nn import functional as F
 from util import device
@@ -134,7 +134,8 @@ def sparse_feature_map(
             padded = F.pad(residual, (0, atom_size))
             f = F.conv1d(
                 padded, d.view(n_atoms, 1, atom_size))[..., :n_samples]
-            f = sparsify(f, n_to_keep=n_steps)
+            # attn = torch.norm(f, dim=1)
+            # f, _ = sparsify_vectors(f, attn, n_to_keep=n_steps)
             return f
         else:
             f = fft_convolve(residual, d, approx=approx)
@@ -202,6 +203,7 @@ def sparse_code_to_differentiable_key_points(
     signal = signal.view(signal.shape[0], 1, -1)
     batch, _, n_samples = signal.shape
     n_atoms, atom_size = d.shape
+    half_atom = atom_size // 2
     d = unit_norm(d, dim=-1)
     residual = signal.clone()
 
@@ -233,11 +235,22 @@ def sparse_code_to_differentiable_key_points(
             vec = local_fm[:, pos]
 
             time = soft_dirac(local_fm[ai, :]) @ torch.linspace(0, 1, n_samples, device=d.device, requires_grad=True)
+            # time = soft_dirac(local_fm.max(dim=0)[0]) @ torch.linspace(0, 1, n_samples, device=d.device, requires_grad=True)
+            # time = local_fm[ai, :] @ torch.linspace(0, 1, n_samples, device=d.device, requires_grad=True)
             val = value[j]
+
+            # output the element-wise multiplication of the atom and
+            # the signal at that point
+            # atom = d[ai]
+            rez = residual[j, 0, pos - half_atom: pos + half_atom].clone()
+            vec = rez # atom[:rez.shape[0]].clone() * rez
+            diff = atom_size - vec.shape[0]
+            if diff > 0:
+                vec = torch.cat([vec, torch.zeros(diff, device=vec.device)])
 
             # vec = vec.view(n_atoms)
             # vec = torch.softmax(vec.view(n_atoms), dim=-1)
-            vec = soft_dirac(vec.view(n_atoms))
+            # vec = soft_dirac(vec.view(n_atoms))
             # print('VEC MAX', torch.argmax(vec, dim=-1).item())
 
             x = torch.cat([val.view(1), time.view(1), vec.view(n_atoms)])

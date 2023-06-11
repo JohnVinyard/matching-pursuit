@@ -35,6 +35,10 @@ class BaseExperimentRunner(object):
         self._orig_spec(self.real_spec())
         self._fake_audio(self.listen())
         self._fake_spec(self.fake_spec())
+    
+    @property
+    def batch_size(self):
+        return self.stream.batch_size
 
     @property
     def conjure_funcs(self):
