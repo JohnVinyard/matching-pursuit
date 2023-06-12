@@ -86,12 +86,12 @@ def extract_key_points(x, d):
     batch = x.shape[0]
 
 
-    x = sparse_code_to_differentiable_key_points(
+    x, residual = sparse_code_to_differentiable_key_points(
         x, d, n_steps=sparse_coding_iterations)
     
 
-    x = x.view(sparse_coding_iterations, batch, d_size + 2).permute(1, 2, 0)
-    return x
+    x = x.view(sparse_coding_iterations, batch, -1).permute(1, 2, 0)
+    return x, residual
 
 
 
@@ -118,7 +118,7 @@ class Encoder(nn.Module):
     def forward(self, x):
         x = x.view(-1, 1, exp.n_samples)
 
-        x = extract_key_points(x, self.d)
+        x, _ = extract_key_points(x, self.d)
 
         pos_amp = x[:, :2, :]
         atoms = x[:, 2:, :]
@@ -243,21 +243,25 @@ class DenseModel(nn.Module):
 
 # model = Model(channels=d_size, schedule=True).to(device)
 # model = DenseModel().to(device)
-model = OverfitRawAudio((1, 1, exp.n_samples), std=1e-5, normalize=False).to(device)
+model = OverfitRawAudio((1, 1, exp.n_samples), std=1e-4, normalize=False).to(device)
 optim = optimizer(model, lr=1e-3)
 
 
 def loss_func(a, b):
 
-
-    if b.shape[-1] != d_size + 2:
-        b = extract_key_points(b, d)
+    b, b_res = extract_key_points(b, d)
 
     if a.shape[-1] != d_size + 2:
-        a = extract_key_points(a, d)
+        a, a_res = extract_key_points(a, d)
 
     
-    loss = F.mse_loss(a[..., :2], b[..., :2])
+    value_loss = F.mse_loss(a[..., :1], b[..., :1])
+    time_loss = F.mse_loss(a[..., 1:2], b[..., 1:2])
+    vec_loss = F.mse_loss(a[..., 2:], b[..., 2:])
+    residual_loss = F.mse_loss(a_res, b_res)
+
+    loss = value_loss + time_loss + vec_loss + residual_loss
+    
     return loss
     
 

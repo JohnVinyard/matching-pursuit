@@ -2,6 +2,7 @@ import torch
 from torch import Tensor
 
 from modules.normalization import unit_norm
+from modules.pos_encode import pos_encode_feature
 from modules.sparse import soft_dirac, sparsify, sparsify_vectors
 from collections import defaultdict
 from torch.nn import functional as F
@@ -232,10 +233,10 @@ def sparse_code_to_differentiable_key_points(
             local_fm = fm[j].view(n_atoms, n_samples)
 
             pos = position[j]
-            vec = local_fm[:, pos]
+            # vec = local_fm[:, pos]
 
-            time = soft_dirac(local_fm[ai, :]) @ torch.linspace(0, 1, n_samples, device=d.device, requires_grad=True)
-            # time = soft_dirac(local_fm.max(dim=0)[0]) @ torch.linspace(0, 1, n_samples, device=d.device, requires_grad=True)
+            # time = soft_dirac(local_fm[ai, :]) @ torch.linspace(0, 1, n_samples, device=d.device, requires_grad=True)
+            time = soft_dirac(local_fm.max(dim=0)[0]) @ torch.linspace(0, 1, n_samples, device=d.device, requires_grad=True)
             # time = local_fm[ai, :] @ torch.linspace(0, 1, n_samples, device=d.device, requires_grad=True)
             val = value[j]
 
@@ -253,7 +254,13 @@ def sparse_code_to_differentiable_key_points(
             # vec = soft_dirac(vec.view(n_atoms))
             # print('VEC MAX', torch.argmax(vec, dim=-1).item())
 
-            x = torch.cat([val.view(1), time.view(1), vec.view(n_atoms)])
+            x = torch.cat([
+                val.view(1), 
+                time.view(1),
+                # pos_encode_feature(time.view(1, 1) * np.pi, np.pi, None, 16).view(33), 
+                # time.view(1) - 50,
+                vec.view(n_atoms)
+            ])
             vecs.append(x[None, :])
 
             p = position[j][None, ...]
@@ -261,10 +268,10 @@ def sparse_code_to_differentiable_key_points(
             local_instances.append((ai, j, p, a))
 
         sparse = scatter_segments(residual.shape, local_instances)
-        residual -= sparse
+        residual = residual - sparse
 
     vecs = torch.cat(vecs, dim=0)
-    return vecs
+    return vecs, torch.norm(residual, dim=-1)
 
 def sparse_code(
         signal: Tensor,

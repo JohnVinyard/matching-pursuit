@@ -15,6 +15,7 @@ from modules.softmax import hard_softmax
 from scalar_scheduling import pos_encoded
 from time_distance import optimizer
 from train.experiment_runner import BaseExperimentRunner
+from upsample import ConvUpsample
 from util import device, playable
 from util.readmedocs import readme
 from experiments.e_2023_3_8.experiment import model
@@ -23,7 +24,7 @@ from conjure import numpy_conjure, SupportedContentType
 exp = Experiment(
     samplerate=zounds.SR22050(),
     n_samples=2**15,
-    weight_init=0.05,
+    weight_init=0.1,
     model_dim=128,
     kernel_size=512)
 
@@ -47,6 +48,38 @@ class TransformerSetProcessor(nn.Module):
     def forward(self, x):
         x = self.net(x)
         return x
+
+class Reduce(nn.Module):
+    def __init__(self, channels, out_dim):
+        super().__init__()
+        self.channels = channels
+        self.out_dim = out_dim
+
+        self.net = nn.Sequential(
+            nn.Conv1d(channels, channels, 7, 4, 3), # 64
+            nn.BatchNorm1d(channels),
+            nn.LeakyReLU(0.2),
+
+            nn.Conv1d(channels, channels, 7, 4, 3), # 16
+            nn.BatchNorm1d(channels),
+            nn.LeakyReLU(0.2),
+
+            nn.Conv1d(channels, channels, 7, 4, 3), # 4
+            nn.BatchNorm1d(channels),
+            nn.LeakyReLU(0.2),
+
+            nn.Conv1d(channels, out_dim, 4, 4, 0)
+        )
+    
+    def forward(self, x):
+        x = x.view(-1, n_events, self.channels)
+        x = x.permute(0, 2, 1)
+        x = F.pad(x, (0, 256 - n_events))
+        x = self.net(x)
+        x = x.view(-1, self.out_dim)
+        return x
+
+
 
 
 do_canonical_ordering = True
@@ -77,31 +110,40 @@ class Generator(nn.Module):
         self.to_amp = nn.Linear(self.internal_dim, 1)
         self.softmax = softmax
 
-        self.embed = nn.Linear(self.latent_dim + 33, internal_dim)
+        self.embed = nn.Linear(self.internal_dim + 33, internal_dim)
         self.process = set_processor(internal_dim, internal_dim)
+
+        self.up = ConvUpsample(
+            latent_dim, internal_dim, 4, 256, mode='nearest', out_channels=internal_dim, batch_norm=True)
 
         self.apply(lambda x: exp.init_weights(x))
 
     def forward(self, x):
 
-        batch, time, channels = x.shape
-        factor = self.n_events // time
+        # batch, time, channels = x.shape
+        # factor = self.n_events // time
 
-        x = x.view(batch, time, self.latent_dim).repeat(1, factor, 1)
+        # x = x.view(batch, time, self.latent_dim).repeat(1, factor, 1)
+        x = x.view(-1, self.latent_dim)
+        x = self.up(x).permute(0, 2, 1)[:, :n_events, :]
+        skip = x
+
         pos = pos_encoded(x.shape[0], self.n_events, 16, device=x.device)
         x = torch.cat([x, pos], dim=-1)
         x = self.embed(x)
         x = self.process(x)
 
+        x = skip + x
+
         atom = self.to_atom.forward(x)
         atom = self.softmax(atom)
 
-        # pos = torch.sigmoid(self.to_pos.forward(x))
-        pos = unit_sine(self.to_pos.forward(x))
+        pos = torch.sigmoid(self.to_pos.forward(x))
+        # pos = unit_sine(self.to_pos.forward(x))
 
         # amp = torch.sigmoid(self.to_amp.forward(x)) * 15
-        # amp = torch.relu(self.to_amp.forward(x))
-        amp = self.to_amp.forward(x) ** 2
+        amp = torch.relu(self.to_amp.forward(x))
+        # amp = self.to_amp.forward(x) ** 2
 
         final = torch.cat([pos, amp, atom], dim=-1)
         return final
@@ -133,6 +175,8 @@ class Discriminator(nn.Module):
         self.reduction = reduction
         self.judgement_activation = judgement_activation
 
+        self.collapse = Reduce(internal_dim, out_dim)
+
         self.apply(lambda x: exp.init_weights(x))
 
     def forward(self, x):
@@ -141,22 +185,24 @@ class Discriminator(nn.Module):
         pos_amp = self.embed_pos_amp(pos_amp)
         atoms = self.embed_atom(atoms)
         x = torch.cat([pos_amp, atoms], dim=-1)
-
+        skip = x
         x = self.processor(x)
+        x = x + skip
+        x = self.collapse(x)
 
-        if self.reduction == 'last':
-            x = x[:, -1:, :]
-        elif self.reduction == 'mean':
-            x = torch.mean(x, dim=1, keepdim=True)
-        elif self.reduction == 'sum':
-            x = torch.sum(x, dim=1, keepdim=True)
-        elif self.reduction == 'none':
-            pass
-        else:
-            raise ValueError(f'Unknown reduction type {self.reduction}')
+        # if self.reduction == 'last':
+        #     x = x[:, -1:, :]
+        # elif self.reduction == 'mean':
+        #     x = torch.mean(x, dim=1, keepdim=True)
+        # elif self.reduction == 'sum':
+        #     x = torch.sum(x, dim=1, keepdim=True)
+        # elif self.reduction == 'none':
+        #     pass
+        # else:
+        #     raise ValueError(f'Unknown reduction type {self.reduction}')
         
-        x = self.judge(x)
-        x = self.judgement_activation(x)
+        # x = self.judge(x)
+        # x = self.judgement_activation(x)
         
         return x
 
@@ -203,49 +249,7 @@ canonical = CanonicalOrdering(
 ae = AutoEncoder().to(device)
 optim = optimizer(ae, lr=1e-3)
 
-gen = Generator(
-    latent_dim=latent_dim, 
-    internal_dim=512, 
-    n_events=n_events, 
-    set_processor=TransformerSetProcessor,
-    softmax=lambda x: hard_softmax(x, dim=-1, invert=True)).to(device)
-gen_optim = optimizer(gen, lr=1e-4)
 
-
-disc = Discriminator(
-    n_atoms=model.embedding_dim,
-    internal_dim=512,
-    out_dim=1,
-    set_processor=TransformerSetProcessor,
-    reduction=aggregation_method,
-    judgement_activation=torch.sigmoid).to(device)
-disc_optim = optimizer(disc, lr=1e-4)
-
-
-def generate_latent(batch_size):
-    return torch.zeros(batch_size, 1, latent_dim, device=device).uniform_(-1, 1)
-
-def train_gen(batch):
-    gen_optim.zero_grad()
-    x = generate_latent(batch.shape[0])
-    fake = gen.forward(x)
-    j = disc.forward(fake)
-    loss = torch.abs(1 - j).mean()
-    loss.backward()
-    gen_optim.step()
-    return loss, fake, x
-
-
-def train_disc(batch):
-    disc_optim.zero_grad()
-    x = generate_latent(batch.shape[0])
-    fake = gen.forward(x)
-    fj = disc.forward(fake)
-    rj = disc.forward(batch)
-    loss = (torch.abs(1 - rj).mean() + torch.abs(0 - fj).mean()) * 0.5
-    loss.backward()
-    disc_optim.step()
-    return loss
 
 
 
@@ -254,13 +258,13 @@ def train_ae(batch):
     recon, encoded = ae.forward(batch)
     targets = torch.argmax(batch[..., 2:], dim=-1).view(-1)
 
-    # l1 = F.mse_loss(recon[..., :2], batch[..., :2])
-    weight = batch[..., 1:2]
-    diff = (recon[..., :2] - batch[..., :2])
-    l1 = (torch.norm(diff, dim=-1, keepdim=True) * weight).mean()
+    l1 = F.mse_loss(recon[..., :2], batch[..., :2])
+    # weight = batch[..., 1:2]
+    # diff = (recon[..., :2] - batch[..., :2])
+    # l1 = (torch.norm(diff, dim=-1, keepdim=True) * weight).mean()
     l2 = F.cross_entropy(recon[..., 2:].view(-1, model.total_atoms), targets)
 
-    loss = (l1 * 1) + (l2 * 1)
+    loss = (l1 * 100) + (l2 * 1)
     loss.backward()
     optim.step()
     return loss, recon, encoded
@@ -432,17 +436,5 @@ class MatchingPursuitGAN(BaseExperimentRunner):
             self.fake = f
             print(i, l.item())
 
-
-            # l = torch.zeros(1).fill_(0)
-
-            # if i % 2 == 0:
-            #     l, r, e = train_gen(vec)
-            #     self.fake = r
-            #     self.encoded = e
-            #     print('G', l.item())
-            # else:
-            #     dl = train_disc(vec)
-            #     print('D', dl.item())
-            
 
             self.after_training_iteration(l)
