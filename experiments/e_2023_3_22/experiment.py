@@ -86,7 +86,7 @@ do_canonical_ordering = True
 canonical_ordering_dim = 0 # canonical ordering by time seems to work best
 encoder_class = TransformerSetProcessor
 decoder_class = TransformerSetProcessor
-aggregation_method = 'sum'
+# aggregation_method = 'sum'
 
 
 class Generator(nn.Module):
@@ -126,14 +126,14 @@ class Generator(nn.Module):
         # x = x.view(batch, time, self.latent_dim).repeat(1, factor, 1)
         x = x.view(-1, self.latent_dim)
         x = self.up(x).permute(0, 2, 1)[:, :n_events, :]
-        skip = x
+        # skip = x
 
         pos = pos_encoded(x.shape[0], self.n_events, 16, device=x.device)
         x = torch.cat([x, pos], dim=-1)
         x = self.embed(x)
-        x = self.process(x)
+        # x = self.process(x)
 
-        x = skip + x
+        # x = skip + x
 
         atom = self.to_atom.forward(x)
         atom = self.softmax(atom)
@@ -156,7 +156,6 @@ class Discriminator(nn.Module):
             internal_dim,
             out_dim=1,
             set_processor=TransformerSetProcessor,
-            reduction='last',
             judgement_activation=lambda x: x,
         ):
 
@@ -172,7 +171,6 @@ class Discriminator(nn.Module):
         self.processor = set_processor(internal_dim, internal_dim)
         self.judge = nn.Linear(internal_dim, out_dim)
         self.out_dim = out_dim
-        self.reduction = reduction
         self.judgement_activation = judgement_activation
 
         self.collapse = Reduce(internal_dim, out_dim)
@@ -185,9 +183,9 @@ class Discriminator(nn.Module):
         pos_amp = self.embed_pos_amp(pos_amp)
         atoms = self.embed_atom(atoms)
         x = torch.cat([pos_amp, atoms], dim=-1)
-        skip = x
-        x = self.processor(x)
-        x = x + skip
+        # skip = x
+        # x = self.processor(x)
+        # x = x + skip
         x = self.collapse(x)
 
         # if self.reduction == 'last':
@@ -217,7 +215,6 @@ class AutoEncoder(nn.Module):
             internal_dim=512, 
             out_dim=latent_dim, 
             set_processor=encoder_class, 
-            reduction=aggregation_method, 
             judgement_activation=lambda x: x, 
         )
         
