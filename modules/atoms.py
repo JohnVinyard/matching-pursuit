@@ -13,7 +13,7 @@ def unit_norm(x, axis=-1):
     if isinstance(x, np.ndarray):
         n = np.linalg.norm(x, axis=axis, keepdims=True)
     else:
-        n = torch.norm(x, dim=-1, keepdim=True)
+        n = torch.norm(x, dim=axis, keepdim=True)
     return x / (n + 1e-12)
 
 

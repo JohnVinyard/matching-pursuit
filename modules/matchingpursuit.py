@@ -81,10 +81,16 @@ def compare_conv():
 def build_scatter_segments(n_samples, atom_size):
 
     def scatter_segments(x, inst):
+
         if isinstance(x, tuple):
+            # x is the desired _size_ out the target signal
             x = torch.zeros(*x, device=device, requires_grad=True)
+
+        # pad the signal at the beginning and end to avoid any boundary
+        # issues    
         target = torch.cat(
             [torch.zeros_like(x), x, torch.zeros_like(x)], dim=-1)
+    
         base = n_samples
 
         for ai, j, p, a in inst:
@@ -98,6 +104,7 @@ def build_scatter_segments(n_samples, atom_size):
                 print(
                     f'Out-of-bounds with start {start - base} and end {end - base}')
 
+        # remove all the padding
         return target[..., n_samples: n_samples * 2]
 
     return scatter_segments
@@ -282,12 +289,18 @@ def sparse_code(
         flatten=False,
         extract_atom_embedding=None):
 
+    # TODO: It should be possible to accept signals of different dimension
     signal = signal.view(signal.shape[0], 1, -1)
+
     batch, _, n_samples = signal.shape
     n_atoms, atom_size = d.shape
+
+    # TODO: unit norm should be applied to entire atom
     d = unit_norm(d, dim=-1)
+
     residual = signal.clone()
 
+    # TODO: scatter segments is hard-coded for 1D signals
     scatter_segments = build_scatter_segments(n_samples, atom_size)
 
     instances = defaultdict(list)
@@ -346,7 +359,9 @@ def dictionary_learning_step(
     signal = signal.view(signal.shape[0], 1, -1)
     batch, _, n_samples = signal.shape
     n_atoms, atom_size = d.shape
+
     d = unit_norm(d, dim=-1)
+
     residual = signal.clone()
 
     def gather_segments(x, inst):
