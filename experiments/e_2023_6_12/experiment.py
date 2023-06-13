@@ -172,4 +172,16 @@ class PhaseInvariantFeatureInversion(BaseExperimentRunner):
     def __init__(self, stream, port=None):
         super().__init__(stream, train, exp, port=port)
     
+    def run(self):
+        for i, item in enumerate(self.iter_items()):
+            item = item.view(-1, 1, exp.n_samples)
+            self.real = item
+            l, r = self.train(item, i)
+            print(l.item())
+            self.after_training_iteration(l)
+
+            if i >= 6500:
+                torch.save(model.state_dict(), 'model.dat')
+                break
+    
     
