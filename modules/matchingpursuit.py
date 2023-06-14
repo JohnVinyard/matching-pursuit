@@ -98,11 +98,8 @@ def build_scatter_segments(n_samples, atom_size):
             start = base + p
             end = start + atom_size
 
-            try:
-                target[j, :, start: end] += a
-            except RuntimeError:
-                print(
-                    f'Out-of-bounds with start {start - base} and end {end - base}')
+            target[j, :, start: end] += a.view(-1, atom_size)
+            
 
         # remove all the padding
         return target[..., n_samples: n_samples * 2]
@@ -287,16 +284,20 @@ def sparse_code(
         device=None,
         approx=None,
         flatten=False,
-        extract_atom_embedding=None):
+        extract_atom_embedding=None,
+        d_normalization_dims=-1):
+    
+    batch, channels, time = signal.shape
 
     # TODO: It should be possible to accept signals of different dimension
-    signal = signal.view(signal.shape[0], 1, -1)
+    signal = signal.view(signal.shape[0], channels, -1)
 
     batch, _, n_samples = signal.shape
-    n_atoms, atom_size = d.shape
+    # n_atoms, atom_size = d.shape
+    n_atoms = d.shape[0]
+    atom_size = d.shape[-1]
 
-    # TODO: unit norm should be applied to entire atom
-    d = unit_norm(d, dim=-1)
+    d = unit_norm(d, dim=(d_normalization_dims))
 
     residual = signal.clone()
 
@@ -313,7 +314,7 @@ def sparse_code(
         if approx is None:
             padded = F.pad(residual, (0, atom_size))
             fm = F.conv1d(padded, d.view(
-                n_atoms, 1, atom_size))[..., :n_samples]
+                n_atoms, channels, atom_size))[..., :n_samples]
         else:
             fm = fft_convolve(residual, d, approx=approx)
         
@@ -325,7 +326,10 @@ def sparse_code(
 
         atom_index = mx // n_samples  # (Batch,)
         position = mx % n_samples  # (Batch,)
-        at = d[atom_index] * value[:, None]  # (Batch,)
+        if channels == 1:
+            at = d[atom_index] * value[:, None]  # (Batch,)
+        else:
+            at = d[atom_index] * value[:, None, None]
 
         local_instances = []
 
@@ -354,13 +358,18 @@ def dictionary_learning_step(
         d: Tensor,
         n_steps: int = 100,
         device=None,
-        approx=None):
+        approx=None,
+        d_normalization_dims=-1):
 
-    signal = signal.view(signal.shape[0], 1, -1)
+    batch, channels, time = signal.shape
+    signal = signal.view(signal.shape[0], channels, -1)
     batch, _, n_samples = signal.shape
-    n_atoms, atom_size = d.shape
+    # n_atoms, atom_size = d.shape
+    n_atoms = d.shape[0]
+    atom_size = d.shape[-1]
 
-    d = unit_norm(d, dim=-1)
+    d = unit_norm(d, dim=d_normalization_dims)
+
 
     residual = signal.clone()
 
@@ -370,12 +379,13 @@ def dictionary_learning_step(
         segments = []
         base = n_samples
         for ai, j, p, a in inst:
-            segments.append(source[j, :, base + p: base + p + atom_size])
+            seg = source[j, :, base + p: base + p + atom_size]
+            segments.append(seg[None, ...])
         segments = torch.cat(segments, dim=0)
         return segments
 
     instances, scatter_segments = sparse_code(
-        signal, d, n_steps=n_steps, device=device, approx=approx)
+        signal, d, n_steps=n_steps, device=device, approx=approx, d_normalization_dims=(1, 2))
 
     for index in instances.keys():
         inst = instances[index]
@@ -385,21 +395,23 @@ def dictionary_learning_step(
         residual += sparse
 
         # take the average of all positions to compute the new atom
+
         new_segments = gather_segments(residual, inst)
         new_atom = torch.sum(new_segments, dim=0)
-        new_atom = unit_norm(new_atom)
+        new_atom = unit_norm(new_atom.view(-1)).view(channels, atom_size)
+
         d[index] = new_atom
 
         updated = map(
             lambda x: (x[0], x[1], x[2], new_atom *
-                       torch.norm(x[3], dim=-1, keepdim=True)),
+                       torch.norm(x[3], dim=d_normalization_dims, keepdim=True)),
             inst
         )
 
         sparse = scatter_segments(residual.shape, updated)
         residual = residual - sparse
 
-    d = unit_norm(d)
+    d = unit_norm(d, dim=d_normalization_dims)
 
     return d
 

@@ -9,6 +9,7 @@ sparse_coded
 .env
 
 **/experiment_data/*
+model.dat
 
 band_512.dat
 band_1024.dat
