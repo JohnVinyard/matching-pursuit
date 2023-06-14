@@ -21,7 +21,7 @@ exp = Experiment(
     model_dim=128,
     kernel_size=512)
 
-sparse_coding_iterations = 128
+sparse_coding_iterations = 64
 do_sparse_coding = False
 
 sparse_coding_phase = True
@@ -44,62 +44,15 @@ class SparseCode(nn.Module):
         self.d.data[:] = d
     
     def do_sparse_code(self, x, n_iterations):
-        print(x.shape)
         inst, scatter = sparse_code(
             x, self.d, n_steps=n_iterations, device=x.device, d_normalization_dims=(-1, -2))
         inst = flatten_atom_dict(inst)
         recon = scatter(x.shape, inst)
-        print(recon.shape)
         return recon
     
     def forward(self, x, n_iterations=32):
         return self.sparse_code(x, n_iterations=n_iterations)
     
-    # def sparse_code(self, x, n_iterations=32):
-    #     """
-    #     To update:
-
-    #     1. For each atom, add all instances back to the residual
-    #     2. take the average of the residual at all positions
-    #     3. subtract the newly updated atom from the residual
-    #     """
-
-    #     d = unit_norm(self.d, axis=(1, 2))
-    #     batch, channels, time = x.shape
-
-    #     recon = torch.zeros_like(x)
-
-    #     x = x.clone()
-
-    #     for i in range(n_iterations):
-    #         # TODO: Allow atoms to start before the beginning of the sample
-    #         fm = F.conv1d(F.pad(x, (0, self.atom_size)), d)[..., :time]
-    #         values, indices = torch.max(fm.reshape(batch, -1), dim=-1)
-
-    #         atom_indices = indices // time
-    #         time_indices = indices % time
-
-    #         # scaled atoms
-    #         atoms = d[atom_indices]
-    #         atoms = atoms * values[:, None, None]
-
-    #         sparse = torch.zeros(batch, channels, time, device=x.device)
-
-    #         for i, ti in enumerate(time_indices):
-    #             start = ti
-    #             end = torch.clamp(start + self.atom_size, 0, time - 1)
-    #             size = end - start
-    #             sparse[i, :, start:end] = atoms[i, :, :size]
-            
-    #         # remove the sparse atoms
-    #         x = x - sparse
-
-    #         # add the sparse atoms to the reconstruction
-    #         recon = recon + sparse
-        
-    #     residual = x
-
-    #     return residual, recon
 
 
 class SparseCode2(nn.Module):
@@ -146,16 +99,7 @@ class UpsampleBlock(nn.Module):
     
     def forward(self, x):
         batch, channels, time = x.shape
-
         return F.interpolate(x, scale_factor=4, mode='nearest')
-        
-        new_time = time * 4
-        new_coeffs = new_time // 2 + 1
-        spec = torch.fft.rfft(x, dim=-1, norm='ortho')
-        new_spec = torch.zeros(batch, channels, new_coeffs, dtype=spec.dtype, device=spec.device)
-        new_spec[:, :, :spec.shape[-1]] = spec
-        result = torch.fft.irfft(new_spec, dim=-1, norm='ortho')
-        return result
 
 class Model(nn.Module):
     def __init__(self):
@@ -203,8 +147,6 @@ class Model(nn.Module):
     
     def forward(self, x):
         # torch.Size([16, 128, 128, 257])
-        # batch, channels, time, period = x.shape
-        # x = self.embed(x).permute(0, 3, 1, 2).reshape(batch, 8 * channels, time)
         x = self.embed_features(x)
 
         orig = x
@@ -214,7 +156,6 @@ class Model(nn.Module):
         else:
             res, rec = None, orig
 
-        # x = self.up(rec)
         x = self.generate(x)
 
         return x, res, rec, orig
@@ -228,7 +169,7 @@ except IOError:
 optim = optimizer(model, lr=1e-3)
 
 
-sparse_model = SparseCode(1024, 32, 1024).to(device)
+sparse_model = SparseCode(4096, 32, 1024).to(device)
 # sparse_model = SparseCode2(1024, sparse_coding_iterations).to(device)
 
 
@@ -262,15 +203,6 @@ def train_sparse_coding(batch, i):
         # loss = torch.abs(recon - embedded).sum()
         loss = F.mse_loss(recon, embedded)
     
-    # res, rec = sparse_model.forward(embedded)
-
-    # # loss = F.mse_loss(rec, embedded)
-    # # TODO: Should I do norm of residual or mean-squared error?
-    # # Is there any difference?
-    # loss = torch.norm(res, dim=(1, 2)).mean()
-    # loss.backward()
-    # sparse_optim.step()
-
     with torch.no_grad():
         recon = model.generate(recon)
 
@@ -288,11 +220,15 @@ class PhaseInvariantFeatureInversion(BaseExperimentRunner):
             self.real = item
             l, r = self.train(item, i)
             self.fake = r
-            print(l.item())
+            print(i, l.item())
             self.after_training_iteration(l)
 
             if i >= 6500 and not sparse_coding_phase:
                 torch.save(model.state_dict(), 'model.dat')
+                break
+
+            if i > 6500 and sparse_coding_phase:
+                torch.save(sparse_model.state_dict(), 'sparse_model.dat')
                 break
     
     
