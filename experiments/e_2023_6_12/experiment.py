@@ -1,4 +1,5 @@
 
+from collections import defaultdict
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -25,6 +26,26 @@ exp = Experiment(
 sparse_coding_iterations = 64
 do_sparse_coding = False
 sparse_coding_phase = True
+
+def encode_events(inst, batch_size, n_frames, n_points):
+
+    indices = torch.zeros(batch_size, n_points, dtype=torch.long, device=device)
+    points = torch.zeros(batch_size, n_frames, n_points, 2, dtype=torch.float, device=device)
+
+    batch_pos = defaultdict(int)
+
+    for item in inst:
+        atom_index, batch, position, atom = item
+        current_pos_in_batch = batch_pos[batch]
+        pos = position / n_frames
+        amp = torch.norm(atom)
+        indices[batch, current_pos_in_batch] = atom_index
+        points[batch, current_pos_in_batch, :] = torch.cat([pos, amp])
+        batch_pos[batch] += 1
+    
+    return indices, points
+
+
 
 class SparseCode(nn.Module):
     def __init__(self, n_atoms, atom_size, channels):
