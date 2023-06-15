@@ -6,6 +6,7 @@ import zounds
 from config.experiment import Experiment
 from modules.atoms import unit_norm
 from modules.matchingpursuit import dictionary_learning_step, flatten_atom_dict, sparse_code
+from modules.pointcloud import encode_events
 from modules.pos_encode import pos_encoded
 from modules.sparse import sparsify
 from train.experiment_runner import BaseExperimentRunner
@@ -23,12 +24,8 @@ exp = Experiment(
 
 sparse_coding_iterations = 64
 do_sparse_coding = False
-
 sparse_coding_phase = True
 
-# TODO: Allow a much larger "vocabulary", along with 
-# an initial mechanism to produce a mask (like switch transformers)
-# to choose an appropriate subset
 class SparseCode(nn.Module):
     def __init__(self, n_atoms, atom_size, channels):
         super().__init__()
@@ -45,53 +42,20 @@ class SparseCode(nn.Module):
     
     def do_sparse_code(self, x, n_iterations):
         inst, scatter = sparse_code(
-            x, self.d, n_steps=n_iterations, device=x.device, d_normalization_dims=(-1, -2))
-        inst = flatten_atom_dict(inst)
+            x, 
+            self.d, 
+            n_steps=n_iterations, 
+            device=x.device, 
+            d_normalization_dims=(-1, -2), 
+            flatten=True)
+
+        # TODO: Encode and decode events for transformer or other models        
         recon = scatter(x.shape, inst)
         return recon
     
     def forward(self, x, n_iterations=32):
         return self.sparse_code(x, n_iterations=n_iterations)
     
-
-
-class SparseCode2(nn.Module):
-    def __init__(self, channels, k_sparse):
-        super().__init__()
-        self.channels = channels
-        self.k_sparse = k_sparse
-
-        self.embed = nn.Linear(33 + channels, channels)
-        encoder = nn.TransformerEncoderLayer(channels, 4, channels, batch_first=True)
-        self.encoder = nn.TransformerEncoder(encoder, 4, norm=nn.LayerNorm((128, channels)))
-
-        self.embed_again = nn.Linear(33 + channels, channels)
-        self.decoder = nn.TransformerEncoder(encoder, 4, norm=nn.LayerNorm((128, channels)))
-        self.apply(lambda x: exp.init_weights(x))
-    
-    def sparse_code(self, x, n_iterations):
-        return self.forward(x)
-
-    def forward(self, x, n_iterations=None):
-        batch, channels, time = x.shape
-        x = x.permute(0, 2, 1)
-
-        pos = pos_encoded(batch, time, 16, device=x.device)
-        x = torch.cat([x, pos], dim=-1)
-        x = self.embed(x)
-        x = self.encoder(x)
-
-        x = x.permute(0, 2, 1)
-        x = sparsify(x, self.k_sparse)
-        x = x.permute(0, 2, 1)
-
-        x = torch.cat([x, pos], dim=-1)
-        x = self.embed_again(x)
-        x = self.decoder(x)
-
-        x = x.permute(0, 2, 1)
-        return x
-
 
 class UpsampleBlock(nn.Module):
     def __init__(self):
@@ -169,8 +133,12 @@ except IOError:
 optim = optimizer(model, lr=1e-3)
 
 
-sparse_model = SparseCode(4096, 32, 1024).to(device)
-# sparse_model = SparseCode2(1024, sparse_coding_iterations).to(device)
+try:
+    sparse_model = SparseCode(4096, 32, 1024).to(device)
+    sparse_model.load_state_dict(torch.load('sparse_model.dat'))
+    print('Loaded sparse model')
+except IOError:
+    pass
 
 
 def train(batch, i):
@@ -227,7 +195,7 @@ class PhaseInvariantFeatureInversion(BaseExperimentRunner):
                 torch.save(model.state_dict(), 'model.dat')
                 break
 
-            if i > 6500 and sparse_coding_phase:
+            if i > 500 and sparse_coding_phase:
                 torch.save(sparse_model.state_dict(), 'sparse_model.dat')
                 break
     
