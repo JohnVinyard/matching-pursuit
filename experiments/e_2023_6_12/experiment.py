@@ -27,24 +27,38 @@ sparse_coding_iterations = 64
 do_sparse_coding = False
 sparse_coding_phase = True
 
-def encode_events(inst, batch_size, n_frames, n_points):
+def encode_events(inst, batch_size, n_frames, n_points, device=None):
+    """
+    TODO: Sort by batch, then time, both ascending
 
-    indices = torch.zeros(batch_size, n_points, dtype=torch.long, device=device)
-    points = torch.zeros(batch_size, n_frames, n_points, 2, dtype=torch.float, device=device)
+    Then, "pack" into atom indices and 2D points for 
+    time and amplitude
 
-    batch_pos = defaultdict(int)
+    ai, j, p, a 
+    """
+    srt = sorted(inst, key=lambda x: (x[1], x[2]))
+    packed_indices = torch.zeros(batch_size * n_points, dtype=torch.long, device=device)
+    packed_points = torch.zeros(batch_size * n_points, 2, dtype=torch.float, device=device)
 
-    for item in inst:
-        atom_index, batch, position, atom = item
-        current_pos_in_batch = batch_pos[batch]
-        pos = position / n_frames
-        amp = torch.norm(atom)
-        indices[batch, current_pos_in_batch] = atom_index
-        points[batch, current_pos_in_batch, :] = torch.cat([pos, amp])
-        batch_pos[batch] += 1
+    for i, tup in enumerate(srt):
+        ai, j, p, a = tup
+        packed_indices[i] = ai
+        amp = torch.norm(a)
+        pos = p / n_frames
+        packed_points[i, :] = torch.cat([pos.view(1), amp.view(1)])
     
+    indices = packed_indices.view(batch_size, n_points)
+    points = packed_points.view(batch_size, n_points, 2)
+
     return indices, points
 
+
+def decode_events(events: torch.Tensor):
+    """
+    Convert back to a shape usable by the scatter function returned
+    by sparse_code
+    """
+    pass
 
 
 class SparseCode(nn.Module):
@@ -62,6 +76,8 @@ class SparseCode(nn.Module):
         self.d.data[:] = d
     
     def do_sparse_code(self, x, n_iterations):
+        batch, channels, frames = x.shape
+
         inst, scatter = sparse_code(
             x, 
             self.d, 
@@ -70,7 +86,13 @@ class SparseCode(nn.Module):
             d_normalization_dims=(-1, -2), 
             flatten=True)
 
-        # TODO: Encode and decode events for transformer or other models        
+        # indices, points = encode_events(
+        #     inst, batch, frames, n_iterations, device=x.device)
+        
+        # print('=======================')
+        # print(indices)
+        # print(points)
+
         recon = scatter(x.shape, inst)
         return recon
     
