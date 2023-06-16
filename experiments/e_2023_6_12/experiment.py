@@ -1,5 +1,6 @@
 
 from collections import defaultdict
+from typing import List
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -24,18 +25,21 @@ exp = Experiment(
     kernel_size=512)
 
 sparse_coding_iterations = 64
-do_sparse_coding = False
+# do_sparse_coding = False
 sparse_coding_phase = True
 
-def encode_events(inst, batch_size, n_frames, n_points, device=None):
+def encode_events(
+        inst: List[tuple], 
+        batch_size: int, 
+        n_frames: int, n_points: 
+        int, device: torch.device =None):
     """
-    TODO: Sort by batch, then time, both ascending
+    Convert from a flat list of tuples of (atom_index, batch, position, scaled_atom)
 
-    Then, "pack" into atom indices and 2D points for 
-    time and amplitude
-
-    ai, j, p, a 
+    to two tensors, one containing atom indices and the other containing 
+    (pos, amp) pairs
     """
+
     srt = sorted(inst, key=lambda x: (x[1], x[2]))
     packed_indices = torch.zeros(batch_size * n_points, dtype=torch.long, device=device)
     packed_points = torch.zeros(batch_size * n_points, 2, dtype=torch.float, device=device)
@@ -50,15 +54,31 @@ def encode_events(inst, batch_size, n_frames, n_points, device=None):
     indices = packed_indices.view(batch_size, n_points)
     points = packed_points.view(batch_size, n_points, 2)
 
-    return indices, points
+    return indices, points, srt
 
 
-def decode_events(events: torch.Tensor):
+def decode_events(indices: torch.Tensor, points: torch.Tensor, n_frames: int, d: torch.Tensor):
     """
     Convert back to a shape usable by the scatter function returned
     by sparse_code
     """
-    pass
+    inst = []
+    batch, n_points = indices.shape
+    for i in range(batch):
+        for p in range(n_points):
+            index = indices[i, p]
+            pnt = points[i, p]
+            inst.append((
+                # atom index
+                index.item(), 
+                # batch
+                i, 
+                # frame number
+                int(pnt[0] * n_frames),
+                # atom, scaled by norm 
+                d[index] * pnt[1]
+            ))        
+    return inst
 
 
 class SparseCode(nn.Module):
@@ -86,13 +106,16 @@ class SparseCode(nn.Module):
             d_normalization_dims=(-1, -2), 
             flatten=True)
 
-        # indices, points = encode_events(
-        #     inst, batch, frames, n_iterations, device=x.device)
         
         # print('=======================')
-        # print(indices)
-        # print(points)
-
+        # indices, points, srt = encode_events(
+        #     inst, batch, frames, n_iterations, device=x.device)
+        # inst_recon = decode_events(indices, points, frames, self.d)
+        # for a, b in zip(srt, inst_recon):
+        #     print('-----------------------------')
+        #     print(a)
+        #     print(b)
+        
         recon = scatter(x.shape, inst)
         return recon
     
@@ -156,16 +179,9 @@ class Model(nn.Module):
         # torch.Size([16, 128, 128, 257])
         x = self.embed_features(x)
 
-        orig = x
-
-        if do_sparse_coding:
-            res, rec = self.sparse.sparse_code(x, n_iterations=32)
-        else:
-            res, rec = None, orig
-
         x = self.generate(x)
 
-        return x, res, rec, orig
+        return x
 
 try:
     model = Model().to(device)
@@ -189,17 +205,10 @@ def train(batch, i):
     with torch.no_grad():
         spec = exp.perceptual_feature(batch)
 
-    recon, residual, latent_recon, orig_recon = model.forward(spec)
+    recon = model.forward(spec)
     recon_spec = exp.perceptual_feature(recon)
-
     audio_loss = F.mse_loss(recon_spec, spec)
-
-    if do_sparse_coding:
-        latent_loss = F.mse_loss(latent_recon, orig_recon.detach())
-        loss = audio_loss + latent_loss
-    else:
-        loss = audio_loss
-    
+    loss = audio_loss
     loss.backward()
     optim.step()
     return loss, recon
