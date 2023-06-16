@@ -25,14 +25,16 @@ exp = Experiment(
     kernel_size=512)
 
 sparse_coding_iterations = 64
-# do_sparse_coding = False
 sparse_coding_phase = True
+pointcloud_encoding_phase = False
+n_atoms = 4096
 
 def encode_events(
         inst: List[tuple], 
         batch_size: int, 
-        n_frames: int, n_points: 
-        int, device: torch.device =None):
+        n_frames: int, 
+        n_points: int, 
+        device: torch.device =None):
     """
     Convert from a flat list of tuples of (atom_index, batch, position, scaled_atom)
 
@@ -40,7 +42,7 @@ def encode_events(
     (pos, amp) pairs
     """
 
-    srt = sorted(inst, key=lambda x: (x[1], x[2]))
+    srt = sorted(inst, key=lambda x: (x[2], x[1]))
     packed_indices = torch.zeros(batch_size * n_points, dtype=torch.long, device=device)
     packed_points = torch.zeros(batch_size * n_points, 2, dtype=torch.float, device=device)
 
@@ -76,7 +78,7 @@ def decode_events(indices: torch.Tensor, points: torch.Tensor, n_frames: int, d:
                 # frame number
                 int(pnt[0] * n_frames),
                 # atom, scaled by norm 
-                d[index] * pnt[1]
+                unit_norm(d[index]) * pnt[1]
             ))        
     return inst
 
@@ -95,8 +97,23 @@ class SparseCode(nn.Module):
         d = dictionary_learning_step(x, self.d, n_steps=n_iterations, device=x.device, d_normalization_dims=(-1, -2))
         self.d.data[:] = d
     
-    def do_sparse_code(self, x, n_iterations):
+    def feature_to_point_cloud(self, x, n_iterations):
         batch, channels, frames = x.shape
+        inst, scatter = sparse_code(
+            x, 
+            self.d, 
+            n_steps=n_iterations, 
+            device=x.device, 
+            d_normalization_dims=(-1, -2), 
+            flatten=True)
+        indices, points, srt = encode_events(
+            inst, batch, frames, n_iterations, device=x.device)
+        return indices, points, scatter
+
+    def point_cloud_to_feature(self, indices, points, n_frames):
+        return decode_events(indices, points, n_frames, self.d)
+    
+    def do_sparse_code(self, x, n_iterations):
 
         inst, scatter = sparse_code(
             x, 
@@ -106,22 +123,57 @@ class SparseCode(nn.Module):
             d_normalization_dims=(-1, -2), 
             flatten=True)
 
-        
-        # print('=======================')
-        # indices, points, srt = encode_events(
-        #     inst, batch, frames, n_iterations, device=x.device)
-        # inst_recon = decode_events(indices, points, frames, self.d)
-        # for a, b in zip(srt, inst_recon):
-        #     print('-----------------------------')
-        #     print(a)
-        #     print(b)
-        
         recon = scatter(x.shape, inst)
         return recon
     
     def forward(self, x, n_iterations=32):
         return self.sparse_code(x, n_iterations=n_iterations)
+
+
+class PointCloudAutencoder(nn.Module):
+    def __init__(self, input_features, channels):
+        super().__init__()
+        self.input_features = input_features
+        self.channels = channels
+
+        self.atom_embedding = nn.Embedding(n_atoms, channels // 2)
+        self.point_embedding = nn.Linear(2, channels // 2)
+
+        self.embed = nn.Linear(channels + 33, channels)
+        encoder = nn.TransformerEncoderLayer(channels, 4, channels, batch_first=True)
+
+        self.encoder = nn.TransformerEncoder(
+            encoder, 4, norm=nn.LayerNorm((sparse_coding_iterations, channels)))
+        self.decoder = nn.TransformerEncoder(
+            encoder, 4, norm=nn.LayerNorm((sparse_coding_iterations, channels)))
+        
+        self.to_indices = nn.Linear(channels, n_atoms)
+        self.to_amps = nn.Linear(channels, 1)
+        self.to_pos = nn.Linear(channels, 1)
+
+        self.apply(lambda x: exp.init_weights(x))
+        
     
+    def forward(self, indices, points):
+        batch, n_points = indices.shape
+
+        index_embedding = self.atom_embedding(indices)
+        point_embedding = self.point_embedding(points)
+
+        x = torch.cat([index_embedding, point_embedding], dim=-1)
+        pos = pos_encoded(batch, n_points, 16, device=indices.device)
+        x = torch.cat([x, pos], dim=-1)
+
+        x = self.embed(x)
+        x = self.encoder(x)
+        x = self.decoder(x)
+
+        indices = self.to_indices(x)
+
+        amps = torch.relu(self.to_amps(x))
+        pos = torch.sigmoid(self.to_pos(x))
+        points = torch.cat([pos, amps], dim=-1)
+        return indices, points
 
 class UpsampleBlock(nn.Module):
     def __init__(self):
@@ -178,9 +230,7 @@ class Model(nn.Module):
     def forward(self, x):
         # torch.Size([16, 128, 128, 257])
         x = self.embed_features(x)
-
         x = self.generate(x)
-
         return x
 
 try:
@@ -193,12 +243,15 @@ optim = optimizer(model, lr=1e-3)
 
 
 try:
-    sparse_model = SparseCode(4096, 32, 1024).to(device)
+    sparse_model = SparseCode(n_atoms, 32, 1024).to(device)
     sparse_model.load_state_dict(torch.load('sparse_model.dat'))
     print('Loaded sparse model')
 except IOError:
     pass
 
+
+point_cloud = PointCloudAutencoder(n_atoms, 1024).to(device)
+pc_optim = optimizer(point_cloud, lr=1e-3)
 
 def train(batch, i):
     optim.zero_grad()
@@ -218,9 +271,12 @@ def train_sparse_coding(batch, i):
     with torch.no_grad():
         spec = exp.perceptual_feature(batch)
         embedded = model.embed_features(spec)
-        sparse_model.learning_step(embedded, n_iterations=sparse_coding_iterations)
+
+        # do the recon _before_ a learning iteration on this batch, otherwise
+        # batches always sound better than they should
         recon = sparse_model.do_sparse_code(embedded, n_iterations=sparse_coding_iterations)
-        # loss = torch.abs(recon - embedded).sum()
+
+        sparse_model.learning_step(embedded, n_iterations=sparse_coding_iterations)
         loss = F.mse_loss(recon, embedded)
     
     with torch.no_grad():
@@ -229,10 +285,65 @@ def train_sparse_coding(batch, i):
     return loss, recon
     
 
+
+def train_pointcloud_encoder(batch, i):
+    """
+    Encoding
+    ------------------
+    audio -> pif -> low-dim -> pointcloud
+
+    Decoding
+    -------------------
+    pointcloud -> low-dim -> audio
+    """
+    pc_optim.zero_grad()
+
+    with torch.no_grad():
+        # compute the PIF feature
+        spec = exp.perceptual_feature(batch)
+        # compute the lower-dimensional embedding
+        embedded = model.embed_features(spec)
+        # sparse code the lower-dimensional feature
+        target_indices, target_points, scatter = sparse_model.feature_to_point_cloud(
+            embedded, n_iterations=sparse_coding_iterations)
+    
+    # encoded and decode the point cloud
+    indices, points = point_cloud.forward(target_indices, target_points)
+
+    # compute losses for the reconstruction
+    index_loss = F.cross_entropy(indices.view(-1, n_atoms), target_indices.view(-1))
+    point_loss = F.mse_loss(points, target_points)
+    loss = index_loss + point_loss
+    loss.backward()
+    pc_optim.step()
+
+    with torch.no_grad():
+        indices = torch.argmax(indices, dim=-1)
+        # first, back to instances
+        inst = sparse_model.point_cloud_to_feature(indices, points, points.shape[1])
+        # then reconstruct the low-dim feature
+        feature = scatter(embedded.shape, inst)
+        # finally, generate audio from the low-dim feature
+        recon = model.generate(feature)
+    
+    return loss, recon
+
+
+def return_train_func():
+    if sparse_coding_phase:
+        return train_sparse_coding
+    
+    if pointcloud_encoding_phase:
+        return train_pointcloud_encoder
+
+    return train
+
+
+
 @readme
 class PhaseInvariantFeatureInversion(BaseExperimentRunner):
     def __init__(self, stream, port=None):
-        super().__init__(stream, train_sparse_coding if sparse_coding_phase else train, exp, port=port)
+        super().__init__(stream, return_train_func(), exp, port=port)
     
     def run(self):
         for i, item in enumerate(self.iter_items()):
@@ -250,5 +361,7 @@ class PhaseInvariantFeatureInversion(BaseExperimentRunner):
             if i > 500 and sparse_coding_phase:
                 torch.save(sparse_model.state_dict(), 'sparse_model.dat')
                 break
+
+                
     
     
