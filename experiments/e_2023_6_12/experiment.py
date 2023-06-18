@@ -24,8 +24,11 @@ exp = Experiment(
     model_dim=128,
     kernel_size=512)
 
-sparse_coding_iterations = 64
-sparse_coding_phase = True
+sparse_coding_iterations = 128
+atom_size = 8
+features_per_band = 8
+feature_size = exp.n_bands * features_per_band
+sparse_coding_phase = False
 pointcloud_encoding_phase = False
 n_atoms = 4096
 
@@ -84,9 +87,10 @@ def decode_events(indices: torch.Tensor, points: torch.Tensor, n_frames: int, d:
 
 
 class SparseCode(nn.Module):
-    def __init__(self, n_atoms, atom_size, channels):
+    def __init__(self, n_atoms, atom_size, channels, slow_movement=False):
         super().__init__()
 
+        self.slow_movement = slow_movement
         self.n_atoms = n_atoms
         self.atom_size = atom_size
         self.channels = channels
@@ -94,7 +98,14 @@ class SparseCode(nn.Module):
         self.d = nn.Parameter(torch.zeros((n_atoms, channels, atom_size)).uniform_(-1, 1))
     
     def learning_step(self, x, n_iterations):
-        d = dictionary_learning_step(x, self.d, n_steps=n_iterations, device=x.device, d_normalization_dims=(-1, -2))
+        d = dictionary_learning_step(
+            x, 
+            self.d, 
+            n_steps=n_iterations, 
+            device=x.device, 
+            d_normalization_dims=(-1, -2), 
+            slow_movement=self.slow_movement
+        )
         self.d.data[:] = d
     
     def feature_to_point_cloud(self, x, n_iterations):
@@ -182,14 +193,89 @@ class UpsampleBlock(nn.Module):
     def forward(self, x):
         batch, channels, time = x.shape
         return F.interpolate(x, scale_factor=4, mode='nearest')
+    
+
+
+class NeuralSparseCode(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.channels = channels
+
+        self.encoder = nn.Sequential(
+            nn.Conv1d(channels, channels, 3, 1, padding=1, dilation=1),
+            nn.LeakyReLU(0.2),
+            nn.BatchNorm1d(channels),
+
+            nn.Conv1d(channels, channels, 3, 1, padding=3, dilation=3),
+            nn.LeakyReLU(0.2),
+            nn.BatchNorm1d(channels),
+
+            nn.Conv1d(channels, channels, 3, 1, padding=9, dilation=9),
+            nn.LeakyReLU(0.2),
+            nn.BatchNorm1d(channels),
+
+            nn.Conv1d(channels, channels, 3, 1, padding=27, dilation=27),
+            nn.LeakyReLU(0.2),
+            nn.BatchNorm1d(channels),
+
+        )
+            
+        self.up = nn.Conv1d(channels, n_atoms, 1, 1, 0)
+
+        self.map = nn.Conv1d(n_atoms, channels, 1, 1, 0)
+
+        self.decoder = nn.Sequential(
+            
+
+            nn.Conv1d(channels, channels, 3, 1, padding=1, dilation=1),
+            nn.LeakyReLU(0.2),
+            nn.BatchNorm1d(channels),
+
+            nn.Conv1d(channels, channels, 3, 1, padding=3, dilation=3),
+            nn.LeakyReLU(0.2),
+            nn.BatchNorm1d(channels),
+
+            nn.Conv1d(channels, channels, 3, 1, padding=9, dilation=9),
+            nn.LeakyReLU(0.2),
+            nn.BatchNorm1d(channels),
+
+            nn.Conv1d(channels, channels, 3, 1, padding=27, dilation=27),
+            nn.LeakyReLU(0.2),
+            nn.BatchNorm1d(channels),
+
+            nn.Conv1d(channels, channels, 1, 1, 0)
+        )
+
+
+    def forward(self, x):
+        batch, channels, time = x.shape
+
+        skip = x
+        x = self.encoder(x)
+        x = skip + x
+
+
+        x = self.up(x)
+        # sm = torch.softmax(x.view(batch, n_atoms * time), dim=-1).view(batch, n_atoms, time)
+        # x = sm * x
+        x = sparsify(x, sparse_coding_iterations)
+        x = self.map(x)
+
+
+        skip = x
+        x = self.decoder(x)
+        x = skip + x
+
+        return x
 
 class Model(nn.Module):
-    def __init__(self):
+    def __init__(self, sparse_code=False):
         super().__init__()
+        self.sparse_code = sparse_code
 
-        self.embed = nn.Linear(257, 8)
+        self.embed = nn.Linear(257, features_per_band)
 
-        self.sparse = SparseCode(1024, 32, 1024)
+        self.sparse = NeuralSparseCode(feature_size)
 
         self.up = nn.Sequential(
 
@@ -221,6 +307,10 @@ class Model(nn.Module):
         # torch.Size([16, 128, 128, 257])
         batch, channels, time, period = x.shape
         x = self.embed(x).permute(0, 3, 1, 2).reshape(batch, 8 * channels, time)
+
+        if self.sparse_code:
+            x = self.sparse(x)
+        
         return x
 
     def generate(self, x):
@@ -234,7 +324,7 @@ class Model(nn.Module):
         return x
 
 try:
-    model = Model().to(device)
+    model = Model(sparse_code=True).to(device)
     model.load_state_dict(torch.load('model.dat'))
     print('Loaded model')
 except IOError:
@@ -243,7 +333,7 @@ optim = optimizer(model, lr=1e-3)
 
 
 try:
-    sparse_model = SparseCode(n_atoms, 32, 1024).to(device)
+    sparse_model = SparseCode(n_atoms, atom_size, 1024, slow_movement=True).to(device)
     sparse_model.load_state_dict(torch.load('sparse_model.dat'))
     print('Loaded sparse model')
 except IOError:
@@ -354,11 +444,11 @@ class PhaseInvariantFeatureInversion(BaseExperimentRunner):
             print(i, l.item())
             self.after_training_iteration(l)
 
-            if i >= 6500 and not sparse_coding_phase:
+            if i >= 100000 and not sparse_coding_phase:
                 torch.save(model.state_dict(), 'model.dat')
                 break
 
-            if i > 500 and sparse_coding_phase:
+            if i > 1000 and sparse_coding_phase:
                 torch.save(sparse_model.state_dict(), 'sparse_model.dat')
                 break
 

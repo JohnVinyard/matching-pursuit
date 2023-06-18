@@ -5,13 +5,7 @@ from torch import nn
 from torch.nn import functional as F
 import zounds
 from config.experiment import Experiment
-from modules.activation import unit_sine
-from modules.dilated import DilatedStack
-from modules.linear import LinearOutputStack
-from modules.normalization import ExampleNorm
 from modules.pointcloud import CanonicalOrdering, encode_events
-from modules.pos_encode import ExpandUsingPosEncodings
-from modules.softmax import hard_softmax
 from scalar_scheduling import pos_encoded
 from time_distance import optimizer
 from train.experiment_runner import BaseExperimentRunner

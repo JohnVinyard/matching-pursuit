@@ -359,7 +359,8 @@ def dictionary_learning_step(
         n_steps: int = 100,
         device=None,
         approx=None,
-        d_normalization_dims=-1):
+        d_normalization_dims=-1,
+        slow_movement=False):
 
     batch, channels, time = signal.shape
     signal = signal.view(signal.shape[0], channels, -1)
@@ -369,7 +370,6 @@ def dictionary_learning_step(
     atom_size = d.shape[-1]
 
     d = unit_norm(d, dim=d_normalization_dims)
-
 
     residual = signal.clone()
 
@@ -398,8 +398,14 @@ def dictionary_learning_step(
 
         new_segments = gather_segments(residual, inst)
         new_atom = torch.sum(new_segments, dim=0)
-        new_atom = unit_norm(new_atom.view(-1)).view(channels, atom_size)
 
+        if slow_movement:
+            new_atom = unit_norm(
+                new_atom.view(-1) + d[index].view(-1)).view(channels, atom_size)
+        else:
+            new_atom = unit_norm(
+                new_atom.view(-1)).view(channels, atom_size)
+        
         d[index] = new_atom
 
         updated = map(
