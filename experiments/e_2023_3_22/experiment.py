@@ -6,6 +6,7 @@ from torch.nn import functional as F
 import zounds
 from config.experiment import Experiment
 from modules.pointcloud import CanonicalOrdering, encode_events
+from modules.softmax import hard_softmax
 from scalar_scheduling import pos_encoded
 from time_distance import optimizer
 from train.experiment_runner import BaseExperimentRunner
@@ -217,7 +218,7 @@ class AutoEncoder(nn.Module):
             internal_dim=512,
             n_events=n_events,
             set_processor=decoder_class,
-            softmax=lambda x: x,
+            softmax=lambda x: F.softmax(x, dim=-1),
         )
 
         self.apply(lambda x: exp.init_weights(x))
@@ -238,7 +239,7 @@ canonical = CanonicalOrdering(
 
 
 ae = AutoEncoder().to(device)
-optim = optimizer(ae, lr=1e-3)
+optim = optimizer(ae, lr=1e-4)
 
 
 
@@ -247,15 +248,17 @@ optim = optimizer(ae, lr=1e-3)
 def train_ae(batch):
     optim.zero_grad()
     recon, encoded = ae.forward(batch)
-    targets = torch.argmax(batch[..., 2:], dim=-1).view(-1)
 
-    l1 = F.mse_loss(recon[..., :2], batch[..., :2])
+    loss = F.mse_loss(batch, recon)
+    # targets = torch.argmax(batch[..., 2:], dim=-1).view(-1)
+
+    # l1 = F.mse_loss(recon[..., :2], batch[..., :2])
     # weight = batch[..., 1:2]
     # diff = (recon[..., :2] - batch[..., :2])
     # l1 = (torch.norm(diff, dim=-1, keepdim=True) * weight).mean()
-    l2 = F.cross_entropy(recon[..., 2:].view(-1, model.total_atoms), targets)
+    # l2 = F.cross_entropy(recon[..., 2:].view(-1, model.total_atoms), targets)
 
-    loss = (l1 * 100) + (l2 * 1)
+    # loss = (l1 * 100) + (l2 * 1)
     loss.backward()
     optim.step()
     return loss, recon, encoded

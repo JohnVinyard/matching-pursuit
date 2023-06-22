@@ -399,7 +399,8 @@ class NoiseModel(nn.Module):
             activation=lambda x: torch.clamp(x, -1, 1),
             squared=False,
             mask_after=None,
-            return_params=False):
+            return_params=False,
+            batch_norm=False):
 
         super().__init__()
         self.return_params = return_params
@@ -411,6 +412,7 @@ class NoiseModel(nn.Module):
         self.activation = activation
         self.squared = squared
         self.mask_after = mask_after
+        self.batch_norm = batch_norm
 
         noise_step = n_audio_samples // n_noise_frames
         noise_window = noise_step * 2
@@ -424,7 +426,9 @@ class NoiseModel(nn.Module):
             nn.Sequential(
                 nn.Upsample(scale_factor=2, mode='nearest'),
                 nn.Conv1d(channels, channels, 3, 1, 1),
-                nn.LeakyReLU(0.2))
+                nn.LeakyReLU(0.2),
+                nn.BatchNorm1d(channels) if batch_norm else nn.Identity()
+            )
             for _ in range(layers)])
 
         self.final = nn.Conv1d(channels, self.noise_coeffs, 1, 1, 0)
@@ -539,7 +543,7 @@ class HarmonicModel(nn.Module):
 
 
 class AudioModel(nn.Module):
-    def __init__(self, n_samples, model_dim, samplerate, n_frames, n_noise_frames):
+    def __init__(self, n_samples, model_dim, samplerate, n_frames, n_noise_frames, batch_norm=False):
         super().__init__()
         self.n_samples = n_samples
         self.model_dim = model_dim
@@ -561,7 +565,8 @@ class AudioModel(nn.Module):
             n_samples,
             model_dim,
             squared=True,
-            mask_after=1)
+            mask_after=1,
+            batch_norm=batch_norm)
         
         self.verb = NeuralReverb.from_directory(
             Config.impulse_response_path(), samplerate, n_samples)

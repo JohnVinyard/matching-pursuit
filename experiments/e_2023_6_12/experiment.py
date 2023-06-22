@@ -1,5 +1,4 @@
 
-from collections import defaultdict
 from typing import List
 import torch
 from torch import nn
@@ -7,12 +6,16 @@ from torch.nn import functional as F
 import zounds
 from config.experiment import Experiment
 from modules.atoms import unit_norm
-from modules.matchingpursuit import dictionary_learning_step, flatten_atom_dict, sparse_code
+from modules.ddsp import AudioModel
+from modules.linear import LinearOutputStack
+from modules.matchingpursuit import dictionary_learning_step, sparse_code
 from modules.pointcloud import encode_events
 from modules.pos_encode import pos_encoded
+from modules.reverb import ReverbGenerator
 from modules.sparse import sparsify
 from train.experiment_runner import BaseExperimentRunner
 from train.optim import optimizer
+from upsample import ConvUpsample
 from util import device
 from util.readmedocs import readme
 
@@ -25,6 +28,8 @@ exp = Experiment(
     kernel_size=512)
 
 sparse_coding_iterations = 128
+initial_model_does_sparse_coding = True
+
 atom_size = 8
 features_per_band = 8
 feature_size = exp.n_bands * features_per_band
@@ -187,75 +192,123 @@ class PointCloudAutencoder(nn.Module):
         return indices, points
 
 class UpsampleBlock(nn.Module):
-    def __init__(self):
+    def __init__(self, channels):
         super().__init__()
     
     def forward(self, x):
-        batch, channels, time = x.shape
-        return F.interpolate(x, scale_factor=4, mode='nearest')
-    
+        return F.interpolate(x, scale_factor=4, mode='linear')
 
+
+class DilatedConvContext(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv1d(channels, channels, 3, 1, padding=1, dilation=1),
+            nn.LeakyReLU(0.2),
+            nn.BatchNorm1d(channels),
+
+            nn.Conv1d(channels, channels, 3, 1, padding=3, dilation=3),
+            nn.LeakyReLU(0.2),
+            nn.BatchNorm1d(channels),
+
+            nn.Conv1d(channels, channels, 3, 1, padding=9, dilation=9),
+            nn.LeakyReLU(0.2),
+            nn.BatchNorm1d(channels),
+
+            nn.Conv1d(channels, channels, 3, 1, padding=27, dilation=27),
+            nn.LeakyReLU(0.2),
+            nn.BatchNorm1d(channels),
+        )
+    
+    def forward(self, x):
+        x = self.net(x)
+        return x
+
+
+class TransformerContext(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.embed = nn.Linear(channels + 33, channels)
+        encoder = nn.TransformerEncoderLayer(channels, 4, channels, batch_first=True)
+
+        self.encoder = nn.TransformerEncoder(
+            encoder, 4, norm=nn.LayerNorm((128, channels)))
+    
+    def forward(self, x):
+        batch, channels, time = x.shape
+        x = x.permute(0, 2, 1)
+        pos = pos_encoded(batch, time, 16, device=x.device)
+        x = torch.cat([x, pos], dim=-1)
+        x = self.embed(x)
+        x = self.encoder(x)
+        x = x.permute(0, 2, 1)
+        return x
 
 class NeuralSparseCode(nn.Module):
     def __init__(self, channels):
         super().__init__()
         self.channels = channels
 
-        self.encoder = nn.Sequential(
-            nn.Conv1d(channels, channels, 3, 1, padding=1, dilation=1),
-            nn.LeakyReLU(0.2),
-            nn.BatchNorm1d(channels),
+        # self.encoder = nn.Sequential(
+        #     nn.Conv1d(channels, channels, 3, 1, padding=1, dilation=1),
+        #     nn.LeakyReLU(0.2),
+        #     nn.BatchNorm1d(channels),
 
-            nn.Conv1d(channels, channels, 3, 1, padding=3, dilation=3),
-            nn.LeakyReLU(0.2),
-            nn.BatchNorm1d(channels),
+        #     nn.Conv1d(channels, channels, 3, 1, padding=3, dilation=3),
+        #     nn.LeakyReLU(0.2),
+        #     nn.BatchNorm1d(channels),
 
-            nn.Conv1d(channels, channels, 3, 1, padding=9, dilation=9),
-            nn.LeakyReLU(0.2),
-            nn.BatchNorm1d(channels),
+        #     nn.Conv1d(channels, channels, 3, 1, padding=9, dilation=9),
+        #     nn.LeakyReLU(0.2),
+        #     nn.BatchNorm1d(channels),
 
-            nn.Conv1d(channels, channels, 3, 1, padding=27, dilation=27),
-            nn.LeakyReLU(0.2),
-            nn.BatchNorm1d(channels),
+        #     nn.Conv1d(channels, channels, 3, 1, padding=27, dilation=27),
+        #     nn.LeakyReLU(0.2),
+        #     nn.BatchNorm1d(channels),
 
-        )
+        # )
+
+        self.encoder = TransformerContext(channels)
             
         self.up = nn.Conv1d(channels, n_atoms, 1, 1, 0)
-
         self.map = nn.Conv1d(n_atoms, channels, 1, 1, 0)
 
-        self.decoder = nn.Sequential(
+        # self.decoder = nn.Sequential(
             
 
-            nn.Conv1d(channels, channels, 3, 1, padding=1, dilation=1),
-            nn.LeakyReLU(0.2),
-            nn.BatchNorm1d(channels),
+        #     nn.Conv1d(channels, channels, 3, 1, padding=1, dilation=1),
+        #     nn.LeakyReLU(0.2),
+        #     nn.BatchNorm1d(channels),
 
-            nn.Conv1d(channels, channels, 3, 1, padding=3, dilation=3),
-            nn.LeakyReLU(0.2),
-            nn.BatchNorm1d(channels),
+        #     nn.Conv1d(channels, channels, 3, 1, padding=3, dilation=3),
+        #     nn.LeakyReLU(0.2),
+        #     nn.BatchNorm1d(channels),
 
-            nn.Conv1d(channels, channels, 3, 1, padding=9, dilation=9),
-            nn.LeakyReLU(0.2),
-            nn.BatchNorm1d(channels),
+        #     nn.Conv1d(channels, channels, 3, 1, padding=9, dilation=9),
+        #     nn.LeakyReLU(0.2),
+        #     nn.BatchNorm1d(channels),
 
-            nn.Conv1d(channels, channels, 3, 1, padding=27, dilation=27),
-            nn.LeakyReLU(0.2),
-            nn.BatchNorm1d(channels),
+        #     nn.Conv1d(channels, channels, 3, 1, padding=27, dilation=27),
+        #     nn.LeakyReLU(0.2),
+        #     nn.BatchNorm1d(channels),
 
-            nn.Conv1d(channels, channels, 1, 1, 0)
-        )
+            
+        # )
+
+        self.decoder = TransformerContext(channels)
+
+        self.final = nn.Conv1d(channels, channels, 1, 1, 0)
 
 
     def forward(self, x):
-        batch, channels, time = x.shape
 
+        batch, channels, time = x.shape
         skip = x
         x = self.encoder(x)
         x = skip + x
 
-
         x = self.up(x)
+        x = F.dropout(x, p=0.05)
         # sm = torch.softmax(x.view(batch, n_atoms * time), dim=-1).view(batch, n_atoms, time)
         # x = sm * x
         x = sparsify(x, sparse_coding_iterations)
@@ -264,6 +317,7 @@ class NeuralSparseCode(nn.Module):
 
         skip = x
         x = self.decoder(x)
+        x = self.final(x)
         x = skip + x
 
         return x
@@ -277,30 +331,39 @@ class Model(nn.Module):
 
         self.sparse = NeuralSparseCode(feature_size)
 
+        self.to_verb_context = LinearOutputStack(1024, 3, out_channels=1024)
+
+        channels = 1024
+
         self.up = nn.Sequential(
 
             nn.Conv1d(1024, 512, 7, 1, 3),
             nn.BatchNorm1d(512),
             nn.LeakyReLU(0.2),
-            UpsampleBlock(),
+            UpsampleBlock(512),
 
             nn.Conv1d(512, 256, 7, 1, 3),
             nn.BatchNorm1d(256),
             nn.LeakyReLU(0.2),
-            UpsampleBlock(),
+            UpsampleBlock(256),
 
             nn.Conv1d(256, 128, 7, 1, 3),
             nn.BatchNorm1d(128),
             nn.LeakyReLU(0.2),
-            UpsampleBlock(),
+            UpsampleBlock(128),
 
             nn.Conv1d(128, 64, 7, 1, 3),
             nn.BatchNorm1d(64),
             nn.LeakyReLU(0.2),
-            UpsampleBlock(),
+            UpsampleBlock(64),
 
             nn.Conv1d(64, 1, 7, 1, 3),
         )        
+
+        
+
+        self.verb = ReverbGenerator(1024, 3, exp.samplerate, exp.n_samples)
+
         self.apply(lambda x: exp.init_weights(x))
     
     def embed_features(self, x):
@@ -310,6 +373,7 @@ class Model(nn.Module):
 
         if self.sparse_code:
             x = self.sparse(x)
+            return x
         
         return x
 
@@ -319,12 +383,17 @@ class Model(nn.Module):
     
     def forward(self, x):
         # torch.Size([16, 128, 128, 257])
-        x = self.embed_features(x)
-        x = self.generate(x)
+        encoded = self.embed_features(x)
+        ctx = torch.sum(encoded, dim=-1)
+        ctx = self.to_verb_context(ctx)
+
+        x = self.generate(encoded)
+
+        x = self.verb.forward(ctx, x)
         return x
 
 try:
-    model = Model(sparse_code=True).to(device)
+    model = Model(sparse_code=initial_model_does_sparse_coding).to(device)
     model.load_state_dict(torch.load('model.dat'))
     print('Loaded model')
 except IOError:
@@ -350,6 +419,7 @@ def train(batch, i):
 
     recon = model.forward(spec)
     recon_spec = exp.perceptual_feature(recon)
+
     audio_loss = F.mse_loss(recon_spec, spec)
     loss = audio_loss
     loss.backward()

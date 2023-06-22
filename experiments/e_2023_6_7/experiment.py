@@ -8,6 +8,7 @@ from fft_basis import morlet_filter_bank
 from fft_shift import fft_shift
 from modules.atoms import unit_norm
 from modules.dilated import DilatedStack
+from modules.fft import fft_convolve
 from modules.linear import LinearOutputStack
 from modules.matchingpursuit import sparse_code_to_differentiable_key_points, sparse_feature_map
 from modules.normalization import max_norm
@@ -32,7 +33,7 @@ exp = Experiment(
 d_size = 256
 kernel_size = 256
 sparse_coding_iterations = 16
-overfit = True
+overfit = False
 
 
 band = zounds.FrequencyBand(20, 2000)
@@ -143,7 +144,7 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, channels, schedule=False):
+    def __init__(self, channels, schedule=False, schedule_method='fft'):
         super().__init__()
         self.channels = channels
         self.net = ExpandUsingPosEncodings(
@@ -152,6 +153,11 @@ class Decoder(nn.Module):
         self.to_pos_amp = LinearOutputStack(channels, 3, out_channels=2)
         self.to_atom = LinearOutputStack(channels, 3, out_channels=d_size)
         self.schedule = schedule
+        self.schedule_method = schedule_method
+
+        if schedule_method == 'conv':
+            self.to_schedule = LinearOutputStack(channels, 3, out_channels=512)
+            self.factor = exp.n_samples // 512
 
     
     def forward(self, x):
@@ -163,30 +169,50 @@ class Decoder(nn.Module):
         atoms = self.to_atom(x)
 
         if self.schedule:
-            # (batch, events, 2), (batch, events, d_size)
-            # print('EVENT SHAPE', pos_amp.shape, atoms.shape)
 
-            batch = pos_amp.shape[0]
+            if self.schedule_method == 'fft':
+                batch = pos_amp.shape[0]
+                amp = pos_amp[:, :, :1]
+                pos = pos_amp[:, :, 1:]
+                atoms = torch.softmax(atoms, dim=-1)
+                atoms = (atoms @ d) * amp
+                output = torch.zeros(batch, sparse_coding_iterations, exp.n_samples, device=amp.device)
+                output[:, :, :kernel_size] = atoms
+                output = fft_shift(output, pos)
+                return output
+            else:
+                batch = pos_amp.shape[0]
+                amp = pos_amp[:, :, :1]
+                # pos = pos_amp[:, :, 1:]
+                atoms = torch.softmax(atoms, dim=-1)
+                atoms = (atoms @ d) * amp
 
-            amp = pos_amp[:, :, :1]
-            pos = pos_amp[:, :, 1:]
-            atoms = torch.softmax(atoms, dim=-1)
-            atoms = (atoms @ d) * amp
-            output = torch.zeros(batch, sparse_coding_iterations, exp.n_samples, device=amp.device)
-            output[:, :, :kernel_size] = atoms
-            output = fft_shift(output, pos)
-            return output
+                sched = self.to_schedule(x)
+                sched = F.interpolate(sched, size=exp.n_samples)
+                sched = torch.softmax(sched, dim=-1)
+
+                atoms = F.pad(atoms, (0, exp.n_samples - kernel_size))
+                
+                output = fft_convolve(sched, atoms)
+                output = torch.sum(output, dim=1, keepdim=True)
+                return output
+
+                # output = torch.zeros(batch, sparse_coding_iterations, exp.n_samples, device=amp.device)
+                # output[:, :, :kernel_size] = atoms
+                # output = fft_shift(output, pos)
+
+                return output
 
         x = torch.cat([pos_amp, atoms], dim=-1).permute(0, 2, 1)
         return x
 
 
 class Model(nn.Module):
-    def __init__(self, channels, schedule=False):
+    def __init__(self, channels, schedule=False, schedule_method='conv'):
         super().__init__()
         self.schedule = schedule
         self.encoder = Encoder(channels, d=d)
-        self.decoder = Decoder(channels, schedule=schedule)
+        self.decoder = Decoder(channels, schedule=schedule, schedule_method=schedule_method)
         self.apply(lambda x: exp.init_weights(x))
     
     def forward(self, x):
@@ -241,13 +267,15 @@ class DenseModel(nn.Module):
         # x = x[..., :exp.n_samples]
         return x
 
-# model = Model(channels=d_size, schedule=True).to(device)
+model = Model(channels=d_size, schedule=True, schedule_method='conv').to(device)
 # model = DenseModel().to(device)
-model = OverfitRawAudio((1, 1, exp.n_samples), std=1e-4, normalize=False).to(device)
+# model = OverfitRawAudio((1, 1, exp.n_samples), std=1e-4, normalize=False).to(device)
 optim = optimizer(model, lr=1e-3)
 
 
 def loss_func(a, b):
+
+    return F.mse_loss(a, b)
 
     b, b_res = extract_key_points(b, d)
 

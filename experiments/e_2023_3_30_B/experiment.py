@@ -6,10 +6,12 @@ import zounds
 from config.experiment import Experiment
 from fft_basis import morlet_filter_bank
 from modules.dilated import DilatedStack
-from modules.fft import fft_shift
+from modules.fft import fft_convolve, fft_shift
 from modules.linear import LinearOutputStack
 from modules.reverb import ReverbGenerator
+from modules.softmax import hard_softmax
 from modules.sparse import sparsify_vectors
+from modules.transfer import ImpulseGenerator
 from scalar_scheduling import pos_encoded
 from time_distance import optimizer
 from train.experiment_runner import BaseExperimentRunner
@@ -27,7 +29,7 @@ exp = Experiment(
 
 
 n_events = 8
-min_decay = 0.8
+min_decay = 0.5
 
 
 
@@ -81,7 +83,7 @@ class NoisePulseGenerator(nn.Module):
             exp.model_dim, 
             8, 
             end_size=n_frames, 
-            mode='learned', 
+            mode='nearest', 
             out_channels=1)
         
         self.to_decay = LinearOutputStack(exp.model_dim, 3, out_channels=1)
@@ -122,7 +124,10 @@ class Model(nn.Module):
         self.reduce = nn.Conv1d(exp.model_dim + 33, exp.model_dim, 1, 1, 0)
         self.net = DilatedStack(exp.model_dim, [1, 3, 9, 27, 81, 1], dropout=0.1)
         self.attn = nn.Conv1d(exp.model_dim, 1, 1, 1, 0)
-        self.to_positions = LinearOutputStack(exp.model_dim, 3, out_channels=1)
+
+        self.to_positions = LinearOutputStack(exp.model_dim, 3, out_channels=256)
+
+
 
         self.noise = NoisePulseGenerator(exp.n_samples, 128)
         self.res = Resonance(
@@ -150,11 +155,11 @@ class Model(nn.Module):
 
         events, indices = sparsify_vectors(x, attn, n_to_keep=n_events)
 
-        t = torch.sigmoid(self.to_positions(events))
 
         env = self.noise(events)
 
         final = self.res(env, events)
+
 
         # learnings from today indicate that this is only helpful for small shifts,
         # if a somewhat-matching segment overlaps a generated event.
@@ -163,6 +168,7 @@ class Model(nn.Module):
         #     final.view(-1, n_events, exp.n_samples), 
         #     t.view(-1, n_events, 1)
         # )
+
 
         final = torch.sum(final.view(-1, n_events, exp.n_samples), dim=1, keepdim=True)
 

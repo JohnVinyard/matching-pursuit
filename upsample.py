@@ -50,9 +50,9 @@ class Linear(UpsampleBlock):
 
 
 class LearnedUpsampleBlock(nn.Module):
-    def __init__(self, in_channels, out_channels):
+    def __init__(self, in_channels, out_channels, kernel_size=4, step_size=2, padding=1):
         super().__init__()
-        self.conv = nn.ConvTranspose1d(in_channels, out_channels, 4, 2, 1)
+        self.conv = nn.ConvTranspose1d(in_channels, out_channels, kernel_size, step_size, padding)
 
     def forward(self, x):
         x = self.conv(x)
