@@ -68,10 +68,18 @@ def _inner_generate(batch_size, total_events, amps, positions, atom_indices):
 
 
 class Model(nn.Module):
-    def __init__(self):
+    def __init__(
+            self, 
+            n_scheduling_frames=512, 
+            training_softmax=lambda x: soft_dirac(x, dim=-1), 
+            inference_softmax=lambda x: soft_dirac(x, dim=-1)):
+        
         super().__init__()
+        self.training_softmax = training_softmax
+        self.inference_softmax = inference_softmax
+
         self.positions = nn.Parameter(
-            torch.zeros(sparse_coding_iterations, 512).uniform_(-1, 1))
+            torch.zeros(sparse_coding_iterations, n_scheduling_frames).uniform_(-1, 1))
         
         self.amps = nn.Parameter(
             torch.zeros(sparse_coding_iterations, 1).uniform_(0, 1))
@@ -85,21 +93,19 @@ class Model(nn.Module):
     
     @property
     def training_atom_softmax(self):
-        # return lambda x: torch.softmax(x, dim=-1)
-        return lambda x: soft_dirac(x, dim=-1)
+        return self.training_softmax
     
     @property
     def training_schedule_softmax(self):
-        # return lambda x: torch.softmax(x, dim=-1)
-        return lambda x: soft_dirac(x, dim=-1)
+        return self.training_softmax
     
     @property
     def inference_atom_softmax(self):
-        return lambda x: soft_dirac(x, dim=-1)
+        return self.inference_softmax
     
     @property
     def inference_schedule_softmax(self):
-        return lambda x: soft_dirac(x, dim=-1)
+        return self.inference_softmax
     
     def _core_forward(self, x, atom_softmax, schedule_softmax):
         sel = atom_softmax(self.atom_selection)
@@ -127,7 +133,12 @@ class Model(nn.Module):
             x, self.training_atom_softmax, self.training_schedule_softmax)
         return result
 
-model = Model().to(device)
+model = Model(
+    n_scheduling_frames=512, 
+    training_softmax=lambda x: soft_dirac(x, dim=-1),
+    inference_softmax=lambda x: soft_dirac(x, dim=-1)
+    ).to(device)
+
 optim = optimizer(model, lr=1e-3)
 
 
