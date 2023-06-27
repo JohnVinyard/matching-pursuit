@@ -14,6 +14,7 @@ TODO: hierarchical scheduling?
 Using softmax for training and a "hard" function for inference doesn't work as planned, 
 because the model learns to use artifacts from the fuzzy scheduling to perform the reconstruction
 
+
 ## Mitigating Strategies to Test
 - use hard function during training
     - `soft_dirac`

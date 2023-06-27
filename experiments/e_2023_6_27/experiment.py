@@ -67,19 +67,49 @@ def _inner_generate(batch_size, total_events, amps, positions, atom_indices):
     return output
 
 
+class Scheduler(nn.Module):
+    def __init__(self, schedule_type='impulse', n_frames=512):
+        super().__init__()
+        self.schedule_type = schedule_type
+        self.n_frames = n_frames
+
+        if schedule_type == 'impulse':
+            self.params = nn.Parameter(
+                torch.zeros(sparse_coding_iterations, n_frames).uniform_(-1, 1))
+            self.gen = ImpulseGenerator(exp.n_samples, softmax=lambda x: torch.softmax(x, dim=-1))
+        else:
+            self.params = nn.Parameter(
+                torch.zeros(sparse_coding_iterations, 33).uniform_(-1, 1))
+            self.gen = PosEncodedImpulseGenerator()
+    
+    def forward(self, x, softmax):
+        if self.schedule_type == 'impulse':
+            impulses = self.gen.forward(self.params, softmax=softmax)
+            impulses = impulses.view(1, sparse_coding_iterations, exp.n_samples)
+        else:
+            impulses, _ = self.gen.forward(self.params, softmax=softmax)
+            impulses = impulses.view(1, sparse_coding_iterations, exp.n_samples)
+        
+        return impulses
+
+
 class Model(nn.Module):
     def __init__(
             self, 
             n_scheduling_frames=512, 
             training_softmax=lambda x: soft_dirac(x, dim=-1), 
-            inference_softmax=lambda x: soft_dirac(x, dim=-1)):
+            inference_softmax=lambda x: soft_dirac(x, dim=-1),
+            scheduler_type='impulse'):
         
         super().__init__()
         self.training_softmax = training_softmax
         self.inference_softmax = inference_softmax
 
-        self.positions = nn.Parameter(
-            torch.zeros(sparse_coding_iterations, n_scheduling_frames).uniform_(-1, 1))
+        self.scheduler_type = scheduler_type
+        self.n_scheduling_frames = n_scheduling_frames
+
+        # self.positions = nn.Parameter(
+        #     torch.zeros(sparse_coding_iterations, n_scheduling_frames).uniform_(-1, 1))
         
         self.amps = nn.Parameter(
             torch.zeros(sparse_coding_iterations, 1).uniform_(0, 1))
@@ -87,8 +117,10 @@ class Model(nn.Module):
         self.atom_selection = nn.Parameter(
             torch.zeros(sparse_coding_iterations, d_size).uniform_(-1, 1))
         
-        self.encoded = ImpulseGenerator(
-            exp.n_samples, softmax=lambda x: torch.softmax(x, dim=-1))
+        # self.encoded = ImpulseGenerator(
+        #     exp.n_samples, softmax=lambda x: torch.softmax(x, dim=-1))
+
+        self.scheduler = Scheduler(self.scheduler_type, self.n_scheduling_frames)
 
     
     @property
@@ -114,9 +146,10 @@ class Model(nn.Module):
         with_amp = with_amp.view(1, sparse_coding_iterations, kernel_size)
         atoms = F.pad(with_amp, (0, exp.n_samples - kernel_size))
 
-        impulses = self.encoded.forward(self.positions, softmax=schedule_softmax)
+        # impulses = self.encoded.forward(self.positions, softmax=schedule_softmax)
         # impulses, _ = impulses
-        impulses = impulses.view(1, sparse_coding_iterations, exp.n_samples)
+        # impulses = impulses.view(1, sparse_coding_iterations, exp.n_samples)
+        impulses = self.scheduler.forward(None, schedule_softmax)
 
         final = fft_convolve(impulses, atoms)
         final = torch.sum(final, dim=1, keepdim=True)
@@ -136,8 +169,9 @@ class Model(nn.Module):
 model = Model(
     n_scheduling_frames=512, 
     training_softmax=lambda x: soft_dirac(x, dim=-1),
-    inference_softmax=lambda x: soft_dirac(x, dim=-1)
-    ).to(device)
+    inference_softmax=lambda x: soft_dirac(x, dim=-1),
+    scheduler_type='impulse',
+).to(device)
 
 optim = optimizer(model, lr=1e-3)
 
