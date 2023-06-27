@@ -19,6 +19,7 @@ from upsample import ConvUpsample, PosEncodedUpsample
 from util import device
 from util.readmedocs import readme
 from itertools import count
+from random import random
 
 
 exp = Experiment(
@@ -213,18 +214,21 @@ class Model(nn.Module):
         final = max_norm(final)
         return final
     
-    
 
-    def forward(self, x):
+    def forward(self, x, training=True):
         if self.encode:
             amps, pos, atoms = self.encoder.forward(x)
         else:
             amps, pos, atoms = None, None, None
 
+        ti = random() > 0.5
+        t = training and ti
+
+        
         result = self._core_forward(
             x, 
-            self.training_atom_softmax, 
-            self.training_schedule_softmax,
+            self.training_atom_softmax if t else self.inference_atom_softmax, 
+            self.training_schedule_softmax if t else self.inference_schedule_softmax,
             atom_selection=atoms,
             amps=amps,
             positions=pos)
@@ -233,7 +237,7 @@ class Model(nn.Module):
 
 model = Model(
     n_scheduling_frames=512, 
-    training_softmax=lambda x: soft_dirac(x, dim=-1),
+    training_softmax=lambda x: torch.softmax(x, dim=-1),
     inference_softmax=lambda x: soft_dirac(x, dim=-1),
     encode=True,
     reduction=False
@@ -263,10 +267,14 @@ class NoGridExperiment(BaseExperimentRunner):
             
             optim.zero_grad()
             recon = model.forward(item)
-            self.fake = recon
+            
             loss = exp_loss(recon, item)
             loss.backward()
             optim.step()
+
+            with torch.no_grad():
+                recon = model.forward(item, training=False)
+                self.fake = recon
 
             print(i, loss.item())
             self.after_training_iteration(loss)
