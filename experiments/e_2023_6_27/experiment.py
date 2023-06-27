@@ -73,30 +73,18 @@ def _inner_generate(batch_size, total_events, amps, positions, atom_indices):
 
 
 class Scheduler(nn.Module):
-    def __init__(self, schedule_type='impulse', n_frames=512):
+    def __init__(self, n_frames=512):
         super().__init__()
-        self.schedule_type = schedule_type
         self.n_frames = n_frames
 
-        if schedule_type == 'impulse':
-            self.params = nn.Parameter(
-                torch.zeros(sparse_coding_iterations, n_frames).uniform_(-1, 1))
-            self.gen = ImpulseGenerator(exp.n_samples, softmax=lambda x: torch.softmax(x, dim=-1))
-        else:
-            self.params = nn.Parameter(
-                torch.zeros(sparse_coding_iterations, 33).uniform_(-1, 1))
-            self.gen = PosEncodedImpulseGenerator(
-                n_frames, exp.n_samples, softmax=lambda x: torch.softmax(x, dim=-1), scale_frequencies=True)
-    
-    def forward(self, x, softmax):
-        if self.schedule_type == 'impulse':
-            inp = x if x is not None else self.params
-            impulses = self.gen.forward(inp.view(-1, self.n_frames), softmax=softmax)
-            impulses = impulses.view(1, sparse_coding_iterations, exp.n_samples)
-        else:
-            impulses, _ = self.gen.forward(x if x is not None else self.params, softmax=softmax)
-            impulses = impulses.view(1, sparse_coding_iterations, exp.n_samples)
+        self.params = nn.Parameter(
+            torch.zeros(sparse_coding_iterations, n_frames).uniform_(-1, 1))
+        self.gen = ImpulseGenerator(exp.n_samples, softmax=lambda x: torch.softmax(x, dim=-1))
         
+    def forward(self, x, softmax):
+        inp = x if x is not None else self.params
+        impulses = self.gen.forward(inp.view(-1, self.n_frames), softmax=softmax)
+        impulses = impulses.view(1, sparse_coding_iterations, exp.n_samples)
         return impulses
 
 
@@ -110,16 +98,7 @@ class Encoder(nn.Module):
         self.encoder = nn.TransformerEncoder(encoder, 5, norm=nn.LayerNorm((128, channels)))
         self.reduction = reduction
 
-        # self.up = PosEncodedUpsample(
-        #     channels, 
-        #     channels, 
-        #     size=sparse_coding_iterations, 
-        #     out_channels=channels, 
-        #     layers=3,
-        #     concat=True,
-        #     learnable_encodings=True,
-        #     multiply=True
-        # )
+        
         self.up = ConvUpsample(
             channels, 
             channels, 
@@ -167,7 +146,6 @@ class Model(nn.Module):
             n_scheduling_frames=512, 
             training_softmax=lambda x: soft_dirac(x, dim=-1), 
             inference_softmax=lambda x: soft_dirac(x, dim=-1),
-            scheduler_type='impulse',
             encode=False,
             reduction=False):
         
@@ -177,7 +155,6 @@ class Model(nn.Module):
         self.training_softmax = training_softmax
         self.inference_softmax = inference_softmax
 
-        self.scheduler_type = scheduler_type
         self.n_scheduling_frames = n_scheduling_frames
 
         self.encoder = Encoder(1024, n_scheduling_frames, reduction=reduction)
@@ -188,7 +165,7 @@ class Model(nn.Module):
         self.atom_selection = nn.Parameter(
             torch.zeros(sparse_coding_iterations, d_size).uniform_(-1, 1))
         
-        self.scheduler = Scheduler(self.scheduler_type, self.n_scheduling_frames)
+        self.scheduler = Scheduler(self.n_scheduling_frames)
 
         self.apply(lambda x: exp.init_weights(x))
 
@@ -253,7 +230,6 @@ model = Model(
     n_scheduling_frames=512, 
     training_softmax=lambda x: soft_dirac(x, dim=-1),
     inference_softmax=lambda x: soft_dirac(x, dim=-1),
-    scheduler_type='impulse',
     encode=True,
     reduction=False
 ).to(device)
