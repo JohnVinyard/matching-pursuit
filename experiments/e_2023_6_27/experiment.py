@@ -8,6 +8,7 @@ from config.experiment import Experiment
 from fft_basis import morlet_filter_bank
 from fft_shift import fft_shift
 from modules.fft import fft_convolve
+from modules.matchingpursuit import sparse_feature_map
 from modules.normalization import max_norm, unit_norm
 from modules.pos_encode import pos_encoded
 from modules.sparse import soft_dirac, sparsify_vectors
@@ -119,7 +120,15 @@ class Encoder(nn.Module):
         #     learnable_encodings=True,
         #     multiply=True
         # )
-        self.up = ConvUpsample(channels, channels, 4, sparse_coding_iterations, mode='learned', out_channels=channels, batch_norm=True)
+        self.up = ConvUpsample(
+            channels, 
+            channels, 
+            4, 
+            sparse_coding_iterations, 
+            mode='learned', 
+            out_channels=channels, 
+            batch_norm=True
+        )
 
         self.attn = nn.Linear(channels, 1)
         self.to_amps = nn.Linear(channels, 1)
@@ -136,8 +145,8 @@ class Encoder(nn.Module):
         x = self.encoder(x)
 
         if self.reduction:
-            x = torch.sum(x, dim=1)
-            # x = x[:, -1, :]
+            # x = torch.sum(x, dim=1)
+            x = x[:, -1, :]
             x = self.up(x).permute(0, 2, 1)
         else:
             attn = self.attn(x)
@@ -250,6 +259,61 @@ model = Model(
 ).to(device)
 
 optim = optimizer(model, lr=1e-3)
+
+def fft_loss(a, b):
+    a = torch.fft.rfft(a, dim=-1)
+    b = torch.fft.rfft(b, dim=-1)
+    mag_loss = F.mse_loss(torch.abs(a), torch.abs(b))
+    phase_loss = F.mse_loss(torch.angle(a), torch.angle(b))
+    return mag_loss + phase_loss
+
+
+def self_similarity_loss(a: torch.Tensor, b: torch.Tensor):
+    a = a.unfold(-1, 128, 64)
+    b = b.unfold(-1, 128, 64)
+    a_sim = torch.cdist(a, b)
+    b_sim = torch.cdist(b, b)
+    loss = torch.abs(a_sim - b_sim).sum()
+    return loss
+
+def spec_similarity_loss(a: torch.Tensor, b: torch.Tensor):
+    a = exp.pooled_filter_bank(a)
+    b = exp.pooled_filter_bank(b)
+
+    diff = torch.abs(a[:, :, None, :] - b[:, :, :, None])
+
+    # a_sim = torch.cdist(a, b)
+    # b_sim = torch.cdist(b, b)
+    # loss = torch.abs(a_sim - b_sim).sum()
+
+    loss = diff.sum()
+    return loss
+
+
+def sparse_loss(a, b):
+    a = sparse_feature_map(a, d, n_steps=sparse_coding_iterations, device=device)
+    b = sparse_feature_map(b, d, n_steps=sparse_coding_iterations, device=device)
+    orig = F.mse_loss(a, b)
+
+    
+    a1 = a.unfold(-1, 512, 256).sum(dim=-1)
+    b1 = b.unfold(-1, 512, 256).sum(dim=-1)
+    small = F.mse_loss(a1, b1)
+
+    a2 = a.unfold(-1, 4096, 2048).sum(dim=-1)
+    b2 = b.unfold(-1, 4096, 2048).sum(dim=-1)
+    med = F.mse_loss(a2, b2)
+
+    a3 = a.unfold(-1, 8192, 4096).sum(dim=-1)
+    b3 = b.unfold(-1, 8192, 4096).sum(dim=-1)
+    lg = F.mse_loss(a3, b3)
+
+    a4 = a.unfold(-1, 16384, 8192).sum(dim=-1)
+    b4 = b.unfold(-1, 16384, 8192).sum(dim=-1)
+    xlg = F.mse_loss(a4, b4)
+
+    return orig + small + med + lg + xlg
+
 
 def exp_loss(a, b):
     return exp.perceptual_loss(a, b)
