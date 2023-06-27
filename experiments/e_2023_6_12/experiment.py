@@ -28,14 +28,13 @@ exp = Experiment(
     kernel_size=512)
 
 sparse_coding_iterations = 128
-initial_model_does_sparse_coding = True
-
-atom_size = 8
+initial_model_does_sparse_coding = False
+atom_size = 32
 features_per_band = 8
 feature_size = exp.n_bands * features_per_band
-sparse_coding_phase = False
+sparse_coding_phase = True
 pointcloud_encoding_phase = False
-n_atoms = 4096
+n_atoms = 1024
 
 def encode_events(
         inst: List[tuple], 
@@ -196,7 +195,7 @@ class UpsampleBlock(nn.Module):
         super().__init__()
     
     def forward(self, x):
-        return F.interpolate(x, scale_factor=4, mode='linear')
+        return F.interpolate(x, scale_factor=4, mode='nearest')
 
 
 class DilatedConvContext(nn.Module):
@@ -309,8 +308,8 @@ class NeuralSparseCode(nn.Module):
 
         x = self.up(x)
         x = F.dropout(x, p=0.05)
-        # sm = torch.softmax(x.view(batch, n_atoms * time), dim=-1).view(batch, n_atoms, time)
-        # x = sm * x
+        sm = torch.softmax(x.view(batch, n_atoms * time), dim=-1).view(batch, n_atoms, time)
+        x = sm * x
         x = sparsify(x, sparse_coding_iterations)
         x = self.map(x)
 
@@ -329,9 +328,9 @@ class Model(nn.Module):
 
         self.embed = nn.Linear(257, features_per_band)
 
-        self.sparse = NeuralSparseCode(feature_size)
+        # self.sparse = NeuralSparseCode(feature_size)
 
-        self.to_verb_context = LinearOutputStack(1024, 3, out_channels=1024)
+        # self.to_verb_context = LinearOutputStack(1024, 3, out_channels=1024)
 
         channels = 1024
 
@@ -360,9 +359,8 @@ class Model(nn.Module):
             nn.Conv1d(64, 1, 7, 1, 3),
         )        
 
-        
 
-        self.verb = ReverbGenerator(1024, 3, exp.samplerate, exp.n_samples)
+        # self.verb = ReverbGenerator(1024, 3, exp.samplerate, exp.n_samples)
 
         self.apply(lambda x: exp.init_weights(x))
     
@@ -384,17 +382,17 @@ class Model(nn.Module):
     def forward(self, x):
         # torch.Size([16, 128, 128, 257])
         encoded = self.embed_features(x)
-        ctx = torch.sum(encoded, dim=-1)
-        ctx = self.to_verb_context(ctx)
+        # ctx = torch.sum(encoded, dim=-1)
+        # ctx = self.to_verb_context(ctx)
 
         x = self.generate(encoded)
 
-        x = self.verb.forward(ctx, x)
+        # x = self.verb.forward(ctx, x)
         return x
 
 try:
     model = Model(sparse_code=initial_model_does_sparse_coding).to(device)
-    model.load_state_dict(torch.load('model.dat'))
+    model.load_state_dict(torch.load('model.dat'), strict=False)
     print('Loaded model')
 except IOError:
     pass
@@ -402,7 +400,7 @@ optim = optimizer(model, lr=1e-3)
 
 
 try:
-    sparse_model = SparseCode(n_atoms, atom_size, 1024, slow_movement=True).to(device)
+    sparse_model = SparseCode(n_atoms, atom_size, 1024, slow_movement=False).to(device)
     sparse_model.load_state_dict(torch.load('sparse_model.dat'))
     print('Loaded sparse model')
 except IOError:
@@ -437,6 +435,11 @@ def train_sparse_coding(batch, i):
         recon = sparse_model.do_sparse_code(embedded, n_iterations=sparse_coding_iterations)
 
         sparse_model.learning_step(embedded, n_iterations=sparse_coding_iterations)
+
+        print('=================================')
+        print(embedded.min(), embedded.max())
+        print(recon.min(), recon.max())
+
         loss = F.mse_loss(recon, embedded)
     
     with torch.no_grad():
@@ -514,7 +517,7 @@ class PhaseInvariantFeatureInversion(BaseExperimentRunner):
             print(i, l.item())
             self.after_training_iteration(l)
 
-            if i >= 100000 and not sparse_coding_phase:
+            if i >= 10000 and not sparse_coding_phase:
                 torch.save(model.state_dict(), 'model.dat')
                 break
 

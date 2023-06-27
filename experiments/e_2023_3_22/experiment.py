@@ -5,12 +5,13 @@ from torch import nn
 from torch.nn import functional as F
 import zounds
 from config.experiment import Experiment
+from modules.activation import unit_sine
 from modules.pointcloud import CanonicalOrdering, encode_events
 from modules.softmax import hard_softmax
 from scalar_scheduling import pos_encoded
 from time_distance import optimizer
 from train.experiment_runner import BaseExperimentRunner
-from upsample import ConvUpsample
+from upsample import ConvUpsample, PosEncodedUpsample
 from util import device, playable
 from util.readmedocs import readme
 from experiments.e_2023_3_8.experiment import model
@@ -19,7 +20,7 @@ from conjure import numpy_conjure, SupportedContentType
 exp = Experiment(
     samplerate=zounds.SR22050(),
     n_samples=2**15,
-    weight_init=0.1,
+    weight_init=0.02,
     model_dim=128,
     kernel_size=512)
 
@@ -52,15 +53,15 @@ class Reduce(nn.Module):
 
         self.net = nn.Sequential(
             nn.Conv1d(channels, channels, 7, 4, 3), # 64
-            nn.BatchNorm1d(channels),
+            # nn.BatchNorm1d(channels),
             nn.LeakyReLU(0.2),
 
             nn.Conv1d(channels, channels, 7, 4, 3), # 16
-            nn.BatchNorm1d(channels),
+            # nn.BatchNorm1d(channels),
             nn.LeakyReLU(0.2),
 
             nn.Conv1d(channels, channels, 7, 4, 3), # 4
-            nn.BatchNorm1d(channels),
+            # nn.BatchNorm1d(channels),
             nn.LeakyReLU(0.2),
 
             nn.Conv1d(channels, out_dim, 4, 4, 0)
@@ -109,7 +110,9 @@ class Generator(nn.Module):
         self.process = set_processor(internal_dim, internal_dim)
 
         self.up = ConvUpsample(
-            latent_dim, internal_dim, 4, 256, mode='nearest', out_channels=internal_dim, batch_norm=True)
+            latent_dim, internal_dim, 4, 256, mode='learned', out_channels=internal_dim, batch_norm=False)
+        
+        self.up = PosEncodedUpsample(latent_dim, internal_dim, size=n_events, out_channels=internal_dim, layers=6, concat=True, learnable_encodings=True, multiply=True)
 
         self.apply(lambda x: exp.init_weights(x))
 
@@ -123,9 +126,9 @@ class Generator(nn.Module):
         x = self.up(x).permute(0, 2, 1)[:, :n_events, :]
         # skip = x
 
-        pos = pos_encoded(x.shape[0], self.n_events, 16, device=x.device)
-        x = torch.cat([x, pos], dim=-1)
-        x = self.embed(x)
+        # pos = pos_encoded(x.shape[0], self.n_events, 16, device=x.device)
+        # x = torch.cat([x, pos], dim=-1)
+        # x = self.embed(x)
         # x = self.process(x)
 
         # x = skip + x
@@ -136,8 +139,8 @@ class Generator(nn.Module):
         pos = torch.sigmoid(self.to_pos.forward(x))
         # pos = unit_sine(self.to_pos.forward(x))
 
-        # amp = torch.sigmoid(self.to_amp.forward(x)) * 15
-        amp = torch.relu(self.to_amp.forward(x))
+        amp = torch.sigmoid(self.to_amp.forward(x)) * 15
+        # amp = torch.relu(self.to_amp.forward(x))
         # amp = self.to_amp.forward(x) ** 2
 
         final = torch.cat([pos, amp, atom], dim=-1)
@@ -218,7 +221,7 @@ class AutoEncoder(nn.Module):
             internal_dim=512,
             n_events=n_events,
             set_processor=decoder_class,
-            softmax=lambda x: F.softmax(x, dim=-1),
+            softmax=lambda x: x,
         )
 
         self.apply(lambda x: exp.init_weights(x))
@@ -239,7 +242,7 @@ canonical = CanonicalOrdering(
 
 
 ae = AutoEncoder().to(device)
-optim = optimizer(ae, lr=1e-4)
+optim = optimizer(ae, lr=1e-3)
 
 
 
@@ -248,17 +251,20 @@ optim = optimizer(ae, lr=1e-4)
 def train_ae(batch):
     optim.zero_grad()
     recon, encoded = ae.forward(batch)
+    
 
-    loss = F.mse_loss(batch, recon)
-    # targets = torch.argmax(batch[..., 2:], dim=-1).view(-1)
+    # loss = F.mse_loss(batch, recon)
+    targets = torch.argmax(batch[..., 2:], dim=-1).view(-1)
 
-    # l1 = F.mse_loss(recon[..., :2], batch[..., :2])
+    # weight = targets // 512
+
+    l1 = F.mse_loss(recon[..., :2], batch[..., :2])
     # weight = batch[..., 1:2]
     # diff = (recon[..., :2] - batch[..., :2])
     # l1 = (torch.norm(diff, dim=-1, keepdim=True) * weight).mean()
-    # l2 = F.cross_entropy(recon[..., 2:].view(-1, model.total_atoms), targets)
+    l2 = F.cross_entropy(recon[..., 2:].view(-1, model.total_atoms), targets)
 
-    # loss = (l1 * 100) + (l2 * 1)
+    loss = (l1 * 1) + (l2 * 1)
     loss.backward()
     optim.step()
     return loss, recon, encoded

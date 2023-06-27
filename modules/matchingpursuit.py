@@ -387,6 +387,7 @@ def dictionary_learning_step(
     instances, scatter_segments = sparse_code(
         signal, d, n_steps=n_steps, device=device, approx=approx, d_normalization_dims=(1, 2))
 
+
     for index in instances.keys():
         inst = instances[index]
 

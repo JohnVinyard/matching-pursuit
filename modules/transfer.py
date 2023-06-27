@@ -237,10 +237,12 @@ class ImpulseGenerator(nn.Module):
         self.final_size = final_size
         self.softmax = softmax
     
-    def forward(self, x):
+    def forward(self, x, softmax=None):
+        sm = softmax or self.softmax
+
         batch, time = x.shape
         x = x.view(batch, 1, time)
-        x = self.softmax(x)
+        x = sm(x)
         step = self.final_size // time
         output = torch.zeros(batch, 1, self.final_size, device=x.device)
         output[:, :, ::step] = x
