@@ -202,7 +202,10 @@ class PosEncodedImpulseGenerator(nn.Module):
         self.softmax = softmax
         self.scale_frequencies = scale_frequencies
     
-    def forward(self, p):
+    def forward(self, p, softmax=None):
+
+        sm = softmax or self.softmax
+
         batch, _ = p.shape
 
         norms = torch.norm(p, dim=-1, keepdim=True)
@@ -220,7 +223,7 @@ class PosEncodedImpulseGenerator(nn.Module):
         sim = (pos @ p[:, :, None]).view(batch, 1, self.n_frames)
         orig_sim = sim
 
-        sim = self.softmax(sim)
+        sim = sm(sim)
 
         # sim = F.interpolate(sim, size=self.final_size, mode='linear')
 

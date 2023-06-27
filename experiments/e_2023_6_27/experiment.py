@@ -80,7 +80,8 @@ class Scheduler(nn.Module):
         else:
             self.params = nn.Parameter(
                 torch.zeros(sparse_coding_iterations, 33).uniform_(-1, 1))
-            self.gen = PosEncodedImpulseGenerator()
+            self.gen = PosEncodedImpulseGenerator(
+                n_frames, exp.n_samples, softmax=lambda x: torch.softmax(x, dim=-1), scale_frequencies=True)
     
     def forward(self, x, softmax):
         if self.schedule_type == 'impulse':
