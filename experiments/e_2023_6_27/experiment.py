@@ -114,7 +114,8 @@ class Encoder(nn.Module):
             batch_norm=True
         )
 
-        self.positional = nn.Parameter(torch.zeros(1, 128, 33).uniform_(-1, 1))
+        self.project_spec = nn.Linear(128, channels)
+        self.project_pos = nn.Linear(33, channels)
 
         self.attn = nn.Linear(channels, 1)
         self.to_amps = nn.Linear(channels, 1)
@@ -125,13 +126,16 @@ class Encoder(nn.Module):
         x = exp.pooled_filter_bank(x)
         batch, channels, frames = x.shape
         x = x.permute(0, 2, 1)
+
+        spec = self.project_spec(x)
+
+        pos = pos_encoded(batch, frames, n_freqs=16, device=x.device)
+        pos = self.project_pos(pos)
+
+        # x = torch.cat([x, pos], dim=-1)
+        x = pos + spec
         
-        # pos = pos_encoded(batch, frames, n_freqs=16, device=x.device)
-
-        pos = self.positional.repeat(batch, 1, 1)
-
-        x = torch.cat([x, pos], dim=-1)
-        x = self.embed(x)
+        # x = self.embed(x)
         x = self.encoder(x)
 
         if self.reduction:
