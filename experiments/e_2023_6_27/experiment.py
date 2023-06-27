@@ -14,7 +14,7 @@ from modules.sparse import soft_dirac, sparsify_vectors
 from modules.transfer import ImpulseGenerator, PosEncodedImpulseGenerator
 from train.experiment_runner import BaseExperimentRunner
 from train.optim import optimizer
-from upsample import PosEncodedUpsample
+from upsample import ConvUpsample, PosEncodedUpsample
 from util import device
 from util.readmedocs import readme
 from itertools import count
@@ -109,13 +109,17 @@ class Encoder(nn.Module):
         self.encoder = nn.TransformerEncoder(encoder, 5, norm=nn.LayerNorm((128, channels)))
         self.reduction = reduction
 
-        self.up = PosEncodedUpsample(
-            channels, 
-            channels, 
-            size=sparse_coding_iterations, 
-            out_channels=channels, 
-            layers=3
-        )
+        # self.up = PosEncodedUpsample(
+        #     channels, 
+        #     channels, 
+        #     size=sparse_coding_iterations, 
+        #     out_channels=channels, 
+        #     layers=3,
+        #     concat=True,
+        #     learnable_encodings=True,
+        #     multiply=True
+        # )
+        self.up = ConvUpsample(channels, channels, 4, sparse_coding_iterations, mode='learned', out_channels=channels, batch_norm=True)
 
         self.attn = nn.Linear(channels, 1)
         self.to_amps = nn.Linear(channels, 1)
@@ -133,6 +137,7 @@ class Encoder(nn.Module):
 
         if self.reduction:
             x = torch.sum(x, dim=1)
+            # x = x[:, -1, :]
             x = self.up(x).permute(0, 2, 1)
         else:
             attn = self.attn(x)
