@@ -132,14 +132,11 @@ class Encoder(nn.Module):
         pos = pos_encoded(batch, frames, n_freqs=16, device=x.device)
         pos = self.project_pos(pos)
 
-        # x = torch.cat([x, pos], dim=-1)
         x = pos + spec
         
-        # x = self.embed(x)
         x = self.encoder(x)
 
         if self.reduction:
-            # x = torch.sum(x, dim=1)
             x = x[:, -1, :]
             x = self.up(x).permute(0, 2, 1)
         else:
@@ -221,7 +218,7 @@ class Model(nn.Module):
 
         final = fft_convolve(impulses, atoms)
         final = torch.sum(final, dim=1, keepdim=True)
-        final = max_norm(final)
+        # final = max_norm(final)
         return final
     
 
@@ -231,8 +228,6 @@ class Model(nn.Module):
         else:
             amps, pos, atoms = None, None, None
 
-        # ti = random() > 0.5
-        # t = training and ti
         t = training
 
         result = self._core_forward(
