@@ -25,7 +25,7 @@ from random import random
 exp = Experiment(
     samplerate=zounds.SR22050(),
     n_samples=2**15,
-    weight_init=0.05,
+    weight_init=0.1,
     model_dim=128,
     kernel_size=512)
 
@@ -114,6 +114,8 @@ class Encoder(nn.Module):
             batch_norm=True
         )
 
+        self.positional = nn.Parameter(torch.zeros(1, 128, 33).uniform_(-1, 1))
+
         self.attn = nn.Linear(channels, 1)
         self.to_amps = nn.Linear(channels, 1)
         self.to_positions = nn.Linear(channels, impulse_frames)
@@ -123,7 +125,11 @@ class Encoder(nn.Module):
         x = exp.pooled_filter_bank(x)
         batch, channels, frames = x.shape
         x = x.permute(0, 2, 1)
-        pos = pos_encoded(batch, frames, n_freqs=16, device=x.device)
+        
+        # pos = pos_encoded(batch, frames, n_freqs=16, device=x.device)
+
+        pos = self.positional.repeat(batch, 1, 1)
+
         x = torch.cat([x, pos], dim=-1)
         x = self.embed(x)
         x = self.encoder(x)
@@ -221,10 +227,10 @@ class Model(nn.Module):
         else:
             amps, pos, atoms = None, None, None
 
-        ti = random() > 0.5
-        t = training and ti
+        # ti = random() > 0.5
+        # t = training and ti
+        t = training
 
-        
         result = self._core_forward(
             x, 
             self.training_atom_softmax if t else self.inference_atom_softmax, 
