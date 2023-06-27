@@ -24,7 +24,7 @@ from itertools import count
 exp = Experiment(
     samplerate=zounds.SR22050(),
     n_samples=2**15,
-    weight_init=0.1,
+    weight_init=0.05,
     model_dim=128,
     kernel_size=512)
 
@@ -84,7 +84,7 @@ class Scheduler(nn.Module):
     def forward(self, x, softmax):
         inp = x if x is not None else self.params
         impulses = self.gen.forward(inp.view(-1, self.n_frames), softmax=softmax)
-        impulses = impulses.view(1, sparse_coding_iterations, exp.n_samples)
+        impulses = impulses.view(-1, sparse_coding_iterations, exp.n_samples)
         return impulses
 
 
@@ -95,7 +95,11 @@ class Encoder(nn.Module):
         self.impulse_frames = impulse_frames
         self.embed = nn.Linear(exp.n_bands + 33, channels)
         encoder = nn.TransformerEncoderLayer(channels, 4, channels, batch_first=True)
-        self.encoder = nn.TransformerEncoder(encoder, 5, norm=nn.LayerNorm((128, channels)))
+        self.encoder = nn.TransformerEncoder(
+            encoder, 
+            5, 
+            norm=nn.LayerNorm((128, channels))
+        )
         self.reduction = reduction
 
         
@@ -128,12 +132,13 @@ class Encoder(nn.Module):
             x = x[:, -1, :]
             x = self.up(x).permute(0, 2, 1)
         else:
-            attn = self.attn(x)
+            attn = self.attn(x).view(batch, frames)
+            attn = torch.softmax(attn, dim=-1)
             x = x.permute(0, 2, 1)
             x, indices = sparsify_vectors(x, attn, n_to_keep=sparse_coding_iterations)
 
         amps = self.to_amps(x) ** 2
-        pos = self.to_positions(x)
+        pos = self.to_positions(x).view(batch, sparse_coding_iterations, self.impulse_frames)
         atoms = self.to_atoms(x)
 
         return amps, pos, atoms
@@ -198,7 +203,7 @@ class Model(nn.Module):
         sel = atom_softmax(atom_selection if atom_selection is not None else self.atom_selection)
         atoms = (sel @ d)
         with_amp = atoms * (amps if amps is not None else self.amps)
-        with_amp = with_amp.view(1, sparse_coding_iterations, kernel_size)
+        with_amp = with_amp.view(-1, sparse_coding_iterations, kernel_size)
         atoms = F.pad(with_amp, (0, exp.n_samples - kernel_size))
 
         impulses = self.scheduler.forward(positions, schedule_softmax)
@@ -249,12 +254,13 @@ class NoGridExperiment(BaseExperimentRunner):
         super().__init__(stream, train, exp, port=port)
     
     def run(self):
-        item = generate(1)
-        self.real = item
-
+        
         for i in count():
-            item = item.clone().detach()
 
+            if self.real is None or not self.overfit:
+                item = generate(1 if self.overfit else self.batch_size).clone().detach()
+                self.real = item
+            
             optim.zero_grad()
             recon = model.forward(item)
             self.fake = recon

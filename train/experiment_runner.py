@@ -39,6 +39,10 @@ class BaseExperimentRunner(object):
     @property
     def batch_size(self):
         return self.stream.batch_size
+    
+    @property
+    def overfit(self):
+        return self.stream.overfit
 
     @property
     def conjure_funcs(self):
