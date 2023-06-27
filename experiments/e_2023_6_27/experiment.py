@@ -10,7 +10,7 @@ from fft_shift import fft_shift
 from modules.fft import fft_convolve
 from modules.normalization import max_norm, unit_norm
 from modules.pos_encode import pos_encoded
-from modules.sparse import soft_dirac
+from modules.sparse import soft_dirac, sparsify_vectors
 from modules.transfer import ImpulseGenerator, PosEncodedImpulseGenerator
 from train.experiment_runner import BaseExperimentRunner
 from train.optim import optimizer
@@ -100,15 +100,24 @@ class Scheduler(nn.Module):
 
 
 class Encoder(nn.Module):
-    def __init__(self, channels, impulse_frames):
+    def __init__(self, channels, impulse_frames, reduction=False):
         super().__init__()
         self.channels = channels
         self.impulse_frames = impulse_frames
         self.embed = nn.Linear(exp.n_bands + 33, channels)
         encoder = nn.TransformerEncoderLayer(channels, 4, channels, batch_first=True)
         self.encoder = nn.TransformerEncoder(encoder, 5, norm=nn.LayerNorm((128, channels)))
-        self.up = PosEncodedUpsample(channels, channels, sparse_coding_iterations, channels, 5)
+        self.reduction = reduction
 
+        self.up = PosEncodedUpsample(
+            channels, 
+            channels, 
+            size=sparse_coding_iterations, 
+            out_channels=channels, 
+            layers=3
+        )
+
+        self.attn = nn.Linear(channels, 1)
         self.to_amps = nn.Linear(channels, 1)
         self.to_positions = nn.Linear(channels, impulse_frames)
         self.to_atoms = nn.Linear(channels, d_size)
@@ -121,9 +130,14 @@ class Encoder(nn.Module):
         x = torch.cat([x, pos], dim=-1)
         x = self.embed(x)
         x = self.encoder(x)
-        # x = torch.sum(x, dim=1)
-        x = x[:, -1, :]
-        x = self.up(x).permute(0, 2, 1) # (batch, n_atoms, channels)
+
+        if self.reduction:
+            x = torch.sum(x, dim=1)
+            x = self.up(x).permute(0, 2, 1)
+        else:
+            attn = self.attn(x)
+            x = x.permute(0, 2, 1)
+            x, indices = sparsify_vectors(x, attn, n_to_keep=sparse_coding_iterations)
 
         amps = self.to_amps(x) ** 2
         pos = self.to_positions(x)
@@ -140,7 +154,8 @@ class Model(nn.Module):
             training_softmax=lambda x: soft_dirac(x, dim=-1), 
             inference_softmax=lambda x: soft_dirac(x, dim=-1),
             scheduler_type='impulse',
-            encode=False):
+            encode=False,
+            reduction=False):
         
         super().__init__()
 
@@ -151,7 +166,7 @@ class Model(nn.Module):
         self.scheduler_type = scheduler_type
         self.n_scheduling_frames = n_scheduling_frames
 
-        self.encoder = Encoder(1024, n_scheduling_frames)
+        self.encoder = Encoder(1024, n_scheduling_frames, reduction=reduction)
 
         self.amps = nn.Parameter(
             torch.zeros(sparse_coding_iterations, 1).uniform_(0, 1))
@@ -225,7 +240,8 @@ model = Model(
     training_softmax=lambda x: soft_dirac(x, dim=-1),
     inference_softmax=lambda x: soft_dirac(x, dim=-1),
     scheduler_type='impulse',
-    encode=True
+    encode=True,
+    reduction=False
 ).to(device)
 
 optim = optimizer(model, lr=1e-3)
