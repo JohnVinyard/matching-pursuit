@@ -30,7 +30,7 @@ exp = Experiment(
     kernel_size=512)
 
 d_size = 256
-kernel_size = 256
+kernel_size = 512
 sparse_coding_iterations = 16
 
 band = zounds.FrequencyBand(20, 2000)
@@ -40,10 +40,12 @@ d = morlet_filter_bank(
     exp.samplerate, 
     kernel_size, 
     scale, 
-    np.linspace(0.25, 0.01, d_size)).real
+    # np.linspace(0.25, 0.01, d_size), 
+    0.1,
+    normalize=False).real
 
 d = torch.from_numpy(d).float().to(device)
-d.requires_grad = True
+# d.requires_grad = True
 
 
 def generate(batch_size):
@@ -114,7 +116,26 @@ class Encoder(nn.Module):
             batch_norm=True
         )
 
-        self.project_spec = nn.Linear(128, channels)
+        self.down = nn.Sequential(
+            nn.Conv1d(1, 16, 7, 4, 3), # 8192
+            nn.LeakyReLU(0.2),
+            nn.BatchNorm1d(16),
+
+            nn.Conv1d(16, 32, 7, 4, 3), # 2048
+            nn.LeakyReLU(0.2),
+            nn.BatchNorm1d(32),
+
+            nn.Conv1d(32, 64, 7, 4, 3), # 512
+            nn.LeakyReLU(0.2),
+            nn.BatchNorm1d(64),
+
+            nn.Conv1d(64, d_size, 7, 4, 3), # 128
+            nn.LeakyReLU(0.2),
+            nn.BatchNorm1d(256),
+        )
+
+
+        self.project_spec = nn.Linear(d_size, channels)
         self.project_pos = nn.Linear(33, channels)
 
         self.attn = nn.Linear(channels, 1)
@@ -123,7 +144,14 @@ class Encoder(nn.Module):
         self.to_atoms = nn.Linear(channels, d_size)
     
     def forward(self, x):
-        x = exp.pooled_filter_bank(x)
+        # x = exp.pooled_filter_bank(x)
+
+        # x = F.conv1d(
+        #     x, 
+        #     d.view(d_size, 1, kernel_size), stride=kernel_size // 2, padding=kernel_size // 2)[..., :128]
+
+        x = self.down(x)
+
         batch, channels, frames = x.shape
         x = x.permute(0, 2, 1)
 
@@ -135,6 +163,8 @@ class Encoder(nn.Module):
         x = pos + spec
         
         x = self.encoder(x)
+
+        x = x + pos
 
         if self.reduction:
             x = x[:, -1, :]
@@ -218,7 +248,6 @@ class Model(nn.Module):
 
         final = fft_convolve(impulses, atoms)
         final = torch.sum(final, dim=1, keepdim=True)
-        # final = max_norm(final)
         return final
     
 
