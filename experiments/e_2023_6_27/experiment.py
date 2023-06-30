@@ -75,6 +75,40 @@ def _inner_generate(batch_size, total_events, amps, positions, atom_indices):
     return output
 
 
+class ContextModule(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.channels = channels
+        self.net = nn.Sequential(
+
+            nn.Conv1d(channels, channels, 3, 1, padding=1, dilation=1),
+            nn.LeakyReLU(0.2),
+            nn.BatchNorm1d(channels),
+
+            nn.Conv1d(channels, channels, 3, 1, padding=3, dilation=3),
+            nn.LeakyReLU(0.2),
+            nn.BatchNorm1d(channels),
+
+            nn.Conv1d(channels, channels, 3, 1, padding=9, dilation=9),
+            nn.LeakyReLU(0.2),
+            nn.BatchNorm1d(channels),
+
+            nn.Conv1d(channels, channels, 3, 1, padding=27, dilation=27),
+            nn.LeakyReLU(0.2),
+            nn.BatchNorm1d(channels),
+
+            nn.Conv1d(channels, channels, 3, 1, padding=1, dilation=1),
+            nn.LeakyReLU(0.2),
+            nn.BatchNorm1d(channels),
+
+        )
+    
+    def forward(self, x):
+        x = x.permute(0, 2, 1)
+        x = self.net(x)
+        x = x.permute(0, 2, 1)
+        return x
+
 class Scheduler(nn.Module):
     def __init__(self, n_frames=512):
         super().__init__()
@@ -97,12 +131,16 @@ class Encoder(nn.Module):
         self.channels = channels
         self.impulse_frames = impulse_frames
         self.embed = nn.Linear(exp.n_bands + 33, channels)
-        encoder = nn.TransformerEncoderLayer(channels, 4, channels, batch_first=True)
-        self.encoder = nn.TransformerEncoder(
-            encoder, 
-            5, 
-            norm=nn.LayerNorm((128, channels))
-        )
+
+
+        # encoder = nn.TransformerEncoderLayer(channels, 4, channels, batch_first=True)
+        # self.encoder = nn.TransformerEncoder(
+        #     encoder, 
+        #     5, 
+        #     norm=nn.LayerNorm((128, channels))
+        # )
+
+        self.encoder = ContextModule(channels)
         self.reduction = reduction
 
         
