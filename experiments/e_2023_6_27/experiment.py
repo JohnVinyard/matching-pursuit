@@ -173,7 +173,7 @@ class Encoder(nn.Module):
         )
 
 
-        self.project_spec = nn.Linear(d_size, channels)
+        self.project_spec = nn.Linear(128, channels)
         self.project_pos = nn.Linear(33, channels)
 
         self.attn = nn.Linear(channels, 1)
@@ -182,13 +182,13 @@ class Encoder(nn.Module):
         self.to_atoms = nn.Linear(channels, d_size)
     
     def forward(self, x):
-        # x = exp.pooled_filter_bank(x)
+        x = exp.pooled_filter_bank(x)
 
         # x = F.conv1d(
         #     x, 
         #     d.view(d_size, 1, kernel_size), stride=kernel_size // 2, padding=kernel_size // 2)[..., :128]
 
-        x = self.down(x)
+        # x = self.down(x)
 
         batch, channels, frames = x.shape
         x = x.permute(0, 2, 1)
