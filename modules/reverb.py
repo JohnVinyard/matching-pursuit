@@ -83,9 +83,18 @@ class ReverbGenerator(nn.Module):
         
         self.n_rooms = self.verb.n_rooms
 
-        self.to_mix = LinearOutputStack(channels, layers, out_channels=2)
+        self.to_mix = LinearOutputStack(channels, layers, out_channels=2, shortcut=True)
         self.to_room = LinearOutputStack(
-            channels, layers, out_channels=self.n_rooms)
+            channels, layers, out_channels=self.n_rooms, shortcut=True)
+    
+    def precomputed(self, dry, mx, rm):
+        wet = self.verb.forward(dry, rm)
+        stacked = torch.stack([dry, wet], dim=-1)
+
+        mixed = stacked * mx
+        mixed = torch.sum(mixed, dim=-1)
+        # mixed = (dry * mx) + (wet * (1 - mx))
+        return mixed
         
     
     def forward(self, context, dry):

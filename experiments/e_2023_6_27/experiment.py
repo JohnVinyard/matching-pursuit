@@ -8,18 +8,17 @@ from config.experiment import Experiment
 from fft_basis import morlet_filter_bank
 from fft_shift import fft_shift
 from modules.fft import fft_convolve
-from modules.matchingpursuit import sparse_feature_map
 from modules.normalization import max_norm, unit_norm
 from modules.pos_encode import pos_encoded
+from modules.reverb import ReverbGenerator
 from modules.sparse import soft_dirac, sparsify_vectors
-from modules.transfer import ImpulseGenerator, PosEncodedImpulseGenerator
+from modules.transfer import ImpulseGenerator
 from train.experiment_runner import BaseExperimentRunner
 from train.optim import optimizer
-from upsample import ConvUpsample, PosEncodedUpsample
+from upsample import ConvUpsample
 from util import device
 from util.readmedocs import readme
 from itertools import count
-from random import random
 
 
 exp = Experiment(
@@ -35,6 +34,8 @@ sparse_coding_iterations = 16
 
 band = zounds.FrequencyBand(20, 2000)
 scale = zounds.MelScale(band, d_size)
+
+verb = ReverbGenerator(128, 3, samplerate=exp.samplerate, n_samples=exp.n_samples).to(device)
 
 d = morlet_filter_bank(
     exp.samplerate, 
@@ -53,8 +54,16 @@ def generate(batch_size):
     amps = torch.zeros(total_events, device=device).uniform_(0.9, 1)
     positions = torch.zeros(total_events, device=device).uniform_(0, 1)
     atom_indices = (torch.zeros(total_events).uniform_(0, 1) * d_size).long()
+
     output = _inner_generate(
         batch_size, total_events, amps, positions, atom_indices)
+    
+    rm = torch.zeros((batch_size, verb.n_rooms)).to(device).normal_(0, 1)
+    rm = torch.softmax(rm, dim=-1)
+    mx = torch.zeros((batch_size, 2)).to(device).normal_(0, 1)
+    mx = torch.softmax(mx, dim=-1)
+
+    output = verb.precomputed(output, mx, rm)
     output = max_norm(output)
     return output
 
@@ -172,6 +181,7 @@ class Encoder(nn.Module):
             nn.BatchNorm1d(256),
         )
 
+        self.verb_params = nn.Linear(channels, channels)
 
         self.project_spec = nn.Linear(128, channels)
         self.project_pos = nn.Linear(33, channels)
@@ -202,6 +212,7 @@ class Encoder(nn.Module):
         
         x = self.encoder(x)
 
+        # bring the position back in using a skip connection
         x = x + pos
 
         if self.reduction:
@@ -212,12 +223,14 @@ class Encoder(nn.Module):
             attn = torch.softmax(attn, dim=-1)
             x = x.permute(0, 2, 1)
             x, indices = sparsify_vectors(x, attn, n_to_keep=sparse_coding_iterations)
+        
+        verb_params = self.verb_params.forward(torch.sum(x, dim=1))
 
         amps = self.to_amps(x) ** 2
         pos = self.to_positions(x).view(batch, sparse_coding_iterations, self.impulse_frames)
         atoms = self.to_atoms(x)
 
-        return amps, pos, atoms
+        return amps, pos, atoms, verb_params
 
 
 
@@ -247,6 +260,8 @@ class Model(nn.Module):
             torch.zeros(sparse_coding_iterations, d_size).uniform_(-1, 1))
         
         self.scheduler = Scheduler(self.n_scheduling_frames)
+
+        self.verb = ReverbGenerator(1024, 2, exp.samplerate, exp.n_samples)
 
         self.apply(lambda x: exp.init_weights(x))
 
@@ -291,7 +306,7 @@ class Model(nn.Module):
 
     def forward(self, x, training=True):
         if self.encode:
-            amps, pos, atoms = self.encoder.forward(x)
+            amps, pos, atoms, verb_params = self.encoder.forward(x)
         else:
             amps, pos, atoms = None, None, None
 
@@ -304,6 +319,8 @@ class Model(nn.Module):
             atom_selection=atoms,
             amps=amps,
             positions=pos)
+        
+        result = self.verb.forward(verb_params, result)
         
         return result
 
