@@ -71,7 +71,7 @@ class NeuralReverb(nn.Module):
 
 
 class ReverbGenerator(nn.Module):
-    def __init__(self, channels, layers, samplerate, n_samples):
+    def __init__(self, channels, layers, samplerate, n_samples, norm=None):
         super().__init__()
         self.channels = channels
         self.layeres = layers
@@ -83,15 +83,15 @@ class ReverbGenerator(nn.Module):
         
         self.n_rooms = self.verb.n_rooms
 
-        self.to_mix = LinearOutputStack(channels, layers, out_channels=2, shortcut=True)
+        self.to_mix = LinearOutputStack(channels, layers, out_channels=2, shortcut=True, norm=norm)
         self.to_room = LinearOutputStack(
-            channels, layers, out_channels=self.n_rooms, shortcut=True)
+            channels, layers, out_channels=self.n_rooms, shortcut=True, norm=norm)
     
     def precomputed(self, dry, mx, rm):
         wet = self.verb.forward(dry, rm)
         stacked = torch.stack([dry, wet], dim=-1)
 
-        mixed = stacked * mx
+        mixed = stacked * mx.view(-1, 1, 1, 2)
         mixed = torch.sum(mixed, dim=-1)
         # mixed = (dry * mx) + (wet * (1 - mx))
         return mixed

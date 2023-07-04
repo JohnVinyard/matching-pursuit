@@ -58,8 +58,9 @@ def generate(batch_size):
     output = _inner_generate(
         batch_size, total_events, amps, positions, atom_indices)
     
-    rm = torch.zeros((batch_size, verb.n_rooms)).to(device).normal_(0, 1)
+    rm = torch.zeros((batch_size, verb.n_rooms)).to(device).uniform_(0, 1) ** 2
     rm = torch.softmax(rm, dim=-1)
+
     mx = torch.zeros((batch_size, 2)).to(device).normal_(0, 1)
     mx = torch.softmax(mx, dim=-1)
 
@@ -224,7 +225,9 @@ class Encoder(nn.Module):
             x = x.permute(0, 2, 1)
             x, indices = sparsify_vectors(x, attn, n_to_keep=sparse_coding_iterations)
         
-        verb_params = self.verb_params.forward(torch.sum(x, dim=1))
+        agg = torch.sum(x, dim=1)
+        verb_params = self.verb_params.forward(agg)
+        verb_params = verb_params + agg
 
         amps = self.to_amps(x) ** 2
         pos = self.to_positions(x).view(batch, sparse_coding_iterations, self.impulse_frames)
@@ -261,7 +264,7 @@ class Model(nn.Module):
         
         self.scheduler = Scheduler(self.n_scheduling_frames)
 
-        self.verb = ReverbGenerator(1024, 2, exp.samplerate, exp.n_samples)
+        self.verb = ReverbGenerator(1024, 2, exp.samplerate, exp.n_samples, norm=nn.LayerNorm((1024,)))
 
         self.apply(lambda x: exp.init_weights(x))
 
@@ -326,7 +329,7 @@ class Model(nn.Module):
 
 model = Model(
     n_scheduling_frames=512, 
-    training_softmax=lambda x: torch.softmax(x, dim=-1),
+    training_softmax=lambda x: soft_dirac(x, dim=-1),
     inference_softmax=lambda x: soft_dirac(x, dim=-1),
     encode=True,
     reduction=False

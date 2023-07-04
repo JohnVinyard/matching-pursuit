@@ -7,7 +7,8 @@ class ResidualBlock(nn.Module):
             channels,
             bias=True,
             activation=None,
-            shortcut=True):
+            shortcut=True,
+            norm=None):
 
         super().__init__()
         self.channels = channels
@@ -15,6 +16,7 @@ class ResidualBlock(nn.Module):
         self.l2 = nn.Linear(channels, channels, bias)
         self.activation = activation or nn.LeakyReLU(0.2)
         self.shortcut = shortcut
+        self.norm = norm
 
     def forward(self, x):
         shortcut = x
@@ -25,6 +27,9 @@ class ResidualBlock(nn.Module):
             x = self.activation(shortcut + x)
         else:
             x = self.activation(x)
+        
+        if self.norm:
+            x = self.norm(x)
         return x
 
 
@@ -37,14 +42,15 @@ class ResidualStack(nn.Module):
             layers, 
             bias=True, 
             activation=lambda x: F.leaky_relu(x, 0.2), 
-            shortcut=True):
+            shortcut=True,
+            norm=None):
 
         super().__init__()
         self.activation = activation
         self.channels = channels
         self.layers = layers
         self.net = nn.Sequential(
-            *[ResidualBlock(channels, bias, self.activation, shortcut) for _ in range(layers)]
+            *[ResidualBlock(channels, bias, self.activation, shortcut, norm=norm) for _ in range(layers)]
         )
 
     def forward(self, x):
@@ -60,7 +66,8 @@ class LinearOutputStack(nn.Module):
             in_channels=None,
             activation=lambda x: F.leaky_relu(x, 0.2),
             bias=True,
-            shortcut=True):
+            shortcut=True,
+            norm=None):
 
         super().__init__()
         self.channels = channels
@@ -68,7 +75,7 @@ class LinearOutputStack(nn.Module):
         self.out_channels = out_channels or channels
 
         core = [
-            ResidualStack(channels, layers, activation=activation, bias=bias, shortcut=shortcut),
+            ResidualStack(channels, layers, activation=activation, bias=bias, shortcut=shortcut, norm=norm),
             nn.Linear(channels, self.out_channels, bias=self.out_channels > 1)
         ]
 
