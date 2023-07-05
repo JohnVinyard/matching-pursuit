@@ -154,34 +154,6 @@ class Encoder(nn.Module):
         self.reduction = reduction
 
         
-        self.up = ConvUpsample(
-            channels, 
-            channels, 
-            4, 
-            sparse_coding_iterations, 
-            mode='learned', 
-            out_channels=channels, 
-            batch_norm=True
-        )
-
-        self.down = nn.Sequential(
-            nn.Conv1d(1, 16, 7, 4, 3), # 8192
-            nn.LeakyReLU(0.2),
-            nn.BatchNorm1d(16),
-
-            nn.Conv1d(16, 32, 7, 4, 3), # 2048
-            nn.LeakyReLU(0.2),
-            nn.BatchNorm1d(32),
-
-            nn.Conv1d(32, 64, 7, 4, 3), # 512
-            nn.LeakyReLU(0.2),
-            nn.BatchNorm1d(64),
-
-            nn.Conv1d(64, d_size, 7, 4, 3), # 128
-            nn.LeakyReLU(0.2),
-            nn.BatchNorm1d(256),
-        )
-
         self.verb_params = nn.Linear(channels, channels)
 
         self.project_spec = nn.Linear(128, channels)
@@ -216,14 +188,11 @@ class Encoder(nn.Module):
         # bring the position back in using a skip connection
         x = x + pos
 
-        if self.reduction:
-            x = x[:, -1, :]
-            x = self.up(x).permute(0, 2, 1)
-        else:
-            attn = self.attn(x).view(batch, frames)
-            attn = torch.softmax(attn, dim=-1)
-            x = x.permute(0, 2, 1)
-            x, indices = sparsify_vectors(x, attn, n_to_keep=sparse_coding_iterations)
+        
+        attn = self.attn(x).view(batch, frames)
+        attn = torch.softmax(attn, dim=-1)
+        x = x.permute(0, 2, 1)
+        x, indices = sparsify_vectors(x, attn, n_to_keep=sparse_coding_iterations)
         
         agg = torch.sum(x, dim=1)
         verb_params = self.verb_params.forward(agg)
