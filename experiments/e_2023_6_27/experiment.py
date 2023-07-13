@@ -29,7 +29,7 @@ exp = Experiment(
     kernel_size=512)
 
 d_size = 256
-kernel_size = 512
+kernel_size = 4096
 sparse_coding_iterations = 16
 
 band = zounds.FrequencyBand(20, 2000)
@@ -217,6 +217,8 @@ class Model(nn.Module):
         
         super().__init__()
 
+        self.atoms = nn.Parameter(torch.zeros(d_size, kernel_size).uniform_(-1, 1))
+
         self.encode = encode
         self.training_softmax = training_softmax
         self.inference_softmax = inference_softmax
@@ -261,10 +263,12 @@ class Model(nn.Module):
             schedule_softmax, 
             atom_selection=None, 
             amps=None, 
-            positions=None):
+            positions=None,
+            atom_dict=None):
         
+        ad = d if atom_dict is None else atom_dict
         sel = atom_softmax(atom_selection if atom_selection is not None else self.atom_selection)
-        atoms = (sel @ d)
+        atoms = (sel @ ad)
         with_amp = atoms * (amps if amps is not None else self.amps)
         with_amp = with_amp.view(-1, sparse_coding_iterations, kernel_size)
         atoms = F.pad(with_amp, (0, exp.n_samples - kernel_size))
@@ -290,11 +294,13 @@ class Model(nn.Module):
             self.training_schedule_softmax if t else self.inference_schedule_softmax,
             atom_selection=atoms,
             amps=amps,
-            positions=pos)
+            positions=pos,
+            atom_dict=unit_norm(self.atoms))
         
         result = self.verb.forward(verb_params, result)
         
         return result
+
 
 model = Model(
     n_scheduling_frames=512, 
@@ -320,11 +326,13 @@ class NoGridExperiment(BaseExperimentRunner):
     
     def run(self):
         
-        for i in count():
+        for i, item in enumerate(self.iter_items()):
+            item = item.view(-1, 1, exp.n_samples)
+            self.real = item
 
-            if self.real is None or not self.overfit:
-                item = generate(1 if self.overfit else self.batch_size).clone().detach()
-                self.real = item
+            # if self.real is None or not self.overfit:
+            #     item = generate(1 if self.overfit else self.batch_size).clone().detach()
+            #     self.real = item
             
             optim.zero_grad()
             recon = model.forward(item)
