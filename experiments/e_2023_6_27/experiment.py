@@ -8,10 +8,12 @@ from config.experiment import Experiment
 from fft_basis import morlet_filter_bank
 from fft_shift import fft_shift
 from modules.fft import fft_convolve
+from modules.linear import LinearOutputStack
+from modules.matchingpursuit import dictionary_learning_step, sparse_code, sparse_feature_map
 from modules.normalization import max_norm, unit_norm
 from modules.pos_encode import pos_encoded
 from modules.reverb import ReverbGenerator
-from modules.sparse import soft_dirac, sparsify_vectors
+from modules.sparse import soft_dirac, sparsify, sparsify_vectors
 from modules.transfer import ImpulseGenerator
 from train.experiment_runner import BaseExperimentRunner
 from train.optim import optimizer
@@ -28,25 +30,27 @@ exp = Experiment(
     model_dim=128,
     kernel_size=512)
 
-d_size = 256
-kernel_size = 4096
-sparse_coding_iterations = 16
+d_size = 1024
+kernel_size = 1024
+sparse_coding_iterations = 128
 
 band = zounds.FrequencyBand(20, 2000)
 scale = zounds.MelScale(band, d_size)
 
 verb = ReverbGenerator(128, 3, samplerate=exp.samplerate, n_samples=exp.n_samples).to(device)
 
-d = morlet_filter_bank(
-    exp.samplerate, 
-    kernel_size, 
-    scale, 
-    # np.linspace(0.25, 0.01, d_size), 
-    0.1,
-    normalize=False).real
+# d = morlet_filter_bank(
+#     exp.samplerate, 
+#     kernel_size, 
+#     scale, 
+#     # np.linspace(0.25, 0.01, d_size), 
+#     0.1,
+#     normalize=False).real
 
-d = torch.from_numpy(d).float().to(device)
-# d.requires_grad = True
+# d = torch.from_numpy(d).float().to(device).view(d_size, kernel_size)
+
+d = torch.zeros(d_size, kernel_size, device=device).uniform_(-1, 1)
+
 
 
 def generate(batch_size):
@@ -124,6 +128,8 @@ class Scheduler(nn.Module):
         super().__init__()
         self.n_frames = n_frames
 
+        
+
         self.params = nn.Parameter(
             torch.zeros(sparse_coding_iterations, n_frames).uniform_(-1, 1))
         self.gen = ImpulseGenerator(exp.n_samples, softmax=lambda x: torch.softmax(x, dim=-1))
@@ -143,13 +149,6 @@ class Encoder(nn.Module):
         self.embed = nn.Linear(exp.n_bands + 33, channels)
 
 
-        # encoder = nn.TransformerEncoderLayer(channels, 4, channels, batch_first=True)
-        # self.encoder = nn.TransformerEncoder(
-        #     encoder, 
-        #     5, 
-        #     norm=nn.LayerNorm((128, channels))
-        # )
-
         self.encoder = ContextModule(channels)
         self.reduction = reduction
 
@@ -167,11 +166,7 @@ class Encoder(nn.Module):
     def forward(self, x):
         x = exp.pooled_filter_bank(x)
 
-        # x = F.conv1d(
-        #     x, 
-        #     d.view(d_size, 1, kernel_size), stride=kernel_size // 2, padding=kernel_size // 2)[..., :128]
-
-        # x = self.down(x)
+        
 
         batch, channels, frames = x.shape
         x = x.permute(0, 2, 1)
@@ -225,13 +220,17 @@ class Model(nn.Module):
 
         self.n_scheduling_frames = n_scheduling_frames
 
-        self.encoder = Encoder(1024, n_scheduling_frames, reduction=reduction)
+        self.channels = 1024
 
+        self.encoder = Encoder(self.channels, n_scheduling_frames, reduction=reduction)
+
+        
         self.amps = nn.Parameter(
             torch.zeros(sparse_coding_iterations, 1).uniform_(0, 1))
         
         self.atom_selection = nn.Parameter(
             torch.zeros(sparse_coding_iterations, d_size).uniform_(-1, 1))
+    
         
         self.scheduler = Scheduler(self.n_scheduling_frames)
 
@@ -273,7 +272,13 @@ class Model(nn.Module):
         with_amp = with_amp.view(-1, sparse_coding_iterations, kernel_size)
         atoms = F.pad(with_amp, (0, exp.n_samples - kernel_size))
 
+        # env = self.noise(atom_selection)
+
+        # atoms = self.res(env, atom_selection)
+        # atoms = F.pad(atoms, (0, exp.n_samples - kernel_size)).view(-1, sparse_coding_iterations, exp.n_samples)
+
         impulses = self.scheduler.forward(positions, schedule_softmax)
+
 
         final = fft_convolve(impulses, atoms)
         final = torch.sum(final, dim=1, keepdim=True)
@@ -288,6 +293,9 @@ class Model(nn.Module):
 
         t = training
 
+
+        # prepped = unit_norm(self.atoms * torch.hamming_window(kernel_size, device=x.device)[None, ...])
+
         result = self._core_forward(
             x, 
             self.training_atom_softmax if t else self.inference_atom_softmax, 
@@ -295,16 +303,17 @@ class Model(nn.Module):
             atom_selection=atoms,
             amps=amps,
             positions=pos,
-            atom_dict=unit_norm(self.atoms))
+            atom_dict=d)
         
         result = self.verb.forward(verb_params, result)
+
         
         return result
 
 
 model = Model(
     n_scheduling_frames=512, 
-    training_softmax=lambda x: soft_dirac(x, dim=-1),
+    training_softmax=lambda x: torch.softmax(x, dim=-1),
     inference_softmax=lambda x: soft_dirac(x, dim=-1),
     encode=True,
     reduction=False
@@ -312,9 +321,24 @@ model = Model(
 
 optim = optimizer(model, lr=1e-3)
 
+def l1_loss(a, b):
+    return torch.abs(a - b).sum()
+
+def extract_feature(x):
+    fm = sparse_feature_map(x, d, n_steps=128, device=device)
+    fm = F.avg_pool1d(fm, 512, 256, 256)
+    return fm
+
+def matching_pursuit_loss(a, b):
+    a = extract_feature(a)
+    b = extract_feature(b)
+    return l1_loss(a, b)
 
 def exp_loss(a, b):
-    return exp.perceptual_loss(a, b)
+    # mp_loss = matching_pursuit_loss(a, b)
+    # return mp_loss
+    p_loss = exp.perceptual_loss(a, b)
+    return p_loss
 
 def train(batch, i):
     optim.zero_grad()
@@ -333,6 +357,25 @@ class NoGridExperiment(BaseExperimentRunner):
             # if self.real is None or not self.overfit:
             #     item = generate(1 if self.overfit else self.batch_size).clone().detach()
             #     self.real = item
+
+            if i < 500:
+                print(i)
+                with torch.no_grad():
+                    encoded, scatter = sparse_code(
+                        item, d, n_steps=sparse_coding_iterations, device=device, flatten=True)
+                    decoded = scatter(item.shape, encoded)
+                    self.fake = decoded
+                    
+                    # update dictionary
+                    new_d = dictionary_learning_step(
+                        item, 
+                        d, 
+                        n_steps=sparse_coding_iterations, 
+                        device=device)
+                    
+                    d[:] = new_d
+
+                    
             
             optim.zero_grad()
             recon = model.forward(item)
@@ -341,9 +384,9 @@ class NoGridExperiment(BaseExperimentRunner):
             loss.backward()
             optim.step()
 
-            with torch.no_grad():
-                recon = model.forward(item, training=False)
-                self.fake = recon
+            # with torch.no_grad():
+            #     recon = model.forward(item, training=False)
+            #     self.fake = recon
 
             print(i, loss.item())
             self.after_training_iteration(loss)

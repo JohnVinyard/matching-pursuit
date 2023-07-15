@@ -284,8 +284,7 @@ def sparse_code(
         device=None,
         approx=None,
         flatten=False,
-        extract_atom_embedding=None,
-        d_normalization_dims=-1):
+        extract_atom_embedding=None):
     
     batch, channels, time = signal.shape
 
@@ -297,7 +296,7 @@ def sparse_code(
     n_atoms = d.shape[0]
     atom_size = d.shape[-1]
 
-    d = unit_norm(d, dim=(d_normalization_dims))
+    d = unit_norm(d, dim=-1)
 
     residual = signal.clone()
 
@@ -358,9 +357,7 @@ def dictionary_learning_step(
         d: Tensor,
         n_steps: int = 100,
         device=None,
-        approx=None,
-        d_normalization_dims=-1,
-        slow_movement=False):
+        approx=None):
 
     batch, channels, time = signal.shape
     signal = signal.view(signal.shape[0], channels, -1)
@@ -369,7 +366,7 @@ def dictionary_learning_step(
     n_atoms = d.shape[0]
     atom_size = d.shape[-1]
 
-    d = unit_norm(d, dim=d_normalization_dims)
+    d = unit_norm(d, dim=-1)
 
     residual = signal.clone()
 
@@ -385,7 +382,7 @@ def dictionary_learning_step(
         return segments
 
     instances, scatter_segments = sparse_code(
-        signal, d, n_steps=n_steps, device=device, approx=approx, d_normalization_dims=(1, 2))
+        signal, d, n_steps=n_steps, device=device, approx=approx)
 
 
     for index in instances.keys():
@@ -400,25 +397,21 @@ def dictionary_learning_step(
         new_segments = gather_segments(residual, inst)
         new_atom = torch.sum(new_segments, dim=0)
 
-        if slow_movement:
-            new_atom = unit_norm(
-                new_atom.view(-1) + d[index].view(-1)).view(channels, atom_size)
-        else:
-            new_atom = unit_norm(
-                new_atom.view(-1)).view(channels, atom_size)
+        new_atom = unit_norm(
+            new_atom.view(-1)).view(channels, atom_size)
         
         d[index] = new_atom
 
         updated = map(
             lambda x: (x[0], x[1], x[2], new_atom *
-                       torch.norm(x[3], dim=d_normalization_dims, keepdim=True)),
+                       torch.norm(x[3], dim=-1, keepdim=True)),
             inst
         )
 
         sparse = scatter_segments(residual.shape, updated)
         residual = residual - sparse
 
-    d = unit_norm(d, dim=d_normalization_dims)
+    d = unit_norm(d, dim=-1)
 
     return d
 
