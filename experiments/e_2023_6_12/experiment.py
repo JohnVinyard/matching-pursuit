@@ -28,11 +28,13 @@ exp = Experiment(
     kernel_size=512)
 
 sparse_coding_iterations = 128
-initial_model_does_sparse_coding = False
-atom_size = 32
+
+initial_model_does_sparse_coding = True
+atom_size = 16
 features_per_band = 8
+
 feature_size = exp.n_bands * features_per_band
-sparse_coding_phase = True
+sparse_coding_phase = False
 pointcloud_encoding_phase = False
 n_atoms = 1024
 
@@ -328,9 +330,9 @@ class Model(nn.Module):
 
         self.embed = nn.Linear(257, features_per_band)
 
-        # self.sparse = NeuralSparseCode(feature_size)
+        self.sparse = NeuralSparseCode(feature_size)
 
-        # self.to_verb_context = LinearOutputStack(1024, 3, out_channels=1024)
+        self.to_verb_context = LinearOutputStack(1024, 3, out_channels=1024, norm=nn.LayerNorm((1024,)))
 
         channels = 1024
 
@@ -359,8 +361,7 @@ class Model(nn.Module):
             nn.Conv1d(64, 1, 7, 1, 3),
         )        
 
-
-        # self.verb = ReverbGenerator(1024, 3, exp.samplerate, exp.n_samples)
+        self.verb = ReverbGenerator(1024, 3, exp.samplerate, exp.n_samples, norm=nn.LayerNorm(1024,))
 
         self.apply(lambda x: exp.init_weights(x))
     
@@ -382,12 +383,12 @@ class Model(nn.Module):
     def forward(self, x):
         # torch.Size([16, 128, 128, 257])
         encoded = self.embed_features(x)
-        # ctx = torch.sum(encoded, dim=-1)
-        # ctx = self.to_verb_context(ctx)
+        ctx = torch.sum(encoded, dim=-1)
+        ctx = self.to_verb_context(ctx)
 
         x = self.generate(encoded)
 
-        # x = self.verb.forward(ctx, x)
+        x = self.verb.forward(ctx, x)
         return x
 
 try:
@@ -517,13 +518,13 @@ class PhaseInvariantFeatureInversion(BaseExperimentRunner):
             print(i, l.item())
             self.after_training_iteration(l)
 
-            if i >= 10000 and not sparse_coding_phase:
-                torch.save(model.state_dict(), 'model.dat')
-                break
+            # if i >= 10000 and not sparse_coding_phase:
+            #     torch.save(model.state_dict(), 'model.dat')
+            #     break
 
-            if i > 1000 and sparse_coding_phase:
-                torch.save(sparse_model.state_dict(), 'sparse_model.dat')
-                break
+            # if i > 1000 and sparse_coding_phase:
+            #     torch.save(sparse_model.state_dict(), 'sparse_model.dat')
+            #     break
 
                 
     

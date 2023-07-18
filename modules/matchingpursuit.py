@@ -120,8 +120,7 @@ def sparse_feature_map(
         n_steps=100,
         device=None,
         approx=None,
-        pooling=None,
-        use_softmax=False):
+        pooling=None):
 
     signal = signal.view(signal.shape[0], 1, -1)
     batch, _, n_samples = signal.shape
@@ -132,7 +131,7 @@ def sparse_feature_map(
 
     fm = torch.zeros(
         signal.shape[0], d.shape[0], signal.shape[-1], device=device)
-
+    
     for i in range(n_steps):
 
         if approx is None:
@@ -141,17 +140,12 @@ def sparse_feature_map(
                 padded, d.view(n_atoms, 1, atom_size))[..., :n_samples]
             # attn = torch.norm(f, dim=1)
             # f, _ = sparsify_vectors(f, attn, n_to_keep=n_steps)
-            return f
+            # return f
         else:
             f = fft_convolve(residual, d, approx=approx)
 
         values, indices = torch.max(f.reshape(batch, -1), dim=-1)
-
-        if use_softmax:
-            flow = torch.softmax(f.reshape(batch, -1),
-                                 dim=-1).sum(dim=-1, keepdim=True)
-            values = values * flow.view(values.shape)
-
+        
         atom_indices = indices // n_samples
         positions = indices % n_samples
 
@@ -164,14 +158,11 @@ def sparse_feature_map(
             # subtract the atom from the residual
             start = p
             end = start + atom_size
+
             slce = residual[b, :, start:end]
             size = slce.shape[-1]
             slce[:] = slce[:] - (d[ai, :size] * v)
 
-    if pooling is not None:
-        window, step = pooling
-        fm = F.max_pool1d(fm, window, step, padding=step)
-        print('POOLED', fm.shape)
 
     return fm
 

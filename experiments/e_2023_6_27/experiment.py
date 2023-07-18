@@ -5,22 +5,18 @@ from torch import nn
 from torch.nn import functional as F
 import zounds
 from config.experiment import Experiment
-from fft_basis import morlet_filter_bank
 from fft_shift import fft_shift
+from modules.decompose import fft_frequency_recompose
 from modules.fft import fft_convolve
-from modules.linear import LinearOutputStack
-from modules.matchingpursuit import dictionary_learning_step, sparse_code, sparse_feature_map
 from modules.normalization import max_norm, unit_norm
 from modules.pos_encode import pos_encoded
 from modules.reverb import ReverbGenerator
-from modules.sparse import soft_dirac, sparsify, sparsify_vectors
+from modules.sparse import soft_dirac, sparsify_vectors
 from modules.transfer import ImpulseGenerator
 from train.experiment_runner import BaseExperimentRunner
 from train.optim import optimizer
-from upsample import ConvUpsample
 from util import device
 from util.readmedocs import readme
-from itertools import count
 
 
 exp = Experiment(
@@ -30,26 +26,13 @@ exp = Experiment(
     model_dim=128,
     kernel_size=512)
 
-d_size = 1024
-kernel_size = 1024
-sparse_coding_iterations = 128
+d_size = 2048
+kernel_size = 4096
+sparse_coding_iterations = 32
 
-band = zounds.FrequencyBand(20, 2000)
-scale = zounds.MelScale(band, d_size)
 
 verb = ReverbGenerator(128, 3, samplerate=exp.samplerate, n_samples=exp.n_samples).to(device)
 
-# d = morlet_filter_bank(
-#     exp.samplerate, 
-#     kernel_size, 
-#     scale, 
-#     # np.linspace(0.25, 0.01, d_size), 
-#     0.1,
-#     normalize=False).real
-
-# d = torch.from_numpy(d).float().to(device).view(d_size, kernel_size)
-
-d = torch.zeros(d_size, kernel_size, device=device).uniform_(-1, 1)
 
 
 
@@ -201,6 +184,30 @@ class Encoder(nn.Module):
 
 
 
+class MultibandAtoms(nn.Module):
+    def __init__(self, size, bands, n_atoms):
+        super().__init__()
+        self.size = size
+        self.bands = bands
+        self.n_atoms = n_atoms
+
+        bands = {}
+        start = int(np.log2(size))
+        for i in range(start, start - self.bands, -1):
+            size = 2 ** i
+            bands[str(size)] = nn.Parameter(torch.zeros(n_atoms, 1, size).normal_(0, 0.1))
+        
+        self.bands = nn.ParameterDict(bands)
+    
+    def forward(self):
+        d = {int(k): v for k, v in self.bands.items()}
+        atoms = fft_frequency_recompose(d, self.size)
+        window = torch.ones(self.size, device=atoms.device)
+        window[:10] = torch.linspace(0, 1, 10, device=atoms.device)
+        window[-10:] = torch.linspace(1, 0, 10, device=atoms.device)
+        atoms = atoms.view(self.n_atoms, self.size) * window[None, ...]
+        return unit_norm(atoms, dim=-1)
+
 class Model(nn.Module):
     def __init__(
             self, 
@@ -213,6 +220,7 @@ class Model(nn.Module):
         super().__init__()
 
         self.atoms = nn.Parameter(torch.zeros(d_size, kernel_size).uniform_(-1, 1))
+        # self.atoms = MultibandAtoms(kernel_size, 6, d_size)
 
         self.encode = encode
         self.training_softmax = training_softmax
@@ -293,9 +301,6 @@ class Model(nn.Module):
 
         t = training
 
-
-        # prepped = unit_norm(self.atoms * torch.hamming_window(kernel_size, device=x.device)[None, ...])
-
         result = self._core_forward(
             x, 
             self.training_atom_softmax if t else self.inference_atom_softmax, 
@@ -303,17 +308,28 @@ class Model(nn.Module):
             atom_selection=atoms,
             amps=amps,
             positions=pos,
-            atom_dict=d)
+            atom_dict=unit_norm(self.atoms))
         
         result = self.verb.forward(verb_params, result)
 
         
         return result
 
+def training_softmax(x):
+    """
+    Produce a random mixture of the soft and hard functions, such
+    that softmax cannot be replied upon.  This _should_ cause
+    the model to gravitate to the areas where the soft and hard functions
+    are near equivalent
+    """
+    mixture = torch.zeros(x.shape[0], x.shape[1], 1, device=x.device).uniform_(0, 1)
+    sm = torch.softmax(x, dim=-1)
+    d = soft_dirac(x)
+    return (d * mixture) + (sm * (1 - mixture))
 
 model = Model(
     n_scheduling_frames=512, 
-    training_softmax=lambda x: torch.softmax(x, dim=-1),
+    training_softmax=lambda x: training_softmax(x),
     inference_softmax=lambda x: soft_dirac(x, dim=-1),
     encode=True,
     reduction=False
@@ -321,22 +337,8 @@ model = Model(
 
 optim = optimizer(model, lr=1e-3)
 
-def l1_loss(a, b):
-    return torch.abs(a - b).sum()
-
-def extract_feature(x):
-    fm = sparse_feature_map(x, d, n_steps=128, device=device)
-    fm = F.avg_pool1d(fm, 512, 256, 256)
-    return fm
-
-def matching_pursuit_loss(a, b):
-    a = extract_feature(a)
-    b = extract_feature(b)
-    return l1_loss(a, b)
 
 def exp_loss(a, b):
-    # mp_loss = matching_pursuit_loss(a, b)
-    # return mp_loss
     p_loss = exp.perceptual_loss(a, b)
     return p_loss
 
@@ -354,28 +356,6 @@ class NoGridExperiment(BaseExperimentRunner):
             item = item.view(-1, 1, exp.n_samples)
             self.real = item
 
-            # if self.real is None or not self.overfit:
-            #     item = generate(1 if self.overfit else self.batch_size).clone().detach()
-            #     self.real = item
-
-            if i < 500:
-                print(i)
-                with torch.no_grad():
-                    encoded, scatter = sparse_code(
-                        item, d, n_steps=sparse_coding_iterations, device=device, flatten=True)
-                    decoded = scatter(item.shape, encoded)
-                    self.fake = decoded
-                    
-                    # update dictionary
-                    new_d = dictionary_learning_step(
-                        item, 
-                        d, 
-                        n_steps=sparse_coding_iterations, 
-                        device=device)
-                    
-                    d[:] = new_d
-
-                    
             
             optim.zero_grad()
             recon = model.forward(item)
@@ -384,9 +364,9 @@ class NoGridExperiment(BaseExperimentRunner):
             loss.backward()
             optim.step()
 
-            # with torch.no_grad():
-            #     recon = model.forward(item, training=False)
-            #     self.fake = recon
+            with torch.no_grad():
+                recon = model.forward(item, training=False)
+                self.fake = recon
 
             print(i, loss.item())
             self.after_training_iteration(loss)

@@ -53,15 +53,15 @@ class Reduce(nn.Module):
 
         self.net = nn.Sequential(
             nn.Conv1d(channels, channels, 7, 4, 3), # 64
-            # nn.BatchNorm1d(channels),
+            nn.BatchNorm1d(channels),
             nn.LeakyReLU(0.2),
 
             nn.Conv1d(channels, channels, 7, 4, 3), # 16
-            # nn.BatchNorm1d(channels),
+            nn.BatchNorm1d(channels),
             nn.LeakyReLU(0.2),
 
             nn.Conv1d(channels, channels, 7, 4, 3), # 4
-            # nn.BatchNorm1d(channels),
+            nn.BatchNorm1d(channels),
             nn.LeakyReLU(0.2),
 
             nn.Conv1d(channels, out_dim, 4, 4, 0)
@@ -110,9 +110,17 @@ class Generator(nn.Module):
         self.process = set_processor(internal_dim, internal_dim)
 
         self.up = ConvUpsample(
-            latent_dim, internal_dim, 4, 256, mode='learned', out_channels=internal_dim, batch_norm=False)
+            latent_dim, internal_dim, 4, 256, mode='learned', out_channels=internal_dim, batch_norm=True)
         
-        self.up = PosEncodedUpsample(latent_dim, internal_dim, size=n_events, out_channels=internal_dim, layers=6, concat=True, learnable_encodings=True, multiply=True)
+        # self.up = PosEncodedUpsample(
+        #     latent_dim, 
+        #     internal_dim, 
+        #     size=n_events, 
+        #     out_channels=internal_dim, 
+        #     layers=6, 
+        #     concat=True, 
+        #     learnable_encodings=True, 
+        #     multiply=True)
 
         self.apply(lambda x: exp.init_weights(x))
 
@@ -139,7 +147,7 @@ class Generator(nn.Module):
         pos = torch.sigmoid(self.to_pos.forward(x))
         # pos = unit_sine(self.to_pos.forward(x))
 
-        amp = torch.sigmoid(self.to_amp.forward(x)) * 15
+        amp = torch.abs(self.to_amp.forward(x))
         # amp = torch.relu(self.to_amp.forward(x))
         # amp = self.to_amp.forward(x) ** 2
 
@@ -164,8 +172,6 @@ class Discriminator(nn.Module):
         self.embed_pos_amp = nn.Linear(2, internal_dim // 2)
         self.embed_atom = nn.Linear(n_atoms, internal_dim // 2)
 
-        self.embed_edges = nn.Linear(2 + n_atoms, internal_dim)
-
         self.processor = set_processor(internal_dim, internal_dim)
         self.judge = nn.Linear(internal_dim, out_dim)
         self.out_dim = out_dim
@@ -181,27 +187,8 @@ class Discriminator(nn.Module):
         pos_amp = self.embed_pos_amp(pos_amp)
         atoms = self.embed_atom(atoms)
         x = torch.cat([pos_amp, atoms], dim=-1)
-        # skip = x
-        # x = self.processor(x)
-        # x = x + skip
         x = self.collapse(x)
-
-        # if self.reduction == 'last':
-        #     x = x[:, -1:, :]
-        # elif self.reduction == 'mean':
-        #     x = torch.mean(x, dim=1, keepdim=True)
-        # elif self.reduction == 'sum':
-        #     x = torch.sum(x, dim=1, keepdim=True)
-        # elif self.reduction == 'none':
-        #     pass
-        # else:
-        #     raise ValueError(f'Unknown reduction type {self.reduction}')
-        
-        # x = self.judge(x)
-        # x = self.judgement_activation(x)
-        
         return x
-
 
 
 
@@ -235,10 +222,10 @@ class AutoEncoder(nn.Module):
 
 
 pos_amp_dim = 1
-canonical = CanonicalOrdering(
-    model.embedding_dim + (pos_amp_dim * 2), 
-    dim=canonical_ordering_dim, 
-    no_op=not do_canonical_ordering).to(device)
+# canonical = CanonicalOrdering(
+#     model.embedding_dim + (pos_amp_dim * 2), 
+#     dim=canonical_ordering_dim, 
+#     no_op=not do_canonical_ordering).to(device)
 
 
 ae = AutoEncoder().to(device)
@@ -369,12 +356,12 @@ class MatchingPursuitGAN(BaseExperimentRunner):
         return self.encoded.squeeze().data.cpu().numpy()
 
 
-    def listen(self):
-        with torch.no_grad():
-            f = self.fake[:1, ...]
-            inst = to_instances(f)
-            recon = model.decode(inst, shapes=model.shape_dict(f.shape[0]))
-            return playable(recon, exp.samplerate)
+    # def listen(self):
+    #     with torch.no_grad():
+    #         f = self.fake[:1, ...]
+    #         inst = to_instances(f)
+    #         recon = model.decode(inst, shapes=model.shape_dict(f.shape[0]))
+    #         return playable(recon, exp.samplerate)
 
     # TODO: What happens to something like this?  It's typically something
     # I would have tried once or twice at the beginning of a session to ensure
@@ -382,13 +369,14 @@ class MatchingPursuitGAN(BaseExperimentRunner):
     def round_trip(self):
         with torch.no_grad():
             target = self.real[:1, ...]
+            instances = target
 
             # encode
-            vecs = self.batch_encode(target)
-            vecs = torch.from_numpy(vecs).to(device)
+            # vecs = self.batch_encode(target)
+            # vecs = torch.from_numpy(vecs).to(device)
 
             # decode
-            instances = to_instances(vecs)
+            # instances = to_instances(vecs)
             recon = model.decode(
                 instances, shapes=model.shape_dict(target.shape[0]))
 
@@ -408,11 +396,11 @@ class MatchingPursuitGAN(BaseExperimentRunner):
             *funcs
         ]
 
-    def after_training_iteration(self, l):
-        val = super().after_training_iteration(l)
-        l = self.z()
-        self._latent(l)
-        return val
+    # def after_training_iteration(self, l):
+    #     val = super().after_training_iteration(l)
+    #     l = self.z()
+    #     self._latent(l)
+    #     return val
 
     def run(self):
         print('initializing embeddings')
@@ -423,18 +411,24 @@ class MatchingPursuitGAN(BaseExperimentRunner):
         for i, item in enumerate(self.iter_items()):
             self.real = item
 
-            with torch.no_grad():
-                # encode as a dictionary where keys correspond to bands
-                # and values are lists of atoms, times and amplitudes
-                vec = self.batch_encode(item)
-                vec = torch.from_numpy(vec).to(device)
-                vec = canonical.forward(vec)
-                self.vec = vec
+            instances = model.encode(item, steps=32)
+            decoded = model.decode(instances)
+            self.fake = decoded
 
-            l, f, e = train_ae(vec)
-            self.encoded = e
-            self.fake = f
-            print(i, l.item())
+            l = F.mse_loss(decoded, item)
+
+            # with torch.no_grad():
+            #     # encode as a dictionary where keys correspond to bands
+            #     # and values are lists of atoms, times and amplitudes
+            #     vec = self.batch_encode(item)
+            #     vec = torch.from_numpy(vec).to(device)
+            #     # vec = canonical.forward(vec)
+            #     self.vec = vec
+
+            # l, f, e = train_ae(vec)
+            # self.encoded = e
+            # self.fake = f
+            # print(i, l.item())
 
 
             self.after_training_iteration(l)
