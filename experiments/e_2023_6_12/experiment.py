@@ -181,7 +181,7 @@ class Model(nn.Module):
         batch, channels, time, period = x.shape
         x = self.embed(x) # (batch, channels, time, 8)
 
-        sparse_iter = 100
+        sparse_iter = 5000
 
 
         if iteration == sparse_iter:
