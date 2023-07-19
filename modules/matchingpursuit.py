@@ -120,7 +120,8 @@ def sparse_feature_map(
         n_steps=100,
         device=None,
         approx=None,
-        pooling=None):
+        pooling=None,
+        return_residual=False):
 
     signal = signal.view(signal.shape[0], 1, -1)
     batch, _, n_samples = signal.shape
@@ -144,6 +145,10 @@ def sparse_feature_map(
         else:
             f = fft_convolve(residual, d, approx=approx)
 
+        
+        # hard = soft_dirac(f.reshape(batch, -1), dim=-1).reshape(fm.shape)
+        # fm = fm + hard
+
         values, indices = torch.max(f.reshape(batch, -1), dim=-1)
         
         atom_indices = indices // n_samples
@@ -163,6 +168,8 @@ def sparse_feature_map(
             size = slce.shape[-1]
             slce[:] = slce[:] - (d[ai, :size] * v)
 
+    if return_residual:
+        return fm, residual
 
     return fm
 
@@ -251,7 +258,7 @@ def sparse_code_to_differentiable_key_points(
 
             x = torch.cat([
                 val.view(1), 
-                time.view(1),
+                time.view(1) * 100,
                 # pos_encode_feature(time.view(1, 1) * np.pi, np.pi, None, 16).view(33), 
                 # time.view(1) - 50,
                 vec.view(n_atoms)
@@ -275,7 +282,9 @@ def sparse_code(
         device=None,
         approx=None,
         flatten=False,
-        extract_atom_embedding=None):
+        extract_atom_embedding=None,
+        visit_key_point=None,
+        return_residual=False):
     
     batch, channels, time = signal.shape
 
@@ -330,6 +339,9 @@ def sparse_code(
             local_instances.append((ai, j, p, a))
             instances[ai].append((ai, j, p, a))
 
+            if visit_key_point is not None:
+                visit_key_point(fm[j].view(n_atoms, n_samples), ai, p.view(1), a.view(atom_size))
+
         sparse = scatter_segments(residual.shape, local_instances)
         residual -= sparse
 
@@ -338,6 +350,9 @@ def sparse_code(
 
     if not flatten:
         return instances, scatter_segments
+    elif flatten and return_residual:
+        flattened = flatten_atom_dict(instances) 
+        return flattened, scatter_segments, residual
     else:
         flattened = flatten_atom_dict(instances) 
         return flattened, scatter_segments

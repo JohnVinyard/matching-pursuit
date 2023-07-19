@@ -6,7 +6,7 @@ import zounds
 from config.experiment import Experiment
 from fft_basis import morlet_filter_bank
 from modules import stft
-from modules.matchingpursuit import dictionary_learning_step, sparse_code, sparse_feature_map
+from modules.matchingpursuit import dictionary_learning_step, sparse_code, sparse_code_to_differentiable_key_points, sparse_feature_map
 from modules.normalization import max_norm
 from train.experiment_runner import BaseExperimentRunner
 from train.optim import optimizer
@@ -31,26 +31,21 @@ d = torch.zeros(d_size, kernel_size, device=device).uniform_(-1, 1)
 
 
 def basic_matching_pursuit_loss(recon, target):
-    events, scatter = sparse_code(target, d, n_steps=sparse_coding_steps, flatten=True)
-    # t = scatter(target.shape, events)
 
-    # return F.mse_loss(
-    #     stft(recon, 512, 256, pad=True),
-    #     stft(t, 512, 256, pad=True)
-    # )
-
+    
     loss = 0
+
+    
 
     for ai, j, p, a in events:
         start = p
         stop = min(exp.n_samples, p + kernel_size)
         size = stop - start
-
-        r = torch.abs(torch.fft.rfft(recon[j, :, start: start + size], dim=-1))
-        at = torch.abs(torch.fft.rfft(a[:, :size], dim=-1))
-
+        r = recon[j, :, start: start + size]
+        at = a[:, :size]
         loss = loss + torch.abs(r - at).sum()
-    
+
+
     return loss
 
 
@@ -76,7 +71,7 @@ class Model(nn.Module):
             128, 
             start_size=4, 
             end_size=exp.n_samples, 
-            mode='nearest', 
+            mode='learned', 
             out_channels=1, 
             batch_norm=True
         )
@@ -124,4 +119,3 @@ class MatchingPursuitLoss(BaseExperimentRunner):
             print(i, l.item())
             self.fake = r
             self.after_training_iteration(l)
-    
