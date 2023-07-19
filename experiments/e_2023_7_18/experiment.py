@@ -10,6 +10,7 @@ from modules.matchingpursuit import sparse_code, sparse_code_to_differentiable_k
 from modules.normalization import max_norm, unit_norm
 from modules.overfitraw import OverfitRawAudio
 from modules.pos_encode import pos_encode_feature
+from modules.softmax import hard_softmax
 from modules.sparse import soft_dirac
 from time_distance import optimizer
 from train.experiment_runner import BaseExperimentRunner
@@ -38,7 +39,6 @@ d = torch.from_numpy(d).float().to(device)
 d = unit_norm(d, dim=-1)
 
 
-
 def generate(batch_size):
     total_events = batch_size * sparse_coding_iterations
     amps = torch.zeros(total_events, device=device).uniform_(0.9, 1)
@@ -50,7 +50,6 @@ def generate(batch_size):
     
     output = max_norm(output)
     return output
-
 
 def _inner_generate(batch_size, total_events, amps, positions, atom_indices):
     output = torch.zeros(total_events, exp.n_samples, device=device)
@@ -67,34 +66,6 @@ def _inner_generate(batch_size, total_events, amps, positions, atom_indices):
     output = torch.sum(output, dim=1, keepdim=True)
     return output
 
-def extract_keypoints(a, n_steps=sparse_coding_iterations):
-    points = []
-
-    def visit(fm, atom_index, position, atom):
-        hard = soft_dirac(fm.view(-1), dim=-1).view(fm.shape)
-        windowed = hard.unfold(-1, 512, 256).sum(dim=-1)
-
-        # atom = windowed.sum(dim=-1)
-        # time = windowed.sum(dim=0)
-
-        time = (hard.sum(dim=0) @ torch.linspace(0, 1, exp.n_samples, device=device)).view(1)
-
-        points.append(torch.cat([
-            atom, 
-            time
-        ])[None, ...])
-
-    fm, _, residual = sparse_code(
-        a, d, n_steps=n_steps, device=a.device, flatten=True, visit_key_point=visit, return_residual=True)
-    
-    return torch.cat(points, dim=0), residual
-    
-
-
-def local_keypoint_loss(a, b):
-    akp, a_res = extract_keypoints(a, n_steps=sparse_coding_iterations)
-    bkp, b_res = extract_keypoints(b, n_steps=sparse_coding_iterations)
-    return F.mse_loss(akp, bkp) + torch.abs(torch.norm(a_res) - torch.norm(b_res)).sum()
 
 
 model = OverfitRawAudio((1, 1, exp.n_samples), std=0.01, normalize=False).to(device)
@@ -117,16 +88,43 @@ def spectral_loss(a, b):
     b = torch.abs(torch.fft.rfft(b, dim=-1, norm='ortho'))
     return F.mse_loss(a, b)
 
+
+def extract_keypoints(a, n_steps=sparse_coding_iterations):
+    points = []
+
+    def visit(fm, atom_index, position, atom):
+        hard = soft_dirac(fm.view(-1), dim=-1).view(fm.shape)
+
+        time = (hard.sum(dim=0) @ torch.linspace(0, 1, exp.n_samples, device=device)).view(1).repeat(256).view(256)
+        
+        points.append(torch.cat([
+            atom, 
+            time
+        ])[None, ...])
+
+    fm, _, residual = sparse_code(
+        a, d, n_steps=n_steps, device=a.device, flatten=True, visit_key_point=visit, return_residual=True)
+    
+    return torch.cat(points, dim=0), residual
+    
+
+
+def local_keypoint_loss(a, b):
+    akp, a_res = extract_keypoints(a, n_steps=sparse_coding_iterations)
+    bkp, b_res = extract_keypoints(b, n_steps=sparse_coding_iterations)
+    return torch.abs(akp - bkp).sum() + torch.abs(torch.norm(a_res) - torch.norm(b_res)).sum()
+
+
 def extract_sparse_feature_map(a):
     a, res = sparse_feature_map(a, d, n_steps=sparse_coding_iterations, device=device, return_residual=True)
 
     return torch.cat([
-        a.reshape(-1),
         a.unfold(-1, 16384, 8192).sum(dim=-1).reshape(-1),
-        a.unfold(-1, 8192, 4096).sum(dim=-1).reshape(-1),
-        a.unfold(-1, 2048, 1024).sum(dim=-1).reshape(-1),
-        a.unfold(-1, 512, 256).sum(dim=-1).reshape(-1),
-        a.unfold(-1, 128, 64).sum(dim=-1).reshape(-1),
+        a.unfold(-1, 8192, 4096).sum(dim=-1).reshape(-1) * 0.5,
+        a.unfold(-1, 2048, 1024).sum(dim=-1).reshape(-1) * 0.25,
+        a.unfold(-1, 512, 256).sum(dim=-1).reshape(-1) * 0.125,
+        a.unfold(-1, 128, 64).sum(dim=-1).reshape(-1) * 0.0625,
+        a.reshape(-1) * 0.03,
     ]), res
 
 def sparse_feature_map_loss(a, b):
@@ -139,7 +137,7 @@ def sparse_feature_map_loss(a, b):
 
 def atom_comparison_loss(recon, target):
     """
-    This learns a noisy, but precisely-time reconstruction
+    This learns a noisy, but precisely-timed reconstruction
     """
     events, scatter = sparse_code(
         target, d, n_steps=sparse_coding_iterations, device=device, flatten=True)
@@ -153,14 +151,10 @@ def atom_comparison_loss(recon, target):
         loss = loss + torch.abs(r - at).sum()
     return loss
 
-# def key_point_loss(a, b):
-#     a, a_res = sparse_code_to_differentiable_key_points(a, d, n_steps=sparse_coding_iterations, device=device)
-#     b, b_res = sparse_code_to_differentiable_key_points(b, d, n_steps=sparse_coding_iterations, device=device)
-
-#     return F.mse_loss(a, b) + F.mse_loss(torch.norm(a_res), torch.norm(b_res))
 
 def experiment_loss(a, b):
     return sparse_feature_map_loss(a, b)
+    # return local_keypoint_loss(a, b)
 
 @readme
 class DenseToSparse(BaseExperimentRunner):
@@ -172,6 +166,7 @@ class DenseToSparse(BaseExperimentRunner):
         item = generate(1)
         self.real = item
 
+        i = 0
         while True:
             optim.zero_grad()
             recon = model.forward(None)
@@ -179,6 +174,7 @@ class DenseToSparse(BaseExperimentRunner):
             loss = experiment_loss(recon, item)
             loss.backward()
             optim.step()
-            print(loss.item())
+            print(i, loss.item())
 
             self.after_training_iteration(loss)
+            i += 1

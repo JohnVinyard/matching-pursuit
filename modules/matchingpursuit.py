@@ -3,6 +3,7 @@ from torch import Tensor
 
 from modules.normalization import unit_norm
 from modules.pos_encode import pos_encode_feature
+from modules.softmax import hard_softmax
 from modules.sparse import soft_dirac, sparsify, sparsify_vectors
 from collections import defaultdict
 from torch.nn import functional as F
@@ -145,9 +146,6 @@ def sparse_feature_map(
         else:
             f = fft_convolve(residual, d, approx=approx)
 
-        
-        # hard = soft_dirac(f.reshape(batch, -1), dim=-1).reshape(fm.shape)
-        # fm = fm + hard
 
         values, indices = torch.max(f.reshape(batch, -1), dim=-1)
         
