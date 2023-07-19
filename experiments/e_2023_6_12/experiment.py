@@ -1,4 +1,5 @@
 
+from collections import defaultdict
 import numpy as np
 import torch
 from torch import nn
@@ -23,7 +24,6 @@ exp = Experiment(
     kernel_size=512)
 
 
-
 # PIF will be (batch, bands, time, periodicity)
 
 features_per_band = 8
@@ -35,10 +35,7 @@ sparse_coding_iterations = 128
 d = torch.zeros(n_atoms, *atom_shape, device=device).uniform_(-1, 1)
 atom_dict = unit_norm(d.view(n_atoms, -1), dim=-1).reshape(n_atoms, *atom_shape)
 
-# for atom in atom_dict:
-#     print(torch.norm(atom).item(), atom.shape)
 
-# raise Exception()
 
 def to_original_dim(flat_indices, shape):
     fi = flat_indices
@@ -65,8 +62,11 @@ def best_fit(signal, atom_dict):
     signal = signal.view(batch, 1, bands, time, periodicity)
     atom_dict = atom_dict.view(n_atoms, 1, *atom_shape)
 
+    
     # convolve dictionary with signal
     signal = F.pad(signal, (0, 2, 0, 2, 0, 2))
+    sparse_signal = torch.zeros_like(signal)
+
     fm = F.conv3d(signal, atom_dict, stride=1)
 
     # find the best spot in the feature map
@@ -87,6 +87,7 @@ def best_fit(signal, atom_dict):
         atom = atom * val
 
         sig = signal[i, 0]
+        sparse = sparse_signal[i, 0]
 
         b_stop = min(b + x, sig.shape[0])
         b_size = b_stop - b
@@ -98,17 +99,31 @@ def best_fit(signal, atom_dict):
         d_size = d_stop - d
 
         sig[b: b_stop, c: c_stop, d: d_stop] -= atom[:b_size, :c_size, :d_size]
+        sparse[b: b_stop, c: c_stop, d: d_stop] += atom[:b_size, :c_size, :d_size]
 
     # KLUDGE: don't hard-code this
-    return signal[:, :, :128, :128, :8].view(orig_shape)
+    return \
+        signal[:, :, :128, :128, :8].view(orig_shape), \
+        sparse_signal[:, :, :128, :128, :8].view(orig_shape)
 
 
 def sparse_code(signal, d):
+    """
+    After a single round of sparse coding, for each atom:
+        - add the atom back to the appropriate location in each signal
+        - make the atom the average of all these positions
+        - subtract the new atom (with the appropriate norm) from the signal
+    """
     residual = signal.clone()
+
+    sparse = torch.zeros_like(signal)
+
     for i in range(sparse_coding_iterations):
-        residual = best_fit(residual, atom_dict)
-        print(torch.norm(residual).item())
+        residual, sp = best_fit(residual, atom_dict)
+        # print(torch.norm(residual))
+        sparse = sparse + sp
     
+    return sparse
     
 
 class UpsampleBlock(nn.Module):
@@ -160,18 +175,31 @@ class Model(nn.Module):
 
         self.apply(lambda x: exp.init_weights(x))
     
-    def embed_features(self, x):
-
-        
+    def embed_features(self, x, iteration):
 
         # torch.Size([16, 128, 128, 257])
-
         batch, channels, time, period = x.shape
-
         x = self.embed(x) # (batch, channels, time, 8)
 
-        with torch.no_grad():
-            sparse_code(x.clone(), d)
+        sparse_iter = 100
+
+
+        if iteration == sparse_iter:
+            print('initializing atoms')
+            # randomly initialize the dictionary on the 100th iteration
+            for i in range(n_atoms):
+                b = np.random.randint(0, batch)
+                q = np.random.randint(0, 128 - 3)
+                y = np.random.randint(0, 128 - 3)
+                z = np.random.randint(0, 8 - 3)
+                new_atom = x[b, q: q + 3, y: y + 3, z: z + 3]
+                atom_dict[i] = unit_norm(new_atom.reshape(-1)).reshape(3, 3, 3)
+        elif iteration > sparse_iter:
+            with torch.no_grad():
+                print('sparse coding')
+                # start using the dictionary to sparsify the signal
+                x = sparse_code(x, atom_dict)
+
 
         x = x.permute(0, 3, 1, 2).reshape(batch, 8 * channels, time)
         return x
@@ -180,9 +208,10 @@ class Model(nn.Module):
         x = self.up(x)
         return x
     
-    def forward(self, x):
+    def forward(self, x, iteration):
+
         # torch.Size([16, 128, 128, 257])
-        encoded = self.embed_features(x)
+        encoded = self.embed_features(x, iteration)
         ctx = torch.sum(encoded, dim=-1)
         ctx = self.to_verb_context(ctx)
 
@@ -202,7 +231,7 @@ def train(batch, i):
     with torch.no_grad():
         spec = exp.perceptual_feature(batch)
 
-    recon = model.forward(spec)
+    recon = model.forward(spec, i)
     recon_spec = exp.perceptual_feature(recon)
 
     audio_loss = F.mse_loss(recon_spec, spec)
@@ -210,10 +239,6 @@ def train(batch, i):
     loss.backward()
     optim.step()
     return loss, recon
-
-
-
-
 
 
 
