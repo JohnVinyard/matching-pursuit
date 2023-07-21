@@ -44,35 +44,23 @@ def rfft_freqs(window_size):
 def mag_phase_decomposition(spec, freqs):
     if isinstance(freqs, np.ndarray):
         freqs = torch.from_numpy(freqs).to(spec.device)
+
     
     batch_size, time, freq = spec.shape
     mag = torch.abs(spec)
+    
 
-    # cosine distance
-    phase = torch.cat([spec.real[..., None], spec.imag[..., None]], dim=-1)
-    a = phase[:, 1:, :, :]
-    b = phase[:, :-1, :, :]
-
-    # cosine distance
-    # numerator = torch.sum(a * b, dim=-1)
-    # denominator = torch.norm(a, dim=-1) * torch.norm(b, dim=-1)
-    # phase = 1 - (numerator / (denominator + 1e-12))
-    # phase = phase * np.pi * 2
-    # padding = torch.zeros(batch_size, 1, freq).to(spec.device)
-    # phase = torch.cat([phase, padding], dim=1)
-    # # # print(phase.max().item(), phase.min().item())
-
-    # polar coordinates
+    # # polar coordinates
     phase = torch.angle(spec)
     phase = torch.diff(
         phase,
         dim=1,
         prepend=torch.zeros(batch_size, 1, spec.shape[-1]).to(spec.device))
-    # phase = phase % (2 * np.pi)
+    phase = phase % (2 * np.pi)
 
-    # freqs = freqs * 2 * np.pi
-    # subtract the expected value
-    # phase = phase - freqs[None, None, :]
+    freqs = freqs * 2 * np.pi
+    # # subtract the expected value
+    phase = phase - freqs[None, None, :]
 
     return torch.cat([mag[..., None], phase[..., None]], dim=-1)
 
@@ -85,11 +73,11 @@ def mag_phase_recomposition(spec, freqs):
     phase = spec[..., 1]
 
     freqs = freqs * 2 * np.pi
+    
     # add expected value
     phase = phase + freqs[None, None, :]
 
     imag = torch.cumsum(phase, dim=1)
-
     imag = (imag + np.pi) % (2 * np.pi) - np.pi
     spec = real * torch.exp(1j * imag)
     return spec

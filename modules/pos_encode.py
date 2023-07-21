@@ -31,12 +31,12 @@ def n_features_for_freq(n_freqs):
     return n_freqs * 2 + 1
 
 
-def pos_encoded(batch_size, time_dim, n_freqs, device=None):
+def pos_encoded(batch_size, time_dim, n_freqs, device=None, domain=1):
     """
     Return positional encodings with shape (batch_size, time_dim, n_features)
     """
     n_features = n_features_for_freq(n_freqs)
-    pos = pos_encode_feature(torch.linspace(-1, 1, time_dim).view(-1, 1), 1, time_dim, n_freqs)\
+    pos = pos_encode_feature(torch.linspace(-domain, domain, time_dim).view(-1, 1), 1, time_dim, n_freqs)\
         .view(1, time_dim, n_features)\
         .repeat(batch_size, 1, 1)\
         .view(batch_size, time_dim, n_features)\

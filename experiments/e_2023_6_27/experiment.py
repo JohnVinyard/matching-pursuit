@@ -8,6 +8,7 @@ from config.experiment import Experiment
 from fft_shift import fft_shift
 from modules.decompose import fft_frequency_recompose
 from modules.fft import fft_convolve
+from modules.matchingpursuit import dictionary_learning_step, sparse_code
 from modules.normalization import max_norm, unit_norm
 from modules.pos_encode import pos_encoded
 from modules.reverb import ReverbGenerator
@@ -26,9 +27,14 @@ exp = Experiment(
     model_dim=128,
     kernel_size=512)
 
-d_size = 2048
-kernel_size = 4096
+d_size = 1024
+kernel_size = 2048
+
 sparse_coding_iterations = 32
+
+
+# atom_dict = torch.zeros(d_size, kernel_size, device=device).uniform_(-1, 1)
+# atom_dict = unit_norm(atom_dict)
 
 
 verb = ReverbGenerator(128, 3, samplerate=exp.samplerate, n_samples=exp.n_samples).to(device)
@@ -338,9 +344,32 @@ model = Model(
 optim = optimizer(model, lr=1e-3)
 
 
+# def atom_comparison_loss(recon, target):
+#     """
+#     This learns a noisy, but precisely-timed reconstruction
+#     """
+#     events, scatter, t_res = sparse_code(
+#         target, 
+#         atom_dict, 
+#         n_steps=sparse_coding_iterations, 
+#         device=device, 
+#         flatten=True, 
+#         return_residual=True)
+    
+#     loss = 0
+#     for ai, j, p, a in events:
+#         start = p
+#         stop = min(exp.n_samples, p + 512)
+#         size = stop - start
+#         r = recon[j, :, start: start + size]
+#         at = a[:, :size]
+#         loss = loss + torch.abs(r - at).sum()
+#     return loss
+
 def exp_loss(a, b):
     p_loss = exp.perceptual_loss(a, b)
     return p_loss
+    # return atom_comparison_loss(a, b)
 
 def train(batch, i):
     optim.zero_grad()
@@ -354,6 +383,18 @@ class NoGridExperiment(BaseExperimentRunner):
         
         for i, item in enumerate(self.iter_items()):
             item = item.view(-1, 1, exp.n_samples)
+
+            # if i < 200:
+            #     with torch.no_grad():
+            #         coded, scatter = sparse_code(item, atom_dict, n_steps=sparse_coding_iterations, device=device, flatten=True)
+            #         rec = scatter(item.shape, coded)
+            #         self.real = rec
+
+            #         print(i, 'sparse coding...')
+            #         new_d = dictionary_learning_step(item, atom_dict, n_steps=sparse_coding_iterations, device=device)
+            #         atom_dict.data[:] = new_d
+                
+            # else:
             self.real = item
 
             

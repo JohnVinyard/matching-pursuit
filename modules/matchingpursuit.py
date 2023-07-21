@@ -147,6 +147,9 @@ def sparse_feature_map(
             f = fft_convolve(residual, d, approx=approx)
 
 
+        hard = soft_dirac(f.reshape(batch, -1)).reshape(fm.shape)
+        fm = fm + (hard * f)
+
         values, indices = torch.max(f.reshape(batch, -1), dim=-1)
         
         atom_indices = indices // n_samples
@@ -156,7 +159,7 @@ def sparse_feature_map(
             v = values[b]
             ai = atom_indices[b]
             p = positions[b]
-            fm[b, ai, p] += v
+            # fm[b, ai, p] += v
 
             # subtract the atom from the residual
             start = p
@@ -282,7 +285,8 @@ def sparse_code(
         flatten=False,
         extract_atom_embedding=None,
         visit_key_point=None,
-        return_residual=False):
+        return_residual=False,
+        local_contrast_norm=False):
     
     batch, channels, time = signal.shape
 
@@ -317,9 +321,23 @@ def sparse_code(
         
         if extract_atom_embedding is not None:
             embeddings.append(extract_atom_embedding(fm, d))
+        
 
-        fm = fm.reshape(batch, -1)
-        value, mx = torch.max(fm, dim=-1)
+        if local_contrast_norm:
+            # TODO: There might be something to local contrast norm
+            feature_map = fm.view(batch, 1, n_atoms, n_samples)
+            averages = F.avg_pool2d(feature_map, (9, 9), (1, 1), (4, 4))
+            feature_map = feature_map - averages
+            feature_map = feature_map.reshape(batch, -1)
+            fm = fm.reshape(batch, -1)
+            # get the best indices from the normalized feature map
+            value, mx = torch.max(feature_map, dim=-1, keepdim=True)
+            # get the values from the original feature map
+            value = torch.gather(fm, dim=-1, index=mx)
+        else:
+            fm = fm.reshape(batch, -1)
+            value, mx = torch.max(fm, dim=-1, keepdim=True)
+
 
         atom_index = mx // n_samples  # (Batch,)
         position = mx % n_samples  # (Batch,)
@@ -341,7 +359,10 @@ def sparse_code(
                 visit_key_point(fm[j].view(n_atoms, n_samples), ai, p.view(1), a.view(atom_size))
 
         sparse = scatter_segments(residual.shape, local_instances)
+
         residual -= sparse
+
+        
 
     if extract_atom_embedding is not None:
         return embeddings, residual

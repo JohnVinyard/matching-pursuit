@@ -333,7 +333,7 @@ def to_slice(n_samples, percentage):
     return slice(start, end)
 
 
-n_atoms = 512
+n_atoms = 1024
 steps = 32
 # n_training_atoms = 8
 # dictionary_learning_iterations = 100
@@ -345,9 +345,10 @@ model = MultibandDictionaryLearning([
     BandSpec(4096,  n_atoms, 1024, slce=None, device=device, full_size=8192),
     BandSpec(8192,  n_atoms, 2048, slce=None, device=device, full_size=8192),
     BandSpec(16384, n_atoms, 4096, slce=None, device=device, full_size=8192),
-    BandSpec(32768, n_atoms, 4096, slce=None, device=device, full_size=4096),
+    BandSpec(32768, n_atoms, 8192, slce=None, device=device, full_size=8192),
 ])
-model.load()
+
+# model.load()
 
 total_atoms = n_atoms * len(model.bands)
 
@@ -359,8 +360,8 @@ def train():
 
 @readme
 class BasicMatchingPursuit(BaseExperimentRunner):
-    def __init__(self, stream):
-        super().__init__(stream, train, exp)
+    def __init__(self, stream, port=None):
+        super().__init__(stream, train, exp, port=port)
         self.encoded = None
 
     def recon(self, steps=steps):
@@ -421,13 +422,19 @@ class BasicMatchingPursuit(BaseExperimentRunner):
         for i, item in enumerate(self.iter_items()):
             self.real = item
 
+            
             batch_size = item.shape[0]
 
-            print(i, '========================================')
+            print(i, total_atoms, '========================================')
 
             with torch.no_grad():
+                self.fake = self.round_trip(steps=steps)
+
                 model.learn(item, steps=steps)
                 print(i, 'sparse coding step')
+
+            loss = torch.zeros(1)
+            self.after_training_iteration(loss)
 
             # transformer_encoded = self.encode_for_transformer(
             #     item, steps=steps)

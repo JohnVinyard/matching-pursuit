@@ -14,6 +14,7 @@ from modules.softmax import hard_softmax
 from modules.sparse import soft_dirac
 from time_distance import optimizer
 from train.experiment_runner import BaseExperimentRunner
+from upsample import ConvUpsample
 from util import device
 from util.readmedocs import readme
 
@@ -68,8 +69,21 @@ def _inner_generate(batch_size, total_events, amps, positions, atom_indices):
 
 
 
-model = OverfitRawAudio((1, 1, exp.n_samples), std=0.01, normalize=False).to(device)
+class ConvModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.latent = nn.Parameter(torch.zeros(1, 128).uniform_(-1, 1))
+        self.net = ConvUpsample(128, 128, 8, exp.n_samples, 'nearest', out_channels=1, batch_norm=True)
+        self.apply(lambda x: exp.init_weights(x))
+    
+    def forward(self, x):
+        result = self.net(self.latent)
+        return result
+
+model = ConvModel().to(device)
+# model = OverfitRawAudio((1, 1, exp.n_samples), std=0.01, normalize=False).to(device)
 optim = optimizer(model, lr=1e-3)
+
 
 def train(batch, i):
     pass
@@ -78,14 +92,6 @@ def sample_loss(a, b):
     """
     This is our baseline.  It works, obviously
     """
-    return F.mse_loss(a, b)
-
-def spectral_loss(a, b):
-    """
-    This didn't do what I was expecting.  It smears everything out
-    """
-    a = torch.abs(torch.fft.rfft(a, dim=-1, norm='ortho'))
-    b = torch.abs(torch.fft.rfft(b, dim=-1, norm='ortho'))
     return F.mse_loss(a, b)
 
 
@@ -120,11 +126,11 @@ def extract_sparse_feature_map(a):
 
     return torch.cat([
         a.unfold(-1, 16384, 8192).sum(dim=-1).reshape(-1),
-        a.unfold(-1, 8192, 4096).sum(dim=-1).reshape(-1) * 0.5,
-        a.unfold(-1, 2048, 1024).sum(dim=-1).reshape(-1) * 0.25,
-        a.unfold(-1, 512, 256).sum(dim=-1).reshape(-1) * 0.125,
-        a.unfold(-1, 128, 64).sum(dim=-1).reshape(-1) * 0.0625,
-        a.reshape(-1) * 0.03,
+        a.unfold(-1, 8192, 4096).sum(dim=-1).reshape(-1),
+        # a.unfold(-1, 2048, 1024).sum(dim=-1).reshape(-1),
+        # a.unfold(-1, 512, 256).sum(dim=-1).reshape(-1),
+        # a.unfold(-1, 128, 64).sum(dim=-1).reshape(-1),
+        # a.reshape(-1),
     ]), res
 
 def sparse_feature_map_loss(a, b):
@@ -135,12 +141,33 @@ def sparse_feature_map_loss(a, b):
     b, b_res = extract_sparse_feature_map(b)
     return torch.abs(a - b).sum() + torch.abs(torch.norm(a_res) - torch.norm(b_res)).sum()
 
+
+def specific_sparse_feature_map_loss(a, b):
+    batch = a.shape[0]
+
+    a, a_res = extract_sparse_feature_map(a)
+    b, b_res = extract_sparse_feature_map(b)
+
+    a = a.view(batch, -1)
+    b = b.view(batch, -1)
+
+    values, indices = torch.topk(a, k=sparse_coding_iterations, dim=-1)
+    
+    other = torch.gather(b, dim=-1, index=indices)
+    return torch.abs(values - other).sum()
+
+    
+
 def atom_comparison_loss(recon, target):
     """
     This learns a noisy, but precisely-timed reconstruction
     """
-    events, scatter = sparse_code(
-        target, d, n_steps=sparse_coding_iterations, device=device, flatten=True)
+    events, scatter, t_res = sparse_code(
+        target, d, n_steps=sparse_coding_iterations, device=device, flatten=True, return_residual=True)
+    
+    # _, scatter, r_res = sparse_code(
+    #     recon, d, n_steps=sparse_coding_iterations, device=device, flatten=True, return_residual=True)
+    
     loss = 0
     for ai, j, p, a in events:
         start = p
@@ -149,12 +176,17 @@ def atom_comparison_loss(recon, target):
         r = recon[j, :, start: start + size]
         at = a[:, :size]
         loss = loss + torch.abs(r - at).sum()
-    return loss
+    return loss #+ torch.abs(torch.norm(t_res) - torch.norm(r_res)).sum()
+
+
 
 
 def experiment_loss(a, b):
-    return sparse_feature_map_loss(a, b)
+    # return sample_loss(a, b)
+    # return sparse_feature_map_loss(a, b)
     # return local_keypoint_loss(a, b)
+    return atom_comparison_loss(a, b)
+    # return specific_sparse_feature_map_loss(a, b)
 
 @readme
 class DenseToSparse(BaseExperimentRunner):
