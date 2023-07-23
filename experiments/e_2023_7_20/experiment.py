@@ -5,6 +5,7 @@ from torch import nn
 from torch.nn import functional as F
 import zounds
 from config.experiment import Experiment
+from modules.activation import unit_sine
 from modules.matchingpursuit import dictionary_learning_step, sparse_code
 from modules.normalization import unit_norm
 from modules.phase import AudioCodec, MelScale
@@ -26,12 +27,12 @@ exp = Experiment(
 # scale = MelScale()
 # codec = AudioCodec(scale)
 
-d_size = 256
-kernel_size = 256
-iterations = 256
+d_size = 512
+kernel_size = 512
+iterations = 512
 
 local_constrast_norm = True
-dict_learning_steps = 250
+dict_learning_steps = 50
 
 
 atom_dict = torch.zeros(d_size, kernel_size, device=device).uniform_(-1, 1)
@@ -161,6 +162,9 @@ def encode_events(events):
             j += 1
 
     
+    pos = encoded[:, :, d_size: d_size + 1]
+    pos = torch.diff(pos, n=1, dim=-1, prepend=torch.zeros(batch_size, iterations, 1, device=encoded.device))
+    encoded[:, :, d_size: d_size + 1] = pos
     return encoded
 
 
@@ -170,7 +174,11 @@ def decode_events(events):
 
     atoms = events[:, :, :d_size]
     pos = events[:, :, d_size: d_size + 1]
+    pos = torch.cumsum(pos, dim=-1)
+    pos = torch.clamp(pos, 0, 1)
+
     amp = events[:, :, d_size + 1: d_size + 2]
+
 
     indices = torch.argmax(atoms, dim=-1)
 
@@ -198,8 +206,11 @@ class Model(nn.Module):
 
         self.embed_atoms = nn.Linear(d_size, self.channels)
         self.embed_points = nn.Linear(2, channels)
+
+        self.down = nn.Linear(channels * 2, channels)
+
         encoder = nn.TransformerEncoderLayer(channels, 4, channels, batch_first=True)
-        self.encoder = nn.TransformerEncoder(encoder, 6, norm=nn.LayerNorm((iterations, channels)))
+        self.encoder = nn.TransformerEncoder(encoder, 6, norm=nn.LayerNorm((iterations, channels,)))
 
         self.to_atoms = nn.Linear(channels, d_size)
         self.to_points = nn.Linear(channels, 2)
@@ -211,7 +222,10 @@ class Model(nn.Module):
 
         atoms = self.embed_atoms(atoms)
         points = self.embed_points(points)
-        x = atoms + points
+
+        x = torch.cat([atoms, points], dim=-1)
+        x = self.down(x)
+
         x = self.encoder(x)
 
         atoms = self.to_atoms(x)
@@ -227,7 +241,7 @@ class Model(nn.Module):
         x = torch.cat([atoms, points], dim=-1)
         return x
 
-model = Model(256).to(device)
+model = Model(512).to(device)
 optim = optimizer(model, lr=1e-3)
 
 
@@ -238,7 +252,7 @@ def exp_loss(recon, target):
     recon_points = recon[:, :, d_size:]
     target_points = target[:, :, d_size:]
     point_loss = F.mse_loss(recon_points, target_points)
-    return (atom_loss * 0.1) + point_loss
+    return (atom_loss) + point_loss * 100
 
 
 def train(batch, i):
@@ -263,6 +277,8 @@ def train(batch, i):
             atom_dict.data[:] = d
         
     
+    real = scatter(batch.shape, events)
+
     recon_events = model.forward(encoded)
 
     events = decode_events(recon_events)
@@ -272,11 +288,19 @@ def train(batch, i):
     loss.backward()
     optim.step()
 
-    return loss, recon.view(batch_size, 1, exp.n_samples)
+    return loss, recon.view(batch_size, 1, exp.n_samples), real
 
 
 @readme
 class MatchingPursuitPlayground(BaseExperimentRunner):
     def __init__(self, stream, port=None):
         super().__init__(stream, train, exp, port=port)
+    
+    def run(self):
+        for i, item in enumerate(self.iter_items()):
+            l, f, r = train(item.view(-1, 1, exp.n_samples), i)
+            self.fake = f
+            self.real = r
+            print(i, l.item())
+            self.after_training_iteration(l)
     

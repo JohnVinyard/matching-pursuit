@@ -1,4 +1,5 @@
 
+from collections import defaultdict
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -6,8 +7,10 @@ import zounds
 from config.experiment import Experiment
 from fft_basis import morlet_filter_bank
 from modules import stft
+from modules.floodfill import flood_fill_loss
 from modules.matchingpursuit import dictionary_learning_step, sparse_code, sparse_code_to_differentiable_key_points, sparse_feature_map
 from modules.normalization import max_norm
+from modules.phase import AudioCodec, MelScale
 from train.experiment_runner import BaseExperimentRunner
 from train.optim import optimizer
 from upsample import ConvUpsample
@@ -29,24 +32,48 @@ sparse_coding_steps = 128
 
 d = torch.zeros(d_size, kernel_size, device=device).uniform_(-1, 1)
 
+# mel = MelScale()
+# codec = AudioCodec(mel)
 
-def basic_matching_pursuit_loss(recon, target):
 
+# def basic_matching_pursuit_loss(recon, target):
+
+#     # fake_events, scatter = sparse_code(
+#     #     recon, d, n_steps=sparse_coding_steps, device=device, flatten=True)
+#     # recon = scatter(recon.shape, fake_events)
     
-    loss = 0
-
+#     real_events, scatter = sparse_code(
+#         target, d, n_steps=sparse_coding_steps, device=device, flatten=True)
     
+#     real = scatter(recon.shape, real_events)
 
-    for ai, j, p, a in events:
-        start = p
-        stop = min(exp.n_samples, p + kernel_size)
-        size = stop - start
-        r = recon[j, :, start: start + size]
-        at = a[:, :size]
-        loss = loss + torch.abs(r - at).sum()
+#     counter = defaultdict(int)
+#     for _, j, _, _ in real_events:
+#         counter[j] = 0
+    
+#     loss = 0
+
+#     for i in range(len(real_events)):
+#         ai, j, p, a = real_events[i]
+
+#         start = p
+#         stop = min(exp.n_samples, start + a.shape[-1])
+#         # size = stop - start
+#         channel = counter[j]
+
+#         recon_spec = recon[j, channel, start: stop]
+#         real_spec = real[j, channel, start: stop]
+#         loss = loss + F.mse_loss(recon_spec, real_spec)
+#         counter[j] += 1
 
 
-    return loss
+#     return loss
+#     # print(recon.shape, real.shape)
+
+#     # return loss + F.mse_loss(recon, real)
+
+#     # return exp.perceptual_loss(recon, real)
+    
 
 
 
@@ -66,12 +93,13 @@ class Model(nn.Module):
             nn.Conv1d(128, 128, 8, 8, 0)
         )
 
+        
         self.net = ConvUpsample(
             128, 
             128, 
             start_size=4, 
             end_size=exp.n_samples, 
-            mode='learned', 
+            mode='nearest', 
             out_channels=1, 
             batch_norm=True
         )
@@ -91,10 +119,25 @@ optim = optimizer(model, lr=1e-3)
 def train(batch, i):
     optim.zero_grad()
     recon = model.forward(batch)
-    loss = basic_matching_pursuit_loss(recon, batch)
+    # loss = basic_matching_pursuit_loss(recon, batch)
+
+    # recon = codec.to_frequency_domain(recon.view(-1, exp.n_samples))[..., 0]
+    # batch = codec.to_frequency_domain(batch.view(-1, exp.n_samples))[..., 0]
+    # loss = F.mse_loss(recon, batch)
+
+
+    orig_recon = recon
+
+    recon = exp.pooled_filter_bank(recon)
+    batch = exp.pooled_filter_bank(batch)
+    print(batch.min().item(), batch.max().item(), batch.std().item())
+    loss = flood_fill_loss(recon[:, None, :, :], batch[:, None, :, :], threshold=1.25)
+
+    # loss = F.mse_loss(recon, batch)
+    
     loss.backward()
     optim.step()
-    return loss, recon
+    return loss, orig_recon
 
 @readme
 class MatchingPursuitLoss(BaseExperimentRunner):
@@ -107,12 +150,12 @@ class MatchingPursuitLoss(BaseExperimentRunner):
             self.real = item
 
 
-            if i < 100:
-                new_d = dictionary_learning_step(item, d, device=device, n_steps=sparse_coding_steps)
-                d.data[:] = new_d
+            # if i < 100:
+            #     new_d = dictionary_learning_step(item, d, device=device, n_steps=sparse_coding_steps)
+            #     d.data[:] = new_d
 
-                encoded, scatter = sparse_code(item[:1, ...], d, n_steps=sparse_coding_steps, device=device, flatten=True)
-                self.real = scatter(item[:1, ...].shape, encoded)
+            #     encoded, scatter = sparse_code(item[:1, ...], d, n_steps=sparse_coding_steps, device=device, flatten=True)
+            #     self.real = scatter(item[:1, ...].shape, encoded)
             
 
             l, r = self.train(item, i)

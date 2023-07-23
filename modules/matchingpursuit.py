@@ -83,9 +83,12 @@ def build_scatter_segments(n_samples, atom_size):
 
     def scatter_segments(x, inst):
 
+        channels = 1
+
         if isinstance(x, tuple):
             # x is the desired _size_ out the target signal
             x = torch.zeros(*x, device=device, requires_grad=True)
+            channels = x.shape[1]
 
         # pad the signal at the beginning and end to avoid any boundary
         # issues    
@@ -94,12 +97,21 @@ def build_scatter_segments(n_samples, atom_size):
     
         base = n_samples
 
+        counter = defaultdict(int)
+
         for ai, j, p, a in inst:
             p = int(p)
             start = base + p
             end = start + atom_size
 
-            target[j, :, start: end] += a.view(-1, atom_size)
+            ch = counter.get(j, 0)
+
+            if channels == 1:
+                target[j, :, start: end] += a.view(-1, atom_size)
+            else:
+                target[j, ch, start: end] = a.view(-1, atom_size)
+            
+            counter[j] = ch + 1
             
 
         # remove all the padding

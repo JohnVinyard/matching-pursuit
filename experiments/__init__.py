@@ -9,19 +9,32 @@
 
 # from .e_2023_6_7 import KeyPointLossToyExperiment as Current
 
-from .e_2023_6_12 import PhaseInvariantFeatureInversion as Current
+# from .e_2023_6_12 import PhaseInvariantFeatureInversion as Current
 
 # from .e_2023_6_20 import SchedulingExperiment as Current
 # from .e_2023_6_27 import NoGridExperiment as Current
-# from .e_2023_7_13 import MatchingPursuitLoss as Current
+
+"""
+Can I learn a better model (with dense latent variable)
+with a sparse/matching pursuit loss?  Does the _loss_ need
+to be sparse, and not the model?  Can a frame-based approach
+work after all?
+"""
+from .e_2023_7_13 import MatchingPursuitLoss as Current
+
 # from .e_2023_7_18 import DenseToSparse as Current
 
 
-from .e_2023_7_20 import MatchingPursuitPlayground as Current
+# from .e_2023_7_20 import MatchingPursuitPlayground as Current
+
+# from .e_2023_7_22 import SparseAutoencoder as Current
 
 
 """
 TODO Today
+
+- model with momentum and damping that has an additional sparsity constraint
+- another attempt at sparse bottleneck with different architecture
 
 - multi-band matching pursuit (atoms "fused" across bands)
 - matching pursuit with local contrast norm for atom selection
