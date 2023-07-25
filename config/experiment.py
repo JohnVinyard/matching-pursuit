@@ -20,7 +20,8 @@ class Experiment(object):
         weight_init=0.1, 
         kernel_size=512, 
         residual_loss=False,
-        a_weighting=False):
+        a_weighting=False,
+        scaling_factor=0.1):
 
         super().__init__()
         self.samplerate = samplerate
@@ -41,7 +42,7 @@ class Experiment(object):
             samplerate,
             self.kernel_size,
             self.scale,
-            0.1,
+            scaling_factor,
             normalize_filters=True,
             a_weighting=a_weighting).to(device)
 

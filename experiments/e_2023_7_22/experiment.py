@@ -7,8 +7,9 @@ import zounds
 from config.experiment import Experiment
 from fft_basis import morlet_filter_bank
 from modules.ddsp import overlap_add
+from modules.decompose import fft_frequency_decompose
 from modules.floodfill import flood_fill_loss
-from modules.normalization import unit_norm
+from modules.normalization import max_norm, unit_norm
 from modules.phase import AudioCodec, MelScale
 from modules.pos_encode import pos_encoded
 from modules.sparse import sparsify
@@ -22,10 +23,11 @@ from util.readmedocs import readme
 exp = Experiment(
     samplerate=zounds.SR22050(),
     n_samples=2**15,
-    weight_init=0.1,
-    model_dim=128,
-    kernel_size=512,
-    a_weighting=True)
+    weight_init=0.05,
+    model_dim=256,
+    kernel_size=1024,
+    a_weighting=True,
+    scaling_factor=0.25)
 
 # pos = morlet_filter_bank(
 #     exp.samplerate,
@@ -66,7 +68,7 @@ class AudioSynthesis(nn.Module):
             out_channels=exp.n_bands, 
             batch_norm=True,
             from_latent=False)
-        self.net = nn.Conv1d(128, 128, 7, 1, 3)
+        self.net = nn.Conv1d(exp.n_bands, exp.n_bands, 7, 1, 3)
 
     
     def forward(self, x):
@@ -173,8 +175,7 @@ class Bottleneck(nn.Module):
 
         x = self.up(x)
 
-        # generate mask independent of vector scale
-        mask = self.mask(unit_norm(orig, dim=1))
+        mask = self.mask(orig)
         sm = torch.softmax(mask.view(batch, -1), dim=-1)
         sm = sm.view(x.shape)
         sm = sparsify(sm, n_to_keep=self.k_sparse)
@@ -217,40 +218,46 @@ class Model(nn.Module):
         x, energy = self.synthesize(x)
         return x, energy
 
+
 model = Model(512, 2048, k_sparse=512).to(device)
 optim = optimizer(model, lr=1e-3)
 
+def extract_windows(x, kernel, step):
+    kw, kh = kernel
+    sw, sh = step
+
+    x = x.unfold(-1, kw, sw)
+    x = x.unfold(1, kh, sh)
+
+    # win = torch.hamming_window(kw, device=x.device)[:, None] * torch.hamming_window(kh, device=x.device)[None, :]
+    # x = x * win[None, None, None, :, :]
+
+    x = x.reshape(*x.shape[:-2], np.product(x.shape[-2:]))
+    x = unit_norm(x, dim=-1)
+
+
+    return x
+
+def extract_feature(x):
+    return exp.pooled_filter_bank(x)[:, None, :, :]
+
+def exp_loss(a, b):
+    a = extract_feature(a)
+    b = extract_feature(b)
+    return flood_fill_loss(a, b, threshold=1.5)
 
 def train(batch, i):
     optim.zero_grad()
     recon, energy = model.forward(batch)
+    orig_recon = recon
 
-    # energy = torch.abs(energy)
-    # energy_loss = energy.sum()
-
-    # recon_feat = exp.perceptual_feature(recon)[:, None, ...]
-    # recon_local = F.avg_pool3d(recon_feat, (15, 15, 15), (1, 1, 1), (7, 7, 7))
-    # recon_feat = recon_feat - recon_local
-
-    # real_feat = exp.perceptual_feature(batch)[:, None, ...]
-    # real_local = F.avg_pool3d(real_feat, (15, 15, 15), (1, 1, 1), (7, 7, 7))
-    # real_feat = real_feat - real_local
-
-    # # loss = exp.perceptual_loss(recon, batch) + energy_loss
-    # loss = F.mse_loss(recon_feat, real_feat)
-
-    recon = codec.to_frequency_domain(recon.view(-1, exp.n_samples))[:, None, :, :]
-    batch = codec.to_frequency_domain(batch.view(-1, exp.n_samples))[:, None, :, :]
-
-
-    loss = F.mse_loss(recon, batch)
-
-    # loss = flood_fill_loss(recon[..., 0], real[..., 0], 2)
-    # loss = F.mse_loss(recon[..., 0], real[..., 0])
+    
+    # loss = exp.perceptual_loss(recon, batch)
+    loss = exp_loss(recon, batch)
 
     loss.backward()
     optim.step()
-    return loss, recon
+    return loss, max_norm(orig_recon)
 
 @readme
 class SparseAutoencoder(BaseExperimentRunner):
