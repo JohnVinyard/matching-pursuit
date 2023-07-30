@@ -1,13 +1,17 @@
 
+import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
 import zounds
 from config.experiment import Experiment
 from modules.activation import unit_sine
+from modules.decompose import fft_frequency_decompose
 from modules.fft import fft_convolve
+from modules.floodfill import flood_fill_loss
 from modules.linear import LinearOutputStack
 from modules.normalization import max_norm, unit_norm
+from modules.phase import AudioCodec, MelScale
 from modules.pos_encode import pos_encoded
 from modules.reverb import ReverbGenerator
 from modules.sparse import soft_dirac, sparsify
@@ -24,7 +28,8 @@ exp = Experiment(
     n_samples=2**15,
     weight_init=0.1,
     model_dim=128,
-    kernel_size=512)
+    kernel_size=512,
+    a_weighting=True)
 
 
 # total number of atoms
@@ -37,35 +42,6 @@ kernel_size = 1024
 n_atoms = 512
 
 
-min_window_size = 128
-max_window_size = 1024
-
-min_window = min_window_size / exp.n_samples
-max_window = max_window_size / exp.n_samples
-window_size = max_window - min_window
-
-
-
-# class Window(nn.Module):
-#     def __init__(self, n_samples, mn, mx, epsilon=1e-8):
-#         super().__init__()
-#         self.n_samples = n_samples
-
-#         self.mn = mn
-#         self.mx = mx
-#         self.scale = self.mx - self.mn
-
-#         self.epsilon = epsilon
-
-#     def forward(self, means, stds):
-#         dist = Normal(
-#             self.mn + (means * self.scale), # location
-#             self.epsilon + stds) # scale
-        
-#         rng = torch.linspace(0, 1, self.n_samples, device=means.device)[None, None, :]
-#         windows = torch.exp(dist.log_prob(rng))
-#         windows = max_norm(windows)
-#         return windows
 
 def training_softmax(x):
     """
@@ -90,6 +66,8 @@ class AudioAnalysis(nn.Module):
         x = self.net(x)
         return x
 
+
+
 class AudioSynthesis(nn.Module):
     def __init__(self, channels):
         super().__init__()
@@ -100,7 +78,8 @@ class AudioSynthesis(nn.Module):
         self.verb = ReverbGenerator(channels, 2, exp.samplerate, exp.n_samples, norm=nn.LayerNorm((channels)))
     
     def forward(self, x):
-        
+        batch, n_atoms, time = x.shape
+
         context = torch.sum(x, dim=-1)
         context = self.to_context(context)
 
@@ -190,19 +169,7 @@ class Bottleneck(nn.Module):
 
         # multiply mask by computed values
         return sm * x
-        x = sm
-
-        # summarize over all time and project
-        # proj = self.summary(summary)
-
-        # project each individual vector
-        # x = self.down(x)
-
-        # add together global and local projections
-        # x = x + proj[..., None]
-
-        # x = self.norm(x)
-        return x
+        
 
 class Model(nn.Module):
     def __init__(self, channels, encoding_channels):
@@ -220,40 +187,66 @@ class Model(nn.Module):
         x = self.analyze(x)
         x = self.encoder(x)
         x = self.bottleneck(x)
-        # x = self.decoder(x)
         x = self.synthesize(x)
         x = max_norm(x)
         return x
 
+def extract_windows(x, kernel, step):
+    kw, kh = kernel
+    sw, sh = step
+
+    x = x.unfold(-1, kw, sw)
+    x = x.unfold(1, kh, sh)
+
+    # win = torch.hamming_window(kw, device=x.device)[:, None] * torch.hamming_window(kh, device=x.device)[None, :]
+    # x = x * win[None, None, None, :, :]
+
+    x = x.reshape(*x.shape[:-2], np.product(x.shape[-2:]))
+    x = unit_norm(x, dim=-1)
+
+
+    return x
+
+def extract_feature(x):
+    x = exp.pooled_filter_bank(x)
+    return x
+
+
+def exp_loss(a, b):
+
+    atoms = unit_norm(model.synthesize.atoms[0])
+    atoms = atoms @ atoms.T
+    atoms = torch.triu(a)
+    ortho_loss = torch.abs(atoms).mean()
+    print('ortho', ortho_loss.item())
+
+    a = extract_feature(a)
+    b = extract_feature(b)
+    spec_loss = F.mse_loss(a, b)
+    return spec_loss + ortho_loss
 
 model = Model(512, d_size).to(device)
 optim = optimizer(model, lr=1e-3)
 
+
 def train(batch, i):
     batch_size = batch.shape[0]
 
-    orig = batch.clone()
 
     optim.zero_grad()
     recon = model.forward(batch)
     
-    # loss = 0
-    # for atom in range(n_atoms):
-    #     current_norm = torch.norm(orig, dim=-1)
-    #     orig = orig - recon[:, atom: atom + 1, :]
-    #     new_norm = torch.norm(orig, dim=-1)
-    #     diff = (new_norm - current_norm).mean()
-    #     loss = loss + (diff)
-            
-    loss = exp.perceptual_loss(recon, batch)
-    # loss = F.mse_loss(recon, batch)
+    
+    # loss = exp.perceptual_loss(recon, batch)
+    loss = exp_loss(recon, batch)
+    
 
     loss.backward()
     optim.step()
 
     recon = torch.sum(recon, dim=1, keepdim=True)
 
-    return loss, recon
+    return loss, max_norm(recon)
 
 @readme
 class NeuralMatchingPursuit(BaseExperimentRunner):

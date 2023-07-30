@@ -7,12 +7,11 @@
 # from .e_2023_3_30 import ScalarPositioning as Current
 # from .e_2023_3_30_B import BandFilteredImpulseResponse as Current
 
-# from .e_2023_6_7 import KeyPointLossToyExperiment as Current
 
 # from .e_2023_6_12 import PhaseInvariantFeatureInversion as Current
 
 # from .e_2023_6_20 import SchedulingExperiment as Current
-from .e_2023_6_27 import NoGridExperiment as Current
+# from .e_2023_6_27 import NoGridExperiment as Current
 
 """
 Can I learn a better model (with dense latent variable)
@@ -31,6 +30,9 @@ work after all?
 
 from .e_2023_7_25 import NeuralMatchingPursuit as Current
 
+
+
+# from .e_2023_7_29 import HierarchicalScheduling as Current
 
 """
 TODO Today

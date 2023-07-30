@@ -22,3 +22,8 @@ The first and most straightforward is as follows:
     2. Each channel is subtracted from the signal **sequentially**.  The algorithm seeks to maximize the reduction 
         in norm only in the selected location, and not globally
 
+Thinking more about it, there seem to be _two_ key characteristics:
+
+- local vs. global losses
+- the one-at-a-time matching pursuit update seems to encourage independence/orthogonality, 
+    i.e., not every atom "leaps" in the same direction at once.

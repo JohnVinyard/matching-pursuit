@@ -16,6 +16,7 @@ from modules.sparse import soft_dirac, sparsify_vectors
 from modules.transfer import ImpulseGenerator
 from train.experiment_runner import BaseExperimentRunner
 from train.optim import optimizer
+from upsample import ConvUpsample
 from util import device
 from util.readmedocs import readme
 
@@ -33,12 +34,8 @@ kernel_size = 2048
 sparse_coding_iterations = 32
 
 
-# atom_dict = torch.zeros(d_size, kernel_size, device=device).uniform_(-1, 1)
-# atom_dict = unit_norm(atom_dict)
-
 
 verb = ReverbGenerator(128, 3, samplerate=exp.samplerate, n_samples=exp.n_samples).to(device)
-
 
 
 
@@ -238,6 +235,8 @@ class Model(nn.Module):
 
         self.encoder = Encoder(self.channels, n_scheduling_frames, reduction=reduction)
 
+        self.to_atoms = ConvUpsample(1024, 128, 8, end_size=8192, mode='nearest', out_channels=1, batch_norm=True)
+
         
         self.amps = nn.Parameter(
             torch.zeros(sparse_coding_iterations, 1).uniform_(0, 1))
@@ -279,12 +278,23 @@ class Model(nn.Module):
             positions=None,
             atom_dict=None):
         
-        ad = d if atom_dict is None else atom_dict
-        sel = atom_softmax(atom_selection if atom_selection is not None else self.atom_selection)
-        atoms = (sel @ ad)
-        with_amp = atoms * (amps if amps is not None else self.amps)
-        with_amp = with_amp.view(-1, sparse_coding_iterations, kernel_size)
-        atoms = F.pad(with_amp, (0, exp.n_samples - kernel_size))
+        # ad = d if atom_dict is None else atom_dict
+        # sel = atom_softmax(atom_selection if atom_selection is not None else self.atom_selection)
+        # atoms = (sel @ ad)
+        # with_amp = atoms * (amps if amps is not None else self.amps)
+        # with_amp = with_amp.view(-1, sparse_coding_iterations, kernel_size)
+        # atoms = F.pad(with_amp, (0, exp.n_samples - kernel_size))
+
+        batch, n_events, channels = atom_selection.shape
+
+        atom_selection = atom_selection.view(-1, 1024)
+        atoms = self.to_atoms(atom_selection).view(batch, n_events, 8192)
+        print(atoms.shape)
+        atoms = unit_norm(atoms, dim=-1)
+        atoms = atoms * amps
+        atoms = F.pad(atoms, (0, exp.n_samples - 8192))
+        
+
 
         # env = self.noise(atom_selection)
 
@@ -344,32 +354,10 @@ model = Model(
 optim = optimizer(model, lr=1e-3)
 
 
-# def atom_comparison_loss(recon, target):
-#     """
-#     This learns a noisy, but precisely-timed reconstruction
-#     """
-#     events, scatter, t_res = sparse_code(
-#         target, 
-#         atom_dict, 
-#         n_steps=sparse_coding_iterations, 
-#         device=device, 
-#         flatten=True, 
-#         return_residual=True)
-    
-#     loss = 0
-#     for ai, j, p, a in events:
-#         start = p
-#         stop = min(exp.n_samples, p + 512)
-#         size = stop - start
-#         r = recon[j, :, start: start + size]
-#         at = a[:, :size]
-#         loss = loss + torch.abs(r - at).sum()
-#     return loss
 
 def exp_loss(a, b):
     p_loss = exp.perceptual_loss(a, b)
     return p_loss
-    # return atom_comparison_loss(a, b)
 
 def train(batch, i):
     optim.zero_grad()
@@ -384,17 +372,6 @@ class NoGridExperiment(BaseExperimentRunner):
         for i, item in enumerate(self.iter_items()):
             item = item.view(-1, 1, exp.n_samples)
 
-            # if i < 200:
-            #     with torch.no_grad():
-            #         coded, scatter = sparse_code(item, atom_dict, n_steps=sparse_coding_iterations, device=device, flatten=True)
-            #         rec = scatter(item.shape, coded)
-            #         self.real = rec
-
-            #         print(i, 'sparse coding...')
-            #         new_d = dictionary_learning_step(item, atom_dict, n_steps=sparse_coding_iterations, device=device)
-            #         atom_dict.data[:] = new_d
-                
-            # else:
             self.real = item
 
             
