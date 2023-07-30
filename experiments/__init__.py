@@ -11,7 +11,7 @@
 # from .e_2023_6_12 import PhaseInvariantFeatureInversion as Current
 
 # from .e_2023_6_20 import SchedulingExperiment as Current
-# from .e_2023_6_27 import NoGridExperiment as Current
+from .e_2023_6_27 import NoGridExperiment as Current
 
 """
 Can I learn a better model (with dense latent variable)
@@ -28,7 +28,8 @@ work after all?
 
 # from .e_2023_7_22 import SparseAutoencoder as Current
 
-from .e_2023_7_25 import NeuralMatchingPursuit as Current
+# TODO: Run overnight
+# from .e_2023_7_25 import NeuralMatchingPursuit as Current
 
 
 

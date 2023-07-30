@@ -32,6 +32,7 @@ d_size = 1024
 kernel_size = 2048
 
 sparse_coding_iterations = 32
+scalar_positioning = True
 
 
 
@@ -301,10 +302,13 @@ class Model(nn.Module):
         # atoms = self.res(env, atom_selection)
         # atoms = F.pad(atoms, (0, exp.n_samples - kernel_size)).view(-1, sparse_coding_iterations, exp.n_samples)
 
-        impulses = self.scheduler.forward(positions, schedule_softmax)
+        if scalar_positioning:
+            positions = positions.sum(dim=-1, keepdim=True)
+            final = fft_shift(atoms, positions)[..., :exp.n_samples]
+        else:
+            impulses = self.scheduler.forward(positions, schedule_softmax)
+            final = fft_convolve(impulses, atoms)
 
-
-        final = fft_convolve(impulses, atoms)
         final = torch.sum(final, dim=1, keepdim=True)
         return final
     
