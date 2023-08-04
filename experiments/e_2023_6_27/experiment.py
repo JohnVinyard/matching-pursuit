@@ -188,30 +188,6 @@ class Encoder(nn.Module):
 
 
 
-class MultibandAtoms(nn.Module):
-    def __init__(self, size, bands, n_atoms):
-        super().__init__()
-        self.size = size
-        self.bands = bands
-        self.n_atoms = n_atoms
-
-        bands = {}
-        start = int(np.log2(size))
-        for i in range(start, start - self.bands, -1):
-            size = 2 ** i
-            bands[str(size)] = nn.Parameter(torch.zeros(n_atoms, 1, size).normal_(0, 0.1))
-        
-        self.bands = nn.ParameterDict(bands)
-    
-    def forward(self):
-        d = {int(k): v for k, v in self.bands.items()}
-        atoms = fft_frequency_recompose(d, self.size)
-        window = torch.ones(self.size, device=atoms.device)
-        window[:10] = torch.linspace(0, 1, 10, device=atoms.device)
-        window[-10:] = torch.linspace(1, 0, 10, device=atoms.device)
-        atoms = atoms.view(self.n_atoms, self.size) * window[None, ...]
-        return unit_norm(atoms, dim=-1)
-
 class Model(nn.Module):
     def __init__(
             self, 
@@ -224,7 +200,6 @@ class Model(nn.Module):
         super().__init__()
 
         self.atoms = nn.Parameter(torch.zeros(d_size, kernel_size).uniform_(-1, 1))
-        # self.atoms = MultibandAtoms(kernel_size, 6, d_size)
 
         self.encode = encode
         self.training_softmax = training_softmax
@@ -279,21 +254,20 @@ class Model(nn.Module):
             positions=None,
             atom_dict=None):
         
-        # ad = d if atom_dict is None else atom_dict
-        # sel = atom_softmax(atom_selection if atom_selection is not None else self.atom_selection)
-        # atoms = (sel @ ad)
-        # with_amp = atoms * (amps if amps is not None else self.amps)
-        # with_amp = with_amp.view(-1, sparse_coding_iterations, kernel_size)
-        # atoms = F.pad(with_amp, (0, exp.n_samples - kernel_size))
+        ad = d if atom_dict is None else atom_dict
+        sel = atom_softmax(atom_selection if atom_selection is not None else self.atom_selection)
+        atoms = (sel @ ad)
+        with_amp = atoms * (amps if amps is not None else self.amps)
+        with_amp = with_amp.view(-1, sparse_coding_iterations, kernel_size)
+        atoms = F.pad(with_amp, (0, exp.n_samples - kernel_size))
 
         batch, n_events, channels = atom_selection.shape
 
-        atom_selection = atom_selection.view(-1, 1024)
-        atoms = self.to_atoms(atom_selection).view(batch, n_events, 8192)
-        print(atoms.shape)
-        atoms = unit_norm(atoms, dim=-1)
-        atoms = atoms * amps
-        atoms = F.pad(atoms, (0, exp.n_samples - 8192))
+        # atom_selection = atom_selection.view(-1, 1024)
+        # atoms = self.to_atoms(atom_selection).view(batch, n_events, 8192)
+        # atoms = unit_norm(atoms, dim=-1)
+        # atoms = atoms * amps
+        # atoms = F.pad(atoms, (0, exp.n_samples - 8192))
         
 
 
@@ -332,6 +306,7 @@ class Model(nn.Module):
         
         result = self.verb.forward(verb_params, result)
 
+        result = max_norm(result)
         
         return result
 
@@ -358,10 +333,33 @@ model = Model(
 optim = optimizer(model, lr=1e-3)
 
 
+def extract_windows(x, kernel, step):
+    kw, kh = kernel
+    sw, sh = step
+
+    x = x.unfold(-1, kw, sw)
+    x = x.unfold(1, kh, sh)
+
+    # win = torch.hamming_window(kw, device=x.device)[:, None] * torch.hamming_window(kh, device=x.device)[None, :]
+    # x = x * win[None, None, None, :, :]
+
+    x = x.reshape(*x.shape[:-2], np.product(x.shape[-2:]))
+    x = unit_norm(x, dim=-1)
+
+    return x
+
+def extract_feature(x):
+    x = exp.pooled_filter_bank(x)
+    x = extract_windows(x, (7, 7), (3, 3))
+    return x
+
 
 def exp_loss(a, b):
-    p_loss = exp.perceptual_loss(a, b)
-    return p_loss
+    a = extract_feature(a)
+    b = extract_feature(b)
+    spec_loss = F.mse_loss(a, b)
+    return spec_loss
+
 
 def train(batch, i):
     optim.zero_grad()

@@ -33,6 +33,7 @@ iterations = 512
 
 local_constrast_norm = True
 dict_learning_steps = 50
+approx = None
 
 
 atom_dict = torch.zeros(d_size, kernel_size, device=device).uniform_(-1, 1)
@@ -267,13 +268,14 @@ def train(batch, i):
                 n_steps=iterations, 
                 device=device, 
                 flatten=True, 
-                local_contrast_norm=local_constrast_norm)
+                local_contrast_norm=local_constrast_norm,
+                approx=approx)
     
         encoded = encode_events(events)
 
         if i < dict_learning_steps:
             # update sparse dictionary    
-            d = dictionary_learning_step(batch, atom_dict, n_steps=iterations, device=device)
+            d = dictionary_learning_step(batch, atom_dict, n_steps=iterations, device=device, approx=approx)
             atom_dict.data[:] = d
         
     

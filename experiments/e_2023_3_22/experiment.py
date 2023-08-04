@@ -29,6 +29,8 @@ latent_dim = 128
 steps = 32
 n_events = steps * 7 # encoding steps * number of bands
 
+print('N_EVENTS', n_events)
+
 
 class TransformerSetProcessor(nn.Module):
     def __init__(self, embedding_size, dim):
@@ -428,7 +430,7 @@ class MatchingPursuitGAN(BaseExperimentRunner):
             # l, f, e = train_ae(vec)
             # self.encoded = e
             # self.fake = f
-            # print(i, l.item())
+            print(i, l.item())
 
 
             self.after_training_iteration(l)
