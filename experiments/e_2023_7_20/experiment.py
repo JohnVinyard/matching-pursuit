@@ -163,9 +163,9 @@ def encode_events(events):
             j += 1
 
     
-    pos = encoded[:, :, d_size: d_size + 1]
-    pos = torch.diff(pos, n=1, dim=-1, prepend=torch.zeros(batch_size, iterations, 1, device=encoded.device))
-    encoded[:, :, d_size: d_size + 1] = pos
+    # pos = encoded[:, :, d_size: d_size + 1]
+    # pos = torch.diff(pos, n=1, dim=-1, prepend=torch.zeros(batch_size, iterations, 1, device=encoded.device))
+    # encoded[:, :, d_size: d_size + 1] = pos
     return encoded
 
 
@@ -175,7 +175,7 @@ def decode_events(events):
 
     atoms = events[:, :, :d_size]
     pos = events[:, :, d_size: d_size + 1]
-    pos = torch.cumsum(pos, dim=-1)
+    # pos = torch.cumsum(pos, dim=-1)
     pos = torch.clamp(pos, 0, 1)
 
     amp = events[:, :, d_size + 1: d_size + 2]

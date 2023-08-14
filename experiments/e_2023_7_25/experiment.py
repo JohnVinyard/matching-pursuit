@@ -4,6 +4,7 @@ from torch import nn
 from torch.nn import functional as F
 import zounds
 from config.experiment import Experiment
+from modules.fft import fft_convolve
 from modules.pos_encode import pos_encoded
 from modules.reverb import ReverbGenerator
 from modules.sparse import soft_dirac, sparsify
@@ -23,7 +24,8 @@ exp = Experiment(
 
 
 channels = 256
-encoding_channels = 2048
+encoding_channels = 512
+kernel_size = 512
 sparsity = 512
 
 
@@ -45,9 +47,9 @@ class AudioSynthesis(nn.Module):
         super().__init__()
         self.channels = channels
 
-        self.to_samples = nn.Conv1d(channels, 1, 25, 1, 12)
+        # self.to_samples = nn.Conv1d(channels, 1, 25, 1, 12)
 
-        # self.atoms = nn.Parameter(torch.zeros(1, d_size, kernel_size).uniform_(-1, 1))
+        self.atoms = nn.Parameter(torch.zeros(1, encoding_channels, kernel_size).uniform_(-1, 1))
 
         self.to_context = nn.Linear(channels, channels)
         self.verb = ReverbGenerator(channels, 2, exp.samplerate, exp.n_samples, norm=nn.LayerNorm((channels)))
@@ -55,20 +57,24 @@ class AudioSynthesis(nn.Module):
     def forward(self, x):
         batch, n_atoms, time = x.shape
 
-        context = torch.sum(x, dim=-1)
-        context = self.to_context(context)
+        # context = torch.sum(x, dim=-1)
+        # context = self.to_context(context)
 
         # atoms = unit_norm(self.atoms, dim=-1)
         # x = F.pad(x, (0, kernel_size))
         # x = F.conv1d(x, atoms)
         # x = x[..., :exp.n_samples]        
 
-        x = self.to_samples(x)
+        # x = self.to_samples(x)
         # x = F.pad(x, (0, 1))
         # x = exp.fb.transposed_convolve(x * 0.001)[..., :exp.n_samples]
 
 
-        x = self.verb.forward(context, x)
+        # x = self.verb.forward(context, x)
+
+        atoms = F.pad(self.atoms, (0, exp.n_samples - kernel_size))
+        x = fft_convolve(atoms, x)
+        print(x.shape)
         return x
 
 
@@ -128,16 +134,16 @@ class SparseBottleneck(nn.Module):
         sal = torch.softmax(sal.view(batch, -1), dim=-1).view(*sal.shape)
         sal = sparsify(sal, self.k_sparse)
         x = sig * sal
-
-
-        agg = F.avg_pool1d(x, 25, 1, 12)
-
-        x = self.down(x)
-        agg = self.agg(agg)
-
-        x = x + agg
-        x = self.norm(x) 
         return x
+
+        # agg = F.avg_pool1d(x, 25, 1, 12)
+
+        # x = self.down(x)
+        # agg = self.agg(agg)
+
+        # x = x + agg
+        # x = self.norm(x) 
+        # return x
         
 
 class Model(nn.Module):
@@ -156,7 +162,7 @@ class Model(nn.Module):
         x = self.analyze(x)
         x = self.encoder(x)
         x = self.bottleneck(x)
-        x = self.decoder(x)
+        # x = self.decoder(x)
         x = self.synthesize(x)
         return x
 
@@ -219,6 +225,21 @@ disc_optim = optimizer(disc, lr=1e-3)
 def train(batch, i):
     optim.zero_grad()
     disc_optim.zero_grad()
+
+    loss = 0
+    recon = model.forward(batch)
+    residual = batch.clone()
+
+    for i in range(sparsity):
+        start_norm = torch.norm(residual, dim=-1)
+        residual = residual - recon[:, i, :]
+        end_norm = torch.norm(residual, dim=-1)
+        diff = (start_norm - end_norm).mean()
+        loss = loss - diff
+
+    
+    loss.backward()
+    return loss, torch.sum(recon, dim=1, keepdim=True)
 
 
     if i % 2 == 0:

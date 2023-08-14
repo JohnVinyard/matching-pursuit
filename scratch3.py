@@ -1,30 +1,59 @@
 import torch
 
-from modules.sparse import to_key_points
 
-if __name__ == '__main__':
-    # n_bands = 512
-    # n_frames = 128
-    # n_samples = 2 ** 15
+def sparsify2(x: torch.Tensor, n_to_keep: int = 8):
+    """
+    input: (batch, channels, time)
 
-    # resolution = 16
+    outputs:
+        sparse:  (batch, channels, time)
+        packed:  (batch, n_to_keep, time)
+        one_hot: (batch, n_to_keep, channels)
+    
+        
+    - one_hot can be used to generate events
+    - packed can be used to convolve generated events with 
+      original activations
+    """
+    batch, channels, time = x.shape
+    # orig = x
 
-    # samplerate = zounds.SR22050()
-    # band = zounds.FrequencyBand(30, samplerate.nyquist)
-    # scale = zounds.MelScale(band, n_bands)
+    x = x.view(batch, -1)
+    values, indices = torch.topk(x, k=n_to_keep, dim=-1)
 
-    # tf = TransferFunction(
-    #     samplerate, scale, n_frames, resolution, n_samples)
+    ch = indices // time
+    t = indices % time
+
     
 
-    # x = torch.zeros(3, n_bands, resolution).normal_(0, 1)
-    # x = tf.forward(x)
-    # print(x.shape)
+    packed_range = torch.arange(0, n_to_keep, step=1)
+    packed_indices = (packed_range[None, :] * time) + t
+
+    context_indices = (packed_range[None, :] * channels) + ch
+
+    sparse = torch.zeros_like(x, device=x.device)
+    sparse = torch.scatter(sparse, dim=-1, index=indices, src=values)
+    sparse = sparse.view(batch, channels, time)
+
+    context = torch.zeros(batch, n_to_keep * channels, device=x.device)
+    context = torch.scatter(context, dim=-1, index=context_indices, src=values)
+    context = context.view(batch, n_to_keep, channels)
+    
+    packed = torch.zeros(batch, n_to_keep * time, device=x.device)
+    packed = torch.scatter(packed, dim=-1, index=packed_indices, src=values)
+    packed = packed.view(batch, n_to_keep, time)
+
+    return sparse, packed, context
 
 
 
-    # x = torch.zeros(8, 64, 128).normal_(0, 1)
+if __name__ == '__main__':
+    t = torch.zeros(2, 8, 4).uniform_(-1, 1)
+    s, p, c = sparsify2(t, n_to_keep=3)
+    print(s)
+    print(c.shape)
+    print(c)
 
-    x = torch.eye(8)[None, ...]
-    kp = to_key_points(x, n_to_keep=8)
-    print(kp[0])
+    # print(16 * 17)
+    # nz = (p > 0).sum()
+    # print(nz)

@@ -21,6 +21,51 @@ def soft_dirac(x: torch.Tensor, dim: int = -1) -> torch.Tensor:
     return y
 
 
+def sparsify2(x: torch.Tensor, n_to_keep: int = 8):
+    """
+    input: (batch, channels, time)
+
+    outputs:
+        sparse:  (batch, channels, time)
+        packed:  (batch, n_to_keep, time)
+        one_hot: (batch, n_to_keep, channels)
+    
+        
+    - one_hot can be used to generate events
+    - packed can be used to convolve generated events with 
+      original activations
+    """
+    batch, channels, time = x.shape
+    # orig = x
+
+    x = x.view(batch, -1)
+    values, indices = torch.topk(x, k=n_to_keep, dim=-1)
+
+    ch = indices // time
+    t = indices % time
+
+    
+
+    packed_range = torch.arange(0, n_to_keep, step=1, device=x.device)
+    packed_indices = (packed_range[None, :] * time) + t
+
+    context_indices = (packed_range[None, :] * channels) + ch
+
+    sparse = torch.zeros_like(x)
+    sparse = torch.scatter(sparse, dim=-1, index=indices, src=values)
+    sparse = sparse.view(batch, channels, time)
+
+    context = torch.zeros(batch, n_to_keep * channels, device=x.device)
+    context = torch.scatter(context, dim=-1, index=context_indices, src=values)
+    context = context.view(batch, n_to_keep, channels)
+    
+    packed = torch.zeros(batch, n_to_keep * time, device=x.device)
+    packed = torch.scatter(packed, dim=-1, index=packed_indices, src=values)
+    packed = packed.view(batch, n_to_keep, time)
+
+    return sparse, packed, context
+
+
 
 def sparsify(x, n_to_keep, return_indices=False, soft=False, sharpen=False, salience=None):
 
@@ -89,8 +134,7 @@ def to_sparse_vectors_with_context(x, n_elements):
         val = x[tuple(index)]
         one_hot[batch, el, index[1]] = val
 
-    context = torch.sum(x, dim=-1, keepdim=True).repeat(1,
-                                                        1, n_elements).permute(0, 2, 1)
+    context = torch.sum(x, dim=-1, keepdim=True).repeat(1, 1, n_elements).permute(0, 2, 1)
 
     return one_hot, context, positions
 
