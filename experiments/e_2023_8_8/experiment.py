@@ -9,7 +9,7 @@ from fft_basis import morlet_filter_bank
 from modules.ddsp import AudioModel
 from modules.decompose import fft_frequency_decompose, fft_frequency_recompose
 from modules.fft import fft_convolve
-from modules.normalization import max_norm
+from modules.normalization import max_norm, unit_norm
 from modules.pos_encode import ExpandUsingPosEncodings, pos_encoded
 from modules.sparse import sparsify, sparsify2
 from train.experiment_runner import BaseExperimentRunner
@@ -29,17 +29,13 @@ exp = Experiment(
 
 
 k_sparse = 128
-model_channels = 256
-encoding_channels = 1024
-
-event_latent = 32
-kernel_size = 2048
-kernel_frames = kernel_size // 256
+model_channels = 128
+encoding_channels = 512
+event_latent = 16
+kernel_size = 1024
 
 
-transformer_encoder = False
-# transformer_decoder = False
-# ddsp_samples = False
+transformer_encoder = True
 
 def sharpen(x):
     orig_shape = x.shape
@@ -124,11 +120,12 @@ class Contract(nn.Module):
         return self.conv(x)
 
 class SparseBottleneck(nn.Module):
-    def __init__(self, in_channels, hidden_channels, k_sparse):
+    def __init__(self, in_channels, hidden_channels, k_sparse, sparsify2 = False):
         super().__init__()
         self.in_channels = in_channels
         self.hidden_channels = hidden_channels
         self.k_sparse = k_sparse
+        self.sparsify2 = sparsify2
 
         self.up = nn.Conv1d(in_channels, hidden_channels, 1, 1, 0)
         self.salience = nn.Conv1d(in_channels, hidden_channels, 1, 1, 0)
@@ -144,10 +141,14 @@ class SparseBottleneck(nn.Module):
         sal = self.salience(x)
         # sal = sharpen(sal)
         sal = torch.softmax(sal.view(batch, -1), dim=-1).view(*sal.shape)
-        x = sig * sal
-        s, p, c = sparsify2(x, n_to_keep=self.k_sparse)
 
-        return s, p, c
+        if self.sparsify2:
+            x = sig * sal
+            s, p, c = sparsify2(x, n_to_keep=self.k_sparse)
+            return s, p, c
+        else:
+            s = sparsify(sal, n_to_keep=self.k_sparse)
+            return s * sig
 
     
 
@@ -198,35 +199,13 @@ class Generator(nn.Module):
         self.analysis = AudioAnalysis(channels)
         self.expand = Expand(channels)
 
-        # self.to_channels = nn.Conv1d(exp.n_bands, channels, 1, 1, 0)
-        # self.context = Stack(channels, [1, 3, 9, 27, 81, 1])
-
-        self.sparse = SparseBottleneck(channels, encoding_channels, k_sparse)
+        self.sparse = SparseBottleneck(
+            channels, encoding_channels, k_sparse, sparsify2=False)
         self.contract = Contract(encoding_channels, channels)
 
-        # if transformer_decoder:
-        #     self.context = Contextual(channels)
-        # else:
-        #     self.context = Stack(channels, [1, 3, 9, 1, 3, 9, 1])
-
-        # if ddsp_samples:
-        #     self.to_samples = AudioModel(
-        #         exp.n_samples, channels, exp.samplerate, 128, 512, batch_norm=True)
-        # else:
-        #     self.to_samples = ConvUpsample(
-        #         channels, 
-        #         channels, 
-        #         128, 
-        #         end_size=exp.n_samples, 
-        #         mode='nearest', 
-        #         out_channels=1, 
-        #         from_latent=False, 
-        #         batch_norm=True)
-        
-        
-        self.embed_vecs = nn.Linear(encoding_channels, latent_dim)
         self.embed_global = nn.Linear(encoding_channels, latent_dim)
 
+        self.latents = nn.Parameter(torch.zeros(encoding_channels, latent_dim).uniform_(-1, 1))
 
         self.to_dict = ConvUpsample(
             latent_dim,
@@ -237,33 +216,38 @@ class Generator(nn.Module):
             mode='nearest',
             batch_norm=True
         )
-        # self.apply(lambda x: exp.init_weights(x))
+        self.apply(lambda x: exp.init_weights(x))
         
     
     def forward(self, x):
+        batch = x.shape[0]
 
         x = self.analysis(x)
         x = self.expand(x)
-        s, p, c = self.sparse(x)
+        # s, p, c = self.sparse(x)
+        s = self.sparse(x)
 
-        agg = torch.sum(c, dim=1, keepdim=True)
+        agg = torch.sum(s, dim=-1)
 
-        # # TODO: what's the best way to combine global and local
-        # # state?
-        l = self.embed_vecs(c)
+
         g = self.embed_global(agg)
-        latent = l + g
-        latent = latent.view(-1, self.latent_dim)
 
-        # # TODO: What's the best audio generation strategy?
-        d = self.to_dict(latent)
-        d = d.view(-1, self.k_sparse, self.kernel_size)
-        d = F.pad(d, (0, exp.n_samples - self.kernel_size))
+        latents = self.latents[None, ...] + g[:, None, :]
+        latents = latents.view(batch, encoding_channels, self.latent_dim)
+        latents = latents.view(batch * encoding_channels, self.latent_dim)
 
 
-        x = fft_convolve(p, d)[..., :exp.n_samples]
-        x = torch.mean(x, dim=1, keepdim=True)
+
+        d = self.to_dict(latents)
+        d = d.view(batch, encoding_channels, kernel_size)
+        d = unit_norm(d, dim=-1)
+        d = F.pad(d, (0, exp.n_samples - kernel_size))
+
+        x = fft_convolve(s, d)[..., :exp.n_samples]
+        x = torch.sum(x, dim=1, keepdim=True)
+
         x = max_norm(x)
+
         return x
 
 
