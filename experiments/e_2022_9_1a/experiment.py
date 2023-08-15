@@ -108,6 +108,7 @@ class WavetableSynth(nn.Module):
         freq = torch.cumsum(freq, dim=-1)
 
         # TODO: What is all this nonsense?
+        # ANSWER: probably 20hz + a limited range
         freq = 0.0009070294784580499 + (torch.sigmoid(freq) * 0.2)
         freq = F.interpolate(freq, size=exp.n_samples, mode='linear')
         freq = torch.cumsum(freq, dim=-1) % 1
