@@ -35,7 +35,7 @@ event_latent = 16
 kernel_size = 1024
 
 
-transformer_encoder = True
+transformer_encoder = False
 
 def sharpen(x):
     orig_shape = x.shape

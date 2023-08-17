@@ -2,11 +2,11 @@ import numpy as np
 import torch
 from torch.distributions import Normal
 from torch import nn
-from modules.ddsp import overlap_add
 from modules.fft import fft_convolve
 from modules.normalization import max_norm
 from upsample import ConvUpsample
 from torch.nn import functional as F
+from modules.overlap_add import overlap_add
 
 
 class PhysicalSimulation(nn.Module):
@@ -38,6 +38,8 @@ class Window(nn.Module):
         dist = Normal(self.mn + (means * self.scale), self.epsilon + stds)
         rng = torch.linspace(0, 1, self.n_samples, device=means.device)[
             None, None, :]
+        
+        print(means.shape, stds.shape, rng.shape)
         windows = torch.exp(dist.log_prob(rng))
         windows = max_norm(windows)
         return windows

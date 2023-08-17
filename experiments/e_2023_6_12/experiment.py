@@ -6,6 +6,7 @@ from torch import nn
 from torch.nn import functional as F
 import zounds
 from config.experiment import Experiment
+from modules.ddsp import AudioModel
 from modules.linear import LinearOutputStack
 from modules.matchingpursuit import sparse_code
 from modules.normalization import max_norm, unit_norm
@@ -219,30 +220,32 @@ class Model(nn.Module):
 
         channels = 1024
 
-        self.up = nn.Sequential(
+        # self.up = nn.Sequential(
 
-            nn.Conv1d(1024, 512, 7, 1, 3),
-            nn.BatchNorm1d(512),
-            nn.LeakyReLU(0.2),
-            UpsampleBlock(512),
+        #     nn.Conv1d(1024, 512, 7, 1, 3),
+        #     nn.BatchNorm1d(512),
+        #     nn.LeakyReLU(0.2),
+        #     UpsampleBlock(512),
 
-            nn.Conv1d(512, 256, 7, 1, 3),
-            nn.BatchNorm1d(256),
-            nn.LeakyReLU(0.2),
-            UpsampleBlock(256),
+        #     nn.Conv1d(512, 256, 7, 1, 3),
+        #     nn.BatchNorm1d(256),
+        #     nn.LeakyReLU(0.2),
+        #     UpsampleBlock(256),
 
-            nn.Conv1d(256, 128, 7, 1, 3),
-            nn.BatchNorm1d(128),
-            nn.LeakyReLU(0.2),
-            UpsampleBlock(128),
+        #     nn.Conv1d(256, 128, 7, 1, 3),
+        #     nn.BatchNorm1d(128),
+        #     nn.LeakyReLU(0.2),
+        #     UpsampleBlock(128),
 
-            nn.Conv1d(128, 64, 7, 1, 3),
-            nn.BatchNorm1d(64),
-            nn.LeakyReLU(0.2),
-            UpsampleBlock(64),
+        #     nn.Conv1d(128, 64, 7, 1, 3),
+        #     nn.BatchNorm1d(64),
+        #     nn.LeakyReLU(0.2),
+        #     UpsampleBlock(64),
 
-            nn.Conv1d(64, 1, 7, 1, 3),
-        )        
+        #     nn.Conv1d(64, 1, 7, 1, 3),
+        # )
+
+        self.up = AudioModel(exp.n_samples, 1024, exp.samplerate, 128, 512, batch_norm=True)        
 
 
         self.norm = nn.LayerNorm((1024, 128))
@@ -284,7 +287,8 @@ class Model(nn.Module):
             salience = salience.reshape(batch, -1)
             salience = torch.softmax(salience, dim=-1)
             salience = salience.reshape(batch, 1024, -1)
-            x = sparsify(x, n_to_keep=32, salience=salience)
+            x = sparsify(x, n_to_keep=64)
+            x = x * salience
             x = self.context(x)
         
         return x
@@ -311,7 +315,7 @@ class Model(nn.Module):
 
         x = self.generate(encoded)
 
-        x = self.verb.forward(ctx, x)
+        # x = self.verb.forward(ctx, x)
         return x
 
 model = Model().to(device)
@@ -325,33 +329,43 @@ def train(batch, i):
     disc_optim.zero_grad()
 
     with torch.no_grad():
-        batch = exp.perceptual_feature(batch)
+        feat = exp.perceptual_feature(batch)
 
-    if i % 2 == 0:
-        print('G')
-        recon = model.forward(batch, i)
-        j, features = disc.forward(exp.perceptual_feature(recon), i)
-        rj, rf = disc.forward(batch, i)
-        g_loss = torch.abs(1 - j).mean()
-        feat_loss = 0
-        for a, b, in zip(features, rf):
-            feat_loss = feat_loss + F.mse_loss(a, b)
+    recon = model.forward(feat, i)
+
+    r = exp.perceptual_feature(recon)
+    loss = F.mse_loss(r, feat)
+    loss.backward()
+    optim.step()
+
+    # with torch.no_grad():
+    #     batch = exp.perceptual_feature(batch)
+
+    # if i % 2 == 0:
+    #     print('G')
+    #     recon = model.forward(batch, i)
+    #     j, features = disc.forward(exp.perceptual_feature(recon), i)
+    #     rj, rf = disc.forward(batch, i)
+    #     g_loss = torch.abs(1 - j).mean()
+    #     feat_loss = 0
+    #     for a, b, in zip(features, rf):
+    #         feat_loss = feat_loss + F.mse_loss(a, b)
         
-        loss = g_loss + feat_loss
-        loss.backward()
-        optim.step()
+    #     loss = g_loss + feat_loss
+    #     loss.backward()
+    #     optim.step()
 
-    else:
-        with torch.no_grad():
-            recon = model.forward(batch, i)
-            recon_spec = exp.perceptual_feature(recon)
+    # else:
+    #     with torch.no_grad():
+    #         recon = model.forward(batch, i)
+    #         recon_spec = exp.perceptual_feature(recon)
 
-        fj, features = disc.forward(recon_spec, i)
-        rj, rf = disc.forward(batch, i)
-        loss = torch.abs(0 - fj).mean() + torch.abs(1 - rj).mean()
-        loss.backward()
-        disc_optim.step()
-        print('D', fj.view(-1)[0].item(), rj.view(-1)[0].item())
+    #     fj, features = disc.forward(recon_spec, i)
+    #     rj, rf = disc.forward(batch, i)
+    #     loss = torch.abs(0 - fj).mean() + torch.abs(1 - rj).mean()
+    #     loss.backward()
+    #     disc_optim.step()
+    #     print('D', fj.view(-1)[0].item(), rj.view(-1)[0].item())
 
 
 

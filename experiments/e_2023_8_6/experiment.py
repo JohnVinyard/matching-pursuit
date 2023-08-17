@@ -24,7 +24,7 @@ exp = Experiment(
     kernel_size=512)
 
 
-n_events = 32
+n_events = 64
 
     
 
@@ -91,7 +91,7 @@ class Generator(nn.Module):
         self.proj = nn.Linear(channels, channels)
         self.attn = nn.Linear(channels, 1)
 
-        self.atoms = nn.Parameter(torch.zeros(2048, 8192).uniform_(-0.01, 0.01))
+        self.atoms = nn.Parameter(torch.zeros(2048, 2048).uniform_(-0.01, 0.01))
 
         self.to_amp = LinearOutputStack(
             channels, 3, out_channels=1, norm=nn.LayerNorm((n_events, channels)))
@@ -107,8 +107,8 @@ class Generator(nn.Module):
 
     @property
     def normalized_atoms(self):
-        # return unit_norm(self.atoms)
-        return self.atoms
+        return unit_norm(self.atoms)
+        # return self.atoms
     
 
     def forward(self, x):
@@ -144,9 +144,11 @@ class Generator(nn.Module):
         atoms = F.pad(atoms, (0, exp.n_samples - 8192)) * amps
         shifted = fft_shift(atoms, pos)[..., :exp.n_samples]
 
-        x = torch.sum(shifted, dim=1, keepdim=True)
+        x = shifted
+        # x = torch.sum(shifted, dim=1, keepdim=True)
 
         x = self.verb.forward(context, x)
+
 
         return x
 
@@ -212,10 +214,22 @@ def train(batch, i):
 
 
     recon = gen.forward(batch)
-    loss = exp.perceptual_loss(recon, batch)
+
+    loss = 0
+    residual = batch.clone()
+    for i in range(n_events):
+        start_norm = torch.norm(residual, dim=-1)
+        residual = residual - recon[:, i: i + 1, :]
+        end_norm = torch.norm(residual, dim=-1)
+        # maximize the change in norm for each atom individually
+        diff = (start_norm - end_norm).sum()
+        loss = loss - diff
+
+    # loss = exp.perceptual_loss(recon, batch)
+
     loss.backward()
     g_optim.step()
-    return loss, recon
+    return loss, torch.sum(recon, dim=1, keepdim=True)
 
 
 

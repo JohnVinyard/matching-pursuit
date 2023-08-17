@@ -5,7 +5,9 @@ import numpy as np
 from scipy.signal import hann
 from config.dotenv import Config
 from modules.linear import LinearOutputStack
+from modules.physical import Window
 from modules.reverb import NeuralReverb
+from modules.overlap_add import overlap_add
 
 from upsample import FFTUpsampleBlock
 
@@ -99,60 +101,6 @@ def noise_bank2(x):
     return audio
 
 
-def _torch_overlap_add(x, apply_window=True, flip=False):
-    batch, channels, frames, samples = x.shape
-
-    if apply_window:
-        window = torch.from_numpy(hann(samples, False)).to(x.device).float()
-        # window = torch.hamming_window(samples, periodic=False).to(x.device)
-        # window = torch.hann_window(samples, periodic=False).to(x.device)
-        x = x * window[None, None, None, :]
-
-    hop_size = samples // 2
-    first_half = x[:, :, :, :hop_size].contiguous().view(batch, channels, -1)
-    second_half = x[:, :, :, hop_size:].contiguous().view(batch, channels, -1)
-    first_half = F.pad(first_half, (0, hop_size))
-    second_half = F.pad(second_half, (hop_size, 0))
-
-    if flip:
-        first_half = first_half[:, :, ::-1]
-
-    output = first_half + second_half
-    return output
-
-
-def _np_overlap_add(x, apply_window=True, flip=False):
-    batch, channels, frames, samples = x.shape
-
-    if apply_window:
-        window = hann(samples)
-        x = x * window[None, None, None, :]
-
-    hop_size = samples // 2
-    first_half = x[:, :, :, :hop_size].reshape((batch, channels, -1))
-    second_half = x[:, :, :, hop_size:].reshape((batch, channels, -1))
-
-    first_half = np.pad(first_half, [(0, 0), (0, 0), (0, hop_size)])
-    second_half = np.pad(second_half, [(0, 0), (0, 0), (hop_size, 0)])
-
-    if flip:
-        first_half = first_half[:, :, ::-1]
-
-    output = first_half + second_half
-    return output
-
-
-def overlap_add(x, apply_window=True, flip=False, trim=None):
-
-    if isinstance(x, np.ndarray):
-        result = _np_overlap_add(x, apply_window, flip)
-    else:
-        result = _torch_overlap_add(x, apply_window, flip)
-    
-    if trim is not None:
-        result = result[..., :trim]
-    
-    return result
 
 
 class DDSP(nn.Module):
@@ -249,7 +197,9 @@ class OscillatorBank(nn.Module):
             amp_activation=None,
             return_params=False,
             lowest_freq=0.01,
-            complex_valued=False):
+            complex_valued=False,
+            use_wavetable=False,
+            wavetable_size=1024):
 
         super().__init__()
         self.n_osc = n_osc
@@ -275,6 +225,14 @@ class OscillatorBank(nn.Module):
 
         self.amp = nn.Conv1d(input_channels, self.n_osc, 1, 1, 0)
         self.freq = nn.Conv1d(input_channels, self.n_osc, 1, 1, 0)
+
+        self.use_wavetable = use_wavetable
+        self.wavetable_size = wavetable_size
+
+        if use_wavetable:
+            table = torch.sin(torch.linspace(-np.pi, np.pi, wavetable_size))[None, :]
+            self.register_buffer('table', table)
+            self.win = Window(wavetable_size, 0, 1)
 
 
     def forward(self, x, add_noise=False):
@@ -309,10 +267,31 @@ class OscillatorBank(nn.Module):
 
         amp = F.interpolate(amp, size=self.n_audio_samples, mode='linear')
         freq = F.interpolate(freq, size=self.n_audio_samples, mode='linear')
+        cum_freq = torch.cumsum(freq * np.pi, dim=-1)
 
-        
-        x = torch.sin(torch.cumsum(freq * np.pi, dim=-1)) * amp
+        if not self.use_wavetable:        
+            x = torch.sin(cum_freq) * amp
+        else:
+            pos = cum_freq % 1
+            std = torch.zeros_like(pos).fill_(0.01)
+            
+            print(pos.shape, std.shape)
+
+            sampling_kernels = self.win.forward(
+                pos.permute(2, 1, 0), 
+                std.permute(2, 1, 0)
+                )
+
+            print(sampling_kernels.shape)
+            sig = sampling_kernels @ self.table.T
+            print(sig.shape)
+            sig = sig.permute(0, 2, 1)
+            print(sig.shape)
+
+            sig = sig.view(batch_size, -1, self.n_audio_samples)
+
         x = torch.mean(x, dim=1, keepdim=True)
+
         if self.return_params:
             return x, freq_params, amp_params
         else:
@@ -543,7 +522,16 @@ class HarmonicModel(nn.Module):
 
 
 class AudioModel(nn.Module):
-    def __init__(self, n_samples, model_dim, samplerate, n_frames, n_noise_frames, batch_norm=False):
+    def __init__(
+            self, 
+            n_samples, 
+            model_dim, 
+            samplerate, 
+            n_frames, 
+            n_noise_frames, 
+            batch_norm=False, 
+            use_wavetable=False):
+    
         super().__init__()
         self.n_samples = n_samples
         self.model_dim = model_dim
@@ -556,7 +544,8 @@ class AudioModel(nn.Module):
             constrain=True, 
             lowest_freq=40 / samplerate.nyquist,
             amp_activation=lambda x: x ** 2,
-            complex_valued=False)
+            complex_valued=False,
+            use_wavetable=use_wavetable)
         
         self.noise = NoiseModel(
             model_dim,
@@ -586,6 +575,7 @@ class AudioModel(nn.Module):
         harm = self.osc.forward(x)
         noise = self.noise.forward(x)
 
+        
         dry = harm + noise
         wet = self.verb(dry, room)
         signal = (dry * mix) + (wet * (1 - mix))

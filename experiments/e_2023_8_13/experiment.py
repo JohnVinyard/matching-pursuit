@@ -7,6 +7,7 @@ import zounds
 from config.experiment import Experiment
 from modules.decompose import fft_frequency_decompose
 from modules.normalization import max_norm
+from modules.sparse import soft_dirac
 from modules.stft import stft
 from train.experiment_runner import BaseExperimentRunner
 from train.optim import optimizer
@@ -193,8 +194,9 @@ def exp_loss(recon, target):
     # recon = stft(recon, 512, 256, pad=True)
     # target = stft(target, 512, 256, pad=True)
 
-    # recon = torch.abs(torch.fft.rfft(recon, dim=-1, norm='ortho'))
-    # target = torch.abs(torch.fft.rfft(target, dim=-1, norm='ortho'))
+    # recon = torch.abs(torch.fft.rfft(recon, dim=-1, norm='ortho')).view(-1)
+    # target = torch.abs(torch.fft.rfft(target, dim=-1, norm='ortho')).view(-1)
+
     # loss = F.mse_loss(recon, target)
 
     loss = exp.perceptual_loss(recon, target)
