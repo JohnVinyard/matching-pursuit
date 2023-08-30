@@ -11,21 +11,43 @@ from pathlib import Path
 from conjure import time_series_conjure, audio_conjure, numpy_conjure, SupportedContentType
 
 
+# TODO: the following two functions should be collapsed into one
 def build_target_value_conjure_funcs(experiment):
+
 
     @audio_conjure(experiment.collection)
     def orig_audio(data: torch.Tensor):
         samples = playable(data, experiment.exp.samplerate)
         bio = samples.encode()
         return bio.read()
+    
 
     @numpy_conjure(experiment.collection, content_type=SupportedContentType.Spectrogram.value)
     def orig_spec(data: torch.Tensor):
         samples = playable(data, experiment.exp.samplerate)
         x = np.abs(zounds.spectral.stft(samples))
         return (x / (x.max() + 1e-12))
-
+    
     return orig_audio, orig_spec
+
+
+def build_recon_value_conjure_funcs(experiment):
+
+    @audio_conjure(experiment.collection)
+    def fake_audio(data: torch.Tensor):
+        samples = playable(data, experiment.exp.samplerate)
+        bio = samples.encode()
+        return bio.read()
+    
+
+    @numpy_conjure(experiment.collection, content_type=SupportedContentType.Spectrogram.value)
+    def fake_spec(data: torch.Tensor):
+        samples = playable(data, experiment.exp.samplerate)
+        x = np.abs(zounds.spectral.stft(samples))
+        return (x / (x.max() + 1e-12))
+    
+    return fake_audio, fake_spec
+
 
 
 class MonitoredValueDescriptor(object):
@@ -40,8 +62,6 @@ class MonitoredValueDescriptor(object):
     def __set_name__(self, owner, name):
         self.name = name
 
-    # def __get__(self, obj, t=None):
-    #     return self
 
     def __set__(self, obj, value):
         funcs = self.build_conjure_funcs(obj)
@@ -55,15 +75,13 @@ class MonitoredValueDescriptor(object):
 class BaseExperimentRunner(object):
 
     real = MonitoredValueDescriptor(build_target_value_conjure_funcs)
+    fake = MonitoredValueDescriptor(build_recon_value_conjure_funcs)
 
     def __init__(self, stream, train, exp: Experiment, port: Union[str, int] = None):
         super().__init__()
         self.stream = stream
         self.exp = exp
 
-        # self.real = None
-
-        self.fake = None
         self.train = train
 
         if port is not None:
@@ -71,19 +89,10 @@ class BaseExperimentRunner(object):
             self.collection = LmdbCollection(
                 str(self.experiment_path).encode(), port=self.port)
         self.loss_func = None
-
-        # self._orig_audio = None
-        # self._orig_spec = None
-
-        self._fake_audio = None
-        self._fake_spec = None
+        
 
     def after_training_iteration(self, l):
         self.loss_func(l)
-        # self._orig_audio(self.orig())
-        # self._orig_spec(self.real_spec())
-        self._fake_audio(self.listen())
-        self._fake_spec(self.fake_spec())
 
     @property
     def batch_size(self):
@@ -109,35 +118,11 @@ class BaseExperimentRunner(object):
                 [d['values'], l.data.cpu().numpy().reshape((1,))], axis=-1)
             return d['values'].reshape((1, -1))
 
-        # @audio_conjure(self.collection)
-        # def orig_audio(x: zounds.AudioSamples):
-        #     bio = x.encode()
-        #     return bio.read()
-
-        # @numpy_conjure(self.collection, content_type=SupportedContentType.Spectrogram.value,)
-        # def orig_spec(x: np.ndarray):
-        #     return (x / (x.max() + 1e-12))
-
-        @audio_conjure(self.collection)
-        def fake_audio(x: zounds.AudioSamples):
-            bio = x.encode()
-            return bio.read()
-
-        @numpy_conjure(self.collection, content_type=SupportedContentType.Spectrogram.value)
-        def fake_spec(x: np.ndarray):
-            return (x / (x.max() + 1e-12))
-
+        
         self.loss_func = loss_func
-        # self._orig_audio = orig_audio
-        # self._orig_spec = orig_spec
-        self._fake_audio = fake_audio
-        self._fake_spec = fake_spec
+        
 
         funcs = []
-
-        # print('===========================')
-        # print(dir(self))
-        # print(dir(self.__class__))
 
         for key in dir(self.__class__):
             item = getattr(self.__class__, key)
@@ -145,15 +130,8 @@ class BaseExperimentRunner(object):
                 others = item.get_conjure_funcs(self)
                 funcs.extend(others)
 
-        funcs.extend([loss_func, fake_audio, fake_spec])
-
-        # funcs = [
-        #     loss_func,
-        #     # orig_audio,
-        #     # orig_spec,
-        #     fake_audio,
-        #     fake_spec
-        # ]
+        funcs.extend([loss_func])
+        
 
         return funcs
 
@@ -164,18 +142,6 @@ class BaseExperimentRunner(object):
     @property
     def experiment_path(self):
         return Path('experiments') / Path(self.experiment_dir_name) / Path('experiment_data')
-
-    # def orig(self) -> zounds.AudioSamples:
-    #     return playable(self.real, self.exp.samplerate)
-
-    # def real_spec(self) -> np.ndarray:
-    #     return np.abs(zounds.spectral.stft(self.orig()))
-
-    def listen(self) -> zounds.AudioSamples:
-        return playable(self.fake, self.exp.samplerate)
-
-    def fake_spec(self) -> np.ndarray:
-        return np.abs(zounds.spectral.stft(self.listen()))
 
     def iter_items(self):
         for i, item in enumerate(self.stream):
