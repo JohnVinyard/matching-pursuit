@@ -2,6 +2,8 @@ from torch import exp, nn
 import torch
 from torch.nn import functional as F
 
+from modules.normalization import unit_norm
+
 
 
 
@@ -23,7 +25,8 @@ class AuditoryImage(nn.Module):
             causal=False,
             exp_decay=False,
             residual=False,
-            twod=False):
+            twod=False,
+            norm_periodicities=False):
 
         super().__init__()
         self.window_size = window_size
@@ -39,6 +42,7 @@ class AuditoryImage(nn.Module):
         self.exp_decay = exp_decay
         self.residual = residual
         self.twod = twod
+        self.norm_periodicities = norm_periodicities
 
     def forward(self, x):
         batch, channels, time = x.shape
@@ -76,6 +80,9 @@ class AuditoryImage(nn.Module):
             x = torch.abs(x)
 
         
+        if self.norm_periodicities:
+            x = unit_norm(x, dim=-1)
+
         return x
 
 

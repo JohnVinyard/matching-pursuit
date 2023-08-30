@@ -36,3 +36,4 @@ from .matchingpursuit import \
 from .pointcloud import encode_events, decode_events, extract_graph_edges, CanonicalOrdering
 from .activation import unit_sine
 from .floodfill import flood_fill_loss
+from .hypernetwork import HyperNetworkLayer

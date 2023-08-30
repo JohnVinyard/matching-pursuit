@@ -25,7 +25,7 @@ class PhysicalSimulation(nn.Module):
 
 
 class Window(nn.Module):
-    def __init__(self, n_samples, mn, mx, epsilon=1e-8, padding=0):
+    def __init__(self, n_samples, mn, mx, epsilon=1e-8, padding=0, range_shape=None):
         super().__init__()
         self.n_samples = n_samples
         self.mn = mn
@@ -33,13 +33,16 @@ class Window(nn.Module):
         self.scale = self.mx - self.mn
         self.epsilon = epsilon
         self.padding = padding
+        self.range_shape = range_shape
 
     def forward(self, means, stds):
         dist = Normal(self.mn + (means * self.scale), self.epsilon + stds)
-        rng = torch.linspace(0, 1, self.n_samples, device=means.device)[
-            None, None, :]
+        if self.range_shape is not None:
+            rng = torch.linspace(0, 1, self.n_samples, device=means.device).view(*self.range_shape)
+        else:
+            rng = torch.linspace(0, 1, self.n_samples, device=means.device)[
+                None, None, :]
         
-        print(means.shape, stds.shape, rng.shape)
         windows = torch.exp(dist.log_prob(rng))
         windows = max_norm(windows)
         return windows

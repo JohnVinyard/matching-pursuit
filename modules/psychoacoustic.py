@@ -138,6 +138,14 @@ class PsychoacousticFeature(nn.Module):
             bands[size] = combined
 
         return bands
+    
+    def loss(self, a, b):
+        a = self.compute_feature_dict(a)
+        b = self.compute_feature_dict(b)
+        loss = 0
+        for key in a.keys():
+            loss = loss + F.mse_loss(a[key], b[key])
+        return loss
 
     def compute_feature_dict(self, x, constant_window_size=None, time_steps=32):
 

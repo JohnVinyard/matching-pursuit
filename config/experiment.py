@@ -1,4 +1,5 @@
 import zounds
+from modules.normalization import unit_norm
 from modules.psychoacoustic import PsychoacousticFeature
 # from modules.pif import AuditoryImage
 # from modules.psychoacoustic import PsychoacousticFeature
@@ -21,7 +22,9 @@ class Experiment(object):
         kernel_size=512, 
         residual_loss=False,
         a_weighting=False,
-        scaling_factor=0.1):
+        scaling_factor=0.1,
+        windowed_pif=False,
+        norm_periodicities=False):
 
         super().__init__()
         self.samplerate = samplerate
@@ -53,9 +56,10 @@ class Experiment(object):
         self.aim = AuditoryImage(
             512, 
             128, 
-            do_windowing=False, 
+            do_windowing=windowed_pif, 
             check_cola=False, 
-            residual=self.residual_loss).to(device)
+            residual=self.residual_loss,
+            norm_periodicities=norm_periodicities).to(device)
     
     def pooled_filter_bank(self, x):
         orig_shape = x.shape[-1]
@@ -63,6 +67,25 @@ class Experiment(object):
         x = self.fb.temporal_pooling(x, 512, 256)
         x = x[..., :orig_shape // 256]
         return x
+    
+    def perceptual_triune(self, x):
+        batch = x.shape[0]
+
+        x = self.fb.forward(x, normalize=False)
+
+        pooled = self.fb.temporal_pooling(x, 512, 256)
+
+        place_encoding = unit_norm(pooled, dim=1)
+
+        pe = pooled[:, None, :, :]
+        pe = F.avg_pool2d(pe, (8, 1), (8, 1))
+        pe = pe.view(batch, -1, pooled.shape[-1])
+        pop_encoding = pe
+
+        x = self.aim.forward(x)
+        spike_timing = unit_norm(x, dim=-1)
+
+        return place_encoding, pop_encoding, spike_timing
 
     def perceptual_feature(self, x):
         # bands = self.pif.compute_feature_dict(x)

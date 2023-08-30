@@ -1,6 +1,8 @@
 # from .e_2023_3_22 import MatchingPursuitGAN as Current
 # from .e_2023_3_30_B import BandFilteredImpulseResponse as Current
-from .e_2023_6_12 import PhaseInvariantFeatureInversion as Current
+
+# from .e_2023_6_12 import PhaseInvariantFeatureInversion as Current
+
 # from .e_2023_6_27 import NoGridExperiment as Current
 # from .e_2023_7_20 import MatchingPursuitPlayground as Current
 
@@ -42,6 +44,8 @@ from .e_2023_6_12 import PhaseInvariantFeatureInversion as Current
 # from .e_2023_8_8 import SparseStreamingCodec as Current
 
 # from .e_2023_8_13 import F0Optim as Current
+
+from .e_2023_8_25 import HyperNerf as Current
 
 """
 

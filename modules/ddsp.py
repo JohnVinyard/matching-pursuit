@@ -232,7 +232,7 @@ class OscillatorBank(nn.Module):
         if use_wavetable:
             table = torch.sin(torch.linspace(-np.pi, np.pi, wavetable_size))[None, :]
             self.register_buffer('table', table)
-            self.win = Window(wavetable_size, 0, 1)
+            self.win = Window(wavetable_size, 0, 1, range_shape=(1, 1, 1, wavetable_size))
 
 
     def forward(self, x, add_noise=False):
@@ -275,16 +275,11 @@ class OscillatorBank(nn.Module):
             pos = cum_freq % 1
             std = torch.zeros_like(pos).fill_(0.01)
             
-            print(pos.shape, std.shape)
+            sampling_kernels = self.win.forward(pos[..., None], std[..., None])
 
-            sampling_kernels = self.win.forward(
-                pos.permute(2, 1, 0), 
-                std.permute(2, 1, 0)
-                )
-
-            print(sampling_kernels.shape)
+            print('KERNELS', sampling_kernels.shape)
             sig = sampling_kernels @ self.table.T
-            print(sig.shape)
+            print('SIG', sig.shape)
             sig = sig.permute(0, 2, 1)
             print(sig.shape)
 
@@ -530,7 +525,8 @@ class AudioModel(nn.Module):
             n_frames, 
             n_noise_frames, 
             batch_norm=False, 
-            use_wavetable=False):
+            use_wavetable=False,
+            complex_valued_osc=False):
     
         super().__init__()
         self.n_samples = n_samples
@@ -541,10 +537,10 @@ class AudioModel(nn.Module):
             model_dim, 
             model_dim, 
             n_samples, 
-            constrain=True, 
+            constrain=not use_wavetable, 
             lowest_freq=40 / samplerate.nyquist,
             amp_activation=lambda x: x ** 2,
-            complex_valued=False,
+            complex_valued=complex_valued_osc,
             use_wavetable=use_wavetable)
         
         self.noise = NoiseModel(
