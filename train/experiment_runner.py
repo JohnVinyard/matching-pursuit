@@ -11,43 +11,34 @@ from pathlib import Path
 from conjure import time_series_conjure, audio_conjure, numpy_conjure, SupportedContentType
 
 
-# TODO: the following two functions should be collapsed into one
-def build_target_value_conjure_funcs(experiment):
+def build_funcs(prefix):
 
+    def build_target_value_conjure_funcs(experiment):
 
-    @audio_conjure(experiment.collection)
-    def orig_audio(data: torch.Tensor):
-        samples = playable(data, experiment.exp.samplerate)
-        bio = samples.encode()
-        return bio.read()
+        @audio_conjure(
+                experiment.collection, 
+                identifier=f'{prefix}audio'
+        )
+        def audio(data: torch.Tensor):
+            samples = playable(data, experiment.exp.samplerate)
+            bio = samples.encode()
+            return bio.read()
+        
+
+        @numpy_conjure(
+                experiment.collection, 
+                content_type=SupportedContentType.Spectrogram.value, 
+                identifier=f'{prefix}spec'
+        )
+        def spec(data: torch.Tensor):
+            samples = playable(data, experiment.exp.samplerate)
+            x = np.abs(zounds.spectral.stft(samples))
+            return (x / (x.max() + 1e-12))
+        
+        
+        return audio, spec
     
-
-    @numpy_conjure(experiment.collection, content_type=SupportedContentType.Spectrogram.value)
-    def orig_spec(data: torch.Tensor):
-        samples = playable(data, experiment.exp.samplerate)
-        x = np.abs(zounds.spectral.stft(samples))
-        return (x / (x.max() + 1e-12))
-    
-    return orig_audio, orig_spec
-
-
-def build_recon_value_conjure_funcs(experiment):
-
-    @audio_conjure(experiment.collection)
-    def fake_audio(data: torch.Tensor):
-        samples = playable(data, experiment.exp.samplerate)
-        bio = samples.encode()
-        return bio.read()
-    
-
-    @numpy_conjure(experiment.collection, content_type=SupportedContentType.Spectrogram.value)
-    def fake_spec(data: torch.Tensor):
-        samples = playable(data, experiment.exp.samplerate)
-        x = np.abs(zounds.spectral.stft(samples))
-        return (x / (x.max() + 1e-12))
-    
-    return fake_audio, fake_spec
-
+    return build_target_value_conjure_funcs
 
 
 class MonitoredValueDescriptor(object):
@@ -71,11 +62,10 @@ class MonitoredValueDescriptor(object):
             func(value)
 
 
-
 class BaseExperimentRunner(object):
 
-    real = MonitoredValueDescriptor(build_target_value_conjure_funcs)
-    fake = MonitoredValueDescriptor(build_recon_value_conjure_funcs)
+    real = MonitoredValueDescriptor(build_funcs('orig'))
+    fake = MonitoredValueDescriptor(build_funcs('fake'))
 
     def __init__(self, stream, train, exp: Experiment, port: Union[str, int] = None):
         super().__init__()

@@ -109,8 +109,15 @@ if __name__ == '__main__':
 
         exp: BaseExperimentRunner = Current(stream, port=port)
 
+        funcs = exp.conjure_funcs
+        
+        for func in funcs:
+            print(func.identifier)
+        
+        input('Press any key to go...')
+
         serve_conjure(
-            exp.conjure_funcs,
+            funcs,
             port=port,
             n_workers=2
         )
