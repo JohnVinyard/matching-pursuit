@@ -24,7 +24,7 @@ exp = Experiment(
     weight_init=0.05,
     model_dim=128,
     kernel_size=512,
-    a_weighting=True,
+    a_weighting=False,
     windowed_pif=False,
     norm_periodicities=False)
 
@@ -32,7 +32,7 @@ exp = Experiment(
 # PIF will be (batch, bands, time, periodicity)
 
 
-sparse_encoding = True
+sparse_encoding = False
 audio_model_bands = 128
 features_per_band = 8
 transformer_context = False
@@ -216,6 +216,7 @@ class Model(nn.Module):
         self.apply(lambda x: exp.init_weights(x))
     
     def embed_features(self, x, iteration):
+        encoding = None
 
         # torch.Size([16, 128, 128, 257])
         batch, channels, time, period = x.shape
@@ -226,19 +227,25 @@ class Model(nn.Module):
         # x = self.norm(x)
 
         if not self.is_disc:
-            salience = self.salience(x)
-            salience = F.dropout(salience, 0.05)
-            salience = salience.reshape(batch, -1)
-            salience = torch.softmax(salience, dim=-1)
-            salience = salience.reshape(batch, 1024, -1)
 
             if sparse_encoding:
-                salience = sparsify(salience, n_to_keep=k_sparse)
-            
-            x = x * salience
-            x = self.context(x)
+                salience = self.salience(x)
+                salience = F.dropout(salience, 0.05)
+                salience = salience.reshape(batch, -1)
+                salience = torch.softmax(salience, dim=-1)
+                salience = salience.reshape(batch, 1024, -1)
+                encoding = salience = sparsify(salience, n_to_keep=k_sparse)
+                x = x * salience
+                x = self.context(x)
+                return x, encoding
+            else:
+                salience = self.salience(x)
+                salience = F.dropout(salience, 0.05)
+                salience = torch.relu(salience)
+                encoding = x = salience
+
         
-        return x
+        return x, encoding
 
     def generate(self, x):
         x = self.up(x)
@@ -247,7 +254,7 @@ class Model(nn.Module):
     def forward(self, x, iteration):
 
         # torch.Size([16, 128, 128, 257])
-        encoded = self.embed_features(x, iteration)
+        encoded, encoding = self.embed_features(x, iteration)
 
         if self.is_disc:
             features = []
@@ -262,11 +269,11 @@ class Model(nn.Module):
 
         x = self.generate(encoded)
 
-        # x = self.verb.forward(ctx, x)
+        x = self.verb.forward(ctx, x)
         
         # x = max_norm(x)
 
-        return x
+        return x, encoding
 
 model = Model().to(device)
 optim = optimizer(model, lr=1e-3)
@@ -275,38 +282,28 @@ disc = Model(is_disc=True).to(device)
 disc_optim = optimizer(disc, lr=1e-3)
 
 
-def experiment_loss(a, b):
-    a = stft(a, 512, 256, pad=True)
-    b = stft(b, 512, 256, pad=True)
-    return F.mse_loss(a, b)
-
-    # a, _ = loss_model.forward(a)
-    # b, _ = loss_model.forward(b)
-    # return F.mse_loss(a, b)
-
-    loss = 0
-    a = fft_frequency_decompose(a, 512)
-    b = fft_frequency_decompose(b, 512)
-
-    for x, y in zip(a.values(), b.values()):
-        x = stft(x, 32, 16, pad=True)
-        y = stft(y, 32, 16, pad=True)
-        loss = loss + torch.abs(x - y).sum()
-    return loss
-
 
 def train(batch, i):
+    batch_size = batch.shape[0]
+
     optim.zero_grad()
     disc_optim.zero_grad()
 
     with torch.no_grad():
         feat = exp.perceptual_feature(batch)
 
-    recon = model.forward(feat, i)
-    # r = exp.perceptual_feature(recon)
+    recon, encoding = model.forward(feat, i)
+    r = exp.perceptual_feature(recon)
 
-    # loss = F.mse_loss(r, feat)
-    loss = experiment_loss(recon, batch)
+
+    encoding = encoding.view(batch_size, -1)
+    non_zero = (encoding > 0).sum()
+    sparsity = non_zero / encoding.nelement()
+    print('sparsity', sparsity.item(), 'n_elements', (non_zero / batch_size).item())
+
+    sparsity_loss = torch.abs(encoding).sum() * 0.0005
+
+    loss = F.mse_loss(r, feat) + sparsity_loss
 
     loss.backward()
     optim.step()

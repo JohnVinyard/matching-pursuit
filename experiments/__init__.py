@@ -45,7 +45,11 @@
 
 # from .e_2023_8_13 import F0Optim as Current
 
-from .e_2023_8_25 import HyperNerf as Current
+# from .e_2023_8_25 import HyperNerf as Current
+
+# from .e_2023_8_31 import SparsityPenalty as Current
+
+from .e_2023_9_4 import SparseResonance as Current
 
 """
 

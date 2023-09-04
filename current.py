@@ -15,6 +15,8 @@ from train.experiment_runner import BaseExperimentRunner
 
 torch.backends.cudnn.benchmark = True
 
+def templatized_init(class_name):
+    return f'''from .experiment import {class_name}'''
 
 def templatized_experiment(class_name):
     experiment_template = f'''
@@ -66,8 +68,9 @@ def new_experiment(class_name=None, postfix=''):
 
     os.mkdir(exp_path)
 
-    with open(os.path.join(exp_path, '__init__.py'), 'w'):
-        pass
+    with open(os.path.join(exp_path, '__init__.py'), 'w') as f:
+        if class_name:
+            f.write(templatized_init(class_name))
 
     with open(os.path.join(exp_path, 'experiment.py'), 'w') as f:
         if class_name:
@@ -111,10 +114,6 @@ if __name__ == '__main__':
 
         funcs = exp.conjure_funcs
         
-        for func in funcs:
-            print(func.identifier)
-        
-        input('Press any key to go...')
 
         serve_conjure(
             funcs,
