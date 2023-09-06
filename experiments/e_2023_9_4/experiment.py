@@ -10,13 +10,12 @@ from modules.fft import fft_convolve
 from modules.linear import LinearOutputStack
 from modules.overlap_add import overlap_add
 from modules.reverb import ReverbGenerator
-from modules.stft import stft
 from train.experiment_runner import BaseExperimentRunner
 from train.optim import optimizer
 from upsample import ConvUpsample
 from util import device
 from util.readmedocs import readme
-from modules.normalization import unit_norm
+from modules.normalization import max_norm, unit_norm
 
 
 exp = Experiment(
@@ -26,6 +25,8 @@ exp = Experiment(
     model_dim=128,
     kernel_size=512)
 
+
+convolve_impulse_and_resonance = True
 
 class RecurrentResonanceModel(nn.Module):
     def __init__(self, encoding_channels, impulse_samples, latent_dim, channels, window_size, resonance_samples):
@@ -40,6 +41,9 @@ class RecurrentResonanceModel(nn.Module):
         self.n_frames = resonance_samples // self.step
         self.encoding_channels = encoding_channels
 
+        self.base_resonance = 0.5
+        self.resonance_factor = (1 - self.base_resonance) * 0.999
+
         self.register_buffer('group_delay', torch.linspace(0, np.pi, self.n_coeffs))
 
         self.to_initial = LinearOutputStack(
@@ -53,7 +57,7 @@ class RecurrentResonanceModel(nn.Module):
         batch_size = latents.shape[0]
 
         initial = self.to_initial(latents)
-        res = torch.sigmoid(self.to_resonance(latents)) * 0.99
+        res = self.base_resonance + (torch.sigmoid(self.to_resonance(latents)) * self.resonance_factor)
         dither = torch.sigmoid(self.to_phase_dither(latents))
 
 
@@ -62,7 +66,8 @@ class RecurrentResonanceModel(nn.Module):
         frames = [first_frame]
         phases = [torch.zeros_like(first_frame).uniform_(-np.pi, np.pi)]
 
-        # TODO: This should also incorporate impulses
+        # TODO: This should also incorporate impulses, i.e., new excitations
+        # beyond the original
         for i in range(self.n_frames - 1):
 
             mag = frames[i]
@@ -144,7 +149,7 @@ class GenerateImpulse(nn.Module):
         self.n_frames = n_samples // 256
         self.n_filter_bands = n_filter_bands
         self.channels = channels
-        self.filter_kernel_size = 32
+        self.filter_kernel_size = 16
         self.encoding_channels = encoding_channels
 
         scale = zounds.MelScale(zounds.FrequencyBand(20, exp.samplerate.nyquist), n_filter_bands)
@@ -158,7 +163,7 @@ class GenerateImpulse(nn.Module):
         self.to_envelope = ConvUpsample(
             latent_dim,
             channels,
-            start_size=8,
+            start_size=4,
             mode='nearest',
             end_size=self.n_frames,
             out_channels=1,
@@ -202,7 +207,8 @@ class Model(nn.Module):
             encoding_channels, 
             impulse_samples, 
             resonance_samples,
-            latent_dim):
+            latent_dim,
+            resonance_model=False):
 
         super().__init__()
         self.channels = channels
@@ -258,24 +264,27 @@ class Model(nn.Module):
         )
 
 
-        # self.to_resonance = ConvUpsample(
-        #     latent_dim, 
-        #     channels, 
-        #     8, 
-        #     end_size=resonance_samples, 
-        #     out_channels=1, 
-        #     mode='nearest', 
-        #     batch_norm=True)
-        self.to_resonance = RecurrentResonanceModel(
-            self.encoding_channels,
-            self.impulse_samples,
-            self.latent_dim,
-            self.channels,
-            512,
-            self.resonance_samples)
+        if resonance_model:
+            self.to_resonance = RecurrentResonanceModel(
+                self.encoding_channels,
+                self.impulse_samples,
+                self.latent_dim,
+                self.channels,
+                512,
+                self.resonance_samples)
+        else:
+            self.to_resonance = ConvUpsample(
+                latent_dim, 
+                channels, 
+                8, 
+                end_size=resonance_samples, 
+                out_channels=1, 
+                mode='nearest', 
+                batch_norm=True)
+        
         
         self.to_impulse = GenerateImpulse(
-            latent_dim, channels, self.impulse_samples, 16, encoding_channels)
+            latent_dim, channels, self.impulse_samples, 8, encoding_channels)
         
         self.to_mix = GenerateMix(
             latent_dim, channels, encoding_channels)
@@ -295,8 +304,20 @@ class Model(nn.Module):
         x = self.up(x)
         x = F.dropout(x, 0.01)
 
-        # TODO: lateral competition
+        # rectification (only positive activations)
         encoding = x = torch.relu(x)
+
+        # lateral competetion
+        x = x[:, None, :, :]
+        pooled = F.avg_pool2d(x, (3, 27), stride=(1, 1), padding=(1, 13))
+        x = x - pooled
+        x = x.view(-1, self.encoding_channels, exp.n_samples)
+        x = x.view(batch_size, -1)
+        x = x.view(-1, self.encoding_channels, exp.n_samples)
+
+        # rectification (only positive activations)
+        encoding = x = torch.relu(x)
+
 
         ctxt = torch.sum(encoding, dim=-1)
 
@@ -315,15 +336,18 @@ class Model(nn.Module):
         resonances = self.to_resonance.forward(resonance_latent).view(-1, self.encoding_channels, self.resonance_samples)
         assert resonances.shape == (batch_size, self.encoding_channels, self.resonance_samples)
         
-
         mix = self.to_mix(mix_latent)
         assert mix.shape == (batch_size, self.encoding_channels, 2)
 
         imp_amp = mix[..., :1]
         res_amp = mix[..., 1:]
 
-
-        d = fft_convolve(impulses, resonances)
+        # TODO: what happens if I skip this convolution?
+        # is it better to just add the two together
+        if convolve_impulse_and_resonance:
+            d = fft_convolve(impulses, resonances)
+        else:
+            d = resonances
         d = (impulses * imp_amp) + (d * res_amp)
         assert d.shape == (batch_size, self.encoding_channels, self.resonance_samples)
 
@@ -340,9 +364,10 @@ class Model(nn.Module):
 model = Model(
     channels=64, 
     encoding_channels=512, 
-    impulse_samples=256, 
+    impulse_samples=256 * 8, 
     resonance_samples=exp.n_samples,
-    latent_dim=16
+    latent_dim=16,
+    resonance_model=True
 ).to(device)
 
 optim = optimizer(model, lr=1e-3)
@@ -355,14 +380,16 @@ def train(batch, i):
 
     encoding = encoding.view(batch_size, -1)
     srt, indices = torch.sort(encoding, dim=-1, descending=True)
+
+    # the first 128 atoms may be as large/loud as they need to be
+    # TODO: This number could slowly drop over training time
     penalized = srt[:, 128:]
 
     non_zero = (encoding > 0).sum()
     sparsity = non_zero / encoding.nelement()
     print('sparsity', sparsity.item(), 'n_elements', (non_zero / batch_size).item())
 
-
-    sparsity_loss = torch.abs(penalized).sum() * 0.0001
+    sparsity_loss = torch.abs(penalized).sum() * 0.00001
 
     loss = exp.perceptual_loss(recon, batch) + sparsity_loss
 
