@@ -1,7 +1,7 @@
 # from .e_2023_3_22 import MatchingPursuitGAN as Current
 # from .e_2023_3_30_B import BandFilteredImpulseResponse as Current
 
-from .e_2023_6_12 import PhaseInvariantFeatureInversion as Current
+# from .e_2023_6_12 import PhaseInvariantFeatureInversion as Current
 
 # from .e_2023_6_27 import NoGridExperiment as Current
 # from .e_2023_7_20 import MatchingPursuitPlayground as Current
@@ -50,6 +50,8 @@ from .e_2023_6_12 import PhaseInvariantFeatureInversion as Current
 # from .e_2023_8_31 import SparsityPenalty as Current
 
 # from .e_2023_9_4 import SparseResonance as Current
+
+from .e_2023_9_8 import SparseResonance2 as Current
 
 """
 Features of Next Experiment
