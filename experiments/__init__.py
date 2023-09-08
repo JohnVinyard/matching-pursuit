@@ -1,7 +1,7 @@
 # from .e_2023_3_22 import MatchingPursuitGAN as Current
 # from .e_2023_3_30_B import BandFilteredImpulseResponse as Current
 
-# from .e_2023_6_12 import PhaseInvariantFeatureInversion as Current
+from .e_2023_6_12 import PhaseInvariantFeatureInversion as Current
 
 # from .e_2023_6_27 import NoGridExperiment as Current
 # from .e_2023_7_20 import MatchingPursuitPlayground as Current
@@ -49,9 +49,32 @@
 
 # from .e_2023_8_31 import SparsityPenalty as Current
 
-from .e_2023_9_4 import SparseResonance as Current
+# from .e_2023_9_4 import SparseResonance as Current
 
 """
+Features of Next Experiment
+============================
+- analysis happens at frame and not sample level; grinding sounds are a result of sample-level analysis, I think
+- two options:
+    - sparsification happens at frame level and then upsample with traditional transposed conv
+    - upsampling happens, then sparsification, then fft convolution
+- add in fft_shit, but **relative to frame location**
+- lateral competition when sparsifying
+
+## Model
+- pif feature (Q: would "more-correct" scattering be better?)
+- analysis stack
+- upsample to sample-rate (either nearest-neighbor, or "local NERF" with overlap-add)
+- sparsification, ideally with lateral competition (how do I handle feature similarity?) 
+    - (https://hal.science/hal-00727563/document#page=13)
+    - could I just "sort" (random projection to N-D) kernels after every batch? 
+- generate dictionaries and convolve with events
+
+
+## Loss Ideas
+- HPSS loss
+- sort active channels and optimize the contribution of each, going from largest to smallest?
+
 
 Findings
 ==============

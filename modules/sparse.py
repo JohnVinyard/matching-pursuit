@@ -3,6 +3,28 @@ from torch import jit
 from torch import nn
 from torch.nn import functional as F
 
+def encourage_sparsity_loss(
+        encoding: torch.Tensor, 
+        n_unpenalized: int = 128, 
+        sparsity_loss_weight: float = 0.00001):
+    
+    batch_size = encoding.shape[0]
+
+    encoding = encoding.view(batch_size, -1)
+    srt, indices = torch.sort(encoding, dim=-1, descending=True)
+
+    # the first n_unpenalized atoms may be as large/loud as they need to be
+    # TODO: This number could slowly drop over training time
+    penalized = srt[:, n_unpenalized:]
+
+    non_zero = (encoding > 0).sum()
+    sparsity = non_zero / encoding.nelement()
+    print('sparsity', sparsity.item(), 'n_elements', (non_zero / batch_size).item())
+
+    # penalize based on l1 norm
+    sparsity_loss = torch.abs(penalized).sum() * sparsity_loss_weight
+    return sparsity_loss
+
 
 def soft_dirac(x: torch.Tensor, dim: int = -1) -> torch.Tensor:
     x = torch.softmax(x, dim=dim)

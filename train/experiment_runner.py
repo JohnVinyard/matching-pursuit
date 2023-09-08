@@ -16,28 +16,26 @@ def build_funcs(prefix):
     def build_target_value_conjure_funcs(experiment):
 
         @audio_conjure(
-                experiment.collection, 
-                identifier=f'{prefix}audio'
+            experiment.collection,
+            identifier=f'{prefix}audio',
         )
         def audio(data: torch.Tensor):
             samples = playable(data, experiment.exp.samplerate)
             bio = samples.encode()
             return bio.read()
-        
 
         @numpy_conjure(
-                experiment.collection, 
-                content_type=SupportedContentType.Spectrogram.value, 
-                identifier=f'{prefix}spec'
+            experiment.collection,
+            content_type=SupportedContentType.Spectrogram.value,
+            identifier=f'{prefix}spec',
         )
         def spec(data: torch.Tensor):
             samples = playable(data, experiment.exp.samplerate)
             x = np.abs(zounds.spectral.stft(samples))
             return (x / (x.max() + 1e-12))
-        
-        
+
         return audio, spec
-    
+
     return build_target_value_conjure_funcs
 
 
@@ -52,7 +50,6 @@ class MonitoredValueDescriptor(object):
 
     def __set_name__(self, owner, name):
         self.name = name
-
 
     def __set__(self, obj, value):
         funcs = self.build_conjure_funcs(obj)
@@ -79,7 +76,6 @@ class BaseExperimentRunner(object):
             self.collection = LmdbCollection(
                 str(self.experiment_path).encode(), port=self.port)
         self.loss_func = None
-        
 
     def after_training_iteration(self, l):
         self.loss_func(l)
@@ -108,9 +104,7 @@ class BaseExperimentRunner(object):
                 [d['values'], l.data.cpu().numpy().reshape((1,))], axis=-1)
             return d['values'].reshape((1, -1))
 
-        
         self.loss_func = loss_func
-        
 
         funcs = []
 
@@ -121,7 +115,6 @@ class BaseExperimentRunner(object):
                 funcs.extend(others)
 
         funcs.extend([loss_func])
-        
 
         return funcs
 

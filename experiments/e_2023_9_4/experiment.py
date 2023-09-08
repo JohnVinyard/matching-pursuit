@@ -27,6 +27,9 @@ exp = Experiment(
 
 
 convolve_impulse_and_resonance = True
+resonance_model = False
+conv_only_dict = True
+full_atom_size = 4096
 
 class RecurrentResonanceModel(nn.Module):
     def __init__(self, encoding_channels, impulse_samples, latent_dim, channels, window_size, resonance_samples):
@@ -305,15 +308,15 @@ class Model(nn.Module):
         x = F.dropout(x, 0.01)
 
         # rectification (only positive activations)
-        encoding = x = torch.relu(x)
+        # encoding = x = torch.relu(x)
 
-        # lateral competetion
-        x = x[:, None, :, :]
-        pooled = F.avg_pool2d(x, (3, 27), stride=(1, 1), padding=(1, 13))
-        x = x - pooled
-        x = x.view(-1, self.encoding_channels, exp.n_samples)
-        x = x.view(batch_size, -1)
-        x = x.view(-1, self.encoding_channels, exp.n_samples)
+        # # lateral competetion
+        # x = x[:, None, :, :]
+        # pooled = F.avg_pool2d(x, (3, 27), stride=(1, 1), padding=(1, 13))
+        # x = x - pooled
+        # x = x.view(-1, self.encoding_channels, exp.n_samples)
+        # x = x.view(batch_size, -1)
+        # x = x.view(-1, self.encoding_channels, exp.n_samples)
 
         # rectification (only positive activations)
         encoding = x = torch.relu(x)
@@ -342,18 +345,20 @@ class Model(nn.Module):
         imp_amp = mix[..., :1]
         res_amp = mix[..., 1:]
 
-        # TODO: what happens if I skip this convolution?
-        # is it better to just add the two together
-        if convolve_impulse_and_resonance:
-            d = fft_convolve(impulses, resonances)
-        else:
+        if conv_only_dict:
             d = resonances
-        d = (impulses * imp_amp) + (d * res_amp)
-        assert d.shape == (batch_size, self.encoding_channels, self.resonance_samples)
-
+        else:
+            # TODO: what happens if I skip this convolution?
+            # is it better to just add the two together
+            if convolve_impulse_and_resonance:
+                d = fft_convolve(impulses, resonances)
+            else:
+                d = resonances
+            d = (impulses * imp_amp) + (d * res_amp)
+            assert d.shape == (batch_size, self.encoding_channels, self.resonance_samples)
+        
         d = F.pad(d, (0, exp.n_samples - self.resonance_samples))
         d = unit_norm(d, dim=-1)
-
         x = fft_convolve(d, encoding)[..., :exp.n_samples]
         x = torch.sum(x, dim=1, keepdim=True)
 
@@ -365,9 +370,9 @@ model = Model(
     channels=64, 
     encoding_channels=512, 
     impulse_samples=256 * 8, 
-    resonance_samples=exp.n_samples,
+    resonance_samples=full_atom_size,
     latent_dim=16,
-    resonance_model=True
+    resonance_model=resonance_model
 ).to(device)
 
 optim = optimizer(model, lr=1e-3)

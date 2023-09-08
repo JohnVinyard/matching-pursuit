@@ -295,13 +295,21 @@ def train(batch, i):
     recon, encoding = model.forward(feat, i)
     r = exp.perceptual_feature(recon)
 
+    
 
+    # TODO: move this into a stand-alone function
     encoding = encoding.view(batch_size, -1)
+    srt, indices = torch.sort(encoding, dim=-1, descending=True)
+
+    # the first 128 atoms may be as large/loud as they need to be
+    # TODO: This number could slowly drop over training time
+    penalized = srt[:, 128:]
     non_zero = (encoding > 0).sum()
     sparsity = non_zero / encoding.nelement()
     print('sparsity', sparsity.item(), 'n_elements', (non_zero / batch_size).item())
 
-    sparsity_loss = torch.abs(encoding).sum() * 0.0005
+
+    sparsity_loss = torch.abs(penalized).sum() * 0.01
 
     loss = F.mse_loss(r, feat) + sparsity_loss
 
