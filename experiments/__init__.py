@@ -49,9 +49,9 @@
 
 # from .e_2023_8_31 import SparsityPenalty as Current
 
-# from .e_2023_9_4 import SparseResonance as Current
+from .e_2023_9_4 import SparseResonance as Current
 
-from .e_2023_9_8 import SparseResonance2 as Current
+# from .e_2023_9_8 import SparseResonance2 as Current
 
 """
 Features of Next Experiment

@@ -27,7 +27,7 @@ exp = Experiment(
     kernel_size=512)
 
 
-convolve_impulse_and_resonance = True
+convolve_impulse_and_resonance = False
 full_atom_size = exp.n_samples
 
 class RecurrentResonanceModel(nn.Module):
@@ -240,7 +240,13 @@ class Model(nn.Module):
             from_latent=False, 
             batch_norm=True)
         
-        self.lateral_competition = nn.Parameter(torch.zeros(1, 1, 7, 511).uniform_(-1, 1))
+        self.lateral_height = 7
+        self.lateral_width = 25
+
+        self.lateral_height_padding = self.lateral_height // 2
+        self.lateral_width_padding = self.lateral_width // 2
+
+        self.lateral_competition = nn.Parameter(torch.zeros(1, 1, self.lateral_height, self.lateral_width).uniform_(-1, 1))
 
         self.impulse_latent = nn.Parameter(
             torch.zeros(1, encoding_channels, latent_dim).uniform_(-1, 1))
@@ -316,10 +322,9 @@ class Model(nn.Module):
         encoding = x = torch.relu(x)
 
         # lateral comp.
-        encoding = encoding[:, None, :, :]
-        encoding = F.conv2d(encoding, self.lateral_competition, stride=(1, 1), padding=(3, 255))
-        encoding = encoding.view(batch_size, self.encoding_channels, exp.n_samples)
-
+        # encoding = encoding[:, None, :, :]
+        # encoding = F.conv2d(encoding, self.lateral_competition, stride=(1, 1), padding=(self.lateral_height_padding, self.lateral_width_padding))
+        # encoding = encoding.view(batch_size, self.encoding_channels, exp.n_samples)
 
         ctxt = torch.sum(encoding, dim=-1)
 
@@ -364,8 +369,8 @@ class Model(nn.Module):
         return x, encoding
 
 model = Model(
-    channels=64, 
-    encoding_channels=128, 
+    channels=128, 
+    encoding_channels=512, 
     impulse_samples=256 * 8, 
     resonance_samples=full_atom_size,
     latent_dim=16,

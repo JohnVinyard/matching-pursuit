@@ -27,9 +27,10 @@ exp = Experiment(
 
 
 convolve_impulse_and_resonance = True
-resonance_model = False
-conv_only_dict = True
-full_atom_size = 4096
+resonance_model = True
+conv_only_dict = False
+full_atom_size = exp.n_samples
+recurrent_resonance_model = False
 
 class RecurrentResonanceModel(nn.Module):
     def __init__(self, encoding_channels, impulse_samples, latent_dim, channels, window_size, resonance_samples):
@@ -64,34 +65,54 @@ class RecurrentResonanceModel(nn.Module):
         dither = torch.sigmoid(self.to_phase_dither(latents))
 
 
+        # print(res.shape, dither.shape, initial.shape)
+
         first_frame = initial[:, None, :]
 
-        frames = [first_frame]
-        phases = [torch.zeros_like(first_frame).uniform_(-np.pi, np.pi)]
+        if not recurrent_resonance_model:
+            # Non-recurrent
+            full_res = res[..., None].repeat(1, 1, 1, self.n_frames)
+            full_res = torch.cumprod(full_res, dim=-1)
+            mags = full_res * initial[..., None]
+            mags = mags.permute(0, 1, 3, 2)
 
-        # TODO: This should also incorporate impulses, i.e., new excitations
-        # beyond the original
-        for i in range(self.n_frames - 1):
+            full_delay = self.group_delay[None, None, :, None].repeat(1, 1, 1, self.n_frames)
+            full_delay = torch.cumsum(full_delay, dim=-1)
+            full_delay = full_delay + (torch.zeros_like(full_delay).uniform_(-np.pi, np.pi) * dither[:, :, :, None])
+            phases = full_delay
+            phases = phases.permute(0, 1, 3, 2)
+            # end non-recurrent
+        else:
 
-            mag = frames[i]
-            phase = phases[i]
+            # recurrent
 
-            # compute next polar coordinates
-            nxt_mag = mag * res
+            frames = [first_frame]
+            phases = [torch.zeros_like(first_frame).uniform_(-np.pi, np.pi)]
 
-            nxt_phase = \
-                phase \
-                + self.group_delay[None, None, None, :] \
-                + (dither * torch.zeros_like(dither).uniform_(-np.pi, np.pi)[:, None, :, :]) 
+            # TODO: This should also incorporate impulses, i.e., new excitations
+            # beyond the original
+            for i in range(self.n_frames - 1):
+
+                mag = frames[i]
+                phase = phases[i]
+
+                # compute next polar coordinates
+                nxt_mag = mag * res
+
+                nxt_phase = \
+                    phase \
+                    + self.group_delay[None, None, None, :] \
+                    + (dither * torch.zeros_like(dither).uniform_(-np.pi, np.pi)[:, None, :, :]) 
 
 
-            frames.append(nxt_mag)
-            phases.append(nxt_phase)
-        
+                frames.append(nxt_mag)
+                phases.append(nxt_phase)
 
 
-        mags = torch.cat(frames, dim=1)
-        phases = torch.cat(phases, dim=1)
+            mags = torch.cat(frames, dim=1)
+            phases = torch.cat(phases, dim=1)
+
+        # end recurrent
 
         frames = torch.complex(
             mags * torch.cos(phases),
@@ -100,7 +121,9 @@ class RecurrentResonanceModel(nn.Module):
 
         windowed = torch.fft.irfft(frames, dim=-1, norm='ortho')
         
-        windowed = windowed.permute(0, 2, 1, 3)
+        if recurrent_resonance_model:
+            windowed = windowed.permute(0, 2, 1, 3)
+        
         samples = overlap_add(windowed, apply_window=True)[..., :self.resonance_samples]
 
         assert samples.shape == (batch_size, self.encoding_channels, self.resonance_samples)
@@ -181,6 +204,7 @@ class GenerateImpulse(nn.Module):
         # generate envelopes
         frames = self.to_envelope(x.view(-1, self.latent_dim))
         frames = torch.abs(frames)
+        frames = frames * torch.hamming_window(frames.shape[-1], device=x.device)[None, None, :]
         frames = F.interpolate(frames, size=self.n_samples, mode='linear')
         frames = frames.view(-1, self.encoding_channels, self.n_samples)
 
@@ -347,6 +371,7 @@ class Model(nn.Module):
 
         if conv_only_dict:
             d = resonances
+            d = d * torch.hamming_window(d.shape[-1], device=x.device)[None, None, :]
         else:
             # TODO: what happens if I skip this convolution?
             # is it better to just add the two together
@@ -367,7 +392,7 @@ class Model(nn.Module):
         return x, encoding
 
 model = Model(
-    channels=64, 
+    channels=128, 
     encoding_channels=512, 
     impulse_samples=256 * 8, 
     resonance_samples=full_atom_size,
