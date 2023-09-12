@@ -10,6 +10,8 @@ from modules.fft import fft_convolve
 from modules.linear import LinearOutputStack
 from modules.overlap_add import overlap_add
 from modules.reverb import ReverbGenerator
+from modules.sparse import encourage_sparsity_loss
+from modules.stft import stft
 from train.experiment_runner import BaseExperimentRunner
 from train.optim import optimizer
 from upsample import ConvUpsample
@@ -25,12 +27,18 @@ exp = Experiment(
     model_dim=128,
     kernel_size=512)
 
+# Get rid of this setting
+conv_only_dict = True
+
 
 convolve_impulse_and_resonance = True
 resonance_model = True
-conv_only_dict = False
-full_atom_size = exp.n_samples
+full_atom_size = 2048
 recurrent_resonance_model = False
+do_reverb = False
+base_resonance = 0.1
+apply_group_delay_to_dither = True
+encoding_channels = 512
 
 class RecurrentResonanceModel(nn.Module):
     def __init__(self, encoding_channels, impulse_samples, latent_dim, channels, window_size, resonance_samples):
@@ -45,7 +53,7 @@ class RecurrentResonanceModel(nn.Module):
         self.n_frames = resonance_samples // self.step
         self.encoding_channels = encoding_channels
 
-        self.base_resonance = 0.5
+        self.base_resonance = base_resonance
         self.resonance_factor = (1 - self.base_resonance) * 0.999
 
         self.register_buffer('group_delay', torch.linspace(0, np.pi, self.n_coeffs))
@@ -62,7 +70,10 @@ class RecurrentResonanceModel(nn.Module):
 
         initial = self.to_initial(latents)
         res = self.base_resonance + (torch.sigmoid(self.to_resonance(latents)) * self.resonance_factor)
-        dither = torch.sigmoid(self.to_phase_dither(latents))
+        dither = torch.sigmoid(self.to_phase_dither(latents)) 
+
+        if apply_group_delay_to_dither:
+            dither = dither * self.group_delay[None, None, :]
 
 
         # print(res.shape, dither.shape, initial.shape)
@@ -180,7 +191,7 @@ class GenerateImpulse(nn.Module):
 
         scale = zounds.MelScale(zounds.FrequencyBand(20, exp.samplerate.nyquist), n_filter_bands)
         filters = morlet_filter_bank(
-            exp.samplerate, self.filter_kernel_size, scale, 0.25, normalize=True).real.astype(np.float32)
+            exp.samplerate, self.filter_kernel_size, scale, 0.5, normalize=True).real.astype(np.float32)
         self.register_buffer('filters', torch.from_numpy(filters).view(n_filter_bands, self.filter_kernel_size))
 
         self.to_filter_mix = LinearOutputStack(
@@ -331,6 +342,10 @@ class Model(nn.Module):
         x = self.up(x)
         x = F.dropout(x, 0.01)
 
+        # TODO: A softmax operation prior to the RELU might provide better signal 
+        # around sparsity
+
+
         # rectification (only positive activations)
         # encoding = x = torch.relu(x)
 
@@ -385,15 +400,18 @@ class Model(nn.Module):
         d = F.pad(d, (0, exp.n_samples - self.resonance_samples))
         d = unit_norm(d, dim=-1)
         x = fft_convolve(d, encoding)[..., :exp.n_samples]
-        x = torch.sum(x, dim=1, keepdim=True)
+        # x = torch.sum(x, dim=1, keepdim=True)
 
-        verb_ctxt = self.embed_verb_latent(ctxt)
-        x = self.verb.forward(verb_ctxt, x)
+        if do_reverb:
+            # TODO: apply reverb to each individual channel.  This could
+            # help to remove more norm by extending notes
+            verb_ctxt = self.embed_verb_latent(ctxt)
+            x = self.verb.forward(verb_ctxt, x)
         return x, encoding
 
 model = Model(
     channels=128, 
-    encoding_channels=512, 
+    encoding_channels=encoding_channels, 
     impulse_samples=256 * 8, 
     resonance_samples=full_atom_size,
     latent_dim=16,
@@ -408,20 +426,54 @@ def train(batch, i):
     optim.zero_grad()
     recon, encoding = model.forward(batch)
 
-    encoding = encoding.view(batch_size, -1)
-    srt, indices = torch.sort(encoding, dim=-1, descending=True)
+    residual = batch.clone()
+    loss = 0
+
+    print('==========================')
+    # TODO: try sorting from loudest to quietest channel
+    for i in range(encoding_channels):
+        start_norm = torch.norm(residual, dim=-1)
+        residual = residual - recon[:, i: i + 1, :]
+        end_norm = torch.norm(residual, dim=-1)
+        diff = start_norm - end_norm
+        loss = loss + -diff.mean()
+    
+    
+
+    # with torch.no_grad():
+    #     for i in range(batch_size):
+    #         for j in range(encoding.shape[1]):
+    #             channel = recon[i, j, :]
+    #             start_norm = torch.norm(residual[i, j])
+    #             energy = torch.sum(channel)
+    #             if energy.item() == 0:
+    #                 continue
+    #             nz = (channel > 0).sum()
+    #             print(f'batch {i}, channel {j} has {nz.item()} non-zero elements, {(nz / channel.nelement())} sparse')
+    
+
+    recon = torch.sum(recon, dim=1, keepdim=True)
+
+    # encoding = encoding.view(batch_size, -1)
+    # srt, indices = torch.sort(encoding, dim=-1, descending=True)
 
     # the first 128 atoms may be as large/loud as they need to be
     # TODO: This number could slowly drop over training time
-    penalized = srt[:, 128:]
+    # penalized = srt[:, 128:]
 
-    non_zero = (encoding > 0).sum()
-    sparsity = non_zero / encoding.nelement()
-    print('sparsity', sparsity.item(), 'n_elements', (non_zero / batch_size).item())
+    # non_zero = (encoding > 0).sum()
+    # sparsity = non_zero / encoding.nelement()
+    # print('sparsity', sparsity.item(), 'n_elements', (non_zero / batch_size).item())
 
-    sparsity_loss = torch.abs(penalized).sum() * 0.00001
+    # sparsity_loss = torch.abs(penalized).sum() * 0.00001
+    sparsity_loss = encourage_sparsity_loss(
+        encoding, 
+        n_unpenalized=128, 
+        sparsity_loss_weight=0.00005)
 
-    loss = exp.perceptual_loss(recon, batch) + sparsity_loss
+    loss = loss + sparsity_loss
+    # loss = exp.perceptual_loss(recon, batch) + sparsity_loss
+    # loss = F.mse_loss(exp.pooled_filter_bank(recon), exp.pooled_filter_bank(batch)) + sparsity_loss
 
     loss.backward()
     optim.step()
