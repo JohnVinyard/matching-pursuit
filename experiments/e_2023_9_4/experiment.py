@@ -30,7 +30,7 @@ exp = Experiment(
 # Get rid of this setting
 conv_only_dict = True
 
-
+static_dict = True
 convolve_impulse_and_resonance = True
 resonance_model = True
 full_atom_size = 2048
@@ -270,6 +270,9 @@ class Model(nn.Module):
 
         self.up = nn.Conv1d(channels, encoding_channels, 1, 1, 0)
 
+
+        self.static_dict = nn.Parameter(torch.zeros(1, encoding_channels, full_atom_size).uniform_(-1, 1))
+
         self.impulse_latent = nn.Parameter(
             torch.zeros(1, encoding_channels, latent_dim).uniform_(-1, 1))
         self.resonance_latent = nn.Parameter(
@@ -345,62 +348,53 @@ class Model(nn.Module):
         # TODO: A softmax operation prior to the RELU might provide better signal 
         # around sparsity
 
-
-        # rectification (only positive activations)
-        # encoding = x = torch.relu(x)
-
-        # # lateral competetion
-        # x = x[:, None, :, :]
-        # pooled = F.avg_pool2d(x, (3, 27), stride=(1, 1), padding=(1, 13))
-        # x = x - pooled
-        # x = x.view(-1, self.encoding_channels, exp.n_samples)
-        # x = x.view(batch_size, -1)
-        # x = x.view(-1, self.encoding_channels, exp.n_samples)
-
-        # rectification (only positive activations)
         encoding = x = torch.relu(x)
-
 
         ctxt = torch.sum(encoding, dim=-1)
 
-        impulse_latent = self.embed_impulse_latent(ctxt)[:, None, :] + self.impulse_latent
-        resonance_latent = self.embed_resonance_latent(ctxt)[:, None, :] + self.resonance_latent
-        mix_latent = self.embed_mix_latent(ctxt)[:, None, :] + self.mix_latent
-
-        assert impulse_latent.shape == (batch_size, self.encoding_channels, self.latent_dim)
-        assert resonance_latent.shape == (batch_size, self.encoding_channels, self.latent_dim)
-        assert mix_latent.shape == (batch_size, self.encoding_channels, self.latent_dim)
-
-        impulses = self.to_impulse.forward(impulse_latent)
-        assert impulses.shape == (batch_size, self.encoding_channels, self.impulse_samples)
-        impulses = F.pad(impulses, (0, self.resonance_samples - self.impulse_samples))
-
-        resonances = self.to_resonance.forward(resonance_latent).view(-1, self.encoding_channels, self.resonance_samples)
-        assert resonances.shape == (batch_size, self.encoding_channels, self.resonance_samples)
-        
-        mix = self.to_mix(mix_latent)
-        assert mix.shape == (batch_size, self.encoding_channels, 2)
-
-        imp_amp = mix[..., :1]
-        res_amp = mix[..., 1:]
-
-        if conv_only_dict:
-            d = resonances
-            d = d * torch.hamming_window(d.shape[-1], device=x.device)[None, None, :]
+        if static_dict:
+            d = self.static_dict.repeat(batch_size, 1, 1)
         else:
-            # TODO: what happens if I skip this convolution?
-            # is it better to just add the two together
-            if convolve_impulse_and_resonance:
-                d = fft_convolve(impulses, resonances)
-            else:
+            impulse_latent = self.embed_impulse_latent(ctxt)[:, None, :] + self.impulse_latent
+            resonance_latent = self.embed_resonance_latent(ctxt)[:, None, :] + self.resonance_latent
+            mix_latent = self.embed_mix_latent(ctxt)[:, None, :] + self.mix_latent
+
+            assert impulse_latent.shape == (batch_size, self.encoding_channels, self.latent_dim)
+            assert resonance_latent.shape == (batch_size, self.encoding_channels, self.latent_dim)
+            assert mix_latent.shape == (batch_size, self.encoding_channels, self.latent_dim)
+
+            impulses = self.to_impulse.forward(impulse_latent)
+            assert impulses.shape == (batch_size, self.encoding_channels, self.impulse_samples)
+            impulses = F.pad(impulses, (0, self.resonance_samples - self.impulse_samples))
+
+            resonances = self.to_resonance.forward(resonance_latent).view(-1, self.encoding_channels, self.resonance_samples)
+            assert resonances.shape == (batch_size, self.encoding_channels, self.resonance_samples)
+            
+            mix = self.to_mix(mix_latent)
+            assert mix.shape == (batch_size, self.encoding_channels, 2)
+
+            imp_amp = mix[..., :1]
+            res_amp = mix[..., 1:]
+
+            if conv_only_dict:
                 d = resonances
-            d = (impulses * imp_amp) + (d * res_amp)
-            assert d.shape == (batch_size, self.encoding_channels, self.resonance_samples)
-        
+                d = d * torch.hamming_window(d.shape[-1], device=x.device)[None, None, :]
+            else:
+                # TODO: what happens if I skip this convolution?
+                # is it better to just add the two together
+                if convolve_impulse_and_resonance:
+                    d = fft_convolve(impulses, resonances)
+                else:
+                    d = resonances
+                d = (impulses * imp_amp) + (d * res_amp)
+                assert d.shape == (batch_size, self.encoding_channels, self.resonance_samples)
+            
         d = F.pad(d, (0, exp.n_samples - self.resonance_samples))
         d = unit_norm(d, dim=-1)
+
+        # TODO: What if I convert the feature map to sparse before doing this?
         x = fft_convolve(d, encoding)[..., :exp.n_samples]
-        # x = torch.sum(x, dim=1, keepdim=True)
+            # x = torch.sum(x, dim=1, keepdim=True)
 
         if do_reverb:
             # TODO: apply reverb to each individual channel.  This could
@@ -426,15 +420,17 @@ def train(batch, i):
     optim.zero_grad()
     recon, encoding = model.forward(batch)
 
-    residual = batch.clone()
+    residual = stft(batch, 512, 256, pad=True)
     loss = 0
 
+    # TODO: try JIT here
     print('==========================')
     # TODO: try sorting from loudest to quietest channel
     for i in range(encoding_channels):
-        start_norm = torch.norm(residual, dim=-1)
-        residual = residual - recon[:, i: i + 1, :]
-        end_norm = torch.norm(residual, dim=-1)
+        start_norm = torch.norm(residual.view(batch_size, -1), dim=-1)
+        channel_spec = stft(recon[:, i: i + 1, :], 512, 256, pad=True)
+        residual = residual - channel_spec
+        end_norm = torch.norm(residual.view(batch_size, -1), dim=-1)
         diff = start_norm - end_norm
         loss = loss + -diff.mean()
     
@@ -469,7 +465,7 @@ def train(batch, i):
     sparsity_loss = encourage_sparsity_loss(
         encoding, 
         n_unpenalized=128, 
-        sparsity_loss_weight=0.00005)
+        sparsity_loss_weight=0.0001)
 
     loss = loss + sparsity_loss
     # loss = exp.perceptual_loss(recon, batch) + sparsity_loss
