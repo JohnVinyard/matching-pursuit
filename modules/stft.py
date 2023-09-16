@@ -4,10 +4,19 @@ import numpy as np
 from scipy.signal import morlet
 import zounds
 
-def stft(x, ws=512, step=256, pad=False, log_amplitude=False, log_epsilon=1e-4, return_complex=False):
+
+def stft(
+        x: torch.Tensor,
+        ws: int = 512,
+        step: int = 256,
+        pad: bool = False,
+        log_amplitude: bool = False,
+        log_epsilon: float = 1e-4,
+        return_complex: bool = False):
+
     if pad:
         x = F.pad(x, (0, step))
-    
+
     x = x.unfold(-1, ws, step)
     win = torch.hann_window(ws).to(x.device)
     x = x * win[None, None, :]
@@ -15,12 +24,12 @@ def stft(x, ws=512, step=256, pad=False, log_amplitude=False, log_epsilon=1e-4, 
 
     if return_complex:
         return x
-    
+
     x = torch.abs(x)
 
     if log_amplitude:
         x = torch.log(x + log_epsilon)
-    
+
     return x
 
 
@@ -34,7 +43,7 @@ def stft_relative_phase(x, ws=512, step=256, pad=False):
     x = x * win[None, None, :]
     x = torch.fft.rfft(x, norm='ortho')
     x = x.view(x.shape[0], -1, ws // 2 + 1)
-    
+
     # get the magnitude
     mag = torch.abs(x)
 
@@ -60,7 +69,7 @@ def morlet_filter_bank(
         scale,
         scaling_factor,
         normalize=True):
-    
+
     basis_size = len(scale)
     basis = np.zeros((basis_size, kernel_size), dtype=np.complex128)
 
@@ -88,9 +97,9 @@ def morlet_filter_bank(
 
 def geom_basis(fft_size, sr):
     return morlet_filter_bank(
-        sr, 
-        fft_size, 
-        zounds.MelScale(zounds.FrequencyBand(20, sr.nyquist), fft_size), 
+        sr,
+        fft_size,
+        zounds.MelScale(zounds.FrequencyBand(20, sr.nyquist), fft_size),
         np.linspace(0.05, 0.99, fft_size))
 
 
@@ -101,10 +110,11 @@ def short_time_transform(x, basis, pad=True):
 
     if pad:
         x = F.pad(x, (0, ss))
-    
+
     windowed = x.unfold(-1, ws, ss)
 
-    windowed = windowed * torch.hamming_window(ws)[None, None, None, :].to(x.device)
+    windowed = windowed * \
+        torch.hamming_window(ws)[None, None, None, :].to(x.device)
 
     freq_domain = windowed @ basis.T
 

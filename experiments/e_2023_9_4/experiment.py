@@ -18,6 +18,7 @@ from upsample import ConvUpsample
 from util import device
 from util.readmedocs import readme
 from modules.normalization import max_norm, unit_norm
+from torch import jit
 
 
 exp = Experiment(
@@ -28,9 +29,9 @@ exp = Experiment(
     kernel_size=512)
 
 # Get rid of this setting
-conv_only_dict = True
-
+conv_only_dict = False
 static_dict = True
+
 convolve_impulse_and_resonance = True
 resonance_model = True
 full_atom_size = 2048
@@ -414,25 +415,69 @@ model = Model(
 
 optim = optimizer(model, lr=1e-3)
 
+
+class MatchingPursuitLoss(jit.ScriptModule):
+    def __init__(self):
+        super().__init__()
+        self.encoding_channels = 512
+
+
+    def forward(self, batch: torch.Tensor, recon: torch.Tensor):
+        batch_size = batch.shape[0]
+
+        residual = stft(batch, 512, 256, pad=True)
+
+        loss = torch.zeros((1,), device=batch.device)
+
+        for b in range(batch_size):
+            x = recon[b]
+            norms = torch.norm(x, dim=-1)
+            indices = torch.argsort(norms, descending=True)
+
+            r = residual[b: b + 1, :, : ]
+
+            skipped = 0
+
+            for i in indices:
+                if norms[i].item() == 0:
+                    skipped += 1
+                    continue
+
+                start_norm = torch.norm(r.view(-1))
+                channel_spec = stft(recon[b: b + 1, i: i + 1, :], 512, 256, pad=True)
+                r = r - channel_spec
+                end_norm = torch.norm(r.view(-1))
+                diff = start_norm - end_norm
+                loss = loss + -diff.mean()
+            
+            print(f'skipped {skipped} channels')
+        
+        return loss
+
+
+mp_loss = MatchingPursuitLoss().to(device)
+
 def train(batch, i):
     batch_size = batch.shape[0]
 
     optim.zero_grad()
     recon, encoding = model.forward(batch)
 
-    residual = stft(batch, 512, 256, pad=True)
-    loss = 0
+    loss = mp_loss.forward(batch, recon)
 
-    # TODO: try JIT here
-    print('==========================')
-    # TODO: try sorting from loudest to quietest channel
-    for i in range(encoding_channels):
-        start_norm = torch.norm(residual.view(batch_size, -1), dim=-1)
-        channel_spec = stft(recon[:, i: i + 1, :], 512, 256, pad=True)
-        residual = residual - channel_spec
-        end_norm = torch.norm(residual.view(batch_size, -1), dim=-1)
-        diff = start_norm - end_norm
-        loss = loss + -diff.mean()
+    # residual = stft(batch, 512, 256, pad=True)
+    # loss = 0
+
+    # # TODO: try JIT here
+    # print('==========================')
+    # # TODO: try sorting from loudest to quietest channel
+    # for i in range(encoding_channels):
+    #     start_norm = torch.norm(residual.view(batch_size, -1), dim=-1)
+    #     channel_spec = stft(recon[:, i: i + 1, :], 512, 256, pad=True)
+    #     residual = residual - channel_spec
+    #     end_norm = torch.norm(residual.view(batch_size, -1), dim=-1)
+    #     diff = start_norm - end_norm
+    #     loss = loss + -diff.mean()
     
     
 
@@ -464,7 +509,7 @@ def train(batch, i):
     # sparsity_loss = torch.abs(penalized).sum() * 0.00001
     sparsity_loss = encourage_sparsity_loss(
         encoding, 
-        n_unpenalized=128, 
+        n_unpenalized=256, 
         sparsity_loss_weight=0.0001)
 
     loss = loss + sparsity_loss
