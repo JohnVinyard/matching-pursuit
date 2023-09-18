@@ -344,10 +344,8 @@ class Model(nn.Module):
         x = self.stack(x)
 
         x = self.up(x)
+        x = F.avg_pool1d(x, full_atom_size, 1, full_atom_size // 2)[..., :exp.n_samples]
         x = F.dropout(x, 0.01)
-
-        # TODO: A softmax operation prior to the RELU might provide better signal 
-        # around sparsity
 
         encoding = x = torch.relu(x)
 
@@ -395,13 +393,15 @@ class Model(nn.Module):
 
         # TODO: What if I convert the feature map to sparse before doing this?
         x = fft_convolve(d, encoding)[..., :exp.n_samples]
-            # x = torch.sum(x, dim=1, keepdim=True)
+        # x = torch.sum(x, dim=1, keepdim=True)
 
         if do_reverb:
             # TODO: apply reverb to each individual channel.  This could
             # help to remove more norm by extending notes
             verb_ctxt = self.embed_verb_latent(ctxt)
             x = self.verb.forward(verb_ctxt, x)
+        
+        
         return x, encoding
 
 model = Model(
@@ -427,30 +427,42 @@ class MatchingPursuitLoss(jit.ScriptModule):
 
         residual = stft(batch, 512, 256, pad=True)
 
+        # residual = batch.clone()
+
         loss = torch.zeros((1,), device=batch.device)
 
         for b in range(batch_size):
             x = recon[b]
-            norms = torch.norm(x, dim=-1)
+            norms = torch.sum(torch.abs(x), dim=-1)
             indices = torch.argsort(norms, descending=True)
 
             r = residual[b: b + 1, :, : ]
 
             skipped = 0
+            active_channels = set()
 
             for i in indices:
+                
                 if norms[i].item() == 0:
                     skipped += 1
-                    continue
+                    # continue
+                else:
+                    active_channels.add(i.item())
 
                 start_norm = torch.norm(r.view(-1))
+
+                # channel = recon[b: b + 1, i: i + 1]
+                # r = r - channel
+
                 channel_spec = stft(recon[b: b + 1, i: i + 1, :], 512, 256, pad=True)
                 r = r - channel_spec
+
                 end_norm = torch.norm(r.view(-1))
                 diff = start_norm - end_norm
                 loss = loss + -diff.mean()
             
             print(f'skipped {skipped} channels')
+            print(f'active channels {active_channels}')
         
         return loss
 
@@ -510,7 +522,7 @@ def train(batch, i):
     sparsity_loss = encourage_sparsity_loss(
         encoding, 
         n_unpenalized=256, 
-        sparsity_loss_weight=0.0001)
+        sparsity_loss_weight=0.001)
 
     loss = loss + sparsity_loss
     # loss = exp.perceptual_loss(recon, batch) + sparsity_loss
