@@ -1,4 +1,5 @@
 
+import numpy as np
 import torch
 from conjure import numpy_conjure, SupportedContentType
 from torch import nn
@@ -13,31 +14,15 @@ from train.experiment_runner import BaseExperimentRunner, MonitoredValueDescript
 from train.optim import optimizer
 from util import device
 from util.readmedocs import readme
+from torch import jit
 
 exp = Experiment(
     samplerate=zounds.SR22050(),
     n_samples=2**15,
-    weight_init=0.1,
+    weight_init=0.05,
     model_dim=128,
     kernel_size=512)
 
-
-class Contextual(nn.Module):
-    def __init__(self, channels, n_layers=6, n_heads=4):
-        super().__init__()
-        self.channels = channels
-        self.down = nn.Conv1d(channels + 33, channels, 1, 1, 0)
-        encoder = nn.TransformerEncoderLayer(channels, n_heads, channels, batch_first=True)
-        self.encoder = nn.TransformerEncoder(encoder, n_layers, norm=nn.LayerNorm((128, channels)))
-
-    def forward(self, x):
-        pos = pos_encoded(x.shape[0], x.shape[-1], 16, device=x.device).permute(0, 2, 1)
-        x = torch.cat([x, pos], dim=1)
-        x = self.down(x)
-        x = x.permute(0, 2, 1)
-        x = self.encoder(x)
-        x = x.permute(0, 2, 1)
-        return x
     
 class DilatedBlock(nn.Module):
     def __init__(self, channels, dilation):
@@ -67,21 +52,17 @@ class Model(nn.Module):
         self.atom_size = atom_size
 
         self.embed_periodicity = nn.Linear(257, self.periodicity_embedding_dim)
-        self.reduce = nn.Conv1d(self.periodicity_embedding_dim * self.channels, self.channels, 1, 1, 0)
-        # self.context = nn.Sequential(
-        #     DilatedBlock(channels, 1),
-        #     DilatedBlock(channels, 3),
-        #     DilatedBlock(channels, 9),
-        #     DilatedBlock(channels, 1),
-        # )
+        self.reduce = nn.Conv1d(self.periodicity_embedding_dim * exp.n_bands, self.channels, 1, 1, 0)
 
-        self.context = Contextual(channels)
+        self.context = nn.Sequential(
+            DilatedBlock(channels, 1),
+            DilatedBlock(channels, 3),
+            DilatedBlock(channels, 9),
+            DilatedBlock(channels, 1),
+        )
 
-        self.salience = nn.Conv1d(channels, channels, 1, 1, 0)
-        self.act = nn.Conv1d(channels, channels, 1, 1, 0)
+        self.salience = nn.Conv1d(channels, encoding_channels, 1, 1, 0)
         self.up = nn.Conv1d(channels, encoding_channels, 1, 1, 0)
-
-
         self.atoms = nn.Parameter(torch.zeros(1, self.encoding_channels, self.atom_size).uniform_(-1, 1))
 
         self.apply(lambda x: exp.init_weights(x))
@@ -93,7 +74,6 @@ class Model(nn.Module):
         else:
             x = x
         
-        
         # compute perceptual feature
         batch_size = x.shape[0]
         x = self.embed_periodicity(x)
@@ -104,26 +84,37 @@ class Model(nn.Module):
         x = self.context(x)
 
         # sparsify
-        # sal = self.salience(x)
-        # sal = torch.softmax(sal.view(batch_size, -1), dim=-1).view(batch_size, self.channels, -1)
-        # act = self.act(x)
-        # x = sal * act
-
-        
-        x = self.up(x)
-
-
-        encoding = x = sparsify(x, n_to_keep=128)
-
+        sal = self.salience(x)
+        sal = torch.softmax(sal.view(batch_size, -1), dim=-1).view(batch_size, self.encoding_channels, -1)
+        x = encoding = self.up(x)
+        x = F.dropout(x, 0.05)
         # x = torch.relu(x)
-        # encoding = x
+
+        # local competition
+        # x = x[:, None, :, :]
+        # pooled = F.avg_pool2d(x, (9, 9), (1, 1), (4, 4))
+        # x = x - pooled 
+        # x = x.view(batch_size, self.encoding_channels, -1)
+
+        encoding = x = sparsify(
+            x, 
+            n_to_keep=32, 
+            salience=sal
+        )
+
+        d = encoding[0].sum(dim=-1)
+        nz = torch.nonzero(d)
+        print('alive', set(nz.data.cpu().numpy().reshape((-1,))))
+        
         
         full = torch.zeros(batch_size, self.encoding_channels, exp.n_samples, device=x.device)
         ratio = exp.n_samples // x.shape[-1]
         full[:, :, ::ratio] = x
 
-        atoms = unit_norm(self.atoms)
-        atoms = F.pad(self.atoms, (0, exp.n_samples - self.atom_size))
+        atoms = self.atoms
+        # atoms = self.atoms * torch.hamming_window(self.atom_size, device=x.device)[None, None, :]
+        # atoms = unit_norm(atoms, dim=-1)
+        atoms = F.pad(atoms, (0, exp.n_samples - self.atom_size))
         signal = fft_convolve(atoms, full)[..., :exp.n_samples]
 
         signal = torch.sum(signal, dim=1, keepdim=True)
@@ -132,24 +123,26 @@ class Model(nn.Module):
 
         
 model = Model(
-    channels=128, 
+    channels=256, 
     encoding_channels=512, 
-    atom_size=1024
+    atom_size=4096
 ).to(device)
 
 optim = optimizer(model, lr=1e-3)
 
 
-
 def train(batch, i):
     optim.zero_grad()
-
     feat = exp.perceptual_feature(batch)
-
     recon, encoding = model.forward(feat)
 
-    loss = F.mse_loss(exp.perceptual_feature(recon), feat)
+    # e = torch.sum(encoding, dim=-1)
+    # e = torch.softmax(e, dim=-1)
+    # sim = e[:, None, :] * e[:, :, None]
+    # sim = torch.triu(sim)
+    # sim = sim.mean() * 100
 
+    loss = F.mse_loss(exp.perceptual_feature(recon), feat) #+ sim
     loss.backward()
     optim.step()
     return loss, recon, encoding
@@ -163,9 +156,9 @@ def build_conjure_funcs(experiment: BaseExperimentRunner):
             identifier='sparsefeaturemap')
     def sparsefeaturemap(x: torch.Tensor):
         x = x.data.cpu().numpy()
-        x = x - x.min()
-        x = x / (x.max() + 1e-12)
-        x = x * 255
+        x = (x != 0).astype(np.float32)
+        # x = x - x.min()
+        # x = x / (x.max() + 1e-12)
         return x
 
     return (sparsefeaturemap,)
