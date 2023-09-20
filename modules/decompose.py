@@ -1,4 +1,6 @@
+import numpy as np
 import torch
+from scipy.signal import tukey
 
 def fft_frequency_decompose(x, min_size):
     coeffs = torch.fft.rfft(x, norm='ortho')
@@ -34,13 +36,31 @@ def fft_frequency_decompose(x, min_size):
 def fft_resample(x, desired_size, is_lowest_band):
     batch, channels, time = x.shape
 
-
     coeffs = torch.fft.rfft(x, norm='ortho')
     n_coeffs = coeffs.shape[2]
 
+
+    # window = torch.ones(n_coeffs, device=x.device)
+    # window[:10] = torch.linspace(0, 1, 10, device=x.device)
+    # window[-10:] = torch.linspace(1, 0, 10, device=x.device)
+
+    # window = torch.hamming_window(n_coeffs, device=x.device)
+
+    window = torch.from_numpy(tukey(n_coeffs, alpha=0.2).astype(np.float32)).to(x.device)
+    coeffs = coeffs * window[None, None, :]
+
+
     new_coeffs_size = desired_size // 2 + 1
-    new_coeffs = torch.zeros(batch, channels, new_coeffs_size, dtype=torch.complex64).to(x.device)
+
+    new_coeffs = torch.zeros(
+        batch, 
+        channels, 
+        new_coeffs_size, 
+        dtype=torch.complex64, 
+        device=x.device)
+
     if is_lowest_band:
+        # THIS CODE PATH
         new_coeffs[:, :, :n_coeffs] = coeffs
     else:
         new_coeffs[:, :, n_coeffs // 2:n_coeffs] = coeffs[:, :, n_coeffs // 2:]
