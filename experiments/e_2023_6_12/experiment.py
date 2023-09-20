@@ -1,18 +1,14 @@
 
 import torch
+from conjure import numpy_conjure, SupportedContentType
 from torch import nn
 from torch.nn import functional as F
 import zounds
 from config.experiment import Experiment
-from modules.ddsp import AudioModel
-from modules.decompose import fft_frequency_decompose
-from modules.linear import LinearOutputStack
-from modules.normalization import max_norm
 from modules.pos_encode import pos_encoded
 from modules.reverb import ReverbGenerator
-from modules.sparse import sparsify
-from modules.stft import stft
-from train.experiment_runner import BaseExperimentRunner
+from modules.sparse import encourage_sparsity_loss
+from train.experiment_runner import BaseExperimentRunner, MonitoredValueDescriptor
 from train.optim import optimizer
 from util import device
 from util.readmedocs import readme
@@ -32,12 +28,8 @@ exp = Experiment(
 # PIF will be (batch, bands, time, periodicity)
 
 
-sparse_encoding = False
-audio_model_bands = 128
 features_per_band = 8
 transformer_context = False
-use_audio_model = False
-k_sparse = 64
 
 
 class ChannelsLastBatchNorm(nn.Module):
@@ -78,11 +70,9 @@ class UpsampleBlock(nn.Module):
         return F.interpolate(x, scale_factor=4, mode='nearest')
 
 
-
 class Model(nn.Module):
-    def __init__(self, is_disc=False):
+    def __init__(self):
         super().__init__()
-        self.is_disc = is_disc
 
 
         self.embed = nn.Linear(257, features_per_band)
@@ -118,94 +108,36 @@ class Model(nn.Module):
                 ),
             )
 
+        
 
-        self.judge = nn.Sequential(
-            # 64
-            nn.Sequential(
-                nn.Conv1d(1024, 512, 3, 2, 1),
-                nn.LeakyReLU(0.2),
-                # nn.BatchNorm1d(512)
-            ),
-            # 32
-            nn.Sequential(
-                nn.Conv1d(512, 512, 3, 2, 1),
-                nn.LeakyReLU(0.2),
-                # nn.BatchNorm1d(512)
-            ),
-            # 16
-            nn.Sequential(
-                nn.Conv1d(512, 512, 3, 2, 1),
-                nn.LeakyReLU(0.2),
-                # nn.BatchNorm1d(512)
-            ),
-            # 8
-            nn.Sequential(
-                nn.Conv1d(512, 512, 3, 2, 1),
-                nn.LeakyReLU(0.2),
-                # nn.BatchNorm1d(512)
-            ),
-             # 4
-            nn.Sequential(
-                nn.Conv1d(512, 512, 3, 2, 1),
-                nn.LeakyReLU(0.2),
-                # nn.BatchNorm1d(512)
-            ),
-            # 1
-            nn.Sequential(
-                nn.Conv1d(512, 512, 4, 4, 0),
-                nn.LeakyReLU(0.2),
-                # nn.BatchNorm1d(512)
-            ),
-
-            nn.Conv1d(512, 512, 1, 1, 0),
-            nn.Conv1d(512, 1, 1, 1, 0),
-        )
-
-
-        # self.to_verb_context = LinearOutputStack(1024, 3, out_channels=1024, norm=nn.LayerNorm((1024,)))
         self.verb = ReverbGenerator(1024, 3, exp.samplerate, exp.n_samples, norm=nn.LayerNorm((1024,)))
 
-        if use_audio_model:
-            self.up = nn.Sequential(
-                nn.Conv1d(1024, audio_model_bands, 1, 1, 0),
-                AudioModel(
-                    exp.n_samples, 
-                    audio_model_bands, 
-                    exp.samplerate, 
-                    128, 
-                    512, 
-                    batch_norm=True, 
-                    use_wavetable=False,
-                    complex_valued_osc=False
-                )
-            )
-            
-        else:        
+        
 
-            self.up = nn.Sequential(
+        self.up = nn.Sequential(
 
-                nn.Conv1d(1024, 512, 7, 1, 3),
-                nn.BatchNorm1d(512),
-                nn.LeakyReLU(0.2),
-                UpsampleBlock(512),
+            nn.Conv1d(1024, 512, 7, 1, 3),
+            nn.BatchNorm1d(512),
+            nn.LeakyReLU(0.2),
+            UpsampleBlock(512),
 
-                nn.Conv1d(512, 256, 7, 1, 3),
-                nn.BatchNorm1d(256),
-                nn.LeakyReLU(0.2),
-                UpsampleBlock(256),
+            nn.Conv1d(512, 256, 7, 1, 3),
+            nn.BatchNorm1d(256),
+            nn.LeakyReLU(0.2),
+            UpsampleBlock(256),
 
-                nn.Conv1d(256, 128, 7, 1, 3),
-                nn.BatchNorm1d(128),
-                nn.LeakyReLU(0.2),
-                UpsampleBlock(128),
+            nn.Conv1d(256, 128, 7, 1, 3),
+            nn.BatchNorm1d(128),
+            nn.LeakyReLU(0.2),
+            UpsampleBlock(128),
 
-                nn.Conv1d(128, 64, 7, 1, 3),
-                nn.BatchNorm1d(64),
-                nn.LeakyReLU(0.2),
-                UpsampleBlock(64),
+            nn.Conv1d(128, 64, 7, 1, 3),
+            nn.BatchNorm1d(64),
+            nn.LeakyReLU(0.2),
+            UpsampleBlock(64),
 
-                nn.Conv1d(64, 1, 7, 1, 3),
-            )
+            nn.Conv1d(64, 1, 7, 1, 3),
+        )
 
         
 
@@ -222,29 +154,13 @@ class Model(nn.Module):
         batch, channels, time, period = x.shape
         x = self.embed(x) # (batch, channels, time, 8)
 
-
         x = x.permute(0, 3, 1, 2).reshape(batch, 8 * channels, time)
-        # x = self.norm(x)
 
-        if not self.is_disc:
+        salience = self.salience(x)
+        salience = F.dropout(salience, 0.05)
+        salience = torch.relu(salience)
+        encoding = x = salience
 
-            if sparse_encoding:
-                salience = self.salience(x)
-                salience = F.dropout(salience, 0.05)
-                salience = salience.reshape(batch, -1)
-                salience = torch.softmax(salience, dim=-1)
-                salience = salience.reshape(batch, 1024, -1)
-                encoding = salience = sparsify(salience, n_to_keep=k_sparse)
-                x = x * salience
-                x = self.context(x)
-                return x, encoding
-            else:
-                salience = self.salience(x)
-                salience = F.dropout(salience, 0.05)
-                salience = torch.relu(salience)
-                encoding = x = salience
-
-        
         return x, encoding
 
     def generate(self, x):
@@ -255,31 +171,18 @@ class Model(nn.Module):
 
         # torch.Size([16, 128, 128, 257])
         encoded, encoding = self.embed_features(x, iteration)
-
-        if self.is_disc:
-            features = []
-            x = encoded
-            for layer in self.judge:
-                x = layer(x)
-                features.append(x)
-            return x, features
+        
         
         ctx = torch.sum(encoded, dim=-1)
-        # ctx = self.to_verb_context(ctx)
 
         x = self.generate(encoded)
 
         x = self.verb.forward(ctx, x)
         
-        # x = max_norm(x)
-
         return x, encoding
 
 model = Model().to(device)
 optim = optimizer(model, lr=1e-3)
-
-disc = Model(is_disc=True).to(device)
-disc_optim = optimizer(disc, lr=1e-3)
 
 
 
@@ -287,7 +190,6 @@ def train(batch, i):
     batch_size = batch.shape[0]
 
     optim.zero_grad()
-    disc_optim.zero_grad()
 
     with torch.no_grad():
         feat = exp.perceptual_feature(batch)
@@ -295,67 +197,45 @@ def train(batch, i):
     recon, encoding = model.forward(feat, i)
     r = exp.perceptual_feature(recon)
 
-    
 
-    # TODO: move this into a stand-alone function
-    encoding = encoding.view(batch_size, -1)
-    srt, indices = torch.sort(encoding, dim=-1, descending=True)
-
-    # the first 128 atoms may be as large/loud as they need to be
-    # TODO: This number could slowly drop over training time
-    penalized = srt[:, 128:]
-    non_zero = (encoding > 0).sum()
-    sparsity = non_zero / encoding.nelement()
-    print('sparsity', sparsity.item(), 'n_elements', (non_zero / batch_size).item())
-
-
-    sparsity_loss = torch.abs(penalized).sum() * 0.01
+    sparsity_loss = encourage_sparsity_loss(encoding, 0, sparsity_loss_weight=0.001)
 
     loss = F.mse_loss(r, feat) + sparsity_loss
 
     loss.backward()
     optim.step()
 
-    # with torch.no_grad():
-    #     batch = exp.perceptual_feature(batch)
-
-    # if i % 2 == 0:
-    #     print('-----------------------------')
-    #     print('G')
-    #     recon = model.forward(batch, i)
-    #     rec_feat = exp.perceptual_feature(recon)
-    #     j, features = disc.forward(rec_feat, i)
-    #     rj, rf = disc.forward(batch, i)
-    #     g_loss = torch.abs(1 - j).mean()
-    #     feat_loss = 0
-    #     for a, b, in zip(features, rf):
-    #         feat_loss = feat_loss + F.mse_loss(a, b)
-        
-    #     loss = feat_loss + g_loss
-    #     loss.backward()
-    #     optim.step()
-
-    # else:
-    #     with torch.no_grad():
-    #         recon = model.forward(batch, i)
-    #         recon_spec = exp.perceptual_feature(recon)
-
-    #     fj, features = disc.forward(recon_spec, i)
-    #     rj, rf = disc.forward(batch, i)
-    #     loss = torch.abs(0 - fj).mean() + torch.abs(1 - rj).mean()
-    #     loss.backward()
-    #     disc_optim.step()
-    #     print('D', fj.mean().item(), rj.mean().item())
+    encoding = (encoding != 0).float()
 
 
-    return loss, recon
+    return loss, recon, encoding
     
+def make_conjure(experiment: BaseExperimentRunner):
 
+    @numpy_conjure(experiment.collection, SupportedContentType.Spectrogram.value)
+    def encoding(x: torch.Tensor):
+        return x[0].data.cpu().numpy()
+    
+    return (encoding,)
 
 @readme
 class PhaseInvariantFeatureInversion(BaseExperimentRunner):
+
+    encoding_view = MonitoredValueDescriptor(make_conjure)
+
     def __init__(self, stream, port=None):
         super().__init__(stream, train, exp, port=port)
+    
+
+    def run(self):
+        for i, item in enumerate(self.iter_items()):
+            item = item.view(-1, 1, exp.n_samples)
+            self.real = item
+            l, r, e = train(item, i)
+            self.fake = r
+            self.encoding_view = e
+            print(l.item())
+            self.after_training_iteration(l)
     
     
             

@@ -9,6 +9,7 @@ from config.experiment import Experiment
 from fft_basis import morlet_filter_bank
 from modules.overlap_add import overlap_add
 from modules.phase import windowed_audio
+from modules.sparse import encourage_sparsity_loss
 from train.experiment_runner import BaseExperimentRunner, MonitoredValueDescriptor
 from train.optim import optimizer
 from util import device
@@ -80,12 +81,14 @@ class Model(nn.Module):
     def __init__(self):
         super().__init__()
 
-        # self.atoms = nn.Parameter(torch.zeros(1, 2, ))
+        n_atoms = 512
+        self.atoms = nn.Parameter(torch.zeros(2, 1024, 25, 9).uniform_(-0.01, 0.01))
 
         self.down = nn.Sequential(
             # (64, 256)
             nn.Sequential(
                 nn.Conv2d(2, 16, (3, 3), (2, 2), (1, 1)),
+                nn.Dropout2d(0.1),
                 nn.LeakyReLU(0.2),
                 nn.BatchNorm2d(16)
             ),
@@ -93,6 +96,7 @@ class Model(nn.Module):
             # (32, 128)
             nn.Sequential(
                 nn.Conv2d(16, 32, (3, 3), (2, 2), (1, 1)),
+                nn.Dropout2d(0.1),
                 nn.LeakyReLU(0.2),
                 nn.BatchNorm2d(32)
             ),
@@ -100,6 +104,7 @@ class Model(nn.Module):
             # (16, 64)
             nn.Sequential(
                 nn.Conv2d(32, 64, (3, 3), (2, 2), (1, 1)),
+                nn.Dropout2d(0.1),
                 nn.LeakyReLU(0.2),
                 nn.BatchNorm2d(64)
             ),
@@ -107,17 +112,23 @@ class Model(nn.Module):
             # (8, 32)
             nn.Sequential(
                 nn.Conv2d(64, 128, (3, 3), (2, 2), (1, 1)),
+                nn.Dropout2d(0.1),
                 nn.LeakyReLU(0.2),
                 nn.BatchNorm2d(128)
             ),
+
+            nn.Conv2d(128, 1024, (1, 1), (1, 1), (0, 0))
         )
 
 
         self.up = nn.Sequential(
 
+            nn.Conv2d(1024, 128, (1, 1), (1, 1), (0, 0)),
+
             # (16, 64)
             nn.Sequential(
                 nn.ConvTranspose2d(128, 64, (4, 4), (2, 2), (1, 1)),
+                nn.Dropout2d(0.1),
                 nn.LeakyReLU(0.2),
                 nn.BatchNorm2d(64)
             ),
@@ -125,6 +136,7 @@ class Model(nn.Module):
             # (32, 128)
             nn.Sequential(
                 nn.ConvTranspose2d(64, 32, (4, 4), (2, 2), (1, 1)),
+                nn.Dropout2d(0.1),
                 nn.LeakyReLU(0.2),
                 nn.BatchNorm2d(32)
             ),
@@ -132,6 +144,7 @@ class Model(nn.Module):
             # (64, 256)
             nn.Sequential(
                 nn.ConvTranspose2d(32, 16, (4, 4), (2, 2), (1, 1)),
+                nn.Dropout2d(0.1),
                 nn.LeakyReLU(0.2),
                 nn.BatchNorm2d(16)
             ),
@@ -139,8 +152,6 @@ class Model(nn.Module):
             # (128, 512)
             nn.Sequential(
                 nn.ConvTranspose2d(16, 2, (4, 4), (2, 2), (1, 1)),
-                # nn.LeakyReLU(0.2),
-                # nn.BatchNorm2d(16)
             ),
         )
 
@@ -148,14 +159,18 @@ class Model(nn.Module):
     
     def forward(self, x):
         batch, channels, time, freq = x.shape
-        act = {}
+        assert channels == 2
+
 
         for layer in self.down:
             x = layer(x)
-            act[x.shape[-1]] = x
+        
+        x = torch.relu(x)
+        encoding = x
         
         for layer in self.up:
             x = layer(x)
+        
         
         mag = x[:, :1, :, :]
         phase = x[:, 1:, :, :]
@@ -164,7 +179,7 @@ class Model(nn.Module):
 
         x = torch.cat([mag, phase], dim=1)
         
-        return x
+        return x, encoding
 
 
 model = Model().to(device)
@@ -182,17 +197,17 @@ def train(batch, i):
         cat = torch.cat([mag[:, None, :, :], phase[:, None, :, :]], dim=1)
 
     
-    recon = model.forward(cat)
+    recon, encoding = model.forward(cat)
 
-    # loss = F.mse_loss(recon, cat)
+    sp_loss = encourage_sparsity_loss(encoding, 0, sparsity_loss_weight=0.025)
 
     mag_loss = F.mse_loss(
         recon[:, 0, :, :], 
         cat[:, 0, :, :]
-    ) * 100
+    )
 
     phase_loss = F.mse_loss(recon[:, 1, :, :], cat[:, 1, :, :])
-    loss = mag_loss + phase_loss
+    loss = mag_loss + phase_loss + sp_loss
 
     print(mag_loss.item(), phase_loss.item(), loss.item())
     loss.backward()
