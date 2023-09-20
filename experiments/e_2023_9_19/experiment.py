@@ -1,5 +1,6 @@
 
 import numpy as np
+from torch import nn
 from conjure import numpy_conjure, SupportedContentType
 import torch
 from torch.nn import functional as F
@@ -9,6 +10,7 @@ from fft_basis import morlet_filter_bank
 from modules.overlap_add import overlap_add
 from modules.phase import windowed_audio
 from train.experiment_runner import BaseExperimentRunner, MonitoredValueDescriptor
+from train.optim import optimizer
 from util import device
 from util.readmedocs import readme
 
@@ -22,7 +24,7 @@ exp = Experiment(
 
 n_bands = 512
 kernel_size = 512
-freq_band = zounds.FrequencyBand(40, exp.samplerate.nyquist)
+freq_band = zounds.FrequencyBand(50, exp.samplerate.nyquist - 1000)
 scale = zounds.GeometricScale(freq_band.start_hz, freq_band.stop_hz, 0.01, n_bands)
 filter_bank = morlet_filter_bank(
     exp.samplerate, kernel_size, scale, 0.1, normalize=False).astype(np.complex64)
@@ -73,13 +75,133 @@ def to_time_domain(spec):
     return td
 
 
+
+class Model(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        # self.atoms = nn.Parameter(torch.zeros(1, 2, ))
+
+        self.down = nn.Sequential(
+            # (64, 256)
+            nn.Sequential(
+                nn.Conv2d(2, 16, (3, 3), (2, 2), (1, 1)),
+                nn.LeakyReLU(0.2),
+                nn.BatchNorm2d(16)
+            ),
+
+            # (32, 128)
+            nn.Sequential(
+                nn.Conv2d(16, 32, (3, 3), (2, 2), (1, 1)),
+                nn.LeakyReLU(0.2),
+                nn.BatchNorm2d(32)
+            ),
+
+            # (16, 64)
+            nn.Sequential(
+                nn.Conv2d(32, 64, (3, 3), (2, 2), (1, 1)),
+                nn.LeakyReLU(0.2),
+                nn.BatchNorm2d(64)
+            ),
+
+            # (8, 32)
+            nn.Sequential(
+                nn.Conv2d(64, 128, (3, 3), (2, 2), (1, 1)),
+                nn.LeakyReLU(0.2),
+                nn.BatchNorm2d(128)
+            ),
+        )
+
+
+        self.up = nn.Sequential(
+
+            # (16, 64)
+            nn.Sequential(
+                nn.ConvTranspose2d(128, 64, (4, 4), (2, 2), (1, 1)),
+                nn.LeakyReLU(0.2),
+                nn.BatchNorm2d(64)
+            ),
+
+            # (32, 128)
+            nn.Sequential(
+                nn.ConvTranspose2d(64, 32, (4, 4), (2, 2), (1, 1)),
+                nn.LeakyReLU(0.2),
+                nn.BatchNorm2d(32)
+            ),
+
+            # (64, 256)
+            nn.Sequential(
+                nn.ConvTranspose2d(32, 16, (4, 4), (2, 2), (1, 1)),
+                nn.LeakyReLU(0.2),
+                nn.BatchNorm2d(16)
+            ),
+
+            # (128, 512)
+            nn.Sequential(
+                nn.ConvTranspose2d(16, 2, (4, 4), (2, 2), (1, 1)),
+                # nn.LeakyReLU(0.2),
+                # nn.BatchNorm2d(16)
+            ),
+        )
+
+        self.apply(lambda x: exp.init_weights(x))
+    
+    def forward(self, x):
+        batch, channels, time, freq = x.shape
+        act = {}
+
+        for layer in self.down:
+            x = layer(x)
+            act[x.shape[-1]] = x
+        
+        for layer in self.up:
+            x = layer(x)
+        
+        mag = x[:, :1, :, :]
+        phase = x[:, 1:, :, :]
+
+        mag = torch.abs(mag)
+
+        x = torch.cat([mag, phase], dim=1)
+        
+        return x
+
+
+model = Model().to(device)
+optim = optimizer(model, lr=1e-3)
+
 def train(batch, i):
+    optim.zero_grad()
+
     with torch.no_grad():
         spec = to_frequency_domain(batch)
-        recon = to_time_domain(spec)[..., :exp.n_samples]
-        loss = F.mse_loss(recon, batch)
-        print(loss.item())
-        return loss, recon, spec[0]
+
+        mag, phase = spec
+        # print(mag.min().item(), mag.max().item(), phase.min().item(), phase.max().item())
+
+        cat = torch.cat([mag[:, None, :, :], phase[:, None, :, :]], dim=1)
+
+    
+    recon = model.forward(cat)
+
+    # loss = F.mse_loss(recon, cat)
+
+    mag_loss = F.mse_loss(
+        recon[:, 0, :, :], 
+        cat[:, 0, :, :]
+    ) * 100
+
+    phase_loss = F.mse_loss(recon[:, 1, :, :], cat[:, 1, :, :])
+    loss = mag_loss + phase_loss
+
+    print(mag_loss.item(), phase_loss.item(), loss.item())
+    loss.backward()
+    optim.step()
+
+    with torch.no_grad():
+        recon = to_time_domain((recon[:, 0, :, :], recon[:, 1, :, :]))[..., :exp.n_samples]
+
+    return loss, recon, spec[0], spec[1]
 
 
 def make_conjure(experiment: BaseExperimentRunner):
@@ -90,10 +212,19 @@ def make_conjure(experiment: BaseExperimentRunner):
     
     return (geom_spec,)
 
+def make_phase_conj(experiment: BaseExperimentRunner):
+
+    @numpy_conjure(experiment.collection, SupportedContentType.Spectrogram.value)
+    def geom_phase(x: torch.Tensor):
+        return x.data.cpu().numpy()[0]
+    
+    return (geom_phase,)
+
 @readme
 class MatchingPursuitV3(BaseExperimentRunner):
 
     geom_spec = MonitoredValueDescriptor(make_conjure)
+    geom_phase = MonitoredValueDescriptor(make_phase_conj)
 
     def __init__(self, stream, port=None):
         super().__init__(stream, train, exp, port=port)
@@ -102,8 +233,9 @@ class MatchingPursuitV3(BaseExperimentRunner):
         for i, item in enumerate(self.iter_items()):
             item = item.view(-1, 1, exp.n_samples)
             self.real = item
-            l, r, spec = train(item, i)
+            l, r, spec, phase = train(item, i)
             self.geom_spec = spec
+            self.geom_phase = phase
             self.fake = r
             self.after_training_iteration(l)
     
