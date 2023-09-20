@@ -7,9 +7,9 @@ from torch.nn import functional as F
 import zounds
 from config.experiment import Experiment
 from modules.fft import fft_convolve
-from modules.normalization import unit_norm
+from modules.normalization import max_norm, unit_norm
 from modules.pos_encode import pos_encoded
-from modules.sparse import sparsify
+from modules.sparse import encourage_sparsity_loss, sparsify
 from train.experiment_runner import BaseExperimentRunner, MonitoredValueDescriptor
 from train.optim import optimizer
 from util import device
@@ -19,7 +19,7 @@ from torch import jit
 exp = Experiment(
     samplerate=zounds.SR22050(),
     n_samples=2**15,
-    weight_init=0.05,
+    weight_init=0.1,
     model_dim=128,
     kernel_size=512)
 
@@ -61,9 +61,11 @@ class Model(nn.Module):
             DilatedBlock(channels, 1),
         )
 
+
         self.salience = nn.Conv1d(channels, encoding_channels, 1, 1, 0)
         self.up = nn.Conv1d(channels, encoding_channels, 1, 1, 0)
-        self.atoms = nn.Parameter(torch.zeros(1, self.encoding_channels, self.atom_size).uniform_(-1, 1))
+        self.atoms = nn.Parameter(
+            torch.zeros(1, self.encoding_channels, self.atom_size).uniform_(-1, 1))
 
         self.apply(lambda x: exp.init_weights(x))
     
@@ -86,9 +88,10 @@ class Model(nn.Module):
         # sparsify
         sal = self.salience(x)
         sal = torch.softmax(sal.view(batch_size, -1), dim=-1).view(batch_size, self.encoding_channels, -1)
+
         x = encoding = self.up(x)
         x = F.dropout(x, 0.05)
-        # x = torch.relu(x)
+        x = torch.relu(x)
 
         # local competition
         # x = x[:, None, :, :]
@@ -96,11 +99,12 @@ class Model(nn.Module):
         # x = x - pooled 
         # x = x.view(batch_size, self.encoding_channels, -1)
 
-        encoding = x = sparsify(
-            x, 
-            n_to_keep=32, 
-            salience=sal
-        )
+        # encoding = x = sparsify(
+        #     x, 
+        #     n_to_keep=32, 
+        #     salience=sal * 25
+        # )
+        encoding = x
 
         d = encoding[0].sum(dim=-1)
         nz = torch.nonzero(d)
@@ -111,10 +115,10 @@ class Model(nn.Module):
         ratio = exp.n_samples // x.shape[-1]
         full[:, :, ::ratio] = x
 
-        atoms = self.atoms
+        # atoms = self.atoms
         # atoms = self.atoms * torch.hamming_window(self.atom_size, device=x.device)[None, None, :]
         # atoms = unit_norm(atoms, dim=-1)
-        atoms = F.pad(atoms, (0, exp.n_samples - self.atom_size))
+        atoms = F.pad(self.atoms, (0, exp.n_samples - self.atom_size))
         signal = fft_convolve(atoms, full)[..., :exp.n_samples]
 
         signal = torch.sum(signal, dim=1, keepdim=True)
@@ -142,9 +146,17 @@ def train(batch, i):
     # sim = torch.triu(sim)
     # sim = sim.mean() * 100
 
-    loss = F.mse_loss(exp.perceptual_feature(recon), feat) #+ sim
+    sp = encourage_sparsity_loss(encoding, 0, sparsity_loss_weight=0.00000005)
+
+    # loss = F.mse_loss(exp.perceptual_feature(recon), feat) + sp 
+    loss = F.mse_loss(recon, batch) + sp
     loss.backward()
     optim.step()
+
+    # model.atoms.data[:] = unit_norm(model.atoms)
+
+    # recon = max_norm(recon)
+
     return loss, recon, encoding
 
 
