@@ -1,15 +1,20 @@
 
+import numpy as np
 import torch
 from conjure import numpy_conjure, SupportedContentType
 from torch import nn
 from torch.nn import functional as F
 import zounds
 from config.experiment import Experiment
+from fft_basis import morlet_filter_bank
+from modules.fft import fft_convolve
+from modules.normalization import unit_norm
 from modules.pos_encode import pos_encoded
 from modules.reverb import ReverbGenerator
 from modules.sparse import encourage_sparsity_loss
 from train.experiment_runner import BaseExperimentRunner, MonitoredValueDescriptor
 from train.optim import optimizer
+from upsample import ConvUpsample
 from util import device
 from util.readmedocs import readme
 
@@ -21,7 +26,7 @@ exp = Experiment(
     model_dim=128,
     kernel_size=512,
     a_weighting=False,
-    windowed_pif=False,
+    windowed_pif=True,
     norm_periodicities=False)
 
 
@@ -32,17 +37,6 @@ features_per_band = 8
 transformer_context = False
 
 
-class ChannelsLastBatchNorm(nn.Module):
-    def __init__(self, channels):
-        super().__init__()
-        self.channels = channels
-        self.norm = nn.BatchNorm1d(channels)
-    
-    def forward(self, x):
-        x = x.permute(0, 2, 1)
-        x = self.norm(x)
-        x = x.permute(0, 2, 1)
-        return x
 
 
 class Contextual(nn.Module):
@@ -106,6 +100,11 @@ class Model(nn.Module):
                     nn.LeakyReLU(0.2),
                     nn.BatchNorm1d(1024)
                 ),
+                nn.Sequential(
+                    nn.Conv1d(1024, 1024, 7, 4, 3),
+                    nn.LeakyReLU(0.2),
+                    nn.BatchNorm1d(1024)
+                )
             )
 
         
@@ -114,32 +113,44 @@ class Model(nn.Module):
 
         
 
+        # self.up = nn.Sequential(
+
+        #     nn.Conv1d(1024, 512, 7, 1, 3),
+        #     nn.BatchNorm1d(512),
+        #     nn.LeakyReLU(0.2),
+        #     UpsampleBlock(512),
+
+        #     nn.Conv1d(512, 256, 7, 1, 3),
+        #     nn.BatchNorm1d(256),
+        #     nn.LeakyReLU(0.2),
+        #     UpsampleBlock(256),
+
+        #     nn.Conv1d(256, 128, 7, 1, 3),
+        #     nn.BatchNorm1d(128),
+        #     nn.LeakyReLU(0.2),
+        #     UpsampleBlock(128),
+
+        #     nn.Conv1d(128, 64, 7, 1, 3),
+        #     nn.BatchNorm1d(64),
+        #     nn.LeakyReLU(0.2),
+        #     UpsampleBlock(64),
+
+        #     nn.Conv1d(64, 1, 7, 1, 3),
+        # )
+
         self.up = nn.Sequential(
-
-            nn.Conv1d(1024, 512, 7, 1, 3),
-            nn.BatchNorm1d(512),
-            nn.LeakyReLU(0.2),
-            UpsampleBlock(512),
-
-            nn.Conv1d(512, 256, 7, 1, 3),
-            nn.BatchNorm1d(256),
-            nn.LeakyReLU(0.2),
-            UpsampleBlock(256),
-
-            nn.Conv1d(256, 128, 7, 1, 3),
-            nn.BatchNorm1d(128),
-            nn.LeakyReLU(0.2),
-            UpsampleBlock(128),
-
-            nn.Conv1d(128, 64, 7, 1, 3),
-            nn.BatchNorm1d(64),
-            nn.LeakyReLU(0.2),
-            UpsampleBlock(64),
-
-            nn.Conv1d(64, 1, 7, 1, 3),
+            nn.Conv1d(1024, 128, 1, 1, 0),
+            ConvUpsample(
+                128, 128, 128, exp.n_samples, mode='nearest', out_channels=1024, from_latent=False, batch_norm=True)
         )
 
-        
+        self.atom_size = 16384
+
+
+
+        self.atoms = nn.Parameter(
+            unit_norm(torch.zeros(1, 1024, self.atom_size).uniform_(-1, 1))
+        )
 
 
         self.norm = nn.LayerNorm((1024, 128))
@@ -156,6 +167,10 @@ class Model(nn.Module):
 
         x = x.permute(0, 3, 1, 2).reshape(batch, 8 * channels, time)
 
+        # gather context
+        x = self.context(x)
+
+        # sparsify
         salience = self.salience(x)
         salience = F.dropout(salience, 0.05)
         salience = torch.relu(salience)
@@ -164,7 +179,22 @@ class Model(nn.Module):
         return x, encoding
 
     def generate(self, x):
-        x = self.up(x)
+        # x = self.up(x)
+
+        rate = x.shape[-1]
+        step = exp.n_samples // rate
+        new_x = torch.zeros(x.shape[0], x.shape[1], exp.n_samples, device=x.device)
+        new_x[:, :, ::step] = x
+        x = new_x
+
+        # x = F.dropout(x, 0.05)
+        x = torch.relu(x)
+
+        atoms = F.pad(self.atoms, (0, exp.n_samples - self.atom_size))
+
+        # x = F.conv1d(x, self.atoms, padding=4096)[..., :exp.n_samples]
+        x = fft_convolve(atoms, x)
+        x = torch.sum(x, dim=1, keepdim=True)
         return x
     
     def forward(self, x, iteration):
@@ -198,15 +228,17 @@ def train(batch, i):
     r = exp.perceptual_feature(recon)
 
 
-    sparsity_loss = encourage_sparsity_loss(encoding, 0, sparsity_loss_weight=0.001)
+    sparsity_loss = encourage_sparsity_loss(encoding, 0, sparsity_loss_weight=0.00005)
 
     loss = F.mse_loss(r, feat) + sparsity_loss
+        
 
     loss.backward()
     optim.step()
 
     encoding = (encoding != 0).float()
-
+    ew = torch.linspace(0, 1, encoding.shape[-1], device=encoding.device)
+    encoding = encoding * ew[None, None, :]
 
     return loss, recon, encoding
     

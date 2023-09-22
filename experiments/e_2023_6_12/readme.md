@@ -4,3 +4,9 @@ I should probably do things in the following order:
     - learn an autoencoder for the pif feature to reduce dimensionality
     - learn a sparse dictionary for the compressed pif feature
     - learn a network that produces audio from either of the prior two representations
+
+
+
+# Findings
+- the greater the norm of the atoms, the slower they are to change, and the sparser
+  the control signal becomes
