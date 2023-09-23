@@ -323,7 +323,8 @@ def sparse_code(
         embeddings = []
 
     for i in range(n_steps):
-
+        
+        print('sparse coding step', i)
         if approx is None:
             padded = F.pad(residual, (0, atom_size))
             fm = F.conv1d(padded, d.view(

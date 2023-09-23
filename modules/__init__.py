@@ -37,3 +37,4 @@ from .pointcloud import encode_events, decode_events, extract_graph_edges, Canon
 from .activation import unit_sine
 from .floodfill import flood_fill_loss
 from .hypernetwork import HyperNetworkLayer
+from .refractory import make_refractory_filter
