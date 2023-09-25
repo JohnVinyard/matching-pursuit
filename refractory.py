@@ -3,13 +3,15 @@ from matplotlib import pyplot as plt
 
 
 if __name__ == '__main__':
-    total_size = 32
+    total_size = 8
 
-    ret = np.linspace(total_size, 0, total_size - 1) ** 10
-    sig = np.ones(total_size) * total_size
+    ret = np.linspace(1, 0, total_size - 1) ** 2
+    sig = np.ones(total_size)
     sig[1:] = -ret
 
-    control = np.random.binomial(1, p=0.05, size=512)
+    # control = np.random.binomial(1, p=0.05, size=512)
+    control = np.zeros(512)
+    control[128: 512] = np.linspace(0, 1, 384)
     plt.plot(control)
     plt.show()
 
