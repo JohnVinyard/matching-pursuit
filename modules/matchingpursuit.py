@@ -395,7 +395,8 @@ def dictionary_learning_step(
         d: Tensor,
         n_steps: int = 100,
         device=None,
-        approx=None):
+        approx=None,
+        local_constrast_norm: bool = False):
 
     batch, channels, time = signal.shape
     signal = signal.view(signal.shape[0], channels, -1)
@@ -420,7 +421,7 @@ def dictionary_learning_step(
         return segments
 
     instances, scatter_segments = sparse_code(
-        signal, d, n_steps=n_steps, device=device, approx=approx)
+        signal, d, n_steps=n_steps, device=device, approx=approx, local_contrast_norm=local_constrast_norm)
 
 
     for index in instances.keys():
