@@ -7,7 +7,8 @@ What if sparsity happens at pif feature rate?
 - ~~reverb~~
 - ~~filter bank front-end~~
 - ~~audio front-end~~
-- **adversarial loss**
+- ~~adversarial loss~~
+- multi-band generator
 - image segmentation loss
 - context vector
 
@@ -31,4 +32,18 @@ Cartoon-y, but better than filter bank front end
 
 # Adversarial Loss
 Going to 22K iteratiosn to be fair.  It's unclear whether this is better.
-MSE might be just fine.
+MSE might be just fine.  Conclusion, makes things worse.
+
+# Multi-band generator
+glimmers of a better (subjectively) generator.  Nope, not improved, 
+try again without adversarial loss
+
+# Conv upsample without filter bank frontend
+_Noticeably_ better attacks/transients
+This is the new winner.
+
+## Things to Try With Conv Upsample, No Filter Bank Front-End
+
+- reverb
+- triune loss (tough to evaluate)
+- 
