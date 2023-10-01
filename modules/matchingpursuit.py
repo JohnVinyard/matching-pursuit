@@ -298,7 +298,8 @@ def sparse_code(
         extract_atom_embedding=None,
         visit_key_point=None,
         return_residual=False,
-        local_contrast_norm=False):
+        local_contrast_norm=False,
+        return_sparse_feature_map=False):
     
     batch, channels, time = signal.shape
 
@@ -321,6 +322,9 @@ def sparse_code(
 
     if extract_atom_embedding is not None:
         embeddings = []
+
+    if return_sparse_feature_map:
+        sfm = torch.zeros(batch, n_atoms, n_samples, device=signal.device)
 
     for i in range(n_steps):
         
@@ -365,6 +369,10 @@ def sparse_code(
             ai = atom_index[j].item()
             p = position[j][None, ...]
             a = at[j][None, ...]
+
+            if return_sparse_feature_map:
+                sfm[j, ai, p] += value[j]
+            
             local_instances.append((ai, j, p, a))
             instances[ai].append((ai, j, p, a))
 
@@ -385,6 +393,9 @@ def sparse_code(
     elif flatten and return_residual:
         flattened = flatten_atom_dict(instances) 
         return flattened, scatter_segments, residual
+    elif flatten and return_sparse_feature_map:
+        flattened = flatten_atom_dict(instances) 
+        return flattened, scatter_segments, sfm
     else:
         flattened = flatten_atom_dict(instances) 
         return flattened, scatter_segments

@@ -8,7 +8,8 @@ What if sparsity happens at pif feature rate?
 - ~~filter bank front-end~~
 - ~~audio front-end~~
 - ~~adversarial loss~~
-- multi-band generator
+- ~~multi-band generator~~
+- learned rather than "nearest" upsampling
 - image segmentation loss
 - context vector
 

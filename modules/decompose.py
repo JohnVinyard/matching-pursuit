@@ -46,7 +46,7 @@ def fft_resample(x, desired_size, is_lowest_band):
 
     # window = torch.hamming_window(n_coeffs, device=x.device)
 
-    window = torch.from_numpy(tukey(n_coeffs, alpha=0.2).astype(np.float32)).to(x.device)
+    window = torch.from_numpy(tukey(n_coeffs, alpha=0).astype(np.float32)).to(x.device)
     coeffs = coeffs * window[None, None, :]
 
 
