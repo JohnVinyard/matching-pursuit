@@ -10,7 +10,7 @@ from fft_basis import morlet_filter_bank
 from fft_shift import fft_shift
 from modules.fft import fft_convolve
 from modules.linear import LinearOutputStack
-from modules.normalization import unit_norm
+from modules.normalization import max_norm, unit_norm
 from modules.overlap_add import overlap_add
 from modules.reverb import ReverbGenerator
 from scratch3 import sparsify2
@@ -30,91 +30,56 @@ exp = Experiment(
 
 
 n_events = 64
-impulse_size = 1024
+impulse_size = 512
 resonance_size = 16384
 
-# # events
-# n_events = 16
-
-# # impulses
-# impulse_size = 128
-# n_impulses = 32
-
-# # resonances
-# resonance_size = exp.n_samples
-# n_resonances = 32
-# min_resonance = 0.8
+recurrent_resonance_model = False
+base_resonance = 0.2
+apply_group_delay_to_dither = True
 
 
-# class Model(nn.Module):
-
-#     def __init__(self):
+# class RecurrentResonanceModel(nn.Module):
+#     def __init__(self, encoding_channels, latent_dim, channels, window_size, resonance_samples):
 #         super().__init__()
-#         self.impulses = nn.Parameter(torch.zeros(n_impulses, impulse_size).uniform_(-0.01, 0.01))
-#         self.resonances = nn.Parameter(torch.zeros(n_resonances, resonance_size).uniform_(-1, 1))
+#         self.encoding_channels = encoding_channels
+#         self.latent_dim = latent_dim
+#         self.channels = channels
+#         self.window_size = window_size
+#         self.resonance_samples = resonance_samples
 
-#         # learned parameters
-#         self.impulse_choice = nn.Parameter(torch.zeros(n_events, n_impulses).uniform_(-1, 1))
-#         self.resonance_choice = nn.Parameter(torch.zeros(n_events, n_resonances).uniform_(-1, 1))
-#         self.decays = nn.Parameter(torch.zeros(n_events, 1).uniform_(0, 1))
-#         self.amps = nn.Parameter(torch.zeros(n_events, 1).uniform_(0, 1))
-#         self.mixes = nn.Parameter(torch.zeros(n_events, 2).uniform_(-1, 1))
-#         self.times = nn.Parameter(torch.zeros(n_events, 1).uniform_(0, 1))
+#         n_res = 128
+#         self.n_frames = resonance_samples // (window_size // 2)
+#         self.res_factor = (1 - base_resonance) * 0.9
+
+#         # band = zounds.FrequencyBand(40, 2000)
+#         # scale = zounds.MelScale(band, n_res)
+#         # bank = morlet_filter_bank(exp.samplerate, resonance_samples, scale, 0.01, normalize=True).real.astype(np.float32)
+#         # bank = torch.from_numpy(bank)
+#         # self.res = nn.Parameter(bank)
+
+#         self.res = nn.Parameter(torch.zeros(n_res, resonance_samples).uniform_(-1, 1))
+#         self.to_momentum = LinearOutputStack(channels, 3, out_channels=1, in_channels=latent_dim, norm=nn.LayerNorm((channels,)))
+#         self.to_selection = LinearOutputStack(channels, 3, out_channels=n_res, in_channels=latent_dim, norm=nn.LayerNorm((channels,)))
     
-#     def forward(self, _):
+#     def forward(self, x):
 
-#         # get impulses
-#         ic = torch.softmax(self.impulse_choice, dim=-1)
-#         impulses = ic @ self.impulses
-#         impulses = impulses * torch.sigmoid(self.amps)
-#         # print(impulses.shape)
+#         mom = base_resonance + (torch.sigmoid(self.to_momentum(x)) * self.res_factor)
+#         mom = mom.repeat(1, 1, self.n_frames)
+#         mom = torch.cumprod(mom, dim=-1)
 
-#         # prepare resonances
-#         rc = torch.softmax(self.resonance_choice, dim=-1)
-#         resonances = rc @ self.resonances
-#         windowed = windowed_audio(resonances, 512, 256)
+#         sel = self.to_selection(x)
+#         sel = torch.softmax(sel, dim=-1)
+#         res = sel @ self.res
+#         windowed = windowed_audio(res, self.window_size, self.window_size // 2)
 #         windowed = unit_norm(windowed, dim=-1)
 
-#         amps = torch.sigmoid(self.amps).repeat(1, 128)
-#         decays = torch.sigmoid(self.decays).repeat(1, 128)
-#         decays = min_resonance + ((0.999 - min_resonance) * decays)
+#         windowed = windowed * mom[..., None]
 
-#         decays = torch.cumprod(decays, dim=-1)
-#         amps = decays * amps
-#         windowed = windowed * amps[..., None]
-#         resonances = overlap_add(windowed[:, None, :, :], apply_window=False)[..., :resonance_size]
-#         resonances = resonances.view(-1, resonance_size)
-#         # print(resonances.shape)
+#         windowed = overlap_add(windowed, apply_window=False)[..., :self.resonance_samples]
+#         windowed = max_norm(windowed)
 
-#         padded = F.pad(impulses, (0, resonance_size - impulse_size))
-#         conv = fft_convolve(resonances, padded)
+#         return windowed
 
-#         mix = torch.softmax(self.mixes, -1)
-
-#         stacked = torch.cat([padded[..., None], conv[..., None]], dim=-1)
-
-#         mixed = stacked @ mix.view(n_events, 2, 1)
-#         mixed = mixed.view(n_events, -1)
-
-#         shifted = fft_shift(mixed, self.times)[..., :exp.n_samples]
-        
-#         shifted = torch.sum(shifted, dim=0)
-#         shifted = shifted.view(1, 1, -1)
-        
-
-#         return shifted
-
-# model = Model().to(device)
-# optim = optimizer(model, lr=1e-3)
-
-# convolve_impulse_and_resonance = True
-# resonance_model = True
-# full_atom_size = 2048
-recurrent_resonance_model = False
-# do_reverb = False
-base_resonance = 0.1
-apply_group_delay_to_dither = True
-# encoding_channels = 512
 
 class RecurrentResonanceModel(nn.Module):
     def __init__(self, encoding_channels, latent_dim, channels, window_size, resonance_samples):
@@ -129,7 +94,7 @@ class RecurrentResonanceModel(nn.Module):
         self.encoding_channels = encoding_channels
 
         self.base_resonance = base_resonance
-        self.resonance_factor = (1 - self.base_resonance) * 0.999
+        self.resonance_factor = (1 - self.base_resonance) * 0.9
 
         self.register_buffer('group_delay', torch.linspace(0, np.pi, self.n_coeffs))
 
@@ -211,29 +176,12 @@ class RecurrentResonanceModel(nn.Module):
             windowed = windowed.permute(0, 2, 1, 3)
         
         samples = overlap_add(windowed, apply_window=True)[..., :self.resonance_samples]
+        samples = max_norm(samples, dim=-1)
 
         assert samples.shape == (batch_size, self.encoding_channels, self.resonance_samples)
         return samples
                         
 
-
-# class DilatedBlock(nn.Module):
-#     def __init__(self, channels, dilation):
-#         super().__init__()
-#         self.dilated = nn.Conv1d(channels, channels, 3, padding=dilation, dilation=dilation)
-#         self.conv = nn.Conv1d(channels, channels, 1, 1, 0)
-#         self.norm = nn.BatchNorm1d(channels)
-    
-#     def forward(self, x):
-#         x = F.dropout(x, 0.1)
-
-#         orig = x
-#         x = self.dilated(x)
-#         x = self.conv(x)
-#         x = x + orig
-#         x = F.leaky_relu(x, 0.2)
-#         x = self.norm(x)
-#         return x
 
 class GenerateMix(nn.Module):
 
@@ -266,7 +214,7 @@ class GenerateImpulse(nn.Module):
 
         scale = zounds.MelScale(zounds.FrequencyBand(20, exp.samplerate.nyquist), n_filter_bands)
         filters = morlet_filter_bank(
-            exp.samplerate, self.filter_kernel_size, scale, 0.5, normalize=True).real.astype(np.float32)
+            exp.samplerate, self.filter_kernel_size, scale, 0.75, normalize=True).real.astype(np.float32)
         self.register_buffer('filters', torch.from_numpy(filters).view(n_filter_bands, self.filter_kernel_size))
 
         self.to_filter_mix = LinearOutputStack(
@@ -310,6 +258,7 @@ class GenerateImpulse(nn.Module):
 
         # apply envelope
         impulse = filtered * frames
+        impulse = max_norm(impulse)
         return impulse
 
 
@@ -407,13 +356,14 @@ class Model(nn.Module):
             nn.Conv1d(1024, 4096, 1, 1, 0)
         )
 
-        self.embed_context = nn.Linear(4096, 256)
-        self.embed_one_hot = nn.Linear(4096, 256)
+        self.embed_context = LinearOutputStack(256, 3, in_channels=4096, norm=nn.LayerNorm((256,)))
+        self.embed_one_hot = LinearOutputStack(256, 3, in_channels=4096, norm=nn.LayerNorm((256,)))
         
-        self.imp = GenerateImpulse(256, 128, 1024, 16, n_events)
-        self.res = RecurrentResonanceModel(n_events, 256, 128, 1024, 16384)
+        self.imp = GenerateImpulse(256, 128, impulse_size, 16, n_events)
+        self.res = RecurrentResonanceModel(n_events, 256, 128, 1024, resonance_samples=resonance_size)
         self.mix = GenerateMix(256, 128, n_events)
         self.to_shift = LinearOutputStack(256, 3, out_channels=1)
+        self.to_amp = LinearOutputStack(256, 3, out_channels=1)
 
 
         self.verb_context = nn.Linear(4096, 32)
@@ -432,6 +382,8 @@ class Model(nn.Module):
         x = x.permute(0, 3, 1, 2)
         x = x.reshape(batch_size, 8 * exp.n_bands, -1)
         encoded = self.encoder.forward(x)
+        encoded = F.dropout(encoded, 0.02)
+
         return encoded
     
     def generate(self, encoded, one_hot, packed):
@@ -458,28 +410,39 @@ class Model(nn.Module):
 
 
         stacked  = torch.cat([padded[..., None], conv[..., None]], dim=-1)
-        mixed = stacked @ mx.view(-1, 64, 2, 1)
+        mixed = stacked @ mx.view(-1, n_events, 2, 1)
         mixed = mixed.view(-1, n_events, resonance_size)
 
+        amps = torch.abs(self.to_amp(embeddings))
+        mixed = mixed * amps
+
         # here I need indices + additional shifts
-        encoded_frames = encoded.shape[-1]
-        total_samples = exp.n_samples
-        step = total_samples // encoded_frames
+        # encoded_frames = encoded.shape[-1]
+        # total_samples = exp.n_samples
+        # step = total_samples // encoded_frames
 
-        # mostly shifted within a frame
-        fine_shifts = self.to_shift(embeddings) * (step / total_samples)
-        fine_shifts = fine_shifts.view(-1, n_events)
+        # # mostly shifted within a frame
+        # fine_shifts = torch.tanh(self.to_shift(embeddings)) * (step / total_samples)
+        # fine_shifts = fine_shifts.view(-1, n_events)
 
-        shifts = (torch.argmax(packed, dim=-1) * step) / total_samples
-        final_shifts = shifts + fine_shifts
+        # indices = torch.argmax(packed, dim=-1)
+        # shifts = (indices * step) / total_samples
+
+        # final_shifts = shifts + fine_shifts
+
+        # final = F.pad(mixed, (0, exp.n_samples - mixed.shape[-1]))
+        # final = fft_shift(final, final_shifts[..., None])[..., :exp.n_samples]
 
         final = F.pad(mixed, (0, exp.n_samples - mixed.shape[-1]))
-        final = fft_shift(final, final_shifts[..., None])[..., :exp.n_samples]
+        up = torch.zeros(final.shape[0], n_events, exp.n_samples, device=final.device)
+        up[:, :, ::256] = packed
+
+        final = fft_convolve(final, up)[..., :exp.n_samples]
 
         final = torch.sum(final, dim=1, keepdim=True)
 
 
-        final = self.verb.forward(ctxt, final)
+        # final = self.verb.forward(ctxt, final)
         return final
 
 
@@ -518,9 +481,14 @@ def train(batch, i):
         r = exp.perceptual_feature(recon)
 
         spec_loss = F.mse_loss(r, feat)
+
+        # a, b, c = exp.perceptual_triune(recon)
+        # d, e, f = exp.perceptual_triune(batch)
+        # spec_loss = F.mse_loss(a, d) + F.mse_loss(b, e) + F.mse_loss(c, f)
+
         j = disc.forward(encoded.clone().detach(), recon)
         
-        loss = torch.abs(1 - j).mean() + spec_loss
+        loss = (torch.abs(1 - j).mean() * 0) + spec_loss
 
         loss.backward()
         optim.step()
@@ -544,7 +512,7 @@ def make_conjure(experiment: BaseExperimentRunner):
     @numpy_conjure(experiment.collection, content_type=SupportedContentType.Spectrogram.value)
     def encoded(x: torch.Tensor):
         x = x[:, None, :, :]
-        x = F.max_pool2d(x, (16, 4), (16, 4))
+        x = F.max_pool2d(x, (16, 8), (16, 8))
         x = x.view(x.shape[0], x.shape[2], x.shape[3])
         x = x.data.cpu().numpy()[0]
         return x
