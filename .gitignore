@@ -19,3 +19,6 @@ band_4096.dat
 band_8192.dat
 band_16384.dat
 band_32768.dat
+
+sparse_conditioned_gen.dat
+sparse_conditioned_disc.dat

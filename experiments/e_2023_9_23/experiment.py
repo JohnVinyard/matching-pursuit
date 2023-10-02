@@ -7,7 +7,7 @@ from torch.nn import functional as F
 import zounds
 from config.experiment import Experiment
 from fft_basis import morlet_filter_bank
-from modules.decompose import fft_frequency_decompose, fft_frequency_recompose
+from modules.decompose import fft_frequency_decompose, fft_frequency_recompose, fft_resample
 from modules.reverb import ReverbGenerator
 from modules.sparse import sparsify
 from modules.stft import stft
@@ -24,7 +24,7 @@ exp = Experiment(
     weight_init=0.1,
     model_dim=128,
     kernel_size=512,
-    windowed_pif=True)
+    windowed_pif=False)
 
 scale = zounds.LinearScale.from_sample_rate(exp.samplerate, 512)
 bank = morlet_filter_bank(exp.samplerate, 64, scale, 0.1, normalize=True).real.astype(np.float32)
@@ -115,6 +115,26 @@ class Discriminator(nn.Module):
         return j
 
 
+class ContextBlock(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.conv = nn.Conv1d(channels, channels, 3, 1, 1)
+        self.embed_conv = nn.Conv1d(channels, channels, 1, 1, 0)
+        self.embed_pooled = nn.Conv1d(channels, channels, 1, 1, 0)
+        self.norm = nn.BatchNorm1d(channels)
+
+    
+    def forward(self, x):
+        x = F.dropout(x, 0.05)
+        x = self.conv(x)
+        pooled = F.avg_pool1d(x, 7, 1, padding=3)
+        pooled = self.embed_pooled(pooled)
+        x = self.embed_conv(x)
+        x = x + pooled
+        x = F.leaky_relu(x, 0.2)
+        x = self.norm(x)
+        return x
+
 
 class Model(nn.Module):
     def __init__(self):
@@ -160,18 +180,28 @@ class Model(nn.Module):
         )
 
         self.to_samples = nn.ModuleDict({
-            '512': nn.Conv1d(256, 1, 7, 1, 3),
-            '1024': nn.Conv1d(256, 1, 7, 1, 3),
-            '2048': nn.Conv1d(256, 1, 7, 1, 3),
-            '4096': nn.Conv1d(256, 1, 7, 1, 3),
-            '8192': nn.Conv1d(256, 1, 7, 1, 3),
-            '16384': nn.Conv1d(256, 1, 7, 1, 3),
-            '32768': nn.Conv1d(256, 1, 7, 1, 3),
+            '512': nn.Conv1d(256, 256, 7, 1, 3),
+            '1024': nn.Conv1d(256, 256, 7, 1, 3),
+            '2048': nn.Conv1d(256, 256, 7, 1, 3),
+            '4096': nn.Conv1d(256, 256, 7, 1, 3),
+            '8192': nn.Conv1d(256, 256, 7, 1, 3),
+            '16384': nn.Conv1d(256, 256, 7, 1, 3),
+            '32768': nn.Conv1d(256, 256, 7, 1, 3),
+        })
+
+        self.atoms = nn.ParameterDict({
+            '512': torch.zeros(1, 256, 64).uniform_(-0.1, 0.1),
+            '1024': torch.zeros(1, 256, 64).uniform_(-0.1, 0.1),
+            '2048': torch.zeros(1, 256, 64).uniform_(-0.1, 0.1),
+            '4096': torch.zeros(1, 256, 64).uniform_(-0.1, 0.1),
+            '8192': torch.zeros(1, 256, 64).uniform_(-0.1, 0.1),
+            '16384': torch.zeros(1, 256, 64).uniform_(-0.1, 0.1),
+            '32768': torch.zeros(1, 256, 64).uniform_(-0.1, 0.1),
         })
 
 
         self.up = ConvUpsample(
-            256, 256, 128, exp.n_samples, mode='nearest', out_channels=256, from_latent=False, batch_norm=True)
+            256, 256, 128, exp.n_samples, mode='learned', out_channels=256, from_latent=False, batch_norm=True)
 
         self.verb_context = nn.Linear(4096, 32)
         self.verb = ReverbGenerator(
@@ -190,11 +220,8 @@ class Model(nn.Module):
         x = x.reshape(batch_size, 8 * exp.n_bands, -1)
         encoded = self.encoder.forward(x)
         return encoded
-
-    def forward(self, x):
-        encoded = self.encode(x)
-        encoded = sparsify(encoded, n_to_keep=512)
-
+    
+    def generate(self, encoded):
         ctxt = torch.sum(encoded, dim=-1)
         ctxt = self.verb_context.forward(ctxt)
 
@@ -208,14 +235,51 @@ class Model(nn.Module):
             key = str(decoded.shape[-1])
             if key in self.to_samples:
                 band = self.to_samples[key].forward(decoded)
+
+                band = F.pad(band, (0, 64))
+                band = F.conv1d(band, self.atoms[key])
+
                 samples[int(key)] = band
 
         final = fft_frequency_recompose(samples, exp.n_samples)
         # bands = {size: AF.resample()}
 
         final = self.verb.forward(ctxt, final)
+        return final
 
 
+    def forward(self, x):
+        encoded = self.encode(x)
+        encoded = sparsify(encoded, n_to_keep=512)
+
+        # ctxt = torch.sum(encoded, dim=-1)
+        # ctxt = self.verb_context.forward(ctxt)
+
+        # decoded = self.decoder.forward(encoded)
+
+        # final = self.up.forward(decoded)
+
+        # samples = {}
+        # for layer in self.up:
+        #     decoded = layer(decoded)
+        #     key = str(decoded.shape[-1])
+        #     if key in self.to_samples:
+        #         band = self.to_samples[key].forward(decoded)
+
+        #         band = F.pad(band, (0, 64))
+        #         band = F.conv1d(band, self.atoms[key])
+
+        #         samples[int(key)] = band
+
+        # final = fft_frequency_recompose(samples, exp.n_samples)
+        # # bands = {size: AF.resample()}
+
+        # final = self.verb.forward(ctxt, final)
+
+
+        # return final, encoded
+
+        final = self.generate(encoded)
         return final, encoded
 
 
@@ -224,6 +288,30 @@ optim = optimizer(model, lr=1e-3)
 
 disc = Discriminator().to(device)
 disc_optim = optimizer(disc, lr=1e-3)
+
+
+try:
+    model.load_state_dict(torch.load('sparse_conditioned_gen.dat'))
+    disc.load_state_dict(torch.load('sparse_conditioned_disc.dat'))
+    print('loaded model weights')
+except IOError as err:
+    print(err)
+
+
+
+def perlin():
+    scale = 1.0
+
+    start = torch.zeros(1, 4096, 4, device=device).uniform_(0, scale)
+
+    while start.shape[-1] < 128:
+        # start = F.interpolate(start, scale_factor=2, mode='linear')
+        start = fft_resample(start, desired_size=start.shape[-1] * 2, is_lowest_band=True)
+        scale = scale / 2
+        start = start + torch.zeros_like(start).uniform_(0, scale)
+    
+    start = sparsify(start, n_to_keep=512)
+    return start
 
 def train(batch, i):
     optim.zero_grad()
@@ -244,13 +332,10 @@ def train(batch, i):
         
 
         loss = torch.abs(1 - j).mean() + spec_loss
-        
 
-        # a = feature(recon)
-        # b = feature(batch)
-
-        # # band loss
-        # loss = F.mse_loss(a, b)
+        # with torch.no_grad():
+        #     enc = perlin()
+        #     gen = model.generate(enc)
 
         loss.backward()
         optim.step()
