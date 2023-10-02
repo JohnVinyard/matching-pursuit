@@ -26,7 +26,7 @@ def sparsify2(x: torch.Tensor, n_to_keep: int = 8):
 
     
 
-    packed_range = torch.arange(0, n_to_keep, step=1)
+    packed_range = torch.arange(0, n_to_keep, step=1, device=x.device)
     packed_indices = (packed_range[None, :] * time) + t
 
     context_indices = (packed_range[None, :] * channels) + ch

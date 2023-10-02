@@ -9,7 +9,7 @@ from config.experiment import Experiment
 from fft_basis import morlet_filter_bank
 from modules.decompose import fft_frequency_decompose, fft_frequency_recompose, fft_resample
 from modules.reverb import ReverbGenerator
-from modules.sparse import sparsify
+from modules.sparse import sparsify, sparsify2
 from modules.stft import stft
 from time_distance import optimizer
 from train.experiment_runner import BaseExperimentRunner, MonitoredValueDescriptor
@@ -250,34 +250,15 @@ class Model(nn.Module):
 
     def forward(self, x):
         encoded = self.encode(x)
+
+        # a = full sparse representation
+        # b = packed (just active channels)
+        # c = one_hot
+        # a, b, c = sparsify2(encoded, n_to_keep=64)
+        # print(a.shape, b.shape, c.shape)
+
         encoded = sparsify(encoded, n_to_keep=512)
 
-        # ctxt = torch.sum(encoded, dim=-1)
-        # ctxt = self.verb_context.forward(ctxt)
-
-        # decoded = self.decoder.forward(encoded)
-
-        # final = self.up.forward(decoded)
-
-        # samples = {}
-        # for layer in self.up:
-        #     decoded = layer(decoded)
-        #     key = str(decoded.shape[-1])
-        #     if key in self.to_samples:
-        #         band = self.to_samples[key].forward(decoded)
-
-        #         band = F.pad(band, (0, 64))
-        #         band = F.conv1d(band, self.atoms[key])
-
-        #         samples[int(key)] = band
-
-        # final = fft_frequency_recompose(samples, exp.n_samples)
-        # # bands = {size: AF.resample()}
-
-        # final = self.verb.forward(ctxt, final)
-
-
-        # return final, encoded
 
         final = self.generate(encoded)
         return final, encoded
@@ -381,7 +362,7 @@ class SparseV5(BaseExperimentRunner):
             item = item.view(-1, 1, exp.n_samples)
             l, r, e = train(item, i)
             
-            if i % 1000 == 0:
+            if i % 1000 == 0 and i > 0:
                 print('SAVING')
                 torch.save(model.state_dict(), 'sparse_conditioned_gen.dat')
                 torch.save(disc.state_dict(), 'sparse_conditioned_disc.dat')
