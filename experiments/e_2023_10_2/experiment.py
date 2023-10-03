@@ -12,6 +12,7 @@ from modules.fft import fft_convolve
 from modules.linear import LinearOutputStack
 from modules.normalization import max_norm, unit_norm
 from modules.overlap_add import overlap_add
+from modules.pos_encode import pos_encoded
 from modules.reverb import ReverbGenerator
 from scratch3 import sparsify2
 from train.experiment_runner import BaseExperimentRunner, MonitoredValueDescriptor
@@ -38,148 +39,152 @@ base_resonance = 0.2
 apply_group_delay_to_dither = True
 
 
-# class RecurrentResonanceModel(nn.Module):
-#     def __init__(self, encoding_channels, latent_dim, channels, window_size, resonance_samples):
-#         super().__init__()
-#         self.encoding_channels = encoding_channels
-#         self.latent_dim = latent_dim
-#         self.channels = channels
-#         self.window_size = window_size
-#         self.resonance_samples = resonance_samples
-
-#         n_res = 128
-#         self.n_frames = resonance_samples // (window_size // 2)
-#         self.res_factor = (1 - base_resonance) * 0.9
-
-#         # band = zounds.FrequencyBand(40, 2000)
-#         # scale = zounds.MelScale(band, n_res)
-#         # bank = morlet_filter_bank(exp.samplerate, resonance_samples, scale, 0.01, normalize=True).real.astype(np.float32)
-#         # bank = torch.from_numpy(bank)
-#         # self.res = nn.Parameter(bank)
-
-#         self.res = nn.Parameter(torch.zeros(n_res, resonance_samples).uniform_(-1, 1))
-#         self.to_momentum = LinearOutputStack(channels, 3, out_channels=1, in_channels=latent_dim, norm=nn.LayerNorm((channels,)))
-#         self.to_selection = LinearOutputStack(channels, 3, out_channels=n_res, in_channels=latent_dim, norm=nn.LayerNorm((channels,)))
-    
-#     def forward(self, x):
-
-#         mom = base_resonance + (torch.sigmoid(self.to_momentum(x)) * self.res_factor)
-#         mom = mom.repeat(1, 1, self.n_frames)
-#         mom = torch.cumprod(mom, dim=-1)
-
-#         sel = self.to_selection(x)
-#         sel = torch.softmax(sel, dim=-1)
-#         res = sel @ self.res
-#         windowed = windowed_audio(res, self.window_size, self.window_size // 2)
-#         windowed = unit_norm(windowed, dim=-1)
-
-#         windowed = windowed * mom[..., None]
-
-#         windowed = overlap_add(windowed, apply_window=False)[..., :self.resonance_samples]
-#         windowed = max_norm(windowed)
-
-#         return windowed
 
 
 class RecurrentResonanceModel(nn.Module):
     def __init__(self, encoding_channels, latent_dim, channels, window_size, resonance_samples):
         super().__init__()
+        self.encoding_channels = encoding_channels
         self.latent_dim = latent_dim
         self.channels = channels
         self.window_size = window_size
-        self.step = window_size // 2
-        self.n_coeffs = window_size // 2 + 1
         self.resonance_samples = resonance_samples
-        self.n_frames = resonance_samples // self.step
-        self.encoding_channels = encoding_channels
 
-        self.base_resonance = base_resonance
-        self.resonance_factor = (1 - self.base_resonance) * 0.9
+        n_res = 512
+        self.n_frames = resonance_samples // (window_size // 2)
+        self.res_factor = (1 - base_resonance) * 0.9
 
-        self.register_buffer('group_delay', torch.linspace(0, np.pi, self.n_coeffs))
+        band = zounds.FrequencyBand(40, 2000)
+        scale = zounds.MelScale(band, n_res)
+        bank = morlet_filter_bank(exp.samplerate, resonance_samples, scale, 0.01, normalize=True).real.astype(np.float32)
+        bank = torch.from_numpy(bank)
+        self.res = nn.Parameter(bank)
 
-        self.to_initial = LinearOutputStack(
-            channels, layers=3, out_channels=self.n_coeffs, in_channels=latent_dim, norm=nn.LayerNorm((channels,)))
-        self.to_resonance = LinearOutputStack(
-            channels, layers=3, out_channels=self.n_coeffs, in_channels=latent_dim, norm=nn.LayerNorm((channels,)))
-        self.to_phase_dither = LinearOutputStack(
-            channels, layers=3, out_channels=self.n_coeffs, in_channels=latent_dim, norm=nn.LayerNorm((channels,)))
+        # self.res = nn.Parameter(torch.zeros(n_res, resonance_samples).uniform_(-1, 1))
+        self.to_momentum = LinearOutputStack(channels, 3, out_channels=1, in_channels=latent_dim, norm=nn.LayerNorm((channels,)))
+        self.to_selection = LinearOutputStack(channels, 3, out_channels=n_res, in_channels=latent_dim, norm=nn.LayerNorm((channels,)))
     
-    def forward(self, latents):
-        batch_size = latents.shape[0]
+    def forward(self, x):
 
-        initial = self.to_initial(latents)
-        res = self.base_resonance + (torch.sigmoid(self.to_resonance(latents)) * self.resonance_factor)
-        dither = torch.sigmoid(self.to_phase_dither(latents)) 
+        mom = base_resonance + (torch.sigmoid(self.to_momentum(x)) * self.res_factor)
+        mom = torch.log(1e-12 + mom)
+        mom = mom.repeat(1, 1, self.n_frames)
+        mom = torch.cumsum(mom, dim=-1)
+        mom = torch.exp(mom)
 
-        if apply_group_delay_to_dither:
-            dither = dither * self.group_delay[None, None, :]
+        sel = self.to_selection(x)
+        sel = torch.softmax(sel, dim=-1)
+        res = sel @ self.res
+        windowed = windowed_audio(res, self.window_size, self.window_size // 2)
+        windowed = unit_norm(windowed, dim=-1)
 
+        windowed = windowed * mom[..., None]
 
-        # print(res.shape, dither.shape, initial.shape)
+        windowed = overlap_add(windowed, apply_window=False)[..., :self.resonance_samples]
+        windowed = max_norm(windowed)
 
-        first_frame = initial[:, None, :]
-
-        if not recurrent_resonance_model:
-            # Non-recurrent
-            full_res = res[..., None].repeat(1, 1, 1, self.n_frames)
-            full_res = torch.cumprod(full_res, dim=-1)
-            mags = full_res * initial[..., None]
-            mags = mags.permute(0, 1, 3, 2)
-
-            full_delay = self.group_delay[None, None, :, None].repeat(1, 1, 1, self.n_frames)
-            full_delay = torch.cumsum(full_delay, dim=-1)
-            full_delay = full_delay + (torch.zeros_like(full_delay).uniform_(-np.pi, np.pi) * dither[:, :, :, None])
-            phases = full_delay
-            phases = phases.permute(0, 1, 3, 2)
-            # end non-recurrent
-        else:
-
-            # recurrent
-
-            frames = [first_frame]
-            phases = [torch.zeros_like(first_frame).uniform_(-np.pi, np.pi)]
-
-            # TODO: This should also incorporate impulses, i.e., new excitations
-            # beyond the original
-            for i in range(self.n_frames - 1):
-
-                mag = frames[i]
-                phase = phases[i]
-
-                # compute next polar coordinates
-                nxt_mag = mag * res
-
-                nxt_phase = \
-                    phase \
-                    + self.group_delay[None, None, None, :] \
-                    + (dither * torch.zeros_like(dither).uniform_(-np.pi, np.pi)[:, None, :, :]) 
+        return windowed
 
 
-                frames.append(nxt_mag)
-                phases.append(nxt_phase)
+# class RecurrentResonanceModel(nn.Module):
+#     def __init__(self, encoding_channels, latent_dim, channels, window_size, resonance_samples):
+#         super().__init__()
+#         self.latent_dim = latent_dim
+#         self.channels = channels
+#         self.window_size = window_size
+#         self.step = window_size // 2
+#         self.n_coeffs = window_size // 2 + 1
+#         self.resonance_samples = resonance_samples
+#         self.n_frames = resonance_samples // self.step
+#         self.encoding_channels = encoding_channels
+
+#         self.base_resonance = base_resonance
+#         self.resonance_factor = (1 - self.base_resonance) * 0.9
+
+#         self.register_buffer('group_delay', torch.linspace(0, np.pi, self.n_coeffs))
+
+#         self.to_initial = LinearOutputStack(
+#             channels, layers=3, out_channels=self.n_coeffs, in_channels=latent_dim, norm=nn.LayerNorm((channels,)))
+#         self.to_resonance = LinearOutputStack(
+#             channels, layers=3, out_channels=self.n_coeffs, in_channels=latent_dim, norm=nn.LayerNorm((channels,)))
+#         self.to_phase_dither = LinearOutputStack(
+#             channels, layers=3, out_channels=self.n_coeffs, in_channels=latent_dim, norm=nn.LayerNorm((channels,)))
+    
+#     def forward(self, latents):
+#         batch_size = latents.shape[0]
+
+#         initial = self.to_initial(latents)
+#         res = self.base_resonance + (torch.sigmoid(self.to_resonance(latents)) * self.resonance_factor)
+#         dither = torch.sigmoid(self.to_phase_dither(latents)) 
+
+#         if apply_group_delay_to_dither:
+#             dither = dither * self.group_delay[None, None, :]
 
 
-            mags = torch.cat(frames, dim=1)
-            phases = torch.cat(phases, dim=1)
+#         # print(res.shape, dither.shape, initial.shape)
 
-        # end recurrent
+#         first_frame = initial[:, None, :]
 
-        frames = torch.complex(
-            mags * torch.cos(phases),
-            mags * torch.sin(phases)
-        )
+#         if not recurrent_resonance_model:
+#             # Non-recurrent
+#             full_res = res[..., None].repeat(1, 1, 1, self.n_frames)
+#             full_res = torch.cumprod(full_res, dim=-1)
+#             mags = full_res * initial[..., None]
+#             mags = mags.permute(0, 1, 3, 2)
 
-        windowed = torch.fft.irfft(frames, dim=-1, norm='ortho')
+#             full_delay = self.group_delay[None, None, :, None].repeat(1, 1, 1, self.n_frames)
+#             full_delay = torch.cumsum(full_delay, dim=-1)
+#             full_delay = full_delay + (torch.zeros_like(full_delay).uniform_(-np.pi, np.pi) * dither[:, :, :, None])
+#             phases = full_delay
+#             phases = phases.permute(0, 1, 3, 2)
+#             # end non-recurrent
+#         else:
+
+#             # recurrent
+
+#             frames = [first_frame]
+#             phases = [torch.zeros_like(first_frame).uniform_(-np.pi, np.pi)]
+
+#             # TODO: This should also incorporate impulses, i.e., new excitations
+#             # beyond the original
+#             for i in range(self.n_frames - 1):
+
+#                 mag = frames[i]
+#                 phase = phases[i]
+
+#                 # compute next polar coordinates
+#                 nxt_mag = mag * res
+
+#                 nxt_phase = \
+#                     phase \
+#                     + self.group_delay[None, None, None, :] \
+#                     + (dither * torch.zeros_like(dither).uniform_(-np.pi, np.pi)[:, None, :, :]) 
+
+
+#                 frames.append(nxt_mag)
+#                 phases.append(nxt_phase)
+
+
+#             mags = torch.cat(frames, dim=1)
+#             phases = torch.cat(phases, dim=1)
+
+#         # end recurrent
+
+#         frames = torch.complex(
+#             mags * torch.cos(phases),
+#             mags * torch.sin(phases)
+#         )
+
+#         windowed = torch.fft.irfft(frames, dim=-1, norm='ortho')
         
-        if recurrent_resonance_model:
-            windowed = windowed.permute(0, 2, 1, 3)
+#         if recurrent_resonance_model:
+#             windowed = windowed.permute(0, 2, 1, 3)
         
-        samples = overlap_add(windowed, apply_window=True)[..., :self.resonance_samples]
-        samples = max_norm(samples, dim=-1)
+#         samples = overlap_add(windowed, apply_window=True)[..., :self.resonance_samples]
+#         samples = max_norm(samples, dim=-1)
 
-        assert samples.shape == (batch_size, self.encoding_channels, self.resonance_samples)
-        return samples
+#         assert samples.shape == (batch_size, self.encoding_channels, self.resonance_samples)
+#         return samples
                         
 
 
@@ -327,31 +332,36 @@ class Model(nn.Module):
         self.encoder = nn.Sequential(
             nn.Sequential(
                 nn.Dropout(0.05),
-                nn.Conv1d(1024, 1024, 3, 1, padding=1, dilation=1),
+                nn.ConstantPad1d((0, 2), 0),
+                nn.Conv1d(1024, 1024, 3, 1, dilation=1),
                 nn.LeakyReLU(0.2),
                 nn.BatchNorm1d(1024)
             ),
 
             nn.Sequential(
                 nn.Dropout(0.05),
-                nn.Conv1d(1024, 1024, 3, 1, padding=3, dilation=3),
+                nn.ConstantPad1d((0, 6), 0),
+                nn.Conv1d(1024, 1024, 3, 1, dilation=3),
                 nn.LeakyReLU(0.2),
                 nn.BatchNorm1d(1024)
             ),
 
             nn.Sequential(
                 nn.Dropout(0.05),
-                nn.Conv1d(1024, 1024, 3, 1, padding=9, dilation=9),
+                nn.ConstantPad1d((0, 18), 0),
+                nn.Conv1d(1024, 1024, 3, 1, dilation=9),
                 nn.LeakyReLU(0.2),
                 nn.BatchNorm1d(1024)
             ),
 
             nn.Sequential(
                 nn.Dropout(0.05),
-                nn.Conv1d(1024, 1024, 3, 1, padding=1, dilation=1),
+                nn.ConstantPad1d((0, 2), 0),
+                nn.Conv1d(1024, 1024, 3, 1, dilation=1),
                 nn.LeakyReLU(0.2),
                 nn.BatchNorm1d(1024)
             ),
+
 
             nn.Conv1d(1024, 4096, 1, 1, 0)
         )
@@ -395,7 +405,8 @@ class Model(nn.Module):
         oh = self.embed_one_hot(one_hot)
         embeddings = ce[:, None, :] + oh
 
-        # generate
+        # generate...
+
         # impulses
         imp = self.imp.forward(embeddings)
         padded = F.pad(imp, (0, resonance_size - impulse_size))
@@ -442,7 +453,7 @@ class Model(nn.Module):
         final = torch.sum(final, dim=1, keepdim=True)
 
 
-        # final = self.verb.forward(ctxt, final)
+        final = self.verb.forward(ctxt, final)
         return final
 
 
@@ -488,7 +499,7 @@ def train(batch, i):
 
         j = disc.forward(encoded.clone().detach(), recon)
         
-        loss = (torch.abs(1 - j).mean() * 0) + spec_loss
+        loss = (torch.abs(1 - j).mean() * 1) + spec_loss
 
         loss.backward()
         optim.step()
