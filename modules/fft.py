@@ -10,9 +10,9 @@ def fft_convolve(*args) -> torch.Tensor:
     # pad to avoid wraparound artifacts
     padded = [F.pad(x, (0, x.shape[-1])) for x in args]
     
-    specs = [torch.fft.rfft(x, dim=-1, norm='ortho') for x in padded]
+    specs = [torch.fft.rfft(x, dim=-1) for x in padded]
     spec = reduce(lambda accum, current: accum * current, specs[1:], specs[0])
-    final = torch.fft.irfft(spec, dim=-1, norm='ortho')
+    final = torch.fft.irfft(spec, dim=-1)
 
     # remove padding
     return final[..., :n_samples]
