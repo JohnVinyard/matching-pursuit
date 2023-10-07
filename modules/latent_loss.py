@@ -11,8 +11,8 @@ def latent_loss(enc, mean_weight=1, std_weight=1):
     std_loss = torch.abs(1 - enc.std(dim=0)).mean()
     cov = covariance(enc)
     d = torch.sqrt(torch.diag(cov))
-    cov = cov / d[None, :]
-    cov = cov / d[:, None]
+    cov = cov / (d[None, :] + 1e-12)
+    cov = cov / (d[:, None] + 1e-12)
     cov = torch.abs(cov)
     cov = cov.mean()
     return (mean_loss * mean_weight) + (std_loss * std_weight) + cov

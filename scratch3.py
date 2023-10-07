@@ -1,4 +1,10 @@
 import torch
+from torch import nn
+from torch.nn.utils.weight_norm import weight_norm
+import torch.nn.functional as F
+
+
+
 
 
 def sparsify2(x: torch.Tensor, n_to_keep: int = 8):
@@ -48,12 +54,24 @@ def sparsify2(x: torch.Tensor, n_to_keep: int = 8):
 
 
 if __name__ == '__main__':
-    t = torch.zeros(2, 8, 4).uniform_(-1, 1)
-    s, p, c = sparsify2(t, n_to_keep=3)
-    print(s)
-    print(c.shape)
-    print(c)
+    # t = torch.zeros(2, 8, 4).uniform_(-1, 1)
+    # s, p, c = sparsify2(t, n_to_keep=3)
+    # print(s)
+    # print(c.shape)
+    # print(c)
 
     # print(16 * 17)
     # nz = (p > 0).sum()
     # print(nz)
+
+
+    with torch.no_grad():
+        net = MixerStack(
+            in_channels=8, channels=16, sequence_length=128, layers=8, attn_blocks=4)
+        
+        seq = torch.zeros(17, 128, 8)
+        seq = net.forward(seq)
+
+        print('FINAL', seq.shape)
+
+    

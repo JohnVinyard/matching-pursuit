@@ -60,7 +60,7 @@ def sparsify2(x: torch.Tensor, n_to_keep: int = 8):
     batch, channels, time = x.shape
     # orig = x
 
-    x = x.view(batch, -1)
+    x = x.reshape(batch, -1)
     values, indices = torch.topk(x, k=n_to_keep, dim=-1)
 
     ch = indices // time
