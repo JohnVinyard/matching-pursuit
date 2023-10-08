@@ -8,7 +8,6 @@ from angle import windowed_audio
 from config.experiment import Experiment
 from fft_basis import morlet_filter_bank
 from fft_shift import fft_shift
-from modules.latent_loss import latent_loss
 from modules.decompose import fft_frequency_decompose, fft_frequency_recompose
 from modules.fft import fft_convolve
 from modules.linear import LinearOutputStack
@@ -56,65 +55,64 @@ class RecurrentResonanceModel(nn.Module):
         self.n_frames = resonance_samples // (window_size // 2)
         self.res_factor = (1 - base_resonance) * 0.99
 
-        band = zounds.FrequencyBand(40, exp.samplerate.nyquist)
+        band = zounds.FrequencyBand(40, 2000)
         scale = zounds.MelScale(band, n_res)
         bank = morlet_filter_bank(exp.samplerate, resonance_samples, scale, 0.01, normalize=True).real.astype(np.float32)
         bank = torch.from_numpy(bank)
-        res = bank.view(1, n_res, resonance_samples)
-        bands = fft_frequency_decompose(res, 512)
-        bands = {str(k): v for k, v in bands.items()}
-        self.res = nn.ParameterDict(bands)
+        # res = bank.view(1, n_res, resonance_samples)
+        # bands = fft_frequency_decompose(res, 512)
+        # bands = {str(k): v for k, v in bands.items()}
+        # self.res = nn.ParameterDict(bands)
 
-        # self.res = nn.Parameter(bank)
+        self.res = nn.Parameter(bank)
         
         self.to_env = ConvUpsample(
             latent_dim, channels, 4, end_size=self.n_frames, mode='nearest', out_channels=1, from_latent=True, batch_norm=True)
         
-        self.to_momentum = LinearOutputStack(channels, 3, out_channels=1, in_channels=latent_dim, norm=nn.LayerNorm((channels,)))
+        # self.to_momentum = LinearOutputStack(channels, 3, out_channels=1, in_channels=latent_dim, norm=nn.LayerNorm((channels,)))
         self.to_selection = LinearOutputStack(channels, 3, out_channels=n_res, in_channels=latent_dim, norm=nn.LayerNorm((channels,)))
 
-        # self.to_events = ConvUpsample(
-        #     latent_dim, channels, 4, end_size=resonance_samples, mode='nearest', out_channels=1, from_latent=True, batch_norm=True)
+        self.to_events = ConvUpsample(
+            latent_dim, channels, 4, end_size=resonance_samples, mode='nearest', out_channels=1, from_latent=True, batch_norm=True)
     
     def forward(self, x):
 
         # TODO: can I bring back this more physics-y thing?  Was this ever the problem?
 
-        mom = base_resonance + (torch.sigmoid(self.to_momentum(x)) * self.res_factor)
-        mom = torch.log(1e-12 + mom)
-        mom = mom.repeat(1, 1, self.n_frames)
-        mom = torch.cumsum(mom, dim=-1)
-        mom = torch.exp(mom)
-        new_mom = mom
+        # mom = base_resonance + (torch.sigmoid(self.to_momentum(x)) * self.res_factor)
+        # mom = torch.log(1e-12 + mom)
+        # mom = mom.repeat(1, 1, self.n_frames)
+        # mom = torch.cumsum(mom, dim=-1)
+        # mom = torch.exp(mom)
+        # new_mom = mom
 
 
         # # this must be limited to [0 - 1], otherwise, the resonance/momentum
         # # loss can be trivially driven down by making the envelope peak 
         # # louder and louder
-        # new_mom = torch.sigmoid(self.to_env(x)).view(-1, n_events, self.n_frames)
+        new_mom = torch.sigmoid(self.to_env(x)).view(-1, n_events, self.n_frames)
 
         # # print(mom.shape, new_mom.shape)
         # # assert new_mom.shape == mom.shape
         
 
-        sel = self.to_selection(x)
+        # sel = self.to_selection(x)
         # relu allows us to turn some filters completely off
-        sel = torch.relu(sel)
+        # sel = torch.relu(sel)
 
-        res = fft_frequency_recompose({int(k): v for k, v in self.res.items()}, self.resonance_samples)
+        # res = fft_frequency_recompose({int(k): v for k, v in self.res.items()}, self.resonance_samples)
+
         # res = self.res
-        res = sel @ res
+        # res = sel @ res
 
 
-        # res = self.to_events(x).view(-1, n_events, self.resonance_samples)
+        res = self.to_events(x).view(-1, n_events, self.resonance_samples)
         windowed = res
 
-        windowed = windowed_audio(res, self.window_size, self.window_size // 2)
-        windowed = unit_norm(windowed, dim=-1)
-
-        windowed = windowed * new_mom[..., None]
-
-        windowed = overlap_add(windowed, apply_window=False)[..., :self.resonance_samples]
+        # windowed = windowed_audio(res, self.window_size, self.window_size // 2)
+        # windowed = unit_norm(windowed, dim=-1)
+        # windowed = windowed * new_mom[..., None]
+        # windowed = overlap_add(windowed, apply_window=False)[..., :self.resonance_samples]
 
         # new_mom = F.avg_pool1d(torch.abs(res), 512, 256, padding=256)
 
@@ -337,10 +335,8 @@ class Discriminator(nn.Module):
         x = x.reshape(batch_size, 8 * exp.n_bands, -1)
         spec = self.embed_spec(x)
 
-        # Ignoring conditioning for now
-        # cond = self.embed_cond(cond)
-        # x = cond + spec
-        x = spec
+        cond = self.embed_cond(cond)
+        x = cond + spec
         j = self.net(x)
         return j
 
@@ -397,8 +393,8 @@ class Model(nn.Module):
         self.imp = GenerateImpulse(256, 128, impulse_size, 16, n_events)
         self.res = RecurrentResonanceModel(n_events, 256, 128, 1024, resonance_samples=resonance_size)
         self.mix = GenerateMix(256, 128, n_events)
-        self.to_shift = LinearOutputStack(256, 3, out_channels=1)
-        self.to_amp = LinearOutputStack(256, 3, out_channels=1)
+        # self.to_shift = LinearOutputStack(256, 3, out_channels=1, norm=nn.LayerNorm((256,)))
+        self.to_amp = LinearOutputStack(256, 3, out_channels=1, norm=nn.LayerNorm((256,)))
 
 
         self.verb_context = nn.Linear(4096, 32)
@@ -432,9 +428,17 @@ class Model(nn.Module):
 
         return encoded
     
-    def generate(self, encoded, one_hot, packed):
-        ctxt = torch.sum(encoded, dim=-1)
-        # ce = self.embed_context(ctxt)
+    def generate(self, encoded, one_hot, packed, dense=None):
+        batch_size = encoded.shape[0]
+
+        ctxt = torch.mean(encoded, dim=-1)
+
+        if dense is not None:
+            ce = torch.mean(dense, dim=-1)
+            ce = self.embed_context(ce)
+        else:
+            ce = self.embed_context(ctxt)
+        
         ctxt = self.verb_context.forward(ctxt)
 
         # TODO: consider adding context back in and/or dense context
@@ -446,21 +450,23 @@ class Model(nn.Module):
         # generate...
 
         # impulses
-        imp = self.imp.forward(embeddings)
-        padded = F.pad(imp, (0, resonance_size - impulse_size))
+        # imp = self.imp.forward(embeddings)
+        # padded = F.pad(imp, (0, resonance_size - impulse_size))
 
         # resonances
         res, env = self.res.forward(embeddings)
 
         # mixes
-        mx = self.mix.forward(embeddings)
+        # mx = self.mix.forward(embeddings)
 
-        conv = fft_convolve(padded, res)[..., :resonance_size]
+        # conv = fft_convolve(padded, res)[..., :resonance_size]
 
 
-        stacked  = torch.cat([padded[..., None], conv[..., None]], dim=-1)
-        mixed = stacked @ mx.view(-1, n_events, 2, 1)
-        mixed = mixed.view(-1, n_events, resonance_size)
+        # stacked  = torch.cat([padded[..., None], conv[..., None]], dim=-1)
+        # mixed = stacked @ mx.view(-1, n_events, 2, 1)
+        # mixed = mixed.view(-1, n_events, resonance_size)
+
+        mixed = res
 
         amps = torch.abs(self.to_amp(embeddings))
         mixed = mixed * amps
@@ -486,12 +492,18 @@ class Model(nn.Module):
         final = F.pad(mixed, (0, exp.n_samples - mixed.shape[-1]))
         up = torch.zeros(final.shape[0], n_events, exp.n_samples, device=final.device)
         up[:, :, ::256] = packed
+
         final = fft_convolve(final, up)[..., :exp.n_samples]
+
+        # print(up.shape, mixed.shape)
+        # up = F.pad(up, (0, resonance_size))
+        # final = F.conv1d(up, mixed.view(-1, 1, resonance_size), groups=n_events)[..., :exp.n_samples]
+        # print(final.shape)
 
         final = torch.sum(final, dim=1, keepdim=True)
 
 
-        final = self.verb.forward(ctxt, final)
+        # final = self.verb.forward(ctxt, final)
         return final, env
 
 
@@ -501,11 +513,13 @@ class Model(nn.Module):
         # a = full sparse representation
         # b = packed (just active channels)
         # c = one_hot
+
+        dense = encoded
         encoded, packed, one_hot = sparsify2(encoded, n_to_keep=n_events)
 
 
 
-        final, env = self.generate(encoded, one_hot, packed)
+        final, env = self.generate(encoded, one_hot, packed, dense=dense)
         return final, encoded, env
 
 
@@ -527,13 +541,6 @@ def train(batch, i):
     if i % 2 == 0:
         recon, encoded, env = model.forward(feat)
 
-        # another failure mode is using a single code for each example
-        # but different codes across examples.  I could further discourage
-        # this by looking at correlations _within_ each encoding
-        enc = torch.sum(encoded, dim=-1)
-        diversity = latent_loss(enc, mean_weight=0, std_weight=0)
-
-        # print('ENV', env.shape)
 
         env = torch.diff(env, dim=-1)
         # print(env)
@@ -555,7 +562,7 @@ def train(batch, i):
         
         adv_loss = (torch.abs(1 - j).mean() * 1)
 
-        loss = spec_loss + env_loss + adv_loss + diversity
+        loss = spec_loss + adv_loss #+ diversity + env_loss
 
         # loss = matching_pursuit_loss(recon, batch) + env_loss
 

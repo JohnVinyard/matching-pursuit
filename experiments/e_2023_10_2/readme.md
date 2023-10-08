@@ -17,8 +17,12 @@ instead, the one_hot vectors + context should be used to generate all resonance 
 - pure conv generator (no resonance/physical modelling) with losses to enforce
   causality and independence (few or no correlations between codes)
 
+- better matching pursuit loss, stopping gradients when subtracting all other channels
+
 - MLP/FFT mixer architecture.  Anti-causal masking?
 
 - sparse scheduling will make runs of the same atom less likely?
 
 - this is harder, because gradients must flow back to the "cause", rather than just the current moment
+
+- 1d projection plus lateral inhibition
