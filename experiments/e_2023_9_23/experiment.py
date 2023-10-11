@@ -314,9 +314,9 @@ def train(batch, i):
 
         loss = torch.abs(1 - j).mean() + spec_loss
 
-        # with torch.no_grad():
-        #     enc = perlin()
-        #     gen = model.generate(enc)
+        with torch.no_grad():
+            enc = perlin()
+            recon = model.generate(enc)
 
         loss.backward()
         optim.step()
@@ -362,10 +362,10 @@ class SparseV5(BaseExperimentRunner):
             item = item.view(-1, 1, exp.n_samples)
             l, r, e = train(item, i)
             
-            if i % 1000 == 0 and i > 0:
-                print('SAVING')
-                torch.save(model.state_dict(), 'sparse_conditioned_gen.dat')
-                torch.save(disc.state_dict(), 'sparse_conditioned_disc.dat')
+            # if i % 1000 == 0 and i > 0:
+            #     print('SAVING')
+            #     torch.save(model.state_dict(), 'sparse_conditioned_gen.dat')
+            #     torch.save(disc.state_dict(), 'sparse_conditioned_disc.dat')
 
 
             if l is None:

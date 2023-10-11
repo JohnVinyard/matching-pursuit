@@ -70,6 +70,8 @@ class MixerBlock(nn.Module):
 
     
     def forward(self, x):
+
+
         assert x.shape[1:] == (self.sequence_length, self.channels)
 
         x = F.dropout(x, 0.1)
@@ -85,6 +87,7 @@ class MixerBlock(nn.Module):
 
         x = x + tr + skip
         x = self.nl(x)
+
 
         return x
 
@@ -118,12 +121,13 @@ class MixerAttention(nn.Module):
         
 
 class MixerStack(nn.Module):
-    def __init__(self, in_channels, channels, sequence_length, layers, attn_blocks):
+    def __init__(self, in_channels, channels, sequence_length, layers, attn_blocks, channels_last=True):
         super().__init__()
         self.in_channels = in_channels
         self.channels = channels
         self.sequence_length = sequence_length
         self.layers = layers
+        self.channels_last = channels_last
 
         self.net = nn.Sequential(
             nn.Linear(in_channels, channels),
@@ -132,5 +136,11 @@ class MixerStack(nn.Module):
         )
     
     def forward(self, x):
+        if not self.channels_last:
+            x = x.permute(0, 2, 1)
+        
         x = self.net(x)
+
+        if not self.channels_last:
+            x = x.permute(0, 2, 1)
         return x
