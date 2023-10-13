@@ -240,7 +240,7 @@ class ImpulseGenerator(nn.Module):
         self.final_size = final_size
         self.softmax = softmax
     
-    def forward(self, x, softmax=None):
+    def forward(self, x, softmax=None, return_logits=False):
         sm = softmax or self.softmax
 
         batch, time = x.shape
@@ -249,7 +249,10 @@ class ImpulseGenerator(nn.Module):
         step = self.final_size // time
         output = torch.zeros(batch, 1, self.final_size, device=x.device)
         output[:, :, ::step] = x
-        return output
+        if return_logits:
+            return output, x
+        else:
+            return output
 
 class STFTTransferFunction(nn.Module):
     def __init__(self):

@@ -6,3 +6,5 @@ from .e_2023_10_2 import GraphRepresentation as Current
 # from .e_2023_10_5 import PointCloud as Current
 
 # from .e_2023_10_8 import Independent as Current
+
+# from .e_2023_10_12 import WaveCollapse as Current

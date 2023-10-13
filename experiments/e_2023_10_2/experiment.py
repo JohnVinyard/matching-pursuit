@@ -1,4 +1,3 @@
-import numpy as np
 import torch
 from conjure import numpy_conjure, SupportedContentType
 from torch import nn
@@ -6,29 +5,21 @@ from torch.nn import functional as F
 import zounds
 from angle import windowed_audio
 from config.experiment import Experiment
-from fft_basis import morlet_filter_bank
-from fft_shift import fft_shift
+from modules.overlap_add import overlap_add
 from modules.ddsp import NoiseModel
-from modules.decompose import fft_frequency_decompose, fft_frequency_recompose
 from modules.fft import fft_convolve
 from modules.latent_loss import latent_loss
 from modules.linear import LinearOutputStack
-from modules.mixer import MixerStack
 from modules.normalization import max_norm, unit_norm
-from modules.overlap_add import overlap_add
-from modules.pos_encode import pos_encoded
 from modules.refractory import make_refractory_filter
 from modules.reverb import ReverbGenerator
-from modules.softmax import hard_softmax
+from modules.sparse import sparsify2
 from modules.stft import stft
-from modules.sparse import soft_dirac, sparsify2
-from modules.transfer import ImpulseGenerator
 from train.experiment_runner import BaseExperimentRunner, MonitoredValueDescriptor
 from train.optim import optimizer
-from upsample import ConvUpsample
+from upsample import ConvUpsample, PosEncodedUpsample
 from util import device
 from util.readmedocs import readme
-from torch.distributions import Uniform, Normal
 
 
 exp = Experiment(
@@ -39,7 +30,7 @@ exp = Experiment(
     kernel_size=512)
 
 
-n_events = 16
+n_events = 32
 impulse_size = 4096
 resonance_size = 32768
 
@@ -57,37 +48,24 @@ class RecurrentResonanceModel(nn.Module):
         self.window_size = window_size
         self.resonance_samples = resonance_samples
 
-        n_res = 1024
-        self.n_frames = resonance_samples // (window_size // 2)
-        self.res_factor = (1 - base_resonance) * 0.99
+        n_atoms = 1024
 
+        self.atoms = nn.Parameter(
+            torch.zeros(n_atoms, resonance_samples).uniform_(-1, 1) * (torch.linspace(1, 0, resonance_samples)[None, :] ** 12))
 
-        self.res = nn.Parameter(torch.zeros(n_res, resonance_samples).uniform_(-1, 1))
+        self.selection = nn.Linear(latent_dim, n_atoms)
+
+        # self.to_res = ConvUpsample(
+        #     latent_dim, channels, 8, end_size=resonance_samples, mode='nearest', out_channels=1, from_latent=True, batch_norm=True)
+
         
-        self.to_momentum = LinearOutputStack(channels, 3, out_channels=1, in_channels=latent_dim, norm=nn.LayerNorm((channels,)))
-        self.to_selection = LinearOutputStack(channels, 3, out_channels=n_res, in_channels=latent_dim, norm=nn.LayerNorm((channels,)))
 
     
     def forward(self, x):
-
-        mom = base_resonance + (torch.sigmoid(self.to_momentum(x)) * self.res_factor)
-        mom = torch.log(1e-12 + mom)
-        mom = mom.repeat(1, 1, self.n_frames)
-        mom = torch.cumsum(mom, dim=-1)
-        mom = torch.exp(mom)
-        new_mom = mom
-
-        sel = self.to_selection(x)
-        res = self.res
-        res = sel @ res
-
-        windowed = windowed_audio(res, self.window_size, self.window_size // 2)
-        windowed = unit_norm(windowed, dim=-1)
-        windowed = windowed * new_mom[..., None]
-        windowed = overlap_add(windowed, apply_window=False)[..., :self.resonance_samples]
-        # windowed = max_norm(windowed)
-
-
+        # windowed = self.to_res(x.view(-1, self.latent_dim)).view(-1, self.encoding_channels, self.resonance_samples)
+        sel = torch.softmax(self.selection(x), dim=-1)
+        windowed = sel @ self.atoms
+        new_mom = None
         return windowed, new_mom
 
 
@@ -189,33 +167,21 @@ class Discriminator(nn.Module):
     def forward(self, cond, audio):
         batch_size = cond.shape[0]
 
-        spec = exp.perceptual_feature(audio)
+        # spec = exp.perceptual_feature(audio)
 
-        x = self.embed_period(spec)
-        x = x.permute(0, 3, 1, 2)
-        x = x.reshape(batch_size, 8 * exp.n_bands, -1)
-        spec = self.embed_spec(x)
+        spec = stft(audio, 2048, 256, pad=True).view(batch_size, 128, 1025)[..., :1024].permute(0, 2, 1)
 
-        # cond = self.embed_cond(cond)
-        # x = cond + spec
-        x = spec
+        # x = self.embed_period(spec)
+        # x = x.permute(0, 3, 1, 2)
+        # x = x.reshape(batch_size, 8 * exp.n_bands, -1)
+
+        spec = self.embed_spec(spec)
+        cond = self.embed_cond(cond)
+        x = cond + spec
         j = self.net(x)
         return j
 
 
-def training_softmax(x):
-    """
-    Produce a random mixture of the soft and hard functions, such
-    that softmax cannot be replied upon.  This _should_ cause
-    the model to gravitate to the areas where the soft and hard functions
-    are near equivalent
-    """
-    mixture = torch.zeros(x.shape[0], x.shape[1], 1, device=x.device).uniform_(0, 1) ** 2
-    sm = torch.softmax(x, dim=-1)
-    d = soft_dirac(x)
-
-    # *soft* softmax is much less likely to dominate
-    return (sm * mixture) + (d * (1 - mixture))
 
 
 class Model(nn.Module):
@@ -269,13 +235,16 @@ class Model(nn.Module):
 
 
 
-        self.embed_context = LinearOutputStack(256, 3, in_channels=4096, norm=nn.LayerNorm((256,)))
-        self.embed_one_hot = LinearOutputStack(256, 3, in_channels=4096, norm=nn.LayerNorm((256,)))
+        self.embed_context = nn.Linear(4096, 256)
+        self.embed_one_hot = nn.Linear(4096, 256)
+
+        # self.embed_context = LinearOutputStack(256, 3, in_channels=4096, norm=nn.LayerNorm((256,)))
+        # self.embed_one_hot = LinearOutputStack(256, 3, in_channels=4096, norm=nn.LayerNorm((256,)))
         
         self.imp = GenerateImpulse(256, 128, impulse_size, 16, n_events)
-        self.res = RecurrentResonanceModel(n_events, 256, 128, 1024, resonance_samples=resonance_size)
+        self.res = RecurrentResonanceModel(n_events, 256, 64, 1024, resonance_samples=resonance_size)
         self.mix = GenerateMix(256, 128, n_events)
-        self.to_amp = LinearOutputStack(256, 3, out_channels=1, norm=nn.LayerNorm((256,)))
+        self.to_amp = nn.Linear(256, 1)
 
 
         self.verb_context = nn.Linear(4096, 32)
@@ -283,9 +252,6 @@ class Model(nn.Module):
             32, 3, exp.samplerate, exp.n_samples, norm=nn.LayerNorm((32,)))
 
 
-        self.to_positions = LinearOutputStack(256, 3, out_channels=512, norm=nn.LayerNorm((256,)))
-        self.pos = ImpulseGenerator(exp.n_samples, lambda x: training_softmax(x))
-        
         self.refractory_period = 8
         self.register_buffer('refractory', make_refractory_filter(self.refractory_period, power=10, device=device))
     
@@ -294,13 +260,16 @@ class Model(nn.Module):
     def encode(self, x):
         batch_size = x.shape[0]
 
-        if len(x.shape) != 4:
-            x = exp.perceptual_feature(x)
+        # if len(x.shape) != 4:
+        #     x = exp.perceptual_feature(x)
 
-        x = self.embed(x)
-        x = x.permute(0, 3, 1, 2)
-        x = x.reshape(batch_size, 8 * exp.n_bands, -1)
+        # x = self.embed(x)
+        # x = x.permute(0, 3, 1, 2)
+        # x = x.reshape(batch_size, 8 * exp.n_bands, -1)
 
+        x = stft(x, 2048, 256, pad=True).view(batch_size, 128, 1025)[..., :1024].permute(0, 2, 1)
+
+    
 
         encoded = self.encoder.forward(x)
         encoded = F.dropout(encoded, 0.05)
@@ -310,10 +279,14 @@ class Model(nn.Module):
         
         return encoded
     
-    def generate(self, encoded, one_hot, packed):
+    def generate(self, encoded, one_hot, packed, dense=None):
         batch_size = encoded.shape[0]
 
-        ctxt = torch.mean(encoded, dim=-1)
+        if dense is not None:
+            ctxt = torch.mean(dense, dim=-1)
+        else:
+            ctxt = torch.mean(encoded, dim=-1)
+        
         ce = self.embed_context(ctxt)
         
         ctxt = self.verb_context.forward(ctxt)
@@ -348,10 +321,6 @@ class Model(nn.Module):
         mixed = mixed * amps
 
 
-        # pos = self.to_positions(embeddings.view(-1, 256))
-        # diracs = self.pos(pos).view(-1, n_events, exp.n_samples)
-        # up = diracs
-
         final = F.pad(mixed, (0, exp.n_samples - mixed.shape[-1]))
         up = torch.zeros(final.shape[0], n_events, exp.n_samples, device=final.device)
         up[:, :, ::256] = packed
@@ -360,7 +329,7 @@ class Model(nn.Module):
 
 
         final = torch.sum(final, dim=1, keepdim=True)
-        # final = self.verb.forward(ctxt, final)
+        final = self.verb.forward(ctxt, final)
 
 
         return final, env
@@ -369,11 +338,12 @@ class Model(nn.Module):
     def forward(self, x):
         encoded = self.encode(x)
 
+        non_sparse = encoded
 
         encoded, packed, one_hot = sparsify2(encoded, n_to_keep=n_events)
 
 
-        final, env = self.generate(encoded, one_hot, packed)
+        final, env = self.generate(encoded, one_hot, packed, dense=non_sparse)
         return final, encoded, env
 
 
@@ -384,61 +354,33 @@ disc = Discriminator().to(device)
 disc_optim = optimizer(disc, lr=1e-3)
 
 
-def single_channel_loss(target: torch.Tensor, events: torch.Tensor):
-    # pick a channel to optimize for this batch
-    channel = np.random.randint(0, events.shape[1])
-
-
-    # target = exp.perceptual_feature(target)
-    target = stft(target, 512, 256, pad=True)
-
-    recon = events.sum(dim=1, keepdim=True)
-    # recon = exp.perceptual_feature(recon)
-    recon = stft(recon, 512, 256, pad=True)
-
-    just_channel = events[:, channel:channel + 1, :]
-    # just_channel = exp.perceptual_feature(just_channel)
-    just_channel = stft(just_channel, 512, 256, pad=True)
-
-    # this channel shouldn't need to clean up any new noise
-    # introduced by other channels, just to cover more of what's left
-    residual = (target - recon)
-    overshoot = torch.abs(torch.clamp(residual, -np.inf, 0)).mean()
-    residual = torch.relu(residual) + just_channel
-
-    loss = F.mse_loss(just_channel, residual) + overshoot
-    return loss
-
-
-# def asymmetrical_spec_loss(target: torch.Tensor, recon: torch.Tensor):
-#     diff = target - recon
-
-#     neg = torch.clamp(diff, -np.inf, 0)
-#     pos = torch.clamp(diff, 0, np.inf)
-
-#     loss = (torch.norm(neg) * 1) + (torch.norm(pos) * 0.01)
-#     return loss
 
 def train(batch, i):
     optim.zero_grad()
     disc_optim.zero_grad()
 
-    with torch.no_grad():
-        feat = exp.perceptual_feature(batch)
+    # with torch.no_grad():
+    #     feat = exp.perceptual_feature(batch)
     
-    if True or i % 2 == 0:
-        recon, encoded, env = model.forward(feat)
+    if i % 2 == 0:
+        recon, encoded, env = model.forward(batch)
 
-        es = torch.sum(encoded, dim=-1)
-        encoding_loss = latent_loss(es, mean_weight=0, std_weight=0)
+        # diff = torch.diff(env, dim=-1)
+        # diff = torch.relu(diff)
+        # env_loss = diff.mean()
+
+        # es = torch.sum(encoded, dim=-1)
+        # encoding_loss = latent_loss(es, mean_weight=0, std_weight=0)
 
         recon_summed = torch.sum(recon, dim=1, keepdim=True)
 
         # compute spec loss
         # r = exp.perceptual_feature(recon_summed)
         # spec_loss = F.mse_loss(r, feat)
+        fake_spec = stft(recon_summed, 2048, 256, pad=True)
+        real_spec = stft(batch, 2048, 256, pad=True)
+        spec_loss = F.mse_loss(fake_spec, real_spec) * 100
 
-        spec_loss = F.mse_loss(stft(recon, 512, 256, pad=True), stft(batch, 512, 256, pad=True))
         
         # make sure random encodings also sound reasonable
         with torch.no_grad():
@@ -453,7 +395,7 @@ def train(batch, i):
         
         adv_loss = (torch.abs(1 - j).mean() * 1)
 
-        loss = spec_loss + encoding_loss #+ adv_loss
+        loss = (spec_loss * 1) + adv_loss
 
         loss.backward()
         optim.step()
@@ -465,7 +407,7 @@ def train(batch, i):
         return loss, recon, encoded
     else:
         with torch.no_grad():
-            recon, encoded, env = model.forward(feat)
+            recon, encoded, env = model.forward(batch)
             recon_summed = torch.sum(recon, dim=1, keepdim=True)
         
         rj = disc.forward(encoded, batch)

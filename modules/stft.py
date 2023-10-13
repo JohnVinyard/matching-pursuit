@@ -14,8 +14,10 @@ def stft(
         log_epsilon: float = 1e-4,
         return_complex: bool = False):
 
+    frames = x.shape[-1] // step
+
     if pad:
-        x = F.pad(x, (0, step))
+        x = F.pad(x, (0, ws))
 
     x = x.unfold(-1, ws, step)
     win = torch.hann_window(ws).to(x.device)
@@ -30,6 +32,7 @@ def stft(
     if log_amplitude:
         x = torch.log(x + log_epsilon)
 
+    x = x[:, :, :frames, :]
     return x
 
 
