@@ -26,3 +26,24 @@ instead, the one_hot vectors + context should be used to generate all resonance 
 - this is harder, because gradients must flow back to the "cause", rather than just the current moment
 
 - 1d projection plus lateral inhibition
+
+
+# Observations
+
+It's pretty clear that gradients are much more likely to flow to _samples_, rather
+than the control signal, e.g., a stem might end up pushed to have a transient in its
+center because it was poorly positioned.  This suggests that the sparse control signal
+and the stem-producing modules should be optimized separately.
+
+## Ideas
+
+
+### Greedy Algorithm
+
+produce and remove one stem at a time
+
+### Just Stems
+
+Produce a control signal and stems.  We find the best position for each stem and compute loss one-by-one, independently.
+Additionally, we compare the sparse control signal we produced to the optimal positioning for each stem
+
