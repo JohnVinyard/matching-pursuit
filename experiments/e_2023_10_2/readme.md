@@ -6,6 +6,9 @@ of using context to generate a dictionary which is then convolved with the spars
 
 instead, the one_hot vectors + context should be used to generate all resonance model parameters
 
+# Observations
+- channel-by-channel matching-pursuit-like loss seems to make a big difference
+
 
 # Next Steps
 
