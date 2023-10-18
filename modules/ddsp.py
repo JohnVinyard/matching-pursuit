@@ -9,7 +9,7 @@ from modules.physical import Window
 from modules.reverb import NeuralReverb
 from modules.overlap_add import overlap_add
 
-from upsample import FFTUpsampleBlock
+from upsample import ConvUpsample, FFTUpsampleBlock
 
 from .normal_pdf import pdf
 import zounds
@@ -392,27 +392,37 @@ class NoiseModel(nn.Module):
         noise_window = noise_step * 2
         self.noise_coeffs = (noise_window // 2) + 1
 
-        layers = int(np.log2(n_noise_frames) - np.log2(input_size))
+        self.upscale = ConvUpsample(
+            input_channels, 
+            channels, 
+            start_size=input_size, 
+            end_size=n_noise_frames, 
+            mode='learned', 
+            out_channels=self.noise_coeffs, 
+            from_latent=False, 
+            batch_norm=batch_norm)
 
-        self.initial = nn.Conv1d(input_channels, channels, 1, 1, 0)
+        # layers = int(np.log2(n_noise_frames) - np.log2(input_size))
 
-        self.upscale = nn.Sequential(*[
-            nn.Sequential(
-                nn.Upsample(scale_factor=2, mode='nearest'),
-                nn.Conv1d(channels, channels, 3, 1, 1),
-                nn.LeakyReLU(0.2),
-                nn.BatchNorm1d(channels) if batch_norm else nn.Identity()
-            )
-            for _ in range(layers)])
+        # self.initial = nn.Conv1d(input_channels, channels, 1, 1, 0)
 
-        self.final = nn.Conv1d(channels, self.noise_coeffs, 1, 1, 0)
+        # self.upscale = nn.Sequential(*[
+        #     nn.Sequential(
+        #         nn.Upsample(scale_factor=2, mode='nearest'),
+        #         nn.Conv1d(channels, channels, 3, 1, 1),
+        #         nn.LeakyReLU(0.2),
+        #         nn.BatchNorm1d(channels) if batch_norm else nn.Identity()
+        #     )
+        #     for _ in range(layers)])
+
+        # self.final = nn.Conv1d(channels, self.noise_coeffs, 1, 1, 0)
 
     def forward(self, x, add_noise=False):
         batch_size = x.shape[0]
         x = x.view(batch_size, self.input_channels, self.input_size)
-        x = self.initial(x)
+        # x = self.initial(x)
         x = self.upscale(x)
-        x = self.final(x)
+        # x = self.final(x)
         x = self.activation(x)
         if self.squared:
             x = x ** 2

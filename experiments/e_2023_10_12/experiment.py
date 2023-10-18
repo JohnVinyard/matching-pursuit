@@ -26,73 +26,128 @@ exp = Experiment(
     kernel_size=512)
 
 
-class Contextual(nn.Module):
+class UNet(nn.Module):
     def __init__(self, channels):
         super().__init__()
         self.channels = channels
-        self.down = nn.Conv1d(channels + 33, channels, 1, 1, 0)
-        encoder = nn.TransformerEncoderLayer(channels, 4, channels, batch_first=True)
-        self.encoder = nn.TransformerEncoder(encoder, 4, norm=nn.LayerNorm((128, channels)))
 
+        self.down = nn.Sequential(
+            # 64
+            nn.Sequential(
+                nn.Dropout(0.1),
+                nn.Conv1d(channels, channels, 3, 2, 1),
+                nn.LeakyReLU(0.2),
+                nn.BatchNorm1d(channels)
+            ),
+
+            # 32
+            nn.Sequential(
+                nn.Dropout(0.1),
+                nn.Conv1d(channels, channels, 3, 2, 1),
+                nn.LeakyReLU(0.2),
+                nn.BatchNorm1d(channels)
+            ),
+
+            # 16
+            nn.Sequential(
+                nn.Dropout(0.1),
+                nn.Conv1d(channels, channels, 3, 2, 1),
+                nn.LeakyReLU(0.2),
+                nn.BatchNorm1d(channels)
+            ),
+
+            # 8
+            nn.Sequential(
+                nn.Dropout(0.1),
+                nn.Conv1d(channels, channels, 3, 2, 1),
+                nn.LeakyReLU(0.2),
+                nn.BatchNorm1d(channels)
+            ),
+
+            # 4
+            nn.Sequential(
+                nn.Dropout(0.1),
+                nn.Conv1d(channels, channels, 3, 2, 1),
+                nn.LeakyReLU(0.2),
+                nn.BatchNorm1d(channels)
+            ),
+        )
+
+        self.up = nn.Sequential(
+            # 8
+            nn.Sequential(
+                nn.Dropout(0.1),
+                nn.ConvTranspose1d(channels, channels, 4, 2, 1),
+                nn.LeakyReLU(0.2),
+                nn.BatchNorm1d(channels)
+            ),
+            # 16
+            nn.Sequential(
+                nn.Dropout(0.1),
+                nn.ConvTranspose1d(channels, channels, 4, 2, 1),
+                nn.LeakyReLU(0.2),
+                nn.BatchNorm1d(channels)
+            ),
+
+            # 32
+            nn.Sequential(
+                nn.Dropout(0.1),
+                nn.ConvTranspose1d(channels, channels, 4, 2, 1),
+                nn.LeakyReLU(0.2),
+                nn.BatchNorm1d(channels)
+            ),
+
+            # 64
+            nn.Sequential(
+                nn.Dropout(0.1),
+                nn.ConvTranspose1d(channels, channels, 4, 2, 1),
+                nn.LeakyReLU(0.2),
+                nn.BatchNorm1d(channels)
+            ),
+
+            # 128
+            nn.Sequential(
+                nn.Dropout(0.1),
+                nn.ConvTranspose1d(channels, channels, 4, 2, 1),
+                nn.LeakyReLU(0.2),
+                nn.BatchNorm1d(channels)
+            ),
+        )
+
+        self.proj = nn.Conv1d(1024, 4096, 1, 1, 0)
+    
     def forward(self, x):
-        pos = pos_encoded(x.shape[0], x.shape[-1], 16, device=x.device).permute(0, 2, 1)
-        x = torch.cat([x, pos], dim=1)
-        x = self.down(x)
-        x = x.permute(0, 2, 1)
-        x = self.encoder(x)
-        x = x.permute(0, 2, 1)
+        # Input will be (batch, 1024, 128)
+        context = {}
+
+        for layer in self.down:
+            x = layer(x)
+            context[x.shape[-1]] = x
+        
+        for layer in self.up:
+            x = layer(x)
+            size = x.shape[-1]
+            if size in context:
+                x = x + context[size]
+            
+        x = self.proj(x)
         return x
+
+
     
 class Model(nn.Module):
     def __init__(self):
         super().__init__()
-        self.embed = nn.Linear(257, 8)
+        self.embed = nn.Linear(1025, 1024)
 
-        # self.net = MixerStack(1024, 1024, 128, 6, 4, channels_last=False)
-        self.net = Contextual(1024)
+        self.net = UNet(1024)
 
-        # self.net = nn.Sequential(
-        #     nn.Sequential(
-        #         nn.Dropout(0.05),
-        #         nn.ConstantPad1d((0, 2), 0),
-        #         nn.Conv1d(1024, 1024, 3, 1, dilation=1),
-        #         nn.LeakyReLU(0.2),
-        #         nn.BatchNorm1d(1024)
-        #     ),
-
-        #     nn.Sequential(
-        #         nn.Dropout(0.05),
-        #         nn.ConstantPad1d((0, 6), 0),
-        #         nn.Conv1d(1024, 1024, 3, 1, dilation=3),
-        #         nn.LeakyReLU(0.2),
-        #         nn.BatchNorm1d(1024)
-        #     ),
-
-        #     nn.Sequential(
-        #         nn.Dropout(0.05),
-        #         nn.ConstantPad1d((0, 18), 0),
-        #         nn.Conv1d(1024, 1024, 3, 1, dilation=9),
-        #         nn.LeakyReLU(0.2),
-        #         nn.BatchNorm1d(1024)
-        #     ),
-
-        #     nn.Sequential(
-        #         nn.Dropout(0.05),
-        #         nn.ConstantPad1d((0, 2), 0),
-        #         nn.Conv1d(1024, 1024, 3, 1, dilation=1),
-        #         nn.LeakyReLU(0.2),
-        #         nn.BatchNorm1d(1024)
-        #     ),
-
-
-        #     nn.Conv1d(1024, 1024, 1, 1, 0)
-        # )
 
         self.n_atoms = 1024
         self.atom_size = 1024
         self.resolution = 4096
 
-        self.atoms = nn.Parameter(torch.zeros(1, self.n_atoms, self.atom_size).uniform_(-1, 1))
+        self.atoms = nn.Parameter(torch.zeros(1, self.n_atoms, self.atom_size).uniform_(-0.01, 0.01))
 
         self.pos = nn.Parameter(torch.zeros(1, 1024, 128).uniform_(-1, 1))
 
@@ -115,19 +170,19 @@ class Model(nn.Module):
     def forward(self, x):
         batch_size = x.shape[0]
 
-        x = exp.perceptual_feature(x)
+        x = stft(x, 2048, 256, pad=True)
         x = self.embed(x)
         x = x.permute(0, 3, 1, 2).reshape(-1, 1024, 128)
-
         pos = self.embed_pos(self.pos)
         spec = self.embed_spec(x)
-
         x = pos + spec
-
         x = self.net(x)
 
         # now, generate the events
         x = x.view(-1, 1024, 128).permute(0, 2, 1)
+
+        # just 16 "events"
+        x = x[:, 64 - 8: 64 + 8, :]
 
         sel = torch.softmax(self.to_selection(x), dim=-1)
 
@@ -137,54 +192,70 @@ class Model(nn.Module):
         atoms = F.pad(atoms, (0, exp.n_samples - self.atom_size))
         amps = torch.abs(self.to_amp(x))
         atoms = atoms * amps
+        atoms = atoms.view(batch_size, -1, exp.n_samples)
 
         pos = self.to_position(x)
 
         impulses, logits = self.imp.forward(pos.view(-1, self.resolution), return_logits=True)
         impulses = impulses.view(batch_size, -1, exp.n_samples)
 
-        final = fft_convolve(atoms, impulses)
-        final = torch.sum(final, dim=1, keepdim=True)
+        final = fft_convolve(atoms, impulses)[..., :exp.n_samples]
+        # final = torch.sum(final, dim=1, keepdim=True)
 
-        return final, logits
+        return final, logits, sel
 
 model = Model().to(device)
 optim = optimizer(model, lr=1e-3)
 
 def single_channel_loss(recon: torch.Tensor, target: torch.Tensor):
-    channel = np.random.randint(0, 128)
 
     target = stft(target, 512, 256, pad=True)
-
-    just_channel = recon[:, channel: channel + 1, :]
-    just_channel = stft(just_channel, 512, 256, pad=True)
-    mask = torch.norm(just_channel, dim=-1, keepdim=True)
-    mask = mask != 0
 
     everything = torch.sum(recon, dim=1, keepdim=True)
     everything = stft(everything, 512, 256, pad=True)
 
-    everything_removed = torch.relu(target - everything.clone().detach())
+    residual = target - everything
 
-    residual = everything_removed + just_channel
+    loss = 0
+
+    for channel in range(recon.shape[1]):
+        just_channel = recon[:, channel: channel + 1, :]
+        just_channel = stft(just_channel, 512, 256, pad=True)
+        t = residual + just_channel
+        loss = loss + F.mse_loss(just_channel, t.clone().detach())
+    
+
+    # everything_removed = torch.relu(target - everything.clone().detach())
+
+    # residual = everything_removed + just_channel
 
     # loss = F.mse_loss(just_channel, residual)
-    loss = (((residual - just_channel) ** 2) * mask).mean()
 
     return loss
 
 # TODO: Consider trying out single-channel loss
 def train(batch, i):
     optim.zero_grad()
-    recon, logits = model.forward(batch)
-    
-    logits = logits.view(128, -1)
+    recon, logits, sel = model.forward(batch)
+
+    sel = sel.view(-1, 1024)
+    highest, indices = torch.max(sel, dim=-1)
+    conf_loss = torch.abs(1 - highest).mean() * 0.01
+
+    logits = logits.view(-1, 4096)
     highest, indices = torch.max(logits, dim=-1)
+    print(indices // (exp.n_samples // 4096))
 
     # TODO: Also push atom selection to be very confident
-    confidence_loss = torch.abs(1 - highest).mean()
+    confidence_loss = torch.abs(1 - highest).mean() * 0.01
 
-    loss = exp.perceptual_loss(recon, batch) + confidence_loss
+    # loss = exp.perceptual_loss(recon, batch) + confidence_loss
+
+    # real_spec = stft(batch, 2048, 256, pad=True)
+    # fake_spec = stft(recon, 2048, 256, pad=True)
+    # loss = F.mse_loss(fake_spec, real_spec) + confidence_loss
+
+    loss = single_channel_loss(recon, batch) + confidence_loss + conf_loss
     loss.backward()
     optim.step()
 
