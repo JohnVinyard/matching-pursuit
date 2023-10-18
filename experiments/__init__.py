@@ -1,4 +1,10 @@
-# TODO: Run overnight and save weights with _no_ adversarial loss
+# from .e_2023_9_23 import SparseV5 as Current
+
 from .e_2023_10_2 import GraphRepresentation as Current
 
-# from .e_2023_10_16 import DecomposedLoss as Current
+# Dense positioning is best
+# from .e_2023_10_5 import PointCloud as Current
+
+# from .e_2023_10_8 import Independent as Current
+
+# from .e_2023_10_12 import WaveCollapse as Current
