@@ -29,19 +29,18 @@ exp = Experiment(
     kernel_size=512)
 
 
-n_events = 8
+n_events = 16
 context_dim = 16
 impulse_size = 4096
-resonance_size = 8192
+resonance_size = 16384
 
-conv_resonance = False
 
 # TODO: Does the "shallow" nature of the
 # discriminator come from the "dense" loss, rather
 # than a single judgement?  Try it out.
-adversarial_loss = True
+adversarial_loss = False
 
-base_resonance = 0.2
+base_resonance = 0.02
 
 
 class RecurrentResonanceModel(nn.Module):
@@ -53,13 +52,10 @@ class RecurrentResonanceModel(nn.Module):
         self.window_size = window_size
         self.resonance_samples = resonance_samples
 
-        n_atoms = 1024
+        n_atoms = 512
         self.n_atoms = n_atoms
         self.n_frames = resonance_samples // (window_size // 2)
-        self.res_factor = (1 - base_resonance) * 0.99
-
-        # TODO: should this be multi-band, or parameterized differently?
-        # What about a convolutional model to produce impulse responses?
+        self.res_factor = (1 - base_resonance) * 0.9
 
         band = zounds.FrequencyBand(40, exp.samplerate.nyquist)
         scale = zounds.LinearScale(band, n_atoms)
@@ -67,33 +63,35 @@ class RecurrentResonanceModel(nn.Module):
             exp.samplerate, resonance_samples, scale, 0.01, normalize=True).real.astype(np.float32)
         bank = torch.from_numpy(bank).view(n_atoms, resonance_samples)
 
-        self.to_env = ConvUpsample(
-            latent_dim, channels, 4, end_size=self.n_frames, mode='learned', out_channels=n_atoms, from_latent=True, batch_norm=True)
+        self.to_initial = nn.Linear(latent_dim, n_atoms)
+        self.to_momentum = nn.Linear(latent_dim, n_atoms)
 
         self.register_buffer('atoms', bank)
 
 
     def forward(self, x):
 
+        # get the initial state
+        initial = self.to_initial(x)
+        initial = torch.relu(initial)
+        initial = initial.view(-1, n_events, self.n_atoms, 1).repeat(1, 1, 1, self.n_frames)
+
         # compute resonance/sustain
-        # mom = base_resonance + (torch.sigmoid(self.to_momentum(x)) * self.res_factor)
-        # mom = torch.log(1e-12 + mom)
-        # mom = mom.repeat(1, 1, self.n_frames)
-        # mom = torch.cumsum(mom, dim=-1)
-        # mom = torch.exp(mom)
+        mom = base_resonance + (torch.sigmoid(self.to_momentum(x)) * self.res_factor)
+        mom = torch.log(1e-12 + mom)
+        mom = mom[..., None].repeat(1, 1, 1, self.n_frames)
+        mom = torch.cumsum(mom, dim=-1)
+        mom = torch.exp(mom)
+        new_mom = mom
 
-        mom = self.to_env(x) ** 2
-        new_mom = mom.view(-1, self.n_atoms, self.n_frames)
-        new_mom = F.interpolate(new_mom, size=self.resonance_samples, mode='linear')
+        amps = new_mom * initial
+        amps = F.interpolate(amps.view(-1, self.n_atoms, self.n_frames), size=self.resonance_samples, mode='linear')
 
-
-        windowed = self.atoms.view(1, self.n_atoms, self.resonance_samples) * new_mom
+        windowed = self.atoms.view(1, self.n_atoms, self.resonance_samples) * amps
         windowed = torch.sum(windowed, dim=1, keepdim=True)
         windowed = max_norm(windowed).view(-1, n_events, self.resonance_samples)
 
         return windowed, new_mom
-
-
 
 
 class GenerateMix(nn.Module):
@@ -163,43 +161,56 @@ class Discriminator(nn.Module):
 
         self.net = nn.Sequential(
 
-            # 64
+            # 128
             nn.Sequential(
-                nn.Conv1d(256, 256, 7, 2, 3),
+                nn.Conv1d(256, 256, 7, 1, 3),
                 nn.LeakyReLU(0.2),
                 nn.BatchNorm1d(256)
             ),
 
-            # 32
+            # 128
             nn.Sequential(
-                nn.Conv1d(256, 256, 7, 2, 3),
+                nn.Conv1d(256, 256, 7, 1, 3),
                 nn.LeakyReLU(0.2),
                 nn.BatchNorm1d(256)
             ),
 
-            # 8
+            # 128
             nn.Sequential(
-                nn.Conv1d(256, 256, 7, 2, 3),
+                nn.Conv1d(256, 256, 7, 1, 3),
                 nn.LeakyReLU(0.2),
-                nn.BatchNorm1d(256)
             ),
 
-            # 4
-            nn.Sequential(
-                nn.Conv1d(256, 256, 3, 2, 1),
-                nn.LeakyReLU(0.2),
-                nn.BatchNorm1d(256)
-            ),
+            # # 32
+            # nn.Sequential(
+            #     nn.Conv1d(256, 256, 7, 2, 3),
+            #     nn.LeakyReLU(0.2),
+            #     nn.BatchNorm1d(256)
+            # ),
 
-            # 2
-            nn.Sequential(
-                nn.Conv1d(256, 256, 3, 2, 1),
-                nn.LeakyReLU(0.2),
-                nn.BatchNorm1d(256)
-            ),
+            # # 8
+            # nn.Sequential(
+            #     nn.Conv1d(256, 256, 7, 2, 3),
+            #     nn.LeakyReLU(0.2),
+            #     nn.BatchNorm1d(256)
+            # ),
+
+            # # 4
+            # nn.Sequential(
+            #     nn.Conv1d(256, 256, 3, 2, 1),
+            #     nn.LeakyReLU(0.2),
+            #     nn.BatchNorm1d(256)
+            # ),
+
+            # # 2
+            # nn.Sequential(
+            #     nn.Conv1d(256, 256, 3, 2, 1),
+            #     nn.LeakyReLU(0.2),
+            #     nn.BatchNorm1d(256)
+            # ),
 
 
-            nn.Conv1d(256, 1, 2, 2, 0)
+            nn.Conv1d(256, 1, 1, 1, 0)
         )
 
         self.apply(lambda x: exp.init_weights(x))
@@ -350,9 +361,9 @@ class Model(nn.Module):
 
         self.from_context = nn.Linear(context_dim, 4096)
 
-        self.refractory_period = 8
-        self.register_buffer('refractory', make_refractory_filter(
-            self.refractory_period, power=10, device=device))
+        # self.refractory_period = 8
+        # self.register_buffer('refractory', make_refractory_filter(
+        #     self.refractory_period, power=10, device=device))
 
         self.apply(lambda x: exp.init_weights(x))
 
@@ -365,9 +376,9 @@ class Model(nn.Module):
         encoded = self.encoder.forward(x)
         encoded = F.dropout(encoded, 0.05)
 
-        ref = F.pad(self.refractory,
-                    (0, encoded.shape[-1] - self.refractory_period))
-        encoded = fft_convolve(encoded, ref)[..., :encoded.shape[-1]]
+        # ref = F.pad(self.refractory,
+        #             (0, encoded.shape[-1] - self.refractory_period))
+        # encoded = fft_convolve(encoded, ref)[..., :encoded.shape[-1]]
 
         return encoded
 
@@ -405,8 +416,7 @@ class Model(nn.Module):
         mixed = mixed * amps
 
         final = F.pad(mixed, (0, exp.n_samples - mixed.shape[-1]))
-        up = torch.zeros(final.shape[0], n_events,
-                         exp.n_samples, device=final.device)
+        up = torch.zeros(final.shape[0], n_events, exp.n_samples, device=final.device)
         up[:, :, ::256] = packed
 
         final = fft_convolve(final, up)[..., :exp.n_samples]
@@ -415,16 +425,7 @@ class Model(nn.Module):
 
         final = self.verb.forward(dense, final)
 
-        # TODO: lose the verb, for now
-        '''
-        Get the stems, give them unit norm, and find the optimal 
-        position for each, as well as the optimal amplitude/norm.
-
-        Stems are aligned and loss is computed
-
-        Loss for sparse control signal is compute from best matching positions
-        '''
-
+        
         return final, env
 
     def forward(self, x):
@@ -481,8 +482,6 @@ def train(batch, i):
     if not adversarial_loss or i % 2 == 0:
         recon, encoded, env = model.forward(batch)
 
-        diff = torch.diff(env, dim=-1)
-
         recon_summed = torch.sum(recon, dim=1, keepdim=True)
 
         # compute spec loss
@@ -512,8 +511,7 @@ def train(batch, i):
         else:
             adv_loss = 0
 
-        loss = loss + adv_loss + diff.mean()
-        # loss = (spec_loss * 1) + adv_loss
+        loss = loss + adv_loss
 
         loss.backward()
         optim.step()
