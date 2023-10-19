@@ -108,8 +108,8 @@ class RecurrentResonanceModel(nn.Module):
         # bank = torch.zeros_like(bank).uniform_(-1, 1)
         # self.atoms = nn.ParameterDict({str(k): v for k, v in fft_frequency_decompose(bank, 512).items()})
 
-        # self.atoms = nn.Parameter(bank)
-        self.register_buffer('atoms', bank)
+        self.atoms = nn.Parameter(bank)
+        # self.register_buffer('atoms', bank)
 
         self.to_res = ConvUpsample(
             latent_dim, channels, 4, end_size=resonance_samples, mode='nearest', out_channels=1, from_latent=True, batch_norm=True)
