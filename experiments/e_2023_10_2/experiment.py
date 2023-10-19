@@ -43,41 +43,6 @@ base_resonance = 0.02
 apply_group_delay_to_dither = True
 
 
-def control_signal_loss(
-        target: torch.Tensor,
-        stems: torch.Tensor,
-        control: torch.Tensor,
-        rendered: torch.Tensor):
-
-    batch, _, n_samples = target.shape
-    _, n_events, stem_samples = stems.shape
-    _, n_atoms, _ = control.shape
-
-    # find the best position for each stem
-    stems = F.pad(stems, (0, n_samples - stem_samples))
-    fm = fft_convolve(target, stems)
-
-    values, indices = torch.max(fm, dim=-1)
-    sparse = torch.zeros_like(fm)
-    sparse = torch.scatter(sparse, dim=-1, index=indices, src=values)
-    re_positioned = fft_convolve(sparse, stems)
-
-    # TODO: would gradient flow better if I just do this manually,
-    # by index?
-    complete = torch.sum(re_positioned, dim=1, keepdim=True)
-    residual = target - complete
-
-    # how close are the samples when aligned optimally?
-    stem_loss = 0
-    for i in range(n_events):
-        res = residual + re_positioned[:, i: i + 1, ...]
-        stem_loss = stem_loss + \
-            F.mse_loss(res, re_positioned[:, i: i + 1, ...])
-
-    # how close is the sparse control signal to the optimal alignment?
-    # The problem here is that no gradient flow occurs
-    control_loss = F.mse_loss(control, sparse)
-
 
 class RecurrentResonanceModel(nn.Module):
     def __init__(self, encoding_channels, latent_dim, channels, window_size, resonance_samples):
