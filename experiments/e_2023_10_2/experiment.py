@@ -39,9 +39,89 @@ context_dim = 16
 impulse_size = 4096
 resonance_size = 32768
 
-base_resonance = 0.02
+base_resonance = 0.2
 apply_group_delay_to_dither = True
 
+
+class STFTRecurrentResonanceModel(nn.Module):
+    def __init__(self, encoding_channels, latent_dim, channels, window_size, resonance_samples):
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.channels = channels
+        self.window_size = window_size
+        self.step = window_size // 2
+        self.n_coeffs = window_size // 2 + 1
+        self.resonance_samples = resonance_samples
+        self.n_frames = resonance_samples // self.step
+        self.encoding_channels = encoding_channels
+
+
+        self.register_buffer('group_delay', torch.linspace(0, np.pi, self.n_coeffs))
+
+        self.resonance_factor = 0.99 - base_resonance
+
+
+        # TODO: Does this work better with just simple linear projections?
+        self.to_initial = LinearOutputStack(
+            channels, layers=3, out_channels=self.n_coeffs, in_channels=latent_dim, norm=nn.LayerNorm((channels,)))
+        self.to_resonance = LinearOutputStack(
+            channels, layers=3, out_channels=self.n_coeffs, in_channels=latent_dim, norm=nn.LayerNorm((channels,)))
+        self.to_phase_dither = LinearOutputStack(
+            channels, layers=3, out_channels=self.n_coeffs, in_channels=latent_dim, norm=nn.LayerNorm((channels,)))
+        
+    
+    def forward(self, latents):
+        batch_size = latents.shape[0]
+
+        initial = self.to_initial(latents)
+        # initial = torch.relu(initial)
+
+        res = base_resonance + (torch.sigmoid(self.to_resonance(latents)) * self.resonance_factor)
+        dither = torch.sigmoid(self.to_phase_dither(latents)) 
+
+        if apply_group_delay_to_dither:
+            dither = dither * self.group_delay[None, None, :]
+
+
+        # print(res.shape, dither.shape, initial.shape)
+
+        # first_frame = initial[:, None, :]
+
+        # Non-recurrent
+
+        full_res = res[..., None].repeat(1, 1, 1, self.n_frames)
+        full_res = torch.log(1e-12 + full_res)
+        full_res = torch.cumsum(full_res, dim=-1)
+        full_res = torch.exp(full_res)
+        # full_res = self.to_env(latents.view(-1, self.latent_dim)).view(-1, n_events, self.n_frames, self.n_coeffs).permute(0, 1, 3, 2)
+        # envelope should be in [0 - 1]
+        # full_res = torch.sigmoid(full_res)
+
+        mags = full_res * initial[..., None]
+        mags = mags.permute(0, 1, 3, 2)
+
+        full_delay = self.group_delay[None, None, :, None].repeat(1, 1, 1, self.n_frames)
+        full_delay = torch.cumsum(full_delay, dim=-1)
+
+        if apply_group_delay_to_dither:
+            full_delay = full_delay + (torch.zeros_like(full_delay).uniform_(-np.pi, np.pi) * dither[:, :, :, None])
+        
+        phases = full_delay
+        phases = phases.permute(0, 1, 3, 2)
+        # end non-recurrent
+        frames = torch.complex(
+            mags * torch.cos(phases),
+            mags * torch.sin(phases)
+        )
+
+        windowed = torch.fft.irfft(frames, dim=-1, norm='ortho')
+        
+        
+        samples = overlap_add(windowed, apply_window=True)[..., :self.resonance_samples]
+        # samples = max_norm(samples, dim=-1)
+
+        assert samples.shape == (batch_size, self.encoding_channels, self.resonance_samples)
+        return samples, full_res
 
 
 class RecurrentResonanceModel(nn.Module):
@@ -374,8 +454,13 @@ class Model(nn.Module):
         self.embed_one_hot = nn.Linear(4096, 256)
 
         self.imp = GenerateImpulse(256, 128, impulse_size, 16, n_events)
-        self.res = RecurrentResonanceModel(
+
+        # self.res = RecurrentResonanceModel(
+            # n_events, 256, 64, 1024, resonance_samples=resonance_size)
+
+        self.res = STFTRecurrentResonanceModel(
             n_events, 256, 64, 1024, resonance_samples=resonance_size)
+
         self.mix = GenerateMix(256, 128, n_events)
         self.to_amp = nn.Linear(256, 1)
 
