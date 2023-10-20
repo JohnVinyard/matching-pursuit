@@ -193,7 +193,7 @@ class RecurrentResonanceModelWithComplexWaveforms(nn.Module):
 
         self.register_buffer('atoms', bank)
 
-        # we don't want the filter to dominator the spectral shape, just roll off highs, mostly
+        # we don't want the filter to dominate the spectral shape, just roll off highs, mostly
         self.to_filter = nn.Linear(latent_dim, 32)
         self.selection = nn.Linear(latent_dim, n_atoms)
         self.to_momentum = nn.Linear(latent_dim, self.n_frames)
@@ -260,11 +260,11 @@ class RecurrentResonanceModel(nn.Module):
         self.atoms = nn.Parameter(bank)
         # self.register_buffer('atoms', bank)
 
-        self.to_res = ConvUpsample(
-            latent_dim, channels, 4, end_size=resonance_samples, mode='nearest', out_channels=1, from_latent=True, batch_norm=True)
+        # self.to_res = ConvUpsample(
+        #     latent_dim, channels, 4, end_size=resonance_samples, mode='nearest', out_channels=1, from_latent=True, batch_norm=True)
 
         self.selection = nn.Linear(latent_dim, n_atoms)
-        self.to_momentum = nn.Linear(latent_dim, 1)
+        self.to_momentum = nn.Linear(latent_dim, self.n_frames)
 
     def forward(self, x):
 
@@ -272,17 +272,15 @@ class RecurrentResonanceModel(nn.Module):
         mom = base_resonance + \
             (torch.sigmoid(self.to_momentum(x)) * self.res_factor)
         mom = torch.log(1e-12 + mom)
-        mom = mom.repeat(1, 1, self.n_frames)
+        # mom = mom.repeat(1, 1, self.n_frames)
         mom = torch.cumsum(mom, dim=-1)
         mom = torch.exp(mom)
         new_mom = mom
 
         # compute resonance shape/pattern
         sel = torch.softmax(self.selection(x), dim=-1)
-        # atoms = fft_frequency_recompose({int(k): v for k, v in self.atoms.items()}, self.resonance_samples)
         atoms = self.atoms
         res = sel @ atoms
-        # res = self.to_res(x).view(-1, n_events, self.resonance_samples)
 
         windowed = windowed_audio(res, self.window_size, self.window_size // 2)
         windowed = unit_norm(windowed, dim=-1)
@@ -515,45 +513,6 @@ class Model(nn.Module):
     def __init__(self):
         super().__init__()
 
-        # self.embed = nn.Linear(257, 8)
-
-        # TODO: What is the best analysis architecture?
-        # Transformer? Dilated conv?, U-Net?
-        # self.encoder = nn.Sequential(
-        #     nn.Sequential(
-        #         nn.Dropout(0.05),
-        #         nn.ConstantPad1d((0, 2), 0),
-        #         nn.Conv1d(1024, 1024, 3, 1, dilation=1),
-        #         nn.LeakyReLU(0.2),
-        #         nn.BatchNorm1d(1024)
-        #     ),
-
-        #     nn.Sequential(
-        #         nn.Dropout(0.05),
-        #         nn.ConstantPad1d((0, 6), 0),
-        #         nn.Conv1d(1024, 1024, 3, 1, dilation=3),
-        #         nn.LeakyReLU(0.2),
-        #         nn.BatchNorm1d(1024)
-        #     ),
-
-        #     nn.Sequential(
-        #         nn.Dropout(0.05),
-        #         nn.ConstantPad1d((0, 18), 0),
-        #         nn.Conv1d(1024, 1024, 3, 1, dilation=9),
-        #         nn.LeakyReLU(0.2),
-        #         nn.BatchNorm1d(1024)
-        #     ),
-
-        #     nn.Sequential(
-        #         nn.Dropout(0.05),
-        #         nn.ConstantPad1d((0, 2), 0),
-        #         nn.Conv1d(1024, 1024, 3, 1, dilation=1),
-        #         nn.LeakyReLU(0.2),
-        #         nn.BatchNorm1d(1024)
-        #     ),
-
-        #     nn.Conv1d(1024, 4096, 1, 1, 0)
-        # )
 
         self.encoder = UNet(1024)
 
@@ -562,15 +521,15 @@ class Model(nn.Module):
 
         self.imp = GenerateImpulse(256, 128, impulse_size, 16, n_events)
 
-        # self.res = RecurrentResonanceModel(
-        #     n_events, 256, 64, 1024, resonance_samples=resonance_size)
+        self.res = RecurrentResonanceModel(
+            n_events, 256, 64, 1024, resonance_samples=resonance_size)
 
         # self.res = STFTRecurrentResonanceModel(
         #     n_events, 256, 64, 1024, resonance_samples=resonance_size)
 
-        self.res = RecurrentResonanceModelWithComplexWaveforms(
-            n_events, 256, 64, 1024, resonance_samples=resonance_size
-        )
+        # self.res = RecurrentResonanceModelWithComplexWaveforms(
+        #     n_events, 256, 64, 1024, resonance_samples=resonance_size
+        # )
 
         self.mix = GenerateMix(256, 128, n_events)
         self.to_amp = nn.Linear(256, 1)
@@ -610,7 +569,6 @@ class Model(nn.Module):
         if use_dense_context:
             ctxt = self.from_context(dense)
         else:
-            print('IGNORING DENSE CONTEXT VECTOR')
             # ctxt = make_memory_context(encoded, 4) # (batch, encoding_channels, time)
             # print(ctxt.shape)
             ctxt = torch.sum(encoded, dim=-1)
@@ -766,10 +724,10 @@ def train(batch, i):
             fake, _ = model.generate(e, oh, p, dense=dense)
             fake_summed = torch.sum(fake, dim=1, keepdim=True)
         
-        if np.random.rand() > 0.5:
-            print('PREVIEWING FAKE')
-            recon_summed = fake_summed
-            encoded = e
+        # if np.random.rand() > 0.5:
+        #     print('PREVIEWING FAKE')
+        #     recon_summed = fake_summed
+        #     encoded = e
         
         # fake = fake.sum(dim=1, keepdim=True)
         # j = disc.forward(encoded.clone().detach(), recon_summed)[..., None]
