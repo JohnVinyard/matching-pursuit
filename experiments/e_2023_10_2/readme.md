@@ -7,6 +7,12 @@ of using context to generate a dictionary which is then convolved with the spars
 instead, the one_hot vectors + context should be used to generate all resonance model parameters
 
 
+# TODO
+- better frequency resolution in loss [X]
+- try without dense context vector [X]
+- add RELU + l1 loss for encoding sparsity
+
+
 # Next Steps
 
 - "easy" conv model with more correct matching pursuit loss 
