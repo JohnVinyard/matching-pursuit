@@ -341,7 +341,7 @@ class GenerateImpulse(nn.Module):
         self.noise_model = NoiseModel(
             channels,
             self.n_frames,
-            self.n_frames * 32,
+            self.n_frames * 4,
             self.n_samples,
             self.channels,
             batch_norm=True,
