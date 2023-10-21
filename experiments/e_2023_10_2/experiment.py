@@ -1,4 +1,3 @@
-from types import FunctionType
 from typing import Callable, Dict
 import numpy as np
 import torch
@@ -40,19 +39,23 @@ context_dim = 16
 impulse_size = 4096
 resonance_size = 32768
 
-base_resonance = 0.2
+base_resonance = 0.02
 apply_group_delay_to_dither = True
 use_dense_context = False
+use_adv_loss = False
+multiband_resonance = True
+
+resonance_selection_method = lambda x: torch.relu(x)
 
 
-def make_memory_context(encoding: torch.Tensor, exponent: float):
-    batch, channels, time = encoding.shape
-    memory = torch.linspace(0, 1, time, device=encoding.device) ** exponent
-    encoding_spec = torch.fft.rfft(encoding, dim=-1)
-    memory_spec = torch.fft.rfft(memory[None, None, :], dim=-1)
-    spec = encoding_spec * memory_spec
-    context = torch.fft.irfft(spec)
-    return context
+# def make_memory_context(encoding: torch.Tensor, exponent: float):
+#     batch, channels, time = encoding.shape
+#     memory = torch.linspace(0, 1, time, device=encoding.device) ** exponent
+#     encoding_spec = torch.fft.rfft(encoding, dim=-1)
+#     memory_spec = torch.fft.rfft(memory[None, None, :], dim=-1)
+#     spec = encoding_spec * memory_spec
+#     context = torch.fft.irfft(spec)
+#     return context
 
 
 class STFTRecurrentResonanceModel(nn.Module):
@@ -211,7 +214,8 @@ class RecurrentResonanceModelWithComplexWaveforms(nn.Module):
         new_mom = mom
 
         # compute resonance shape/pattern
-        sel = torch.softmax(self.selection(x), dim=-1)
+        # sel = torch.softmax(self.selection(x), dim=-1)
+        sel = resonance_selection_method(self.selection(x))
         atoms = self.atoms
         res = sel @ atoms
 
@@ -255,13 +259,12 @@ class RecurrentResonanceModel(nn.Module):
         bank = torch.from_numpy(bank).view(n_atoms, resonance_samples)
 
         # bank = torch.zeros_like(bank).uniform_(-1, 1)
-        # self.atoms = nn.ParameterDict({str(k): v for k, v in fft_frequency_decompose(bank.view(1, n_atoms, resonance_samples), 512).items()})
-
-        self.atoms = nn.Parameter(bank)
+        if multiband_resonance:
+            self.atoms = nn.ParameterDict({str(k): v for k, v in fft_frequency_decompose(bank.view(1, n_atoms, resonance_samples), 512).items()})
+        else:
+            self.atoms = nn.Parameter(bank)
+        
         # self.register_buffer('atoms', bank)
-
-        # self.to_res = ConvUpsample(
-        #     latent_dim, channels, 4, end_size=resonance_samples, mode='nearest', out_channels=1, from_latent=True, batch_norm=True)
 
         self.selection = nn.Linear(latent_dim, n_atoms)
         self.to_momentum = nn.Linear(latent_dim, self.n_frames)
@@ -278,9 +281,13 @@ class RecurrentResonanceModel(nn.Module):
         new_mom = mom
 
         # compute resonance shape/pattern
-        sel = torch.softmax(self.selection(x), dim=-1)
-        atoms = self.atoms
+        sel = resonance_selection_method(self.selection(x))
+        if multiband_resonance:
+            atoms = fft_frequency_recompose({int(k): v for k, v in self.atoms.items()}, self.resonance_samples)
+        else:
+            atoms = self.atoms
         res = sel @ atoms
+
 
         windowed = windowed_audio(res, self.window_size, self.window_size // 2)
         windowed = unit_norm(windowed, dim=-1)
@@ -354,35 +361,35 @@ class Discriminator(nn.Module):
         super().__init__()
 
         self.embed_period = nn.Linear(257, 8)
+        
 
         self.embed_cond = nn.Conv1d(4096, 256, 1, 1, 0)
         self.embed_spec = nn.Conv1d(1024, 256, 1, 1, 0)
-        self.embed_context = nn.Linear(context_dim, 256)
 
         self.net = nn.Sequential(
 
-            # 128
+            # 64
             nn.Sequential(
-                nn.Conv1d(256, 256, 7, 1, 3),
+                nn.Conv1d(256, 256, 7, 2, 3),
                 nn.LeakyReLU(0.2),
                 nn.BatchNorm1d(256)
             ),
 
-            # 128
+            # 32
             nn.Sequential(
-                nn.Conv1d(256, 256, 7, 1, 3),
+                nn.Conv1d(256, 256, 7, 2, 3),
                 nn.LeakyReLU(0.2),
                 nn.BatchNorm1d(256)
             ),
 
-            # 128
+            # 8
             nn.Sequential(
-                nn.Conv1d(256, 256, 7, 1, 3),
+                nn.Conv1d(256, 256, 7, 2, 3),
                 nn.LeakyReLU(0.2),
             ),
 
 
-            nn.Conv1d(256, 1, 1, 1, 0)
+            nn.Conv1d(256, 1, 1, 1, 0)            
         )
 
         self.apply(lambda x: exp.init_weights(x))
@@ -390,11 +397,11 @@ class Discriminator(nn.Module):
     def forward(self, cond, audio):
         batch_size = cond.shape[0]
 
-
-        spec = stft(audio, 2048, 256, pad=True).view(
-            batch_size, 128, 1025)[..., :1024].permute(0, 2, 1)
-
+        spec = stft(audio, 2048, 256, pad=True)[..., :1024].view(-1, 128, 1024).permute(0, 2, 1)
         spec = self.embed_spec(spec)
+
+        # TODO: Weirdly, this was doing some interesting things
+        # as an unconditional discriminator (due to a mistake)
         cond = self.embed_cond(cond)
         x = cond + spec
         j = self.net(x)
@@ -521,15 +528,10 @@ class Model(nn.Module):
 
         self.imp = GenerateImpulse(256, 128, impulse_size, 16, n_events)
 
-        self.res = RecurrentResonanceModel(
+        ResonanceModel = RecurrentResonanceModelWithComplexWaveforms
+
+        self.res = ResonanceModel(
             n_events, 256, 64, 1024, resonance_samples=resonance_size)
-
-        # self.res = STFTRecurrentResonanceModel(
-        #     n_events, 256, 64, 1024, resonance_samples=resonance_size)
-
-        # self.res = RecurrentResonanceModelWithComplexWaveforms(
-        #     n_events, 256, 64, 1024, resonance_samples=resonance_size
-        # )
 
         self.mix = GenerateMix(256, 128, n_events)
         self.to_amp = nn.Linear(256, 1)
@@ -663,7 +665,6 @@ def multiband_transform(x: torch.Tensor):
     d1 = {f'{k}_long': stft(v, 128, 64, pad=True) for k, v in bands.items()}
     d2 = {f'{k}_short': stft(v, 64, 32, pad=True) for k, v in bands.items()}
     return dict(**d1, **d2)
-    
 
 
 def single_channel_loss(target: torch.Tensor, recon: torch.Tensor):
@@ -701,42 +702,20 @@ def train(batch, i):
     optim.zero_grad()
     disc_optim.zero_grad()
 
-    # with torch.no_grad():
-    #     feat = exp.perceptual_feature(batch)
 
-    if True or i % 2 == 0:
+    if not use_adv_loss or i % 2 == 0:
         recon, encoded, env, context = model.forward(batch)
 
         recon_summed = torch.sum(recon, dim=1, keepdim=True)
 
-        # compute spec loss
-        # fake_spec = stft(recon_summed, 2048, 256, pad=True)
-        # real_spec = stft(batch, 2048, 256, pad=True)
-        # spec_loss = F.mse_loss(fake_spec, real_spec)
 
-        loss = single_channel_loss(batch, recon)
-
-        # make sure random encodings also sound reasonable
-        with torch.no_grad():
-            random_encoding = torch.zeros_like(encoded).uniform_(-1, 1)
-            e, p, oh = sparsify2(random_encoding, n_to_keep=n_events)
-            dense = torch.zeros(e.shape[0], context_dim, device=e.device).normal_(0, 1)
-            fake, _ = model.generate(e, oh, p, dense=dense)
-            fake_summed = torch.sum(fake, dim=1, keepdim=True)
+        loss = (single_channel_loss(batch, recon) * 1e-6)
         
-        # if np.random.rand() > 0.5:
-        #     print('PREVIEWING FAKE')
-        #     recon_summed = fake_summed
-        #     encoded = e
+        if use_adv_loss:
+            j = disc.forward(encoded.clone().detach(), recon_summed)
+            adv_loss = (torch.abs(1 - j).mean() * 1)
+            loss = loss + adv_loss
         
-        # fake = fake.sum(dim=1, keepdim=True)
-        # j = disc.forward(encoded.clone().detach(), recon_summed)[..., None]
-        # fj = disc.forward(e.clone().detach(), fake)[..., None]
-        # j = torch.cat([j, fj], dim=-1)
-
-        # adv_loss = (torch.abs(1 - j).mean() * 1)
-
-        # loss = loss + adv_loss
 
         loss.backward()
         optim.step()
