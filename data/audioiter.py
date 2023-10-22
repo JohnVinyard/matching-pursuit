@@ -11,7 +11,8 @@ class AudioIterator(object):
             normalize=False,
             overfit=False,
             step_size=1,
-            pattern='*.wav'):
+            pattern='*.wav',
+            as_torch=True):
 
         super().__init__()
         self.batch_size = batch_size
@@ -21,6 +22,7 @@ class AudioIterator(object):
         self.overfit = overfit
         self.step_size = step_size
         self.pattern = pattern
+        self.as_torch = as_torch
 
     def __iter__(self):
         return audio_stream(
@@ -28,6 +30,6 @@ class AudioIterator(object):
             self.n_samples,
             self.overfit,
             self.normalize,
-            as_torch=True,
+            as_torch=self.as_torch,
             step_size=self.step_size,
             pattern=self.pattern)

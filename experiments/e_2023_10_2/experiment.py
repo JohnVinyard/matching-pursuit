@@ -173,7 +173,7 @@ class RecurrentResonanceModelWithComplexWaveforms(nn.Module):
 
         n_atoms = 1024
         self.n_frames = resonance_samples // (window_size // 2)
-        self.res_factor = (1 - base_resonance) * 0.9
+        self.res_factor = (1 - base_resonance) * 0.95
 
         n_f0s = n_atoms // 3
         f0s = np.linspace(40, 4000, n_f0s)
@@ -341,7 +341,7 @@ class GenerateImpulse(nn.Module):
         self.noise_model = NoiseModel(
             channels,
             self.n_frames,
-            self.n_frames * 4,
+            self.n_frames * 16,
             self.n_samples,
             self.channels,
             batch_norm=True,

@@ -1,7 +1,8 @@
 import numpy as np
 from scipy.signal import sawtooth, square
-from matplotlib import pyplot as plt
-
+from data.audioiter import AudioIterator
+import zounds
+from sklearn.decomposition import PCA
 
 # samplerate = zounds.SR22050()
 # n_samples = 2**15
@@ -105,23 +106,75 @@ if __name__ == '__main__':
     # plt.show()
     # plt.clf()
 
-    seq_len = 128
-    n_features = 64
+    # seq_len = 128
+    # n_features = 64
 
-    memory = np.linspace(0, 1, seq_len) ** 4
-    plt.plot(memory)
-    plt.show()
-    plt.clf()
+    # memory = np.linspace(0, 1, seq_len) ** 4
+    # plt.plot(memory)
+    # plt.show()
+    # plt.clf()
 
-    encoded = np.random.binomial(1, 0.01, (n_features, seq_len))
-    plt.matshow(encoded)
-    plt.show()
-    plt.clf()
+    # encoded = np.random.binomial(1, 0.01, (n_features, seq_len))
+    # plt.matshow(encoded)
+    # plt.show()
+    # plt.clf()
 
-    encoded_spec = np.fft.rfft(encoded, axis=-1)
-    memory_spec = np.fft.rfft(memory[None, :], axis=-1)
-    spec = encoded_spec * memory_spec
-    context = np.fft.irfft(spec)
-    plt.matshow(context)
-    plt.show()
-    plt.clf()
+    # encoded_spec = np.fft.rfft(encoded, axis=-1)
+    # memory_spec = np.fft.rfft(memory[None, :], axis=-1)
+    # spec = encoded_spec * memory_spec
+    # context = np.fft.irfft(spec)
+    # plt.matshow(context)
+    # plt.show()
+    # plt.clf()
+
+    n_samples = 1024
+    n_features = 768
+
+    stream = AudioIterator(
+        n_samples,
+        2**15,
+        zounds.SR22050(),
+        normalize=True,
+        overfit=False,
+        step_size=1,
+        pattern='*.wav',
+        as_torch=False)
+    
+    batch = next(stream.__iter__()).reshape((n_samples, 2**15))
+
+    spec = np.fft.rfft(batch, axis=-1)
+
+    n_coeffs = spec.shape[-1]
+
+    mags = np.abs(spec)
+    phase = np.angle(spec)
+    phase = (phase + np.pi) % (2 * np.pi) - np.pi
+
+    feature = np.concatenate([mags, phase], axis=1)
+    print(feature.shape)
+
+    pca = PCA(n_features)
+    pca.fit(feature)
+
+    recon_feature = pca.transform(feature)
+    recon_feature = pca.inverse_transform(recon_feature)
+
+    recon_mags = recon_feature[:, :n_coeffs]
+    recon_phase = recon_feature[:, n_coeffs:]
+    recon_spec = recon_mags * np.exp(1j * recon_phase)
+    approx_recon = np.fft.irfft(recon_spec)
+    approx_residual = ((batch - approx_recon) ** 2).mean()
+    print(np.linalg.norm(approx_residual))
+
+
+    spec = mags * np.exp(1j * phase)
+    recon = np.fft.irfft(spec)
+    residual = ((batch - recon) ** 2).mean()
+    print(np.linalg.norm(residual))
+
+    orig = zounds.AudioSamples(batch[0], zounds.SR22050())
+    orig.save('fft_orig.wav')
+
+    audio = zounds.AudioSamples(approx_recon[0], zounds.SR22050())
+    audio.save('fft_pca.wav')
+    

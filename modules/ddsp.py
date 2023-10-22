@@ -392,6 +392,8 @@ class NoiseModel(nn.Module):
         noise_window = noise_step * 2
         self.noise_coeffs = (noise_window // 2) + 1
 
+        print(f'NOISE MODEL WILL HAVE {self.noise_coeffs} coeffs/bands')
+
         self.upscale = ConvUpsample(
             input_channels, 
             channels, 
