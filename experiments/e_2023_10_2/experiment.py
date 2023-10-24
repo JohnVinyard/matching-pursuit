@@ -57,6 +57,107 @@ resonance_selection_method = lambda x: torch.relu(x)
 #     context = torch.fft.irfft(spec)
 #     return context
 
+class RecurrentResonanceModelWithConvolution(nn.Module):
+    def __init__(self, encoding_channels, latent_dim, channels, window_size, resonance_samples):
+        super().__init__()
+        self.encoding_channels = encoding_channels
+        self.latent_dim = latent_dim
+        self.channels = channels
+        self.window_size = window_size
+        self.resonance_samples = resonance_samples
+        self.filter_coeffs = window_size // 2 + 1
+
+        self.n_frames = resonance_samples // (window_size // 2)
+        self.res_factor = (1 - base_resonance) * 0.95
+
+        self.start = nn.Linear(256, 256 * 4)
+
+        self.to_res = nn.Sequential(
+            # 16
+            nn.Sequential(
+                nn.ConvTranspose1d(256, 128, 8, 4, 2),
+                nn.LeakyReLU(0.2),
+                nn.BatchNorm1d(128)
+                
+            ),
+
+            # 64
+            nn.Sequential(
+                nn.ConvTranspose1d(128, 64, 8, 4, 2),
+                nn.LeakyReLU(0.2),
+                nn.BatchNorm1d(64)
+                
+            ),
+
+            # 256
+            nn.Sequential(
+                nn.ConvTranspose1d(64, 32, 8, 4, 2),
+                nn.LeakyReLU(0.2),
+                nn.BatchNorm1d(32)
+                
+            ),
+
+            # 1024
+            nn.Sequential(
+                nn.ConvTranspose1d(32, 16, 8, 4, 2),
+                nn.LeakyReLU(0.2),
+                nn.BatchNorm1d(16)
+                
+            ),
+
+            # 4096
+            nn.Sequential(
+                nn.ConvTranspose1d(16, 8, 8, 4, 2),
+                nn.LeakyReLU(0.2),
+                nn.BatchNorm1d(8)
+                
+            ),
+
+            # 16384
+            nn.Sequential(
+                nn.ConvTranspose1d(8, 4, 8, 4, 2),
+                nn.LeakyReLU(0.2),
+                nn.BatchNorm1d(4)
+                
+            ),
+
+            # 32768
+            nn.Sequential(
+                nn.ConvTranspose1d(4, 1, 4, 2, 1),
+                
+            ),
+        )
+
+
+
+        # we don't want the filter to dominate the spectral shape, just roll off highs, mostly
+        self.to_momentum = nn.Linear(latent_dim, self.n_frames)
+
+    def forward(self, x):
+
+        # compute resonance/sustain
+        # computing each frame independently makes something like "damping" possible
+        mom = base_resonance + \
+            (torch.sigmoid(self.to_momentum(x)) * self.res_factor)
+        mom = torch.log(1e-12 + mom)
+        # mom = mom.repeat(1, 1, self.n_frames)
+        mom = torch.cumsum(mom, dim=-1)
+        mom = torch.exp(mom)
+        new_mom = mom
+
+        # compute resonance shape/pattern
+        res = self.start(x).view(-1, 256, 4)
+        res = self.start(x).view(-1, 256, 4)
+        res = self.to_res(res).view(-1, n_events, self.resonance_samples)
+        
+
+        windowed = windowed_audio(res, self.window_size, self.window_size // 2)
+        windowed = unit_norm(windowed, dim=-1)
+        windowed = windowed * new_mom[..., None]
+        windowed = overlap_add(
+            windowed, apply_window=False)[..., :self.resonance_samples]
+
+        return windowed, new_mom
 
 class STFTRecurrentResonanceModel(nn.Module):
     def __init__(self, encoding_channels, latent_dim, channels, window_size, resonance_samples):
@@ -197,7 +298,9 @@ class RecurrentResonanceModelWithComplexWaveforms(nn.Module):
         self.register_buffer('atoms', bank)
 
         # we don't want the filter to dominate the spectral shape, just roll off highs, mostly
-        self.to_filter = nn.Linear(latent_dim, 32)
+        # self.to_filter = nn.Linear(latent_dim, 32)
+        self.to_filter = ConvUpsample(
+            latent_dim, channels, 4, end_size=self.n_frames, mode='nearest', out_channels=32, from_latent=True, batch_norm=True)
         self.selection = nn.Linear(latent_dim, n_atoms)
         self.to_momentum = nn.Linear(latent_dim, self.n_frames)
 
@@ -219,16 +322,16 @@ class RecurrentResonanceModelWithComplexWaveforms(nn.Module):
         atoms = self.atoms
         res = sel @ atoms
 
-        # compute low-pass filter
-        filt = self.to_filter(x)
-        filt = F.interpolate(filt, size=self.filter_coeffs, mode='linear')
+        # compute low-pass filter time-series
+        filt = self.to_filter(x).view(-1, 32, self.n_frames).permute(0, 2, 1)
+        filt = F.interpolate(filt, size=self.filter_coeffs, mode='linear').view(-1, n_events, self.n_frames, self.filter_coeffs)
         filt = torch.sigmoid(filt)
 
         windowed = windowed_audio(res, self.window_size, self.window_size // 2)
         windowed = unit_norm(windowed, dim=-1)
         windowed = windowed * new_mom[..., None]
         windowed = torch.fft.rfft(windowed, dim=-1)
-        windowed = windowed * filt[:, :, None, :]
+        windowed = windowed * filt
         windowed = torch.fft.irfft(windowed, dim=-1)
         windowed = overlap_add(
             windowed, apply_window=False)[..., :self.resonance_samples]
@@ -300,14 +403,15 @@ class RecurrentResonanceModel(nn.Module):
 
 class GenerateMix(nn.Module):
 
-    def __init__(self, latent_dim, channels, encoding_channels):
+    def __init__(self, latent_dim, channels, encoding_channels, mixer_channels = 2):
         super().__init__()
         self.encoding_channels = encoding_channels
         self.latent_dim = latent_dim
         self.channels = channels
+        mixer_channels = mixer_channels
 
         self.to_mix = LinearOutputStack(
-            channels, 3, out_channels=2, in_channels=latent_dim, norm=nn.LayerNorm((channels,)))
+            channels, 3, out_channels=mixer_channels, in_channels=latent_dim, norm=nn.LayerNorm((channels,)))
 
     def forward(self, x):
         x = self.to_mix(x)
@@ -533,7 +637,7 @@ class Model(nn.Module):
         self.res = ResonanceModel(
             n_events, 256, 64, 1024, resonance_samples=resonance_size)
 
-        self.mix = GenerateMix(256, 128, n_events)
+        self.mix = GenerateMix(256, 128, n_events, mixer_channels=3)
         self.to_amp = nn.Linear(256, 1)
 
         # self.verb_context = nn.Linear(4096, 32)
@@ -599,8 +703,8 @@ class Model(nn.Module):
 
         conv = fft_convolve(padded, res)[..., :resonance_size]
 
-        stacked = torch.cat([padded[..., None], conv[..., None]], dim=-1)
-        mixed = stacked @ mx.view(-1, n_events, 2, 1)
+        stacked = torch.cat([padded[..., None], conv[..., None], res[..., None]], dim=-1)
+        mixed = stacked @ mx.view(-1, n_events, 3, 1)
         mixed = mixed.view(-1, n_events, resonance_size)
         # mixed = unit_norm(mixed, dim=-1)
 
@@ -666,6 +770,9 @@ def multiband_transform(x: torch.Tensor):
     d2 = {f'{k}_short': stft(v, 64, 32, pad=True) for k, v in bands.items()}
     return dict(**d1, **d2)
 
+    # bands = stft(x, 2048, 256, pad=True)
+    # return dict(bands=bands)
+
 
 def single_channel_loss(target: torch.Tensor, recon: torch.Tensor):
 
@@ -710,6 +817,9 @@ def train(batch, i):
 
 
         loss = (single_channel_loss(batch, recon) * 1e-6)
+        # real_spec = stft(batch, 2048, 256, pad=True)
+        # fake_spec = stft(recon_summed, 2048, 256, pad=True)
+        # loss = F.mse_loss(fake_spec, real_spec)
         
         if use_adv_loss:
             j = disc.forward(encoded.clone().detach(), recon_summed)
