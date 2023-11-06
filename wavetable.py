@@ -1,180 +1,101 @@
+import torch
+from torch import nn
+from torch.nn import functional as F
+from torch.distributions import Normal
 import numpy as np
-from scipy.signal import sawtooth, square
-from data.audioiter import AudioIterator
-import zounds
-from sklearn.decomposition import PCA
-
-# samplerate = zounds.SR22050()
-# n_samples = 2**15
-
-# n_frames = 128
-
-# wavetable_size = 1024
-# wavetable = torch.sin(torch.linspace(-np.pi, np.pi, steps=wavetable_size))
+from matplotlib import pyplot as plt
 
 
-'''
-for i in range(n_transfer_functions // 3):
-            rps = f0s[i] * np.pi
-            radians = np.linspace(0, rps * n_samples, n_samples)
-            sin = np.sin(radians)[None, ...]
-            sq = square(radians)[None, ...]
-            st = sawtooth(radians)[None, ...]
-            tfs.extend([sin, sq, st])
-'''
-
-def make_waves(n_samples, f0s, samplerate):
-    sawtooths = []
-    squares = []
-    triangles = []
-
-    for f0 in f0s:
-        f0 = f0 / (samplerate // 2)
-        rps = f0 * np.pi
-        radians = np.linspace(0, rps * n_samples, n_samples)
-        sq = square(radians)[None, ...]
-        squares.append(sq)
-        st = sawtooth(radians)[None, ...]
-        sawtooths.append(st)
-        tri = sawtooth(radians, 0.5)[None, ...]
-        triangles.append(tri)
-    
-    sawtooths = np.concatenate(sawtooths, axis=0)
-    squares = np.concatenate(squares, axis=0)
-    triangles = np.concatenate(triangles, axis=0)
-    return sawtooths, squares, triangles
+def max_norm(x, dim=-1, epsilon=1e-8, return_value=False):
+    n, _ = torch.max(torch.abs(x), dim=dim, keepdim=True)
+    normed = x / (n + epsilon)
+    if return_value:
+        return normed, n
+    else:
+        return normed
 
 
+class WavetableSynth(nn.Module):
+    def __init__(self, table_size: int, n_tables: int, total_samples: int, samplerate: int):
+        super().__init__()
+        self.samplerate = samplerate
+        self.total_samples = total_samples
+        self.n_tables = n_tables
+        self.table_size = table_size
 
+        sp = torch.sin(torch.linspace(-np.pi, np.pi, table_size)) * 0.9
+        noise = torch.zeros(self.n_tables, self.table_size).uniform_(-1, 1)
+        self.wavetables = nn.Parameter()
+        nyquist = self.samplerate // 2
+        self.min_freq = 40 / nyquist
+        self.max_freq = 4000 / nyquist
+        self.freq_range = self.max_freq - self.min_freq
 
-# class Model(nn.Module):
-#     def __init__(self):
-#         super().__init__()
-#         self.p = nn.Parameter(torch.zeros(n_frames).uniform_(-0.001, 0.001))
+        self.max_smoothness = 0.05
 
-#     def forward(self, x):
-#         p = self.p.view(-1, 1, n_frames)
-#         p = F.upsample(p, size=n_samples, mode='linear').view(-1)
-#         indices = torch.cumsum(p, dim=-1)
-#         # indices = torch.sin(indices)
+    def get_tables(self):
+        return max_norm(self.wavetables)
 
-#         values = diff_index(wavetable, indices)
-#         return values
+    def forward(self, env: torch.Tensor, table_selection: torch.Tensor, freq: torch.Tensor, smoothness: torch.Tensor):
+        batch, _, n_frames = env.shape
+        assert env.shape[1] == 1
 
+        # env must be positive, it represents overall energy over time
+        env = torch.abs(env)
+        env = F.interpolate(env, size=self.total_samples, mode='linear')
+
+        batch, n_tables, n_frames = table_selection.shape
+        assert n_tables == self.n_tables
+
+        # ts represents the mixture of tables
+        ts = torch.softmax(table_selection, dim=1)
+        ts = F.interpolate(ts, size=self.total_samples, mode='linear')
+
+        batch, _, n_frames = freq.shape
+        assert freq.shape[1] == 1
+
+        # freq is a scalar representing how quickly we loop through the wavetables
+        # concretely it represents the mean of the gaussian used as a "read head"
+        freq = self.min_freq + (torch.sigmoid(freq) * self.freq_range)
+        freq = F.interpolate(freq, size=self.total_samples, mode='linear')
+        freq = torch.cumsum(freq, dim=-1) % 1
+
+        batch, _, n_frames = smoothness.shape
+        assert smoothness.shape[1] == 1
+
+        # smoothness is a scalar that represents a low-pass filter
+        # concretely, it represents the std of the gaussian used as a "read head"
+        smoothness = torch.sigmoid(smoothness) * self.max_smoothness
+        smoothness = F.interpolate(smoothness, size=self.total_samples, mode='linear')
+
+        tables = self.get_tables()
+
+        x = tables.T @ ts
+        assert x.shape[1:] == (self.table_size, self.total_samples)
+
+        dist = Normal(freq, smoothness)
+        rng = torch.linspace(0, self.table_size, self.table_size, device=x.device)[None, :, None]
+        read = torch.exp(dist.log_prob(rng))
+
+        samples = (read * x).sum(dim=1, keepdim=True)
+        samples = samples * env
+        return samples
 
 
 if __name__ == '__main__':
-    # app = zounds.ZoundsApp(globals=globals(), locals=locals())
-    # app.start_in_thread(9999)
+    table_size = 512
+    n_tables = 16
+    total_samples = 2 ** 15
+    samplerate = 22050
 
-    # synth = zounds.SineSynthesizer(samplerate)
-    # target = synth.synthesize(samplerate.frequency * n_samples, [220])
-    # target = torch.from_numpy(target).float()
+    batch_size = 4
+    n_frames = 128
 
-    # def wt():
-    #     return wavetable.data.cpu().numpy().squeeze()
+    model = WavetableSynth(table_size, n_tables, total_samples, samplerate)
+    env = torch.zeros(batch_size, 1, n_frames).uniform_(-1, 1)
+    sel = torch.zeros(batch_size, n_tables, n_frames).uniform_(-1, 1)
+    freq = torch.zeros(batch_size, 1, n_frames).uniform_(-1, 1)
+    smoothness = torch.zeros(batch_size, 1, n_frames).uniform_(-1, 1)
 
-    # def listen():
-    #     return playable(estimate.view(1, -1), samplerate)
-
-    # while True:
-    #     optim.zero_grad()
-    #     estimate = model.forward(None)
-    #     loss = F.mse_loss(estimate, target)
-    #     loss.backward()
-    #     optim.step()
-    #     print(loss.item())
-
-    #     listen()
-
-
-    # samplerate = 22050
-    # n_samples = 1024
-    # n_f0s = 128
-    # st, sq, tri = make_waves(n_samples, np.linspace(40, 2000, n_f0s), samplerate)
-
-    # index = 100
-    # plt.plot(np.abs(np.fft.rfft(st[index])))
-    # plt.show()
-    # plt.clf()
-
-    # plt.plot(np.abs(np.fft.rfft(sq[index])))
-    # plt.show()
-    # plt.clf()
-
-    # plt.plot(np.abs(np.fft.rfft(tri[index])))
-    # plt.show()
-    # plt.clf()
-
-    # seq_len = 128
-    # n_features = 64
-
-    # memory = np.linspace(0, 1, seq_len) ** 4
-    # plt.plot(memory)
-    # plt.show()
-    # plt.clf()
-
-    # encoded = np.random.binomial(1, 0.01, (n_features, seq_len))
-    # plt.matshow(encoded)
-    # plt.show()
-    # plt.clf()
-
-    # encoded_spec = np.fft.rfft(encoded, axis=-1)
-    # memory_spec = np.fft.rfft(memory[None, :], axis=-1)
-    # spec = encoded_spec * memory_spec
-    # context = np.fft.irfft(spec)
-    # plt.matshow(context)
-    # plt.show()
-    # plt.clf()
-
-    n_samples = 1024
-    n_features = 768
-
-    stream = AudioIterator(
-        n_samples,
-        2**15,
-        zounds.SR22050(),
-        normalize=True,
-        overfit=False,
-        step_size=1,
-        pattern='*.wav',
-        as_torch=False)
-    
-    batch = next(stream.__iter__()).reshape((n_samples, 2**15))
-
-    spec = np.fft.rfft(batch, axis=-1)
-
-    n_coeffs = spec.shape[-1]
-
-    mags = np.abs(spec)
-    phase = np.angle(spec)
-    phase = (phase + np.pi) % (2 * np.pi) - np.pi
-
-    feature = np.concatenate([mags, phase], axis=1)
-    print(feature.shape)
-
-    pca = PCA(n_features)
-    pca.fit(feature)
-
-    recon_feature = pca.transform(feature)
-    recon_feature = pca.inverse_transform(recon_feature)
-
-    recon_mags = recon_feature[:, :n_coeffs]
-    recon_phase = recon_feature[:, n_coeffs:]
-    recon_spec = recon_mags * np.exp(1j * recon_phase)
-    approx_recon = np.fft.irfft(recon_spec)
-    approx_residual = ((batch - approx_recon) ** 2).mean()
-    print(np.linalg.norm(approx_residual))
-
-
-    spec = mags * np.exp(1j * phase)
-    recon = np.fft.irfft(spec)
-    residual = ((batch - recon) ** 2).mean()
-    print(np.linalg.norm(residual))
-
-    orig = zounds.AudioSamples(batch[0], zounds.SR22050())
-    orig.save('fft_orig.wav')
-
-    audio = zounds.AudioSamples(approx_recon[0], zounds.SR22050())
-    audio.save('fft_pca.wav')
-    
+    result = model.forward(env, sel, freq, smoothness)
+    print(result.shape)

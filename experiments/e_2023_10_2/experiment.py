@@ -300,7 +300,7 @@ class RecurrentResonanceModelWithComplexWaveforms(nn.Module):
         # we don't want the filter to dominate the spectral shape, just roll off highs, mostly
         # self.to_filter = nn.Linear(latent_dim, 32)
         self.to_filter = ConvUpsample(
-            latent_dim, channels, 4, end_size=self.n_frames, mode='nearest', out_channels=32, from_latent=True, batch_norm=True)
+            latent_dim, channels, 4, end_size=self.n_frames, mode='learned', out_channels=32, from_latent=True, batch_norm=True)
         self.selection = nn.Linear(latent_dim, n_atoms)
         self.to_momentum = nn.Linear(latent_dim, self.n_frames)
 

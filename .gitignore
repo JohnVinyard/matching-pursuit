@@ -8,6 +8,8 @@ sparse_coded
 .ipynb_checkpoints
 .env
 
+.idea
+venv/*
 **/experiment_data/*
 model.dat
 sparse_model.dat
