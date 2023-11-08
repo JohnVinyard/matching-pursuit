@@ -112,7 +112,6 @@ class ResonanceModel(nn.Module):
             from_latent=True, 
             batch_norm=True)
         
-        self.final_mixture = nn.Linear(latent_dim, 2)
         
         self.register_buffer('env', torch.linspace(1, 0, self.resonance_size))
         self.max_exp = 20
@@ -167,12 +166,7 @@ class ResonanceModel(nn.Module):
                 
         final_res = (mx * resonances).sum(dim=1)
     
-        final_mix = torch.softmax(self.final_mixture(latent), dim=-1)
-        
-        
-        mixed = torch.cat([imp[..., None], final_res[..., None]], dim=-1) @ final_mix[..., None]
-        mixed = mixed.view(-1, n_events, self.resonance_size)
-        return mixed
+        return final_res
 
 
 # def make_waves(n_samples, f0s, samplerate):
