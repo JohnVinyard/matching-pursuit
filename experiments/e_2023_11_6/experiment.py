@@ -72,8 +72,8 @@ class ResonanceModel(nn.Module):
         self.n_coeffs = (self.resonance_size // 2) + 1
         self.coarse_coeffs = 32
         
-        self.base_resonance = 0.1
-        self.res_factor = (1 - self.base_resonance) * 0.99
+        self.base_resonance = 0.02
+        self.res_factor = (1 - self.base_resonance) * 0.95
         
         low_hz = 40
         high_hz = 4000
@@ -140,14 +140,6 @@ class ResonanceModel(nn.Module):
         
         imp = F.pad(impulse, (0, self.resonance_size - impulse.shape[-1]))
         
-        '''
-        mom = base_resonance + \
-            (torch.sigmoid(self.to_momentum(x)) * self.res_factor)
-        mom = torch.log(1e-12 + mom)
-        mom = torch.cumsum(mom, dim=-1)
-        mom = torch.exp(mom)
-        new_mom = mom
-        '''
         
         decay = torch.sigmoid(self.decay(latent))
         decay = self.base_resonance + (decay * self.res_factor)
@@ -162,13 +154,6 @@ class ResonanceModel(nn.Module):
             sel = self.selections[i].forward(latent)
             sel = torch.relu(sel)
             res = sel @ self.atoms
-            
-            # choose a decay exponent
-            # exponent = torch.sigmoid(self.decays[i].forward(latent)) * self.max_exp
-            # envs = self.env[None, None, :] ** exponent
-            
-            # apply the decay exponent
-            # res = envs * res
             res = res * decay
             
             # choose a linear combination of band-pass filters
@@ -177,18 +162,12 @@ class ResonanceModel(nn.Module):
             filtered_res = torch.fft.irfft(
                 torch.fft.rfft(res) * filt_sel
             )
-            # filt_sel = torch.relu(filt_sel)
-            # filt = filt_sel @ exp.fb.filter_bank.view(exp.n_bands, exp.kernel_size)
-            # filt = F.pad(filt, (0, self.resonance_size - filt.shape[-1]))
             
             # filtered_res = fft_convolve(filt, res)
             resonances.append(filtered_res[:, None, :, :])
             
             # convolve the impulse with the resonance
             conv = fft_convolve(filtered_res, imp)
-            
-            # convolve the just-created signal with a band-pass filter
-            # filtered_conv = fft_convolve(filt, conv)
             
             # resonances.append(filtered_conv[:, None, :, :])
             convs.append(conv[:, None, :, :])
@@ -200,16 +179,12 @@ class ResonanceModel(nn.Module):
         # produce a linear mixture-over time
         mx = self.to_mixture(latent)
         mx = F.interpolate(mx, size=self.resonance_size, mode='linear')
-        # print(mx.shape) # (Batch * n_events, piecewise, n_samples)
         mx = torch.softmax(mx, dim=1)
-        # mx = mx.view(-1, self.n_piecewise, n_events, self.resonance_size)
         mx = mx.view(-1, n_events, self.n_piecewise, self.resonance_size).permute(0, 2, 1, 3)
         
-        # TODO: Mix both using the same values
         final_res = (mx * resonances).sum(dim=1)
         final_convs = (mx * convs).sum(dim=1)
         
-        # TODO: Produce a final mixture of impulse, resonance, and conv
         final_mx = self.final_mix(latent)
         final_mx = torch.softmax(final_mx, dim=-1)
         
@@ -522,7 +497,7 @@ class Model(nn.Module):
             resonance_size, 
             n_atoms=total_atoms, 
             n_piecewise=4, 
-            init_atoms=waves, 
+            init_atoms=None, 
             learnable_atoms=False, 
             mixture_over_time=True,
             n_frames=32)
