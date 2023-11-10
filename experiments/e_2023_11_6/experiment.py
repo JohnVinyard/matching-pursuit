@@ -99,15 +99,22 @@ class ResonanceModel(nn.Module):
             nn.Linear(latent_dim, self.n_atoms) for _ in range(self.n_piecewise)
         ])
         
-        # self.decays =  nn.ModuleList([
-        #     nn.Linear(latent_dim, 1) for _ in range(self.n_piecewise)
-        # ])
-        
         self.decay = nn.Linear(latent_dim, self.n_frames)
         
-        self.filters = nn.ModuleList([
-            nn.Linear(latent_dim, self.coarse_coeffs) for _ in range(self.n_piecewise)
-        ])
+        # self.filters = nn.ModuleList([
+        #     nn.Linear(latent_dim, self.coarse_coeffs) for _ in range(self.n_piecewise)
+        # ])
+        
+        self.to_filter = ConvUpsample(
+            latent_dim,
+            channels,
+            start_size=8,
+            end_size=self.n_frames,
+            mode='learned',
+            out_channels=self.coarse_coeffs,
+            from_latent=True,
+            batch_norm=True
+        )
         
         self.to_mixture = ConvUpsample(
             latent_dim, 
@@ -148,6 +155,10 @@ class ResonanceModel(nn.Module):
         decay = torch.exp(decay)
         decay = F.interpolate(decay, size=self.resonance_size, mode='linear')
         
+        filt = self.to_filter(latent).view(-1, self.coarse_coeffs, self.n_frames).permute(0, 2, 1)
+        filt = F.interpolate(filt, size=257, mode='linear')
+        filt = filt.view(-1, n_events, self.n_frames, 257)
+        
         for i in range(self.n_piecewise):
             
             # choose a linear combination of resonances
@@ -157,11 +168,21 @@ class ResonanceModel(nn.Module):
             res = res * decay
             
             # choose a linear combination of band-pass filters
-            filt_sel = self.filters[i].forward(latent)
-            filt_sel = F.interpolate(filt_sel, size=self.n_coeffs, mode='linear')
-            filtered_res = torch.fft.irfft(
-                torch.fft.rfft(res) * filt_sel
-            )
+            # filt_sel = self.filters[i].forward(latent)
+            # filt_sel = F.interpolate(filt_sel, size=self.n_coeffs, mode='linear')
+            # filtered_res = torch.fft.irfft(
+            #     torch.fft.rfft(res) * filt_sel
+            # )
+            filtered_res = res
+            
+            windowed = windowed_audio(filtered_res, 512, 256)
+            windowed = torch.fft.rfft(windowed, dim=-1)
+            windowed = windowed * filt
+            windowed = torch.fft.irfft(windowed)
+            filtered_res = overlap_add(windowed, apply_window=False)[..., :self.resonance_size]\
+                .view(-1, n_events, self.resonance_size)
+            
+            # filt = filt.view(-1, n_events)
             
             # filtered_res = fft_convolve(filt, res)
             resonances.append(filtered_res[:, None, :, :])
@@ -497,10 +518,10 @@ class Model(nn.Module):
             resonance_size, 
             n_atoms=total_atoms, 
             n_piecewise=4, 
-            init_atoms=None, 
+            init_atoms=waves, 
             learnable_atoms=False, 
             mixture_over_time=True,
-            n_frames=32)
+            n_frames=128)
 
         # self.mix = GenerateMix(256, 128, n_events, mixer_channels=3)
         self.to_amp = nn.Linear(256, 1)

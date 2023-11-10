@@ -3,11 +3,10 @@ some artificial restrictions on the expressiveness of otherwise
 arbitrarily-complex resonance model
 
 # Things Yet to Try
-- ~~try delay-like resonances again if still getting detuned piano sound~~
-   - while slower to train, it results in less noise/aliasing and sounds nicer overall
-- consider a single, time-varying coarse-grained frequency-domain filter applied _after_ the mixture.  
-   If we think of this resonance as the instrument body, it makes sense that it would change shape
-   uniformly, and not vary wildly as the string or tube changes shape
+- sparsity penalty
+- tuning according to musical scale
+- MSE loss
+- single channel loss with overshoot penalty
 
 
 # Overshoot
