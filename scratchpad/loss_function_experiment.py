@@ -11,7 +11,7 @@ from train.optim import optimizer
 from torch.nn import functional as F
 from data import AudioIterator
 import argparse
-from upsample import ConvUpsample
+from modules.upsample import ConvUpsample
 from util.playable import playable, viewable
 from util.weight_init import make_initializer
 import numpy as np

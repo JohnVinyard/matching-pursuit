@@ -5,8 +5,8 @@ from conjure import numpy_conjure, SupportedContentType
 from torch import nn
 from torch.nn import functional as F
 import zounds
-from angle import windowed_audio
 from config.experiment import Experiment
+from modules.angle import windowed_audio
 from modules.decompose import fft_frequency_decompose
 from modules.overlap_add import overlap_add
 from modules.ddsp import NoiseModel
@@ -17,9 +17,9 @@ from modules.refractory import make_refractory_filter
 from modules.reverb import ReverbGenerator
 from modules.sparse import sparsify2
 from modules.stft import stft
+from modules.upsample import ConvUpsample
 from train.experiment_runner import BaseExperimentRunner, MonitoredValueDescriptor
 from train.optim import optimizer
-from upsample import ConvUpsample
 from util import device
 from util.readmedocs import readme
 from scipy.signal import square, sawtooth
@@ -408,16 +408,13 @@ class Model(nn.Module):
         final = self.verb.forward(dense, final)
 
 
-        return final, env
+        return final
 
     def forward(self, x):
         encoded = self.encode(x)
-
-
         encoded, packed, one_hot = sparsify2(encoded, n_to_keep=n_events)
-
-        final, env = self.generate(encoded, one_hot, packed)
-        return final, encoded, env
+        final = self.generate(encoded, one_hot, packed)
+        return final, encoded
 
 
 model = Model().to(device)
@@ -522,9 +519,8 @@ class GraphRepresentation(BaseExperimentRunner):
         for i, item in enumerate(self.iter_items()):
             item = item.view(-1, 1, exp.n_samples)
             l, r, e = train(item, i)
-
-            if l is None:
-                continue
+            
+            print(__file__)
 
             if i % 1000 == 0:
                 torch.save(model.state_dict(), 'siam.dat')

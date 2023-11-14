@@ -7,7 +7,7 @@ from modules.dilated import DilatedStack
 from modules.pos_encode import pos_encoded
 from train import optimizer
 from modules.normal_pdf import pdf
-from upsample import ConvUpsample
+from modules.upsample import ConvUpsample
 from torch.nn import functional as F
 from util import make_initializer
 from modules.stft import stft

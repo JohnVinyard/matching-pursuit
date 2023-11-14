@@ -6,7 +6,7 @@ from torch.optim import Adam
 from torch.nn import functional as F
 import numpy as np
 from modules import stft
-from upsample import FFTUpsampleBlock
+from modules.upsample import FFTUpsampleBlock
 from util import device
 from scipy.signal.windows import tukey
 

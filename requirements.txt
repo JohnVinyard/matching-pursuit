@@ -1,0 +1,7 @@
+numpy
+scipy
+pytorch
+zounds
+librosa
+lmdb
+conjure

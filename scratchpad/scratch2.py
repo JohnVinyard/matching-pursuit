@@ -8,7 +8,7 @@ from modules.pif import AuditoryImage
 from modules.recurrent import SerialGenerator
 from torch import nn
 from train.optim import optimizer
-from upsample import ConvUpsample
+from modules.upsample import ConvUpsample
 from util import device, playable
 
 from util.weight_init import make_initializer

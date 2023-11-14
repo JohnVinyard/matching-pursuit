@@ -12,7 +12,7 @@ from torch.optim import Adam
 from modules.pif import AuditoryImage
 from modules.psychoacoustic import PsychoacousticFeature
 from train.gan import get_latent
-from upsample import ConvUpsample
+from modules.upsample import ConvUpsample
 from util import playable
 
 from modules.phase import AudioCodec, MelScale

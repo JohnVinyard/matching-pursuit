@@ -11,7 +11,7 @@ from torch.optim import Adam
 from modules.normalization import unit_norm
 from modules.shape import Reshape
 from modules.transfer import ImpulseGenerator, schedule_atoms, scalar_position
-from upsample import ConvUpsample
+from modules.upsample import ConvUpsample
 from util import device
 from data.audioiter import AudioIterator
 

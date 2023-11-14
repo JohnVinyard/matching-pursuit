@@ -7,11 +7,14 @@ audio
 sparse_coded
 .ipynb_checkpoints
 .env
+
 .vscode
+.vscode/*
 
 .idea
 venv/*
 **/experiment_data/*
+**/trained_weights/*
 model.dat
 sparse_model.dat
 
