@@ -1,0 +1,1 @@
+This repository contains research and experiments aimed at producing sparse, interpretable representations of audio.
