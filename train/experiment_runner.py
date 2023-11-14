@@ -91,6 +91,8 @@ class BaseExperimentRunner(object):
                 str(self.experiment_path).encode(), port=self.port)
         self.loss_func = None
         
+        print(f'Has Model {model is not None}, save weights: {save_weights}, load weights: {load_weights}')
+        
         if self.model is not None and self.load_weights:
             try:
                 self.model.load_state_dict(torch.load(self.trained_weights_path_and_filename))
@@ -175,4 +177,4 @@ class BaseExperimentRunner(object):
             l, r = self.train(item, i)
             self.fake = r
             print(i, l.item())
-            self.after_training_iteration(l)
+            self.after_training_iteration(l, i)

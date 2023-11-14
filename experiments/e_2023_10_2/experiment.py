@@ -513,4 +513,4 @@ class GraphRepresentation(BaseExperimentRunner):
             self.fake = r
             self.encoded = e
             print(i, l.item())
-            self.after_training_iteration(l)
+            self.after_training_iteration(l, i)

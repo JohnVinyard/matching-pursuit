@@ -7,6 +7,12 @@ leads to representations that can be manipulated at a level of granularity music
 
 ![Sparse Representation](https://matching-pursuit-repo-media.s3.amazonaws.com/sparse_audio_represenation.png)
 
+## Other Areas of Interest
+
+- simpler, linear sparse decompositions such as matching pursuit
+- perceptually-motivated loss functions, inspired by [Mallat's scattering transform](https://arxiv.org/abs/1512.02125) and the [Auditory Image Model](https://code.soundsoftware.ac.uk/projects/aim).
+
+
 # Getting Started
 
 ## Environment File Template
