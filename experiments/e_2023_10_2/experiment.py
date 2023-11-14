@@ -88,7 +88,6 @@ class RecurrentResonanceModelWithComplexWaveforms(nn.Module):
         self.register_buffer('atoms', bank)
 
         # we don't want the filter to dominate the spectral shape, just roll off highs, mostly
-        # self.to_filter = nn.Linear(latent_dim, 32)
         self.to_filter = ConvUpsample(
             latent_dim, channels, 4, end_size=self.n_frames, mode='learned', out_channels=32, from_latent=True, batch_norm=True)
         self.selection = nn.Linear(latent_dim, n_atoms)
@@ -123,7 +122,7 @@ class RecurrentResonanceModelWithComplexWaveforms(nn.Module):
         windowed = overlap_add(
             windowed, apply_window=False)[..., :self.resonance_samples]
 
-        return windowed, new_mom
+        return windowed
 
 
 class GenerateMix(nn.Module):
@@ -364,7 +363,7 @@ class Model(nn.Module):
         padded = F.pad(imp, (0, resonance_size - impulse_size))
 
         # resonances
-        res, env = self.res.forward(embeddings)
+        res = self.res.forward(embeddings)
 
         # mixes
         mx = self.mix.forward(embeddings)
@@ -399,12 +398,6 @@ model = Model().to(device)
 optim = optimizer(model, lr=1e-3)
 
 
-# try:
-#     model.load_state_dict(torch.load('siam.dat'))
-#     print('LOADED SIAM WEIGHTS')
-# except IOError:
-#     print('No weights saved')
-
 
 def dict_op(
         a: Dict[int, torch.Tensor],
@@ -420,37 +413,27 @@ def multiband_transform(x: torch.Tensor):
     d2 = {f'{k}_short': stft(v, 64, 32, pad=True) for k, v in bands.items()}
     return dict(**d1, **d2)
 
-    # bands = stft(x, 2048, 256, pad=True)
-    # return dict(bands=bands)
 
 
 def single_channel_loss(target: torch.Tensor, recon: torch.Tensor):
 
-    # target = stft(target, ws, ss, pad=True)
     target = multiband_transform(target)
 
     full = torch.sum(recon, dim=1, keepdim=True)
-    # full = stft(full, ws, ss, pad=True)
     full = multiband_transform(full)
 
-    # residual = target - full
     residual = dict_op(target, full, lambda a, b: a - b)
 
     loss = 0
 
     for i in range(n_events):
         ch = recon[:, i: i + 1, :]
-        # ch = stft(ch, ws, ss, pad=True)
         ch = multiband_transform(ch)
 
-        # t = residual + ch
         t = dict_op(residual, ch, lambda a, b: a + b)
 
-        # loss = loss + F.mse_loss(ch, t.clone().detach())
         diff = dict_op(ch, t, lambda a, b: a - b)
         loss = loss + sum([torch.abs(y).sum() for y in diff.values()])
-
-        # loss = loss + torch.abs(ch - t.clone().detach()).sum()
 
     return loss
 
@@ -506,8 +489,6 @@ class GraphRepresentation(BaseExperimentRunner):
             item = item.view(-1, 1, exp.n_samples)
             l, r, e = train(item, i)
             
-            # if i % 1000 == 0:
-            #     torch.save(model.state_dict(), 'siam.dat')
 
             self.real = item
             self.fake = r
