@@ -11,9 +11,11 @@ leads to representations that can be manipulated at a level of granularity music
 
 ## Environment File Template
 
+```bash
 AUDIO_PATH=
 PORT=9999
 IMPULSE_RESPONSE_PATH=
+```
 
 ## MusicNet
 
