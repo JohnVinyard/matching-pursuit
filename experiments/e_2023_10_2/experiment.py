@@ -7,8 +7,7 @@ from torch.nn import functional as F
 import zounds
 from angle import windowed_audio
 from config.experiment import Experiment
-from fft_basis import morlet_filter_bank
-from modules.decompose import fft_frequency_decompose, fft_frequency_recompose
+from modules.decompose import fft_frequency_decompose
 from modules.overlap_add import overlap_add
 from modules.ddsp import NoiseModel
 from modules.fft import fft_convolve
@@ -34,210 +33,11 @@ exp = Experiment(
     kernel_size=512)
 
 
-n_events = 32
+n_events = 64
 context_dim = 16
 impulse_size = 4096
 resonance_size = 32768
-
 base_resonance = 0.02
-apply_group_delay_to_dither = True
-use_dense_context = False
-use_adv_loss = False
-multiband_resonance = True
-
-resonance_selection_method = lambda x: torch.relu(x)
-
-
-# def make_memory_context(encoding: torch.Tensor, exponent: float):
-#     batch, channels, time = encoding.shape
-#     memory = torch.linspace(0, 1, time, device=encoding.device) ** exponent
-#     encoding_spec = torch.fft.rfft(encoding, dim=-1)
-#     memory_spec = torch.fft.rfft(memory[None, None, :], dim=-1)
-#     spec = encoding_spec * memory_spec
-#     context = torch.fft.irfft(spec)
-#     return context
-
-class RecurrentResonanceModelWithConvolution(nn.Module):
-    def __init__(self, encoding_channels, latent_dim, channels, window_size, resonance_samples):
-        super().__init__()
-        self.encoding_channels = encoding_channels
-        self.latent_dim = latent_dim
-        self.channels = channels
-        self.window_size = window_size
-        self.resonance_samples = resonance_samples
-        self.filter_coeffs = window_size // 2 + 1
-
-        self.n_frames = resonance_samples // (window_size // 2)
-        self.res_factor = (1 - base_resonance) * 0.95
-
-        self.start = nn.Linear(256, 256 * 4)
-
-        self.to_res = nn.Sequential(
-            # 16
-            nn.Sequential(
-                nn.ConvTranspose1d(256, 128, 8, 4, 2),
-                nn.LeakyReLU(0.2),
-                nn.BatchNorm1d(128)
-                
-            ),
-
-            # 64
-            nn.Sequential(
-                nn.ConvTranspose1d(128, 64, 8, 4, 2),
-                nn.LeakyReLU(0.2),
-                nn.BatchNorm1d(64)
-                
-            ),
-
-            # 256
-            nn.Sequential(
-                nn.ConvTranspose1d(64, 32, 8, 4, 2),
-                nn.LeakyReLU(0.2),
-                nn.BatchNorm1d(32)
-                
-            ),
-
-            # 1024
-            nn.Sequential(
-                nn.ConvTranspose1d(32, 16, 8, 4, 2),
-                nn.LeakyReLU(0.2),
-                nn.BatchNorm1d(16)
-                
-            ),
-
-            # 4096
-            nn.Sequential(
-                nn.ConvTranspose1d(16, 8, 8, 4, 2),
-                nn.LeakyReLU(0.2),
-                nn.BatchNorm1d(8)
-                
-            ),
-
-            # 16384
-            nn.Sequential(
-                nn.ConvTranspose1d(8, 4, 8, 4, 2),
-                nn.LeakyReLU(0.2),
-                nn.BatchNorm1d(4)
-                
-            ),
-
-            # 32768
-            nn.Sequential(
-                nn.ConvTranspose1d(4, 1, 4, 2, 1),
-                
-            ),
-        )
-
-
-
-        # we don't want the filter to dominate the spectral shape, just roll off highs, mostly
-        self.to_momentum = nn.Linear(latent_dim, self.n_frames)
-
-    def forward(self, x):
-
-        # compute resonance/sustain
-        # computing each frame independently makes something like "damping" possible
-        mom = base_resonance + \
-            (torch.sigmoid(self.to_momentum(x)) * self.res_factor)
-        mom = torch.log(1e-12 + mom)
-        # mom = mom.repeat(1, 1, self.n_frames)
-        mom = torch.cumsum(mom, dim=-1)
-        mom = torch.exp(mom)
-        new_mom = mom
-
-        # compute resonance shape/pattern
-        res = self.start(x).view(-1, 256, 4)
-        res = self.start(x).view(-1, 256, 4)
-        res = self.to_res(res).view(-1, n_events, self.resonance_samples)
-        
-
-        windowed = windowed_audio(res, self.window_size, self.window_size // 2)
-        windowed = unit_norm(windowed, dim=-1)
-        windowed = windowed * new_mom[..., None]
-        windowed = overlap_add(
-            windowed, apply_window=False)[..., :self.resonance_samples]
-
-        return windowed, new_mom
-
-class STFTRecurrentResonanceModel(nn.Module):
-    def __init__(self, encoding_channels, latent_dim, channels, window_size, resonance_samples):
-        super().__init__()
-        self.latent_dim = latent_dim
-        self.channels = channels
-        self.window_size = window_size
-        self.step = window_size // 2
-        self.n_coeffs = window_size // 2 + 1
-        self.resonance_samples = resonance_samples
-        self.n_frames = resonance_samples // self.step
-        self.encoding_channels = encoding_channels
-
-
-        self.register_buffer('group_delay', torch.linspace(0, np.pi, self.n_coeffs))
-
-        self.resonance_factor = 0.99 - base_resonance
-
-
-        # TODO: Does this work better with just simple linear projections?
-        self.to_initial = LinearOutputStack(
-            channels, layers=3, out_channels=self.n_coeffs, in_channels=latent_dim, norm=nn.LayerNorm((channels,)))
-        self.to_resonance = LinearOutputStack(
-            channels, layers=3, out_channels=self.n_coeffs, in_channels=latent_dim, norm=nn.LayerNorm((channels,)))
-        self.to_phase_dither = LinearOutputStack(
-            channels, layers=3, out_channels=self.n_coeffs, in_channels=latent_dim, norm=nn.LayerNorm((channels,)))
-        
-    
-    def forward(self, latents):
-        batch_size = latents.shape[0]
-
-        initial = self.to_initial(latents)
-        # initial = torch.relu(initial)
-
-        res = base_resonance + (torch.sigmoid(self.to_resonance(latents)) * self.resonance_factor)
-        dither = torch.sigmoid(self.to_phase_dither(latents)) 
-
-        if apply_group_delay_to_dither:
-            dither = dither * self.group_delay[None, None, :]
-
-
-        # print(res.shape, dither.shape, initial.shape)
-
-        # first_frame = initial[:, None, :]
-
-        # Non-recurrent
-
-        full_res = res[..., None].repeat(1, 1, 1, self.n_frames)
-        full_res = torch.log(1e-12 + full_res)
-        full_res = torch.cumsum(full_res, dim=-1)
-        full_res = torch.exp(full_res)
-        # full_res = self.to_env(latents.view(-1, self.latent_dim)).view(-1, n_events, self.n_frames, self.n_coeffs).permute(0, 1, 3, 2)
-        # envelope should be in [0 - 1]
-        # full_res = torch.sigmoid(full_res)
-
-        mags = full_res * initial[..., None]
-        mags = mags.permute(0, 1, 3, 2)
-
-        full_delay = self.group_delay[None, None, :, None].repeat(1, 1, 1, self.n_frames)
-        full_delay = torch.cumsum(full_delay, dim=-1)
-
-        if apply_group_delay_to_dither:
-            full_delay = full_delay + (torch.zeros_like(full_delay).uniform_(-np.pi, np.pi) * dither[:, :, :, None])
-        
-        phases = full_delay
-        phases = phases.permute(0, 1, 3, 2)
-        # end non-recurrent
-        frames = torch.complex(
-            mags * torch.cos(phases),
-            mags * torch.sin(phases)
-        )
-
-        windowed = torch.fft.irfft(frames, dim=-1, norm='ortho')
-        
-        
-        samples = overlap_add(windowed, apply_window=True)[..., :self.resonance_samples]
-        # samples = max_norm(samples, dim=-1)
-
-        assert samples.shape == (batch_size, self.encoding_channels, self.resonance_samples)
-        return samples, full_res
 
 
 def make_waves(n_samples, f0s, samplerate):
@@ -318,7 +118,7 @@ class RecurrentResonanceModelWithComplexWaveforms(nn.Module):
 
         # compute resonance shape/pattern
         # sel = torch.softmax(self.selection(x), dim=-1)
-        sel = resonance_selection_method(self.selection(x))
+        sel = torch.relu(self.selection(x))
         atoms = self.atoms
         res = sel @ atoms
 
@@ -339,66 +139,6 @@ class RecurrentResonanceModelWithComplexWaveforms(nn.Module):
         return windowed, new_mom
 
 
-class RecurrentResonanceModel(nn.Module):
-    def __init__(self, encoding_channels, latent_dim, channels, window_size, resonance_samples):
-        super().__init__()
-        self.encoding_channels = encoding_channels
-        self.latent_dim = latent_dim
-        self.channels = channels
-        self.window_size = window_size
-        self.resonance_samples = resonance_samples
-
-        n_atoms = 1024
-        self.n_frames = resonance_samples // (window_size // 2)
-        self.res_factor = (1 - base_resonance) * 0.9
-
-        # TODO: should this be multi-band, or parameterized differently?
-        # What about a convolutional model to produce impulse responses?
-
-        band = zounds.FrequencyBand(40, exp.samplerate.nyquist)
-        scale = zounds.LinearScale(band, n_atoms)
-        bank = morlet_filter_bank(
-            exp.samplerate, resonance_samples, scale, 0.01, normalize=True).real.astype(np.float32)
-        bank = torch.from_numpy(bank).view(n_atoms, resonance_samples)
-
-        # bank = torch.zeros_like(bank).uniform_(-1, 1)
-        if multiband_resonance:
-            self.atoms = nn.ParameterDict({str(k): v for k, v in fft_frequency_decompose(bank.view(1, n_atoms, resonance_samples), 512).items()})
-        else:
-            self.atoms = nn.Parameter(bank)
-        
-        # self.register_buffer('atoms', bank)
-
-        self.selection = nn.Linear(latent_dim, n_atoms)
-        self.to_momentum = nn.Linear(latent_dim, self.n_frames)
-
-    def forward(self, x):
-
-        # compute resonance/sustain
-        mom = base_resonance + \
-            (torch.sigmoid(self.to_momentum(x)) * self.res_factor)
-        mom = torch.log(1e-12 + mom)
-        # mom = mom.repeat(1, 1, self.n_frames)
-        mom = torch.cumsum(mom, dim=-1)
-        mom = torch.exp(mom)
-        new_mom = mom
-
-        # compute resonance shape/pattern
-        sel = resonance_selection_method(self.selection(x))
-        if multiband_resonance:
-            atoms = fft_frequency_recompose({int(k): v for k, v in self.atoms.items()}, self.resonance_samples)
-        else:
-            atoms = self.atoms
-        res = sel @ atoms
-
-
-        windowed = windowed_audio(res, self.window_size, self.window_size // 2)
-        windowed = unit_norm(windowed, dim=-1)
-        windowed = windowed * new_mom[..., None]
-        windowed = overlap_add(
-            windowed, apply_window=False)[..., :self.resonance_samples]
-
-        return windowed, new_mom
 
 
 class GenerateMix(nn.Module):
@@ -459,57 +199,6 @@ class GenerateImpulse(nn.Module):
         x = self.noise_model(x)
         return x.view(-1, n_events, self.n_samples)
 
-
-class Discriminator(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-        self.embed_period = nn.Linear(257, 8)
-        
-
-        self.embed_cond = nn.Conv1d(4096, 256, 1, 1, 0)
-        self.embed_spec = nn.Conv1d(1024, 256, 1, 1, 0)
-
-        self.net = nn.Sequential(
-
-            # 64
-            nn.Sequential(
-                nn.Conv1d(256, 256, 7, 2, 3),
-                nn.LeakyReLU(0.2),
-                nn.BatchNorm1d(256)
-            ),
-
-            # 32
-            nn.Sequential(
-                nn.Conv1d(256, 256, 7, 2, 3),
-                nn.LeakyReLU(0.2),
-                nn.BatchNorm1d(256)
-            ),
-
-            # 8
-            nn.Sequential(
-                nn.Conv1d(256, 256, 7, 2, 3),
-                nn.LeakyReLU(0.2),
-            ),
-
-
-            nn.Conv1d(256, 1, 1, 1, 0)            
-        )
-
-        self.apply(lambda x: exp.init_weights(x))
-
-    def forward(self, cond, audio):
-        batch_size = cond.shape[0]
-
-        spec = stft(audio, 2048, 256, pad=True)[..., :1024].view(-1, 128, 1024).permute(0, 2, 1)
-        spec = self.embed_spec(spec)
-
-        # TODO: Weirdly, this was doing some interesting things
-        # as an unconditional discriminator (due to a mistake)
-        cond = self.embed_cond(cond)
-        x = cond + spec
-        j = self.net(x)
-        return j
 
 
 class UNet(nn.Module):
@@ -671,14 +360,10 @@ class Model(nn.Module):
 
         return encoded
 
-    def generate(self, encoded, one_hot, packed, dense):
-        if use_dense_context:
-            ctxt = self.from_context(dense)
-        else:
-            # ctxt = make_memory_context(encoded, 4) # (batch, encoding_channels, time)
-            # print(ctxt.shape)
-            ctxt = torch.sum(encoded, dim=-1)
-            dense = self.embed_memory_context(ctxt) # (batch, context_dim)
+    def generate(self, encoded, one_hot, packed):
+        
+        ctxt = torch.sum(encoded, dim=-1)
+        dense = self.embed_memory_context(ctxt) # (batch, context_dim)
 
         # ctxt is a single vector
         ce = self.embed_context(ctxt)
@@ -728,26 +413,16 @@ class Model(nn.Module):
     def forward(self, x):
         encoded = self.encode(x)
 
-        # TODO: This should be a mean/std instead
-        # mean + (std * N(0, 1))
-        non_sparse = torch.mean(encoded, dim=-1)
-
-        non_sparse_mean = self.to_context_mean(non_sparse)
-        non_sparse_std = self.to_context_std(non_sparse)
-        non_sparse = non_sparse_mean + \
-            (torch.zeros_like(non_sparse_mean).normal_(0, 1) * non_sparse_std)
 
         encoded, packed, one_hot = sparsify2(encoded, n_to_keep=n_events)
 
-        final, env = self.generate(encoded, one_hot, packed, dense=non_sparse)
-        return final, encoded, env, non_sparse
+        final, env = self.generate(encoded, one_hot, packed)
+        return final, encoded, env
 
 
 model = Model().to(device)
 optim = optimizer(model, lr=1e-3)
 
-disc = Discriminator().to(device)
-disc_optim = optimizer(disc, lr=1e-3)
 
 try:
     model.load_state_dict(torch.load('siam.dat'))
@@ -807,46 +482,21 @@ def single_channel_loss(target: torch.Tensor, recon: torch.Tensor):
 
 def train(batch, i):
     optim.zero_grad()
-    disc_optim.zero_grad()
 
+    recon, encoded, env = model.forward(batch)
 
-    if not use_adv_loss or i % 2 == 0:
-        recon, encoded, env, context = model.forward(batch)
+    recon_summed = torch.sum(recon, dim=1, keepdim=True)
 
-        recon_summed = torch.sum(recon, dim=1, keepdim=True)
+    loss = (single_channel_loss(batch, recon) * 1e-6)
 
+    loss.backward()
+    optim.step()
 
-        loss = (single_channel_loss(batch, recon) * 1e-6)
-        # real_spec = stft(batch, 2048, 256, pad=True)
-        # fake_spec = stft(recon_summed, 2048, 256, pad=True)
-        # loss = F.mse_loss(fake_spec, real_spec)
-        
-        if use_adv_loss:
-            j = disc.forward(encoded.clone().detach(), recon_summed)
-            adv_loss = (torch.abs(1 - j).mean() * 1)
-            loss = loss + adv_loss
-        
+    print('GEN', loss.item())
 
-        loss.backward()
-        optim.step()
-
-        print('GEN', loss.item())
-
-        recon = max_norm(recon_summed)
-        encoded = max_norm(encoded)
-        return loss, recon, encoded
-    else:
-        with torch.no_grad():
-            recon, encoded, env, context = model.forward(batch)
-            recon_summed = torch.sum(recon, dim=1, keepdim=True)
-
-        rj = disc.forward(encoded, batch)
-        fj = disc.forward(encoded, recon_summed)
-        loss = (torch.abs(1 - rj) + torch.abs(0 - fj)).mean()
-        loss.backward()
-        disc_optim.step()
-        print('DISC', loss.item())
-        return None, None, None
+    recon = max_norm(recon_summed)
+    encoded = max_norm(encoded)
+    return loss, recon, encoded
 
 
 def make_conjure(experiment: BaseExperimentRunner):

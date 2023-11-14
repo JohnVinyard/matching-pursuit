@@ -662,39 +662,7 @@ def single_channel_loss(target: torch.Tensor, recon: torch.Tensor):
 
     return loss
 
-# This is loss where only the positive part is treated as residual
-# def single_channel_loss(target: torch.Tensor, recon: torch.Tensor):
-#     # target = stft(target, ws, ss, pad=True)
-#     target = multiband_transform(target)
 
-#     full = torch.sum(recon, dim=1, keepdim=True)
-#     # full = stft(full, ws, ss, pad=True)
-#     full = multiband_transform(full)
-
-#     # residual = target - full
-#     residual = dict_op(target, full, lambda a, b: a - b)
-#     neg = {k: torch.clamp(v, -np.inf, 0) for k, v in residual.items()}
-
-#     residual = {k: torch.clamp(v, 0, np.inf) for k, v in residual.items()}
-
-#     # start by penalizing overshoot
-#     loss = sum([torch.abs(y).sum() for y in neg.values()])
-
-#     for i in range(n_events):
-#         ch = recon[:, i: i + 1, :]
-#         # ch = stft(ch, ws, ss, pad=True)
-#         ch = multiband_transform(ch)
-
-#         # t = residual + ch
-#         t = dict_op(residual, ch, lambda a, b: a + b)
-
-#         # loss = loss + F.mse_loss(ch, t.clone().detach())
-#         diff = dict_op(ch, t, lambda a, b: a - b)
-#         loss = loss + sum([torch.abs(y).sum() for y in diff.values()])
-
-#         # loss = loss + torch.abs(ch - t.clone().detach()).sum()
-
-#     return loss
 
 
 def train(batch, i):
@@ -704,7 +672,10 @@ def train(batch, i):
 
     recon_summed = torch.sum(recon, dim=1, keepdim=True)
 
-    loss = (single_channel_loss(batch, recon) * 1e-6)
+    # loss = (single_channel_loss(batch, recon) * 1e-6)
+    fake_spec = stft(recon_summed, 2048, 256, pad=True)
+    real_spec = stft(batch, 2048, 256, pad=True)
+    loss = F.mse_loss(fake_spec, real_spec)    
 
     loss.backward()
     optim.step()
