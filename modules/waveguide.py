@@ -6,7 +6,7 @@ from modules.ddsp import overlap_add
 from modules.linear import LinearOutputStack
 from modules.normalization import ExampleNorm, unit_norm
 
-from upsample import ConvUpsample
+from modules.upsample import ConvUpsample
 
 
 def karplus_strong_synth(

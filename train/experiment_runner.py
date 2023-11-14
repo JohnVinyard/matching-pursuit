@@ -1,6 +1,7 @@
 from typing import Union
 
 import torch
+from torch import nn
 from config.experiment import Experiment
 from util import playable
 import numpy as np
@@ -9,7 +10,7 @@ from conjure import LmdbCollection
 
 from pathlib import Path
 from conjure import time_series_conjure, audio_conjure, numpy_conjure, SupportedContentType
-
+import os.path
 
 def build_funcs(prefix):
 
@@ -64,10 +65,23 @@ class BaseExperimentRunner(object):
     real = MonitoredValueDescriptor(build_funcs('orig'))
     fake = MonitoredValueDescriptor(build_funcs('fake'))
 
-    def __init__(self, stream, train, exp: Experiment, port: Union[str, int] = None):
+    def __init__(
+        self, 
+        stream, 
+        train, 
+        exp: Experiment, 
+        port: Union[str, int] = None, 
+        save_weights: bool = False, 
+        load_weights: bool = False,
+        model: nn.Module = None):
+        
         super().__init__()
+        
         self.stream = stream
         self.exp = exp
+        self.save_weights = save_weights
+        self.model = model
+        self.load_weights = load_weights
 
         self.train = train
 
@@ -76,9 +90,24 @@ class BaseExperimentRunner(object):
             self.collection = LmdbCollection(
                 str(self.experiment_path).encode(), port=self.port)
         self.loss_func = None
+        
+        if self.model is not None and self.load_weights:
+            try:
+                self.model.load_state_dict(torch.load(self.trained_weights_path_and_filename))
+                print(f'Loaded model weights from {self.trained_weights_path_and_filename}')
+            except IOError as e:
+                print(f'Could not load {self.trained_weights_path_and_filename} due to {str(e)}')
 
-    def after_training_iteration(self, l):
+    def after_training_iteration(self, l, iteration: int = None):
         self.loss_func(l)
+        
+        if self.save_weights and self.model is not None:
+            
+            if bool(iteration) and iteration % 1000 == 0:
+                if not os.path.exists(self.trained_weights_path):
+                    os.mkdir(self.trained_weights_path)
+                torch.save(self.model.state_dict(), self.trained_weights_path_and_filename)
+                print(f'Saved model weights to {self.trained_weights_path_and_filename}')
 
     @property
     def batch_size(self):
@@ -125,7 +154,15 @@ class BaseExperimentRunner(object):
     @property
     def experiment_path(self):
         return Path('experiments') / Path(self.experiment_dir_name) / Path('experiment_data')
-
+    
+    @property
+    def trained_weights_path(self):
+        return Path('experiments') / Path(self.experiment_dir_name) / Path('trained_weights')
+    
+    @property
+    def trained_weights_path_and_filename(self):
+        return self.trained_weights_path / Path('weights.dat')
+    
     def iter_items(self):
         for i, item in enumerate(self.stream):
             item = item.view(-1, 1, self.exp.n_samples)

@@ -1,6 +1,13 @@
 This repository contains research and experiments aimed at producing sparse, interpretable representations of audio.
 
-# Pre-Requisites
+# Current Research
+
+My current research is focused on sparse, interpretable representations of audio.  Ideally, the sparsity and interpretability also
+leads to representations that can be manipulated at a level of granularity musicians are accustomed to.
+
+![Sparse Representation](https://matching-pursuit-repo-media.s3.amazonaws.com/sparse_audio_represenation.png)
+
+# Getting Started
 
 ## Environment File Template
 

@@ -85,16 +85,6 @@ class RecurrentResonanceModelWithComplexWaveforms(nn.Module):
         bank = torch.from_numpy(atoms).float()
         n_atoms = bank.shape[0]
 
-        # TODO: should this be multi-band, or parameterized differently?
-        # What about a convolutional model to produce impulse responses?
-
-        # band = zounds.FrequencyBand(40, exp.samplerate.nyquist)
-        # scale = zounds.LinearScale(band, n_atoms)
-        # bank = morlet_filter_bank(
-        #     exp.samplerate, resonance_samples, scale, 0.01, normalize=True).real.astype(np.float32)
-        # bank = torch.from_numpy(bank).view(n_atoms, resonance_samples)
-
-
         self.register_buffer('atoms', bank)
 
         # we don't want the filter to dominate the spectral shape, just roll off highs, mostly
@@ -111,13 +101,10 @@ class RecurrentResonanceModelWithComplexWaveforms(nn.Module):
         mom = base_resonance + \
             (torch.sigmoid(self.to_momentum(x)) * self.res_factor)
         mom = torch.log(1e-12 + mom)
-        # mom = mom.repeat(1, 1, self.n_frames)
         mom = torch.cumsum(mom, dim=-1)
         mom = torch.exp(mom)
         new_mom = mom
 
-        # compute resonance shape/pattern
-        # sel = torch.softmax(self.selection(x), dim=-1)
         sel = torch.relu(self.selection(x))
         atoms = self.atoms
         res = sel @ atoms
@@ -137,8 +124,6 @@ class RecurrentResonanceModelWithComplexWaveforms(nn.Module):
             windowed, apply_window=False)[..., :self.resonance_samples]
 
         return windowed, new_mom
-
-
 
 
 class GenerateMix(nn.Module):
@@ -329,7 +314,6 @@ class Model(nn.Module):
         self.mix = GenerateMix(256, 128, n_events, mixer_channels=3)
         self.to_amp = nn.Linear(256, 1)
 
-        # self.verb_context = nn.Linear(4096, 32)
         self.verb = ReverbGenerator(
             context_dim, 3, exp.samplerate, exp.n_samples, norm=nn.LayerNorm((context_dim,)))
 
@@ -372,7 +356,6 @@ class Model(nn.Module):
         oh = self.embed_one_hot(one_hot)
 
         embeddings = ce[:, None, :] + oh
-        
 
         # generate...
 
@@ -391,22 +374,17 @@ class Model(nn.Module):
         stacked = torch.cat([padded[..., None], conv[..., None], res[..., None]], dim=-1)
         mixed = stacked @ mx.view(-1, n_events, 3, 1)
         mixed = mixed.view(-1, n_events, resonance_size)
-        # mixed = unit_norm(mixed, dim=-1)
 
         amps = torch.abs(self.to_amp(embeddings))
         mixed = mixed * amps
 
         final = F.pad(mixed, (0, exp.n_samples - mixed.shape[-1]))
-        up = torch.zeros(final.shape[0], n_events,
-                         exp.n_samples, device=final.device)
+        up = torch.zeros(final.shape[0], n_events, exp.n_samples, device=final.device)
         up[:, :, ::256] = packed
 
         final = fft_convolve(final, up)[..., :exp.n_samples]
 
-        # final = torch.sum(final, dim=1, keepdim=True)
-
         final = self.verb.forward(dense, final)
-
 
         return final
 
@@ -421,11 +399,11 @@ model = Model().to(device)
 optim = optimizer(model, lr=1e-3)
 
 
-try:
-    model.load_state_dict(torch.load('siam.dat'))
-    print('LOADED SIAM WEIGHTS')
-except IOError:
-    print('No weights saved')
+# try:
+#     model.load_state_dict(torch.load('siam.dat'))
+#     print('LOADED SIAM WEIGHTS')
+# except IOError:
+#     print('No weights saved')
 
 
 def dict_op(
@@ -480,7 +458,7 @@ def single_channel_loss(target: torch.Tensor, recon: torch.Tensor):
 def train(batch, i):
     optim.zero_grad()
 
-    recon, encoded, env = model.forward(batch)
+    recon, encoded = model.forward(batch)
 
     recon_summed = torch.sum(recon, dim=1, keepdim=True)
 
@@ -512,18 +490,24 @@ class GraphRepresentation(BaseExperimentRunner):
 
     encoded = MonitoredValueDescriptor(make_conjure)
 
-    def __init__(self, stream, port=None):
-        super().__init__(stream, train, exp, port=port)
+    def __init__(self, stream, port=None, save_weights=False, load_weights=True, model=model):
+        
+        super().__init__(
+            stream, 
+            train, 
+            exp, 
+            port=port, 
+            save_weights=save_weights, 
+            load_weights=load_weights, 
+            model=model)
 
     def run(self):
         for i, item in enumerate(self.iter_items()):
             item = item.view(-1, 1, exp.n_samples)
             l, r, e = train(item, i)
             
-            print(__file__)
-
-            if i % 1000 == 0:
-                torch.save(model.state_dict(), 'siam.dat')
+            # if i % 1000 == 0:
+            #     torch.save(model.state_dict(), 'siam.dat')
 
             self.real = item
             self.fake = r

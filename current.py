@@ -7,7 +7,6 @@ import zounds
 import argparse
 from datetime import datetime
 import os
-import numpy as np
 import torch
 from conjure.serve import serve_conjure
 
@@ -91,6 +90,10 @@ if __name__ == '__main__':
     parser.add_argument('--postfix', type=str, default='')
     parser.add_argument('--step', type=int, default=1)
     parser.add_argument('--pattern', type=str, default='*.wav')
+    
+    parser.add_argument('--save-weights', action='store_true')
+    parser.add_argument('--load-weights', action='store_true')
+    
 
     args = parser.parse_args()
 
@@ -110,10 +113,13 @@ if __name__ == '__main__':
             step_size=args.step,
             pattern=args.pattern)
 
-        exp: BaseExperimentRunner = Current(stream, port=port)
+        exp: BaseExperimentRunner = Current(
+            stream, 
+            port=port, 
+            save_weights=args.save_weights, 
+            load_weights=args.load_weights)
 
         funcs = exp.conjure_funcs
-        
 
         serve_conjure(
             funcs,

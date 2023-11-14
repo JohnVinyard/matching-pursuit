@@ -9,7 +9,7 @@ from modules.sparse import VectorwiseSparsity
 from modules.transfer import ImpulseGenerator, PosEncodedImpulseGenerator, TransferFunction, position, schedule_atoms
 from modules.fft import fft_convolve, fft_shift
 from train.optim import optimizer
-from upsample import ConvUpsample
+from modules.upsample import ConvUpsample
 from modules.normalization import ExampleNorm
 from torch.nn import functional as F
 from modules.phase import MelScale

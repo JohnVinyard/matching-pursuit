@@ -4,7 +4,7 @@ from torch.distributions import Normal
 from torch import nn
 from modules.fft import fft_convolve
 from modules.normalization import max_norm
-from upsample import ConvUpsample
+from modules.upsample import ConvUpsample
 from torch.nn import functional as F
 from modules.overlap_add import overlap_add
 

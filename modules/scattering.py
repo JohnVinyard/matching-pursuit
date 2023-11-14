@@ -2,12 +2,8 @@ import torch
 import numpy as np
 from torch.nn import functional as F
 from torch.jit._script import ScriptModule, script_method
-
-from fft_basis import morlet_filter_bank
-from torch import nn
 import zounds
-
-from scratch import filter_bank
+from modules.phase import morlet_filter_bank
 from util import device
 
 

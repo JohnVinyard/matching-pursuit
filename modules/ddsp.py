@@ -9,7 +9,7 @@ from modules.physical import Window
 from modules.reverb import NeuralReverb
 from modules.overlap_add import overlap_add
 
-from upsample import ConvUpsample, FFTUpsampleBlock
+from modules.upsample import ConvUpsample, FFTUpsampleBlock
 
 from .normal_pdf import pdf
 import zounds
