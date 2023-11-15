@@ -32,7 +32,9 @@ class NeuralReverb(nn.Module):
         g = root.joinpath('*.wav')
 
         audio = []
-        for p in glob.iglob(str(g)):
+        to_process = list(glob.iglob(str(g)))
+        
+        for p in to_process:
             a, sr = load(p)
             a = to_mono(a)
             if len(a) < n_samples:
@@ -40,7 +42,8 @@ class NeuralReverb(nn.Module):
             else:
                 a = a[:n_samples]
             audio.append(a[None, ...])
-            print('Processed', p)
+        
+        print(f'Processed {len(to_process)} impulse responses')
         
         audio = np.concatenate(audio, axis=0)
         return NeuralReverb(n_samples, audio.shape[0], audio)

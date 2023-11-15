@@ -1,8 +1,6 @@
 import zounds
 from modules.normalization import unit_norm
 from modules.psychoacoustic import PsychoacousticFeature
-# from modules.pif import AuditoryImage
-# from modules.psychoacoustic import PsychoacousticFeature
 
 from util import device
 from util.weight_init import make_initializer

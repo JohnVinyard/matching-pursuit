@@ -1,1 +1,3 @@
-from experiments.e_2023_10_2.experiment import Model as SparseResonanceModel
+from experiments.e_2023_10_2.inference import model
+
+

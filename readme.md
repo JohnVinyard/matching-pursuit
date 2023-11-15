@@ -21,6 +21,7 @@ leads to representations that can be manipulated at a level of granularity music
 AUDIO_PATH=
 PORT=9999
 IMPULSE_RESPONSE_PATH=
+S3_BUCKET=
 ```
 
 ## MusicNet
@@ -35,3 +36,7 @@ Room impulse responses to support convolution-based reverb can be [downloaded he
 
 You can then update the `IMPULSE_RESPONSE` environment variable to point at the directory on your local machine that contains the
 impulse response audio files.
+
+## My Trained Models
+
+If you'd like to try out some of the models I've trained locally, you can set `S3_BUCKET` to `matching-pursuit-trained-models`

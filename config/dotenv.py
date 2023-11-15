@@ -21,3 +21,7 @@ class Config(object):
     @staticmethod
     def impulse_response_path():
         return os.environ['IMPULSE_RESPONSE_PATH']
+    
+    @staticmethod
+    def s3_bucket():
+        return os.environ['S3_BUCKET']
