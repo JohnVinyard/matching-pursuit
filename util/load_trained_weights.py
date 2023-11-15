@@ -12,13 +12,17 @@ def load_trained_weights_for_inference(
     device: str = 'cpu', 
     s3_bucket: str = None):
     
+    """
+    Load trained weights and return the model.  If the weights
+    are available locally, use them.  If not, check S3 for weights,
+    download, and load them, if available.
+    """
+    
     model = model_constructor()
     
     directory, filename = os.path.split(module_init_path)
     weights_path = Path(directory) / Path('trained_weights/weights.dat')
-    model = model.to('cpu')
-    
-    print(weights_path)
+    model = model.to(device)
     
     if not os.path.exists(weights_path) and s3_bucket:
         _, experiment_date = os.path.split(directory)

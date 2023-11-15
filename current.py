@@ -1,4 +1,4 @@
-from config import config_values
+from config import config_values, Config
 import json
 from data.audioiter import AudioIterator
 from experiments import Current
@@ -11,6 +11,7 @@ import torch
 from conjure.serve import serve_conjure
 
 from train.experiment_runner import BaseExperimentRunner
+from util.store_trained_weights_remotely import store_trained_weights_remoteley
 
 torch.backends.cudnn.benchmark = True
 
@@ -81,6 +82,7 @@ def new_experiment(class_name=None, postfix=''):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
+    parser.add_argument('--push-trained-weights', action='store_true')
     parser.add_argument('--new', action='store_true')
     parser.add_argument('--overfit', action='store_true')
     parser.add_argument('--batch-size', type=int, default=4)
@@ -90,7 +92,6 @@ if __name__ == '__main__':
     parser.add_argument('--postfix', type=str, default='')
     parser.add_argument('--step', type=int, default=1)
     parser.add_argument('--pattern', type=str, default='*.wav')
-    
     parser.add_argument('--save-weights', action='store_true')
     parser.add_argument('--load-weights', action='store_true')
     
@@ -99,6 +100,34 @@ if __name__ == '__main__':
 
     if args.new:
         new_experiment(args.classname, args.postfix)
+    elif args.push_trained_weights:
+        port = os.environ['PORT']
+
+        print(args)
+        
+        stream = AudioIterator(
+            args.batch_size,
+            2**args.nsamples,
+            zounds.SR22050(),
+            args.normalize,
+            args.overfit,
+            step_size=args.step,
+            pattern=args.pattern)
+        
+        exp: BaseExperimentRunner = Current(
+            stream, 
+            port=port, 
+            save_weights=args.save_weights, 
+            load_weights=args.load_weights)
+
+        model = exp.model
+        if model is None:
+            raise ValueError(f'Experiment {Current.__class__.__name__} does not have an associated model')
+        
+        path = Current.__module__
+        
+        store_trained_weights_remoteley(
+            path, model, device='cpu', s3_bucket=Config.s3_bucket())
     else:
         port = os.environ['PORT']
 
