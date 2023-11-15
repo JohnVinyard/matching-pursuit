@@ -4,6 +4,7 @@ ae.dat
 disc.dat
 __pycache__
 audio
+blog
 sparse_coded
 .ipynb_checkpoints
 .env

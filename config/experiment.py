@@ -86,9 +86,6 @@ class Experiment(object):
         return place_encoding, pop_encoding, spike_timing
 
     def perceptual_feature(self, x):
-        # bands = self.pif.compute_feature_dict(x)
-        # return torch.cat(list(bands.values()), dim=-1)
-
         x = self.fb.forward(x, normalize=False)
         x = self.aim.forward(x)
         return x

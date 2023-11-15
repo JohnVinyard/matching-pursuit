@@ -386,6 +386,11 @@ class Model(nn.Module):
         final = self.verb.forward(dense, final)
 
         return final
+    
+    def sparse_encode(self, x):
+        encoded = self.encode(x)
+        encoded, packed, one_hot = sparsify2(encoded, n_to_keep=n_events)
+        return encoded
 
     def forward(self, x):
         encoded = self.encode(x)
@@ -442,6 +447,7 @@ def train(batch, i):
     optim.zero_grad()
 
     recon, encoded = model.forward(batch)
+    # print(encoded.min(), encoded.max())
 
     recon_summed = torch.sum(recon, dim=1, keepdim=True)
 
