@@ -8,7 +8,7 @@ from scipy.signal import square, sawtooth
 from torch import nn
 from torch.nn import functional as F
 
-from angle import windowed_audio
+from modules.angle import windowed_audio
 from config.experiment import Experiment
 from modules.ddsp import NoiseModel
 from modules.decompose import fft_frequency_decompose
@@ -22,7 +22,7 @@ from modules.sparse import sparsify2
 from modules.stft import stft
 from train.experiment_runner import BaseExperimentRunner, MonitoredValueDescriptor
 from train.optim import optimizer
-from upsample import ConvUpsample
+from modules.upsample import ConvUpsample
 from util import device
 from util.readmedocs import readme
 
@@ -91,9 +91,15 @@ class ResonanceModel(nn.Module):
                 atoms[i, ::(sp + 1)] = 1
             
             atoms = F.avg_pool1d(atoms.view(1, 1, -1), kernel_size=oversample_rate, stride=oversample_rate).view(self.n_atoms, self.resonance_size)
-            self.register_buffer('atoms', atoms)
+            if learnable_atoms:
+                self.atoms = nn.Parameter(atoms)
+            else:
+                self.register_buffer('atoms', atoms)
         else:
-            self.register_buffer('atoms', init_atoms)
+            if learnable_atoms:
+                self.atoms = nn.Parameter(init_atoms)
+            else:
+                self.register_buffer('atoms', init_atoms)
         
         self.selections = nn.ModuleList([
             nn.Linear(latent_dim, self.n_atoms) for _ in range(self.n_piecewise)
@@ -110,7 +116,7 @@ class ResonanceModel(nn.Module):
             channels,
             start_size=8,
             end_size=self.n_frames,
-            mode='learned',
+            mode='nearest',
             out_channels=self.coarse_coeffs,
             from_latent=True,
             batch_norm=True
@@ -120,8 +126,8 @@ class ResonanceModel(nn.Module):
             latent_dim, 
             channels, 
             start_size=8, 
-            end_size=self.n_frames, 
-            mode='learned', 
+            end_size=32, 
+            mode='nearest', 
             out_channels=n_piecewise, 
             from_latent=True, 
             batch_norm=True)
@@ -156,8 +162,10 @@ class ResonanceModel(nn.Module):
         decay = F.interpolate(decay, size=self.resonance_size, mode='linear')
         
         filt = self.to_filter(latent).view(-1, self.coarse_coeffs, self.n_frames).permute(0, 2, 1)
+        filt = torch.sigmoid(filt)
         filt = F.interpolate(filt, size=257, mode='linear')
         filt = filt.view(-1, n_events, self.n_frames, 257)
+        
         
         for i in range(self.n_piecewise):
             
@@ -167,12 +175,6 @@ class ResonanceModel(nn.Module):
             res = sel @ self.atoms
             res = res * decay
             
-            # choose a linear combination of band-pass filters
-            # filt_sel = self.filters[i].forward(latent)
-            # filt_sel = F.interpolate(filt_sel, size=self.n_coeffs, mode='linear')
-            # filtered_res = torch.fft.irfft(
-            #     torch.fft.rfft(res) * filt_sel
-            # )
             filtered_res = res
             
             windowed = windowed_audio(filtered_res, 512, 256)
@@ -182,15 +184,10 @@ class ResonanceModel(nn.Module):
             filtered_res = overlap_add(windowed, apply_window=False)[..., :self.resonance_size]\
                 .view(-1, n_events, self.resonance_size)
             
-            # filt = filt.view(-1, n_events)
-            
-            # filtered_res = fft_convolve(filt, res)
             resonances.append(filtered_res[:, None, :, :])
             
-            # convolve the impulse with the resonance
             conv = fft_convolve(filtered_res, imp)
             
-            # resonances.append(filtered_conv[:, None, :, :])
             convs.append(conv[:, None, :, :])
         
         # TODO: Concatenate both the pure resonances and the convolved audio
@@ -503,10 +500,6 @@ class Model(nn.Module):
 
         self.imp = GenerateImpulse(256, 128, impulse_size, 16, n_events)
 
-        # ResonanceModel = RecurrentResonanceModelWithComplexWaveforms
-
-        # self.res = ResonanceModel(
-        #     n_events, 256, 64, 1024, resonance_samples=resonance_size)
         
         total_atoms = 2048
         f0s = np.linspace(40, 4000, total_atoms // 4)
@@ -629,36 +622,27 @@ def multiband_transform(x: torch.Tensor):
     d2 = {f'{k}_short': stft(v, 64, 32, pad=True) for k, v in bands.items()}
     return dict(**d1, **d2)
 
-    # bands = stft(x, 2048, 256, pad=True)
-    # return dict(bands=bands)
-
 def single_channel_loss(target: torch.Tensor, recon: torch.Tensor):
 
-    # target = stft(target, ws, ss, pad=True)
     target = multiband_transform(target)
 
     full = torch.sum(recon, dim=1, keepdim=True)
-    # full = stft(full, ws, ss, pad=True)
     full = multiband_transform(full)
 
-    # residual = target - full
     residual = dict_op(target, full, lambda a, b: a - b)
 
     loss = 0
 
-    for i in range(n_events):
-        ch = recon[:, i: i + 1, :]
-        # ch = stft(ch, ws, ss, pad=True)
-        ch = multiband_transform(ch)
+    # for i in range(n_events):
+    i = np.random.randint(0, n_events)
+    ch = recon[:, i: i + 1, :]
+    ch = multiband_transform(ch)
 
-        # t = residual + ch
-        t = dict_op(residual, ch, lambda a, b: a + b)
+    t = dict_op(residual, ch, lambda a, b: a + b)
 
-        # loss = loss + F.mse_loss(ch, t.clone().detach())
-        diff = dict_op(ch, t, lambda a, b: a - b)
-        loss = loss + sum([torch.abs(y).sum() for y in diff.values()])
+    diff = dict_op(ch, t, lambda a, b: a - b)
+    loss = loss + sum([torch.abs(y).sum() for y in diff.values()])
 
-        # loss = loss + torch.abs(ch - t.clone().detach()).sum()
 
     return loss
 
@@ -668,14 +652,14 @@ def single_channel_loss(target: torch.Tensor, recon: torch.Tensor):
 def train(batch, i):
     optim.zero_grad()
 
+    b = batch.shape[0]
+    
     recon, encoded = model.forward(batch)
-
+    
     recon_summed = torch.sum(recon, dim=1, keepdim=True)
 
-    # loss = (single_channel_loss(batch, recon) * 1e-6)
-    fake_spec = stft(recon_summed, 2048, 256, pad=True)
-    real_spec = stft(batch, 2048, 256, pad=True)
-    loss = F.mse_loss(fake_spec, real_spec)    
+    loss = (single_channel_loss(batch, recon) * 1e-6)
+    
 
     loss.backward()
     optim.step()
@@ -703,22 +687,29 @@ def make_conjure(experiment: BaseExperimentRunner):
 class GraphRepresentation4(BaseExperimentRunner):
     encoded = MonitoredValueDescriptor(make_conjure)
 
-    def __init__(self, stream, port=None):
-        super().__init__(stream, train, exp, port=port)
+    def __init__(self, stream, port=None, load_weights=True, save_weights=False, model=model):
+        super().__init__(
+            stream, 
+            train, 
+            exp, 
+            port=port, 
+            load_weights=load_weights, 
+            save_weights=save_weights, 
+            model=model)
 
     def run(self):
         for i, item in enumerate(self.iter_items()):
             item = item.view(-1, 1, exp.n_samples)
             l, r, e = train(item, i)
 
-            if l is None:
-                continue
+            # if l is None:
+            #     continue
 
-            if i % 1000 == 0:
-                torch.save(model.state_dict(), 'siam.dat')
+            # if i % 1000 == 0:
+            #     torch.save(model.state_dict(), 'siam.dat')
 
             self.real = item
             self.fake = r
             self.encoded = e
             print(i, l.item())
-            self.after_training_iteration(l)
+            self.after_training_iteration(l, i)
