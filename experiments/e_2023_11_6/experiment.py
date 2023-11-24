@@ -16,6 +16,7 @@ from modules.fft import fft_convolve
 from modules.linear import LinearOutputStack
 from modules.normalization import max_norm, unit_norm
 from modules.overlap_add import overlap_add
+from modules.pif import fft_based_pif
 from modules.refractory import make_refractory_filter
 from modules.reverb import ReverbGenerator
 from modules.sparse import sparsify2
@@ -31,10 +32,11 @@ exp = Experiment(
     samplerate=zounds.SR22050(),
     n_samples=2 ** 15,
     weight_init=0.1,
-    model_dim=128,
-    kernel_size=512)
+    model_dim=256,
+    kernel_size=512,
+    windowed_pif=True)
 
-n_events = 32
+n_events = 64
 context_dim = 16
 impulse_size = 4096
 resonance_size = 32768
@@ -111,29 +113,30 @@ class ResonanceModel(nn.Module):
         #     nn.Linear(latent_dim, self.coarse_coeffs) for _ in range(self.n_piecewise)
         # ])
         
-        self.to_filter = ConvUpsample(
-            latent_dim,
-            channels,
-            start_size=8,
-            end_size=self.n_frames,
-            mode='nearest',
-            out_channels=self.coarse_coeffs,
-            from_latent=True,
-            batch_norm=True
-        )
+        # self.to_filter = ConvUpsample(
+        #     latent_dim,
+        #     channels,
+        #     start_size=8,
+        #     end_size=32,
+        #     mode='nearest',
+        #     out_channels=self.coarse_coeffs,
+        #     from_latent=True,
+        #     batch_norm=True
+        # )
+        self.to_filter = nn.Linear(latent_dim, 257)
         
         self.to_mixture = ConvUpsample(
             latent_dim, 
             channels, 
             start_size=8, 
             end_size=32, 
-            mode='nearest', 
+            mode='learned', 
             out_channels=n_piecewise, 
             from_latent=True, 
             batch_norm=True)
         
         
-        self.final_mix = nn.Linear(latent_dim, 3)
+        self.final_mix = nn.Linear(latent_dim, 2)
         
         self.register_buffer('env', torch.linspace(1, 0, self.resonance_size))
         self.max_exp = 20
@@ -161,23 +164,29 @@ class ResonanceModel(nn.Module):
         decay = torch.exp(decay)
         decay = F.interpolate(decay, size=self.resonance_size, mode='linear')
         
-        filt = self.to_filter(latent).view(-1, self.coarse_coeffs, self.n_frames).permute(0, 2, 1)
+        filt = self.to_filter(latent)
         filt = torch.sigmoid(filt)
-        filt = F.interpolate(filt, size=257, mode='linear')
-        filt = filt.view(-1, n_events, self.n_frames, 257)
+        filt = filt.view(-1, n_events, 1, 257)
+        # filt = self.to_filter(latent).view(-1, self.coarse_coeffs, self.n_frames).permute(0, 2, 1)
+        # filt = torch.sigmoid(filt)
+        # filt = F.interpolate(filt, size=257, mode='linear')
+        # filt = filt.view(-1, 32, 257)
+        # filt = F.avg_pool1d(filt, 7, 1, 3)
+        # filt = filt.view(-1, )
         
         
         for i in range(self.n_piecewise):
             
             # choose a linear combination of resonances
             sel = self.selections[i].forward(latent)
-            sel = torch.relu(sel)
+            sel = torch.softmax(sel, dim=-1)
             res = sel @ self.atoms
             res = res * decay
             
             filtered_res = res
             
             windowed = windowed_audio(filtered_res, 512, 256)
+            windowed = unit_norm(windowed, dim=-1)
             windowed = torch.fft.rfft(windowed, dim=-1)
             windowed = windowed * filt
             windowed = torch.fft.irfft(windowed)
@@ -197,6 +206,7 @@ class ResonanceModel(nn.Module):
         # produce a linear mixture-over time
         mx = self.to_mixture(latent)
         mx = F.interpolate(mx, size=self.resonance_size, mode='linear')
+        mx = F.avg_pool1d(mx, 9, 1, 4)
         mx = torch.softmax(mx, dim=1)
         mx = mx.view(-1, n_events, self.n_piecewise, self.resonance_size).permute(0, 2, 1, 3)
         
@@ -206,7 +216,7 @@ class ResonanceModel(nn.Module):
         final_mx = self.final_mix(latent)
         final_mx = torch.softmax(final_mx, dim=-1)
         
-        stacked = torch.cat([final_res[..., None], final_convs[..., None], imp[..., None]], dim=-1)
+        stacked = torch.cat([final_convs[..., None], imp[..., None]], dim=-1)
         
         final = stacked @ final_mx[..., None]
         final = final.view(-1, n_events, self.resonance_size)
@@ -593,16 +603,17 @@ class Model(nn.Module):
 
         final = self.verb.forward(dense, final)
 
-        return final
+        return final, imp
 
     def forward(self, x):
         encoded = self.encode(x)
 
-
         encoded, packed, one_hot = sparsify2(encoded, n_to_keep=n_events)
+        encoded = torch.relu(encoded)
+        
 
-        final = self.generate(encoded, one_hot, packed)
-        return final, encoded
+        final, imp = self.generate(encoded, one_hot, packed)
+        return final, encoded, imp
 
 
 model = Model().to(device)
@@ -621,6 +632,35 @@ def multiband_transform(x: torch.Tensor):
     d1 = {f'{k}_long': stft(v, 128, 64, pad=True) for k, v in bands.items()}
     d2 = {f'{k}_short': stft(v, 64, 32, pad=True) for k, v in bands.items()}
     return dict(**d1, **d2)
+    
+    # pif = exp.perceptual_feature(x)
+    # pif = fft_based_pif(x, 256, 64)
+    # return { 'pif': pif }
+
+
+# def single_channel_loss(target: torch.Tensor, recon: torch.Tensor):
+
+#     target = multiband_transform(target)
+
+#     full = torch.sum(recon, dim=1, keepdim=True)
+#     full = multiband_transform(full)
+
+#     residual = dict_op(target, full, lambda a, b: a - b)
+
+#     loss = 0
+
+#     for i in range(n_events):
+#         ch = recon[:, i: i + 1, :]
+#         ch = multiband_transform(ch)
+
+#         t = dict_op(residual, ch, lambda a, b: a + b)
+
+#         diff = dict_op(ch, t, lambda a, b: a - b)
+#         loss = loss + sum([torch.abs(y).sum() for y in diff.values()])
+
+
+#     return loss
+
 
 def single_channel_loss(target: torch.Tensor, recon: torch.Tensor):
 
@@ -630,7 +670,7 @@ def single_channel_loss(target: torch.Tensor, recon: torch.Tensor):
     full = multiband_transform(full)
 
     residual = dict_op(target, full, lambda a, b: a - b)
-
+    
     loss = 0
 
     # for i in range(n_events):
@@ -643,22 +683,22 @@ def single_channel_loss(target: torch.Tensor, recon: torch.Tensor):
     diff = dict_op(ch, t, lambda a, b: a - b)
     loss = loss + sum([torch.abs(y).sum() for y in diff.values()])
 
-
     return loss
-
-
-
 
 def train(batch, i):
     optim.zero_grad()
 
-    b = batch.shape[0]
+    # b = batch.shape[0]
     
-    recon, encoded = model.forward(batch)
+    recon, encoded, imp = model.forward(batch)
+    
+    energy_loss = torch.abs(imp).sum(dim=-1).mean() * 1e-5
+    print('ENERGY LOSS', energy_loss.item())
+    
     
     recon_summed = torch.sum(recon, dim=1, keepdim=True)
 
-    loss = (single_channel_loss(batch, recon) * 1e-6)
+    loss = (single_channel_loss(batch, recon) * 1e-6) + energy_loss
     
 
     loss.backward()

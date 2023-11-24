@@ -8,11 +8,13 @@ import zounds
 from config.experiment import Experiment
 from modules.angle import windowed_audio
 from modules.decompose import fft_frequency_decompose
+from modules.mixer import MixerStack
 from modules.overlap_add import overlap_add
 from modules.ddsp import NoiseModel
 from modules.fft import fft_convolve
 from modules.linear import LinearOutputStack
 from modules.normalization import max_norm, unit_norm
+from modules.pif import fft_based_pif
 from modules.refractory import make_refractory_filter
 from modules.reverb import ReverbGenerator
 from modules.sparse import sparsify2
@@ -29,7 +31,7 @@ exp = Experiment(
     samplerate=zounds.SR22050(),
     n_samples=2**15,
     weight_init=0.1,
-    model_dim=128,
+    model_dim=256,
     kernel_size=512)
 
 
@@ -72,7 +74,7 @@ class RecurrentResonanceModelWithComplexWaveforms(nn.Module):
         self.resonance_samples = resonance_samples
         self.filter_coeffs = window_size // 2 + 1
 
-        n_atoms = 1024
+        n_atoms = 2048
         self.n_frames = resonance_samples // (window_size // 2)
         self.res_factor = (1 - base_resonance) * 0.95
 
@@ -145,6 +147,9 @@ class GenerateMix(nn.Module):
 
 
 class GenerateImpulse(nn.Module):
+    """
+    Given a latent vector, generate a noisy, energetic impulse
+    """
 
     def __init__(self, latent_dim, channels, n_samples, n_filter_bands, encoding_channels):
         super().__init__()
@@ -297,7 +302,6 @@ class Model(nn.Module):
     def __init__(self):
         super().__init__()
 
-
         self.encoder = UNet(1024)
 
         self.embed_context = nn.Linear(4096, 256)
@@ -310,7 +314,7 @@ class Model(nn.Module):
         self.res = ResonanceModel(
             n_events, 256, 64, 1024, resonance_samples=resonance_size)
 
-        self.mix = GenerateMix(256, 128, n_events, mixer_channels=3)
+        self.mix = GenerateMix(256, 128, n_events, mixer_channels=2)
         self.to_amp = nn.Linear(256, 1)
 
         self.verb = ReverbGenerator(
@@ -370,13 +374,16 @@ class Model(nn.Module):
 
         conv = fft_convolve(padded, res)[..., :resonance_size]
 
-        stacked = torch.cat([padded[..., None], conv[..., None], res[..., None]], dim=-1)
-        mixed = stacked @ mx.view(-1, n_events, 3, 1)
+        stacked = torch.cat([padded[..., None], conv[..., None]], dim=-1)
+        mixed = stacked @ mx.view(-1, n_events, 2, 1)
         mixed = mixed.view(-1, n_events, resonance_size)
 
         amps = torch.abs(self.to_amp(embeddings))
         mixed = mixed * amps
 
+        # TODO: I could also try:
+        # - positioning by best fit
+        # - positioning using scalar positions
         final = F.pad(mixed, (0, exp.n_samples - mixed.shape[-1]))
         up = torch.zeros(final.shape[0], n_events, exp.n_samples, device=final.device)
         up[:, :, ::256] = packed
@@ -385,18 +392,19 @@ class Model(nn.Module):
 
         final = self.verb.forward(dense, final)
 
-        return final
+        return final, imp
     
-    def sparse_encode(self, x):
-        encoded = self.encode(x)
-        encoded, packed, one_hot = sparsify2(encoded, n_to_keep=n_events)
-        return encoded
+    # def sparse_encode(self, x):
+    #     encoded = self.encode(x)
+    #     encoded, packed, one_hot = sparsify2(encoded, n_to_keep=n_events)
+    #     return encoded
 
     def forward(self, x):
         encoded = self.encode(x)
         encoded, packed, one_hot = sparsify2(encoded, n_to_keep=n_events)
-        final = self.generate(encoded, one_hot, packed)
-        return final, encoded
+        encoded = torch.relu(encoded)
+        final, imp = self.generate(encoded, one_hot, packed)
+        return final, encoded, imp
 
 
 model = Model().to(device)
@@ -418,7 +426,28 @@ def multiband_transform(x: torch.Tensor):
     d2 = {f'{k}_short': stft(v, 64, 32, pad=True) for k, v in bands.items()}
     return dict(**d1, **d2)
 
+    # pif = exp.perceptual_feature(x)
+    # pif = fft_based_pif(x, 256, 64)
+    # return { 'pif': pif }
 
+
+# def ratio_loss(target: torch.Tensor, recon: torch.Tensor):
+#     target = stft(target, 2048, 256, pad=True)
+    
+#     residual = target
+    
+#     loss = 0
+    
+#     indices = np.random.permutation(n_events)
+#     for i in indices:
+#         ch = recon[:, i: i + 1, :]
+#         ch = stft(ch, 2048, 256, pad=True)
+#         start_norm = torch.norm(residual, dim=(1, 2))
+#         residual = residual - ch
+#         end_norm = torch.norm(residual, dim=(1, 2))
+#         loss = loss + (end_norm / (start_norm + 1e-12)).mean()    
+    
+#     return loss
 
 def single_channel_loss(target: torch.Tensor, recon: torch.Tensor):
 
@@ -428,31 +457,41 @@ def single_channel_loss(target: torch.Tensor, recon: torch.Tensor):
     full = multiband_transform(full)
 
     residual = dict_op(target, full, lambda a, b: a - b)
-
+    
     loss = 0
 
-    for i in range(n_events):
-        ch = recon[:, i: i + 1, :]
-        ch = multiband_transform(ch)
+    # for i in range(n_events):
+    i = np.random.randint(0, n_events)
+    ch = recon[:, i: i + 1, :]
+    ch = multiband_transform(ch)
 
-        t = dict_op(residual, ch, lambda a, b: a + b)
+    t = dict_op(residual, ch, lambda a, b: a + b)
 
-        diff = dict_op(ch, t, lambda a, b: a - b)
-        loss = loss + sum([torch.abs(y).sum() for y in diff.values()])
+    diff = dict_op(ch, t, lambda a, b: a - b)
+    loss = loss + sum([torch.abs(y).sum() for y in diff.values()])
 
     return loss
+
+
 
 
 def train(batch, i):
     optim.zero_grad()
 
-    recon, encoded = model.forward(batch)
-    # print(encoded.min(), encoded.max())
-
+    recon, encoded, imp = model.forward(batch)
+    # print('========================================')
+    # sparsity_loss = torch.abs(encoded).sum() * 0.001
+    # nz = (encoded > 0).view(batch.shape[0], -1).sum(dim=-1, dtype=torch.float32).mean()
+    # print('AVERAGE SPARSITY', nz.item())
+    
+    energy_loss = torch.abs(imp).sum(dim=-1).mean() * 1e-5
+    print('ENERGY LOSS', energy_loss.item())
+    
     recon_summed = torch.sum(recon, dim=1, keepdim=True)
 
-    loss = (single_channel_loss(batch, recon) * 1e-6)
-
+    loss = (single_channel_loss(batch, recon) * 1e-6) #+ energy_loss
+    
+    
     loss.backward()
     optim.step()
 

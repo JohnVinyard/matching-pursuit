@@ -4,6 +4,37 @@ from torch.nn import functional as F
 
 from modules.normalization import unit_norm
 
+def fft_based_pif(audio: torch.Tensor, freq_window_size: int, time_window_size: int):
+    batch_size = audio.shape[0]
+    spec: torch.Tensor = torch.fft.rfft(audio, dim=-1)
+    
+    freq_step = freq_window_size // 2
+    
+    windowed = spec.unfold(-1, freq_window_size, freq_step)
+    windowed = windowed * torch.hamming_window(freq_window_size, device=windowed.device)[None, None, None, :]
+    channels = torch.fft.irfft(windowed, dim=-1)
+    n_channels = channels.shape[2]
+    
+    # half-wave rectification
+    channels = torch.relu(channels)
+    
+    # compression
+    # TODO: How does this compare to the decibel-like transformation
+    # transformation
+    channels = torch.sqrt(channels)
+    
+    time_domain_window_size = time_window_size
+    time_domain_step_size = time_domain_window_size // 2
+    
+    channels = channels.view(batch_size, n_channels, -1)
+    channels = channels.unfold(-1, time_domain_window_size, time_domain_step_size)
+    channels = channels * torch.hamming_window(channels.shape[-1], device=channels.device)[None, None, None, :]
+    
+    # we want to capture fine-scale information in a phase-invariant way
+    # just keep the magnitudes
+    channels = torch.abs(torch.fft.rfft(channels, dim=-1))
+    
+    return channels
 
 
 
