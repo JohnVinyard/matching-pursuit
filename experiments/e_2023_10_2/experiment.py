@@ -431,23 +431,28 @@ def multiband_transform(x: torch.Tensor):
     # return { 'pif': pif }
 
 
-# def ratio_loss(target: torch.Tensor, recon: torch.Tensor):
-#     target = stft(target, 2048, 256, pad=True)
+def ratio_loss(target: torch.Tensor, recon: torch.Tensor):
+    target = stft(target, 2048, 256, pad=True)
     
-#     residual = target
+    residual = target
     
-#     loss = 0
+    loss = 0
     
-#     indices = np.random.permutation(n_events)
-#     for i in indices:
-#         ch = recon[:, i: i + 1, :]
-#         ch = stft(ch, 2048, 256, pad=True)
-#         start_norm = torch.norm(residual, dim=(1, 2))
-#         residual = residual - ch
-#         end_norm = torch.norm(residual, dim=(1, 2))
-#         loss = loss + (end_norm / (start_norm + 1e-12)).mean()    
+    indices = np.random.permutation(n_events)
     
-#     return loss
+    for i in indices:
+        ch = recon[:, i: i + 1, :]
+        ch = stft(ch, 2048, 256, pad=True)
+        mask = ch > 0
+        
+        start_norm = torch.norm(residual[mask])
+        residual = residual - ch
+        end_norm = torch.norm(residual[mask])
+        
+        loss = loss + (end_norm / (start_norm + 1e-12)).mean()    
+    
+    return loss
+
 
 def single_channel_loss(target: torch.Tensor, recon: torch.Tensor):
 
@@ -479,17 +484,14 @@ def train(batch, i):
     optim.zero_grad()
 
     recon, encoded, imp = model.forward(batch)
-    # print('========================================')
-    # sparsity_loss = torch.abs(encoded).sum() * 0.001
-    # nz = (encoded > 0).view(batch.shape[0], -1).sum(dim=-1, dtype=torch.float32).mean()
-    # print('AVERAGE SPARSITY', nz.item())
     
-    energy_loss = torch.abs(imp).sum(dim=-1).mean() * 1e-5
-    print('ENERGY LOSS', energy_loss.item())
+    # energy_loss = torch.abs(imp).sum(dim=-1).mean() * 1e-5
+    # print('ENERGY LOSS', energy_loss.item())
     
     recon_summed = torch.sum(recon, dim=1, keepdim=True)
 
-    loss = (single_channel_loss(batch, recon) * 1e-6) #+ energy_loss
+    # loss = (single_channel_loss(batch, recon) * 1e-6) #+ energy_loss
+    loss = (ratio_loss(batch, recon) * 1e-6) #+ energy_loss
     
     
     loss.backward()
