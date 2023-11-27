@@ -1,3 +1,3 @@
-from experiments.e_2023_10_2.inference import model
+from experiments.e_2023_11_6.inference import model
 
 

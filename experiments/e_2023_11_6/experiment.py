@@ -33,8 +33,7 @@ exp = Experiment(
     n_samples=2 ** 15,
     weight_init=0.1,
     model_dim=256,
-    kernel_size=512,
-    windowed_pif=True)
+    kernel_size=512)
 
 n_events = 64
 context_dim = 16
@@ -305,7 +304,7 @@ class ResonanceModel2(nn.Module):
             latent_dim, 
             channels, 
             start_size=8, 
-            end_size=32, 
+            end_size=self.n_frames, 
             mode='learned', 
             out_channels=n_piecewise, 
             from_latent=True, 
@@ -380,7 +379,6 @@ class ResonanceModel2(nn.Module):
         final_convs = overlap_add(windowed, apply_window=False)[..., :self.resonance_size]\
             .view(-1, n_events, self.resonance_size)
         
-        
         final_mx = self.final_mix(latent)
         final_mx = torch.softmax(final_mx, dim=-1)
         
@@ -390,6 +388,8 @@ class ResonanceModel2(nn.Module):
         final = final.view(-1, n_events, self.resonance_size)
     
         return final
+
+
 
 def make_waves(n_samples, f0s, samplerate):
     sawtooths = []
@@ -646,6 +646,11 @@ class Model(nn.Module):
         encoded = fft_convolve(encoded, ref)[..., :encoded.shape[-1]]
 
         return encoded
+    
+    def sparse_encode(self, x):
+        encoded = self.encode(x)
+        encoded, packed, one_hot = sparsify2(encoded, n_to_keep=n_events)
+        return encoded
 
     def generate(self, encoded, one_hot, packed):
         ctxt = torch.sum(encoded, dim=-1)
@@ -781,7 +786,6 @@ def train(batch, i):
     
     energy_loss = torch.abs(imp).sum(dim=-1).mean() * 1e-5
     print('ENERGY LOSS', energy_loss.item())
-    
     
     recon_summed = torch.sum(recon, dim=1, keepdim=True)
 
