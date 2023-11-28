@@ -798,7 +798,7 @@ def train(batch, i):
     print('GEN', loss.item())
 
     recon = max_norm(recon_summed)
-    encoded = max_norm(encoded)
+    # encoded = max_norm(encoded)
     return loss, recon, encoded
 
 

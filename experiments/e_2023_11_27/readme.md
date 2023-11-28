@@ -1,0 +1,1 @@
+I'll try a recurrent model again, that "leaks" energy
