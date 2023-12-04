@@ -18,8 +18,10 @@ from modules.linear import LinearOutputStack
 from modules.normalization import max_norm, unit_norm
 from modules.refractory import make_refractory_filter
 from modules.reverb import ReverbGenerator
+from modules.softmax import hard_softmax, sparse_softmax
 from modules.sparse import sparsify2
 from modules.stft import stft
+from modules.transfer import ImpulseGenerator
 from train.experiment_runner import BaseExperimentRunner, MonitoredValueDescriptor
 from train.optim import optimizer
 from modules.upsample import ConvUpsample
@@ -36,8 +38,10 @@ exp = Experiment(
 
 n_events = 64
 context_dim = 16
-impulse_size = 4096
+impulse_size = 16384
 resonance_size = 32768
+
+
 
 
 class ResonanceModel2(nn.Module):
@@ -289,33 +293,21 @@ class GenerateImpulse(nn.Module):
             activation=lambda x: torch.sigmoid(x),
             mask_after=1
         )
+        
+        self.to_env = nn.Linear(latent_dim, self.n_frames)
 
     def forward(self, x):
+        
+        env = self.to_env(x) ** 2
+        env = F.interpolate(env, mode='linear', size=self.n_samples)
+        
         x = self.to_frames(x)
         x = self.noise_model(x)
-        return x.view(-1, n_events, self.n_samples)
-
-
-class Analysis(nn.Module):
-    def __init__(self):
-        super().__init__()
-        encoder = nn.TransformerEncoderLayer(1024, 4, 1024, batch_first=True)
-        self.encoder = nn.TransformerEncoder(encoder, 4, norm=nn.LayerNorm((1024,)))
-        self.proj = nn.Conv1d(1024, 4096, 1, 1, 0)
+        x = x.view(-1, n_events, self.n_samples)
         
-        self.pos = nn.Parameter(torch.zeros(1, 1024, 128).uniform_(-0.1, 0.1))
-    
-    def forward(self, x):
-        
-        # add positional information
-        x = x + self.pos
-        
-        x = x.permute(0, 2, 1)
-        x = self.encoder.forward(x)
-        x = x.permute(0, 2, 1)
-        x = self.proj(x)
+        x = x * env
         return x
-        
+
 
 
 class UNet(nn.Module):
@@ -442,7 +434,6 @@ class Model(nn.Module):
         super().__init__()
 
         self.encoder = UNet(1024)
-        # self.encoder = Analysis()
     
         self.embed_context = nn.Linear(4096, 256)
         self.embed_one_hot = nn.Linear(4096, 256)
@@ -477,6 +468,7 @@ class Model(nn.Module):
         self.embed_memory_context = nn.Linear(4096, context_dim)
 
         self.from_context = nn.Linear(context_dim, 4096)
+        
 
         self.refractory_period = 8
         self.register_buffer('refractory', make_refractory_filter(
@@ -491,11 +483,11 @@ class Model(nn.Module):
             batch_size, 128, 1025)[..., :1024].permute(0, 2, 1)
 
         encoded = self.encoder.forward(x)
-        # encoded = F.dropout(encoded, 0.05)
+        encoded = F.dropout(encoded, 0.05)
 
-        # ref = F.pad(self.refractory,
-        #             (0, encoded.shape[-1] - self.refractory_period))
-        # encoded = fft_convolve(encoded, ref)[..., :encoded.shape[-1]]
+        ref = F.pad(self.refractory,
+                    (0, encoded.shape[-1] - self.refractory_period))
+        encoded = fft_convolve(encoded, ref)[..., :encoded.shape[-1]]
 
         return encoded
     
@@ -527,9 +519,6 @@ class Model(nn.Module):
         mixed = self.res.forward(embeddings, imp)
         mixed = unit_norm(mixed)
 
-
-        # TODO: Are the amps necessary here?  Shouldn't the sparse
-        # events serve that purpose
         amps = torch.abs(self.to_amp(embeddings))
         mixed = mixed * amps
 
@@ -570,8 +559,40 @@ def multiband_transform(x: torch.Tensor):
     d1 = {f'{k}_long': stft(v, 128, 64, pad=True) for k, v in bands.items()}
     d2 = {f'{k}_short': stft(v, 64, 32, pad=True) for k, v in bands.items()}
     return dict(**d1, **d2)
+    
+    # pif = exp.perceptual_feature(x)
+    # return dict(pif=pif)
 
 
+def ratio_loss(target: torch.Tensor, recon: torch.Tensor):
+    
+    norms = torch.norm(recon, dim=-1)
+    srt = torch.zeros_like(recon)
+    
+    # sort from loudest to quietest
+    for b in range(target.shape[0]):
+        indices = torch.argsort(norms[b], descending=True)
+        for i, index in enumerate(indices):
+            srt[b, i] = recon[b, index]
+    
+    
+    target = stft(target, 2048, 256, pad=True)
+    
+    residual = target
+    
+    loss = 0
+
+    for i in range(n_events):
+        ch = recon[:, i: i + 1, :]
+        ch = stft(ch, 2048, 256, pad=True)
+        
+        start_norm = torch.norm(residual, dim=(1, 2))
+        residual = residual - ch
+        end_norm = torch.norm(residual, dim=(1, 2))
+        
+        loss = loss + (end_norm / (start_norm + 1e-12)).mean()    
+    
+    return loss
 
 def single_channel_loss(target: torch.Tensor, recon: torch.Tensor):
 
@@ -598,7 +619,24 @@ def single_channel_loss(target: torch.Tensor, recon: torch.Tensor):
     return loss
 
 
-        
+
+
+# def energy_loss_func(iteration, batch_size, encoded, full_iteration=10000):
+#     """
+#     Slowly ramp up sparsity loss
+#     """
+
+#     iter = min(iteration, full_iteration)
+#     scaled = iter / full_iteration
+    
+#     print('=================================================')
+#     energy_loss = torch.abs(encoded).sum() * 1e-5
+#     print('ENERGY LOSS', energy_loss.item())
+#     nz = (encoded > 0).sum().item() / batch_size
+#     print('AVG. SPARSE', nz) 
+    
+#     return energy_loss * scaled
+    
 
 def train(batch, i):
     optim.zero_grad()
@@ -607,16 +645,11 @@ def train(batch, i):
     
     recon, encoded, imp = model.forward(batch)
     
-    # TODO: Is there some principled way to balance these losses without
-    # endless tuning?
-    # print('=================================================')
-    # energy_loss = torch.abs(encoded).sum() * 1e-5
-    # nz = (encoded > 0).sum().item() / b
-    # print('AVG. SPARSE', nz) 
     
     recon_summed = torch.sum(recon, dim=1, keepdim=True)
 
-    loss = (single_channel_loss(batch, recon) * 1e-6) #+ energy_loss
+    # loss = (single_channel_loss(batch, recon) * 1e-6) #+ energy_loss
+    loss = ratio_loss(batch, recon)
     
     loss.backward()
     optim.step()
