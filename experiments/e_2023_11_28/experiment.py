@@ -564,35 +564,41 @@ def multiband_transform(x: torch.Tensor):
     # return dict(pif=pif)
 
 
-def ratio_loss(target: torch.Tensor, recon: torch.Tensor):
+# def ratio_loss(target: torch.Tensor, recon: torch.Tensor):
     
-    norms = torch.norm(recon, dim=-1)
-    srt = torch.zeros_like(recon)
+#     norms = torch.norm(recon, dim=-1)
+#     srt = torch.zeros_like(recon)
     
-    # sort from loudest to quietest
-    for b in range(target.shape[0]):
-        indices = torch.argsort(norms[b], descending=True)
-        for i, index in enumerate(indices):
-            srt[b, i] = recon[b, index]
+#     # sort from loudest to quietest
+#     for b in range(target.shape[0]):
+#         indices = torch.argsort(norms[b], descending=True)
+#         for i, index in enumerate(indices):
+#             srt[b, i] = recon[b, index]
     
     
-    target = stft(target, 2048, 256, pad=True)
+#     target = stft(target, 2048, 256, pad=True)
     
-    residual = target
+#     residual = target
     
-    loss = 0
+#     loss = 0
 
-    for i in range(n_events):
-        ch = recon[:, i: i + 1, :]
-        ch = stft(ch, 2048, 256, pad=True)
+#     for i in range(n_events):
         
-        start_norm = torch.norm(residual, dim=(1, 2))
-        residual = residual - ch
-        end_norm = torch.norm(residual, dim=(1, 2))
+#         residual = residual.clone().detach()
         
-        loss = loss + (end_norm / (start_norm + 1e-12)).mean()    
+#         ch = recon[:, i: i + 1, :]
+#         ch = stft(ch, 2048, 256, pad=True)
+        
+#         start_norm = torch.norm(residual, dim=(1, 2))
+#         residual = residual - ch
+#         end_norm = torch.norm(residual, dim=(1, 2))
+        
+#         loss = loss + (end_norm / (start_norm + 1e-12)).mean()    
     
-    return loss
+    
+#     loss = torch.clamp(loss, 0, n_events + 1)
+    
+#     return loss
 
 def single_channel_loss(target: torch.Tensor, recon: torch.Tensor):
 
@@ -648,13 +654,14 @@ def train(batch, i):
     
     recon_summed = torch.sum(recon, dim=1, keepdim=True)
 
-    # loss = (single_channel_loss(batch, recon) * 1e-6) #+ energy_loss
-    loss = ratio_loss(batch, recon)
+    loss = (single_channel_loss(batch, recon) * 1e-6) #+ energy_loss
+    # loss = ratio_loss(batch, recon)
     
     loss.backward()
     optim.step()
 
-    recon = max_norm(recon_summed)
+    # recon = max_norm(recon_summed)
+    recon = recon_summed
     encoded = max_norm(encoded)
     return loss, recon, encoded
 
