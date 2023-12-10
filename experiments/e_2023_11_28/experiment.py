@@ -2,13 +2,12 @@ from typing import Callable, Dict
 
 import numpy as np
 import torch
-import zounds
-from conjure import numpy_conjure, SupportedContentType
+
+# from conjure import numpy_conjure, SupportedContentType
 from scipy.signal import square, sawtooth
 from torch import nn
 from torch.nn import functional as F
 
-from config.experiment import Experiment
 from modules.overlap_add import overlap_add
 from modules.angle import windowed_audio
 from modules.ddsp import NoiseModel
@@ -18,28 +17,28 @@ from modules.linear import LinearOutputStack
 from modules.normalization import max_norm, unit_norm
 from modules.refractory import make_refractory_filter
 from modules.reverb import ReverbGenerator
-from modules.softmax import hard_softmax, sparse_softmax
 from modules.sparse import sparsify2
 from modules.stft import stft
-from modules.transfer import ImpulseGenerator
-from train.experiment_runner import BaseExperimentRunner, MonitoredValueDescriptor
-from train.optim import optimizer
+# from train.experiment_runner import BaseExperimentRunner, MonitoredValueDescriptor
+# from train.optim import optimizer
 from modules.upsample import ConvUpsample
 from util import device
-from util.readmedocs import readme
+# from util.readmedocs import readme
 
 
-exp = Experiment(
-    samplerate=zounds.SR22050(),
-    n_samples=2 ** 15,
-    weight_init=0.1,
-    model_dim=256,
-    kernel_size=512)
+# exp = Experiment(
+#     samplerate=22050,
+#     n_samples=2 ** 15,
+#     weight_init=0.1,
+#     model_dim=256,
+#     kernel_size=512)
 
 n_events = 64
 context_dim = 16
 impulse_size = 4096
 resonance_size = 32768
+samplerate = 22050
+n_samples = 32768
 
 
 
@@ -78,8 +77,8 @@ class ResonanceModel2(nn.Module):
         low_hz = 40
         high_hz = 4000
         
-        low_samples = int(exp.samplerate) // low_hz
-        high_samples = int(exp.samplerate) // high_hz
+        low_samples = int(samplerate) // low_hz
+        high_samples = int(samplerate) // high_hz
         spacings = torch.linspace(low_samples, high_samples, self.n_atoms)
         print('SMALLEST SPACING', low_samples, 'HIGHEST SPACING', high_samples)
         oversample_rate = 8
@@ -443,7 +442,7 @@ class Model(nn.Module):
         
         total_atoms = 2048
         f0s = np.linspace(40, 4000, total_atoms // 4)
-        waves = make_waves(resonance_size, f0s, int(exp.samplerate))
+        waves = make_waves(resonance_size, f0s, int(samplerate))
         
         self.res = ResonanceModel2(
             256, 
@@ -461,7 +460,7 @@ class Model(nn.Module):
 
         # self.verb_context = nn.Linear(4096, 32)
         self.verb = ReverbGenerator(
-            context_dim, 3, exp.samplerate, exp.n_samples, norm=nn.LayerNorm((context_dim,)))
+            context_dim, 3, samplerate, n_samples, norm=nn.LayerNorm((context_dim,)))
 
         self.to_context_mean = nn.Linear(4096, context_dim)
         self.to_context_std = nn.Linear(4096, context_dim)
@@ -474,7 +473,7 @@ class Model(nn.Module):
         self.register_buffer('refractory', make_refractory_filter(
             self.refractory_period, power=10, device=device))
 
-        self.apply(lambda x: exp.init_weights(x))
+        # self.apply(lambda x: exp.init_weights(x))
 
     def encode(self, x):
         batch_size = x.shape[0]
@@ -532,11 +531,11 @@ class Model(nn.Module):
         amps = torch.abs(self.to_amp(embeddings))
         mixed = mixed * amps
 
-        final = F.pad(mixed, (0, exp.n_samples - mixed.shape[-1]))
-        up = torch.zeros(final.shape[0], n_events, exp.n_samples, device=final.device)
+        final = F.pad(mixed, (0, n_samples - mixed.shape[-1]))
+        up = torch.zeros(final.shape[0], n_events, n_samples, device=final.device)
         up[:, :, ::256] = packed
 
-        final = fft_convolve(final, up)[..., :exp.n_samples]
+        final = fft_convolve(final, up)[..., :n_samples]
 
         final = self.verb.forward(dense, final)
 
@@ -544,7 +543,7 @@ class Model(nn.Module):
 
     def forward(self, x):
         encoded = self.encode(x)
-
+        
         dense = torch.mean(encoded, dim=-1)
         mean = self.to_context_mean(dense)
         std = self.to_context_std(dense)
@@ -556,10 +555,29 @@ class Model(nn.Module):
 
         final, imp = self.generate(encoded, one_hot, packed, dense)
         return final, encoded, imp
+    
+    def derive_events_and_context(self, x: torch.Tensor):
+        
+        
+        print('STARTING WITH', x.shape)
+        
+        encoded = self.encode(x)
+        print('ENCODED', encoded.shape)
+
+        dense = torch.mean(encoded, dim=-1)
+        mean = self.to_context_mean(dense)
+        std = self.to_context_std(dense)
+        dense = mean + (torch.zeros_like(mean).normal_(0, 1) * std)
+        print('DENSE', dense.shape)
+        
+        
+        encoded, packed, one_hot = sparsify2(encoded, n_to_keep=n_events)
+        encoded = torch.relu(encoded)
+        return encoded, dense
 
 
 model = Model().to(device)
-optim = optimizer(model, lr=1e-3)
+# optim = optimizer(model, lr=1e-3)
 
 
 def dict_op(
@@ -575,45 +593,6 @@ def multiband_transform(x: torch.Tensor):
     d2 = {f'{k}_short': stft(v, 64, 32, pad=True) for k, v in bands.items()}
     return dict(**d1, **d2)
     
-    # pif = exp.perceptual_feature(x)
-    # return dict(pif=pif)
-
-
-# def ratio_loss(target: torch.Tensor, recon: torch.Tensor):
-    
-#     norms = torch.norm(recon, dim=-1)
-#     srt = torch.zeros_like(recon)
-    
-#     # sort from loudest to quietest
-#     for b in range(target.shape[0]):
-#         indices = torch.argsort(norms[b], descending=True)
-#         for i, index in enumerate(indices):
-#             srt[b, i] = recon[b, index]
-    
-    
-#     target = stft(target, 2048, 256, pad=True)
-    
-#     residual = target
-    
-#     loss = 0
-
-#     for i in range(n_events):
-        
-#         residual = residual.clone().detach()
-        
-#         ch = recon[:, i: i + 1, :]
-#         ch = stft(ch, 2048, 256, pad=True)
-        
-#         start_norm = torch.norm(residual, dim=(1, 2))
-#         residual = residual - ch
-#         end_norm = torch.norm(residual, dim=(1, 2))
-        
-#         loss = loss + (end_norm / (start_norm + 1e-6)).mean()    
-    
-    
-#     # loss = torch.clamp(loss, 0, n_events + 1)
-    
-#     return loss
 
 def single_channel_loss(target: torch.Tensor, recon: torch.Tensor):
 
@@ -639,79 +618,78 @@ def single_channel_loss(target: torch.Tensor, recon: torch.Tensor):
 
     return loss
 
-
     
 
-def train(batch, i):
-    optim.zero_grad()
+# def train(batch, i):
+#     optim.zero_grad()
 
-    b = batch.shape[0]
+#     b = batch.shape[0]
     
-    recon, encoded, imp = model.forward(batch)
+#     recon, encoded, imp = model.forward(batch)
     
-    
-    recon_summed = torch.sum(recon, dim=1, keepdim=True)
+#     recon_summed = torch.sum(recon, dim=1, keepdim=True)
 
-    loss = single_channel_loss(batch, recon)
-    # loss = ratio_loss(batch, recon)
+#     loss = single_channel_loss(batch, recon)
+#     # loss = ratio_loss(batch, recon)
     
-    loss.backward()
-    optim.step()
+#     loss.backward()
+#     optim.step()
 
 
-    with torch.no_grad():
-        # generate context latent
-        z = torch.zeros(1, context_dim, device=recon.device).normal_(0, 1)
+#     with torch.no_grad():
+#         # generate context latent
+#         z = torch.zeros(1, context_dim, device=recon.device).normal_(0, 1)
         
-        # generate events
-        events = torch.zeros(1, 1, 4096, 128, device=device).uniform_(0, 10) ** 2
-        events = F.avg_pool2d(events, (7, 7), (1, 1), (3, 3))
-        events = events.view(1, 4096, 128)
+#         # generate events
+#         events = torch.zeros(1, 1, 4096, 128, device=device).uniform_(0, 10) ** 2
+#         events = F.avg_pool2d(events, (7, 7), (1, 1), (3, 3))
+#         events = events.view(1, 4096, 128)
         
-        ch, _, encoded = model.from_sparse(events, z)
-        ch = torch.sum(ch, dim=1, keepdim=True)
+#         ch, _, encoded = model.from_sparse(events, z)
+#         ch = torch.sum(ch, dim=1, keepdim=True)
+
         
-    # recon = max_norm(recon_summed)
-    recon = max_norm(ch)
-    encoded = max_norm(encoded)
+#     recon = max_norm(recon_summed)
+#     # recon = max_norm(ch)
+#     encoded = max_norm(encoded)
     
-    return loss, recon, encoded
+#     return loss, recon, encoded
 
 
-def make_conjure(experiment: BaseExperimentRunner):
-    @numpy_conjure(experiment.collection, content_type=SupportedContentType.Spectrogram.value)
-    def encoded(x: torch.Tensor):
-        x = x[:, None, :, :]
-        x = F.max_pool2d(x, (16, 8), (16, 8))
-        x = x.view(x.shape[0], x.shape[2], x.shape[3])
-        x = x.data.cpu().numpy()[0]
-        return x
+# def make_conjure(experiment: BaseExperimentRunner):
+#     @numpy_conjure(experiment.collection, content_type=SupportedContentType.Spectrogram.value)
+#     def encoded(x: torch.Tensor):
+#         x = x[:, None, :, :]
+#         x = F.max_pool2d(x, (16, 8), (16, 8))
+#         x = x.view(x.shape[0], x.shape[2], x.shape[3])
+#         x = x.data.cpu().numpy()[0]
+#         return x
 
-    return (encoded,)
-
-
-@readme
-class GraphRepresentation5(BaseExperimentRunner):
-    encoded = MonitoredValueDescriptor(make_conjure)
-
-    def __init__(self, stream, port=None, load_weights=True, save_weights=False, model=model):
-        super().__init__(
-            stream, 
-            train, 
-            exp, 
-            port=port, 
-            load_weights=load_weights, 
-            save_weights=save_weights, 
-            model=model)
-
-    def run(self):
-        for i, item in enumerate(self.iter_items()):
-            item = item.view(-1, 1, exp.n_samples)
-            l, r, e = train(item, i)
+#     return (encoded,)
 
 
-            self.real = item
-            self.fake = r
-            self.encoded = e
-            print(i, l.item())
-            self.after_training_iteration(l, i)
+# @readme
+# class GraphRepresentation5(BaseExperimentRunner):
+#     encoded = MonitoredValueDescriptor(make_conjure)
+
+#     def __init__(self, stream, port=None, load_weights=True, save_weights=False, model=model):
+#         super().__init__(
+#             stream, 
+#             train, 
+#             exp, 
+#             port=port, 
+#             load_weights=load_weights, 
+#             save_weights=save_weights, 
+#             model=model)
+
+#     def run(self):
+#         for i, item in enumerate(self.iter_items()):
+#             item = item.view(-1, 1, n_samples)
+#             l, r, e = train(item, i)
+
+
+#             self.real = item
+#             self.fake = r
+#             self.encoded = e
+#             print(i, l.item())
+#             self.after_training_iteration(l, i)

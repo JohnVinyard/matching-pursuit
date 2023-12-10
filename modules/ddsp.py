@@ -12,7 +12,7 @@ from modules.overlap_add import overlap_add
 from modules.upsample import ConvUpsample, FFTUpsampleBlock
 
 from .normal_pdf import pdf
-import zounds
+# import zounds
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -301,7 +301,7 @@ class UnconstrainedOscillatorBank(nn.Module):
             n_audio_samples,
             min_frequency_hz=40,
             max_frequency_hz=9000,
-            samplerate=zounds.SR22050(),
+            samplerate=22050,
             fft_upsample=False,
             baselines=True):
 
@@ -431,7 +431,7 @@ class HarmonicModel(nn.Module):
             n_profiles=16,
             n_harmonics=64,
             freq_hz_range=(40, 4000),
-            samplerate=zounds.SR22050(),
+            samplerate=22050,
             reduce=torch.sum,
             n_frames=64,
             n_samples=2**14):

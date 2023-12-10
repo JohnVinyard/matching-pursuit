@@ -85,8 +85,13 @@ class Experiment(object):
 
         return place_encoding, pop_encoding, spike_timing
 
-    def perceptual_feature(self, x):
-        x = self.fb.forward(x, normalize=False)
+    def perceptual_feature(self, x, log_amplitude=True):
+        if log_amplitude:
+            x = self.fb.forward(x, normalize=False)
+        else:
+            x = self.fb.convolve(x)[..., :self.n_samples]
+            x = torch.relu(x)
+        
         x = self.aim.forward(x)
         return x
 

@@ -2,7 +2,7 @@ from functools import reduce
 from typing import Any, Collection
 import torch
 from torch import nn
-import zounds
+# import zounds
 
 from modules.ddsp import overlap_add
 from modules.pos_encode import pos_encoded
@@ -294,64 +294,64 @@ class STFTTransferFunction(nn.Module):
 
 
 
-class TransferFunction(nn.Module):
+# class TransferFunction(nn.Module):
 
-    def __init__(
-            self, 
-            samplerate: zounds.SampleRate, 
-            scale: zounds.FrequencyScale, 
-            n_frames: int, 
-            resolution: int,
-            n_samples: int,
-            softmax_func: Any,
-            is_continuous=False,
-            resonance_exp=1,
-            reduction=lambda x: torch.mean(x, dim=-1, keepdim=True)):
+#     def __init__(
+#             self, 
+#             samplerate: zounds.SampleRate, 
+#             scale: zounds.FrequencyScale, 
+#             n_frames: int, 
+#             resolution: int,
+#             n_samples: int,
+#             softmax_func: Any,
+#             is_continuous=False,
+#             resonance_exp=1,
+#             reduction=lambda x: torch.mean(x, dim=-1, keepdim=True)):
 
-        super().__init__()
-        self.samplerate = samplerate
-        self.scale = scale
-        self.n_frames = n_frames
-        self.resolution = resolution
-        self.n_samples = n_samples
-        self.softmax_func = softmax_func
-        self.is_continuous = is_continuous
-        self.resonance_exp = resonance_exp
-        self.reduction = reduction
+#         super().__init__()
+#         self.samplerate = samplerate
+#         self.scale = scale
+#         self.n_frames = n_frames
+#         self.resolution = resolution
+#         self.n_samples = n_samples
+#         self.softmax_func = softmax_func
+#         self.is_continuous = is_continuous
+#         self.resonance_exp = resonance_exp
+#         self.reduction = reduction
 
-        bank = morlet_filter_bank(
-            samplerate, n_samples, scale, 0.1, normalize=False)\
-            .real.astype(np.float32)
+#         bank = morlet_filter_bank(
+#             samplerate, n_samples, scale, 0.1, normalize=False)\
+#             .real.astype(np.float32)
         
-        self.register_buffer('filter_bank', torch.from_numpy(bank)[None, :, :])
+#         self.register_buffer('filter_bank', torch.from_numpy(bank)[None, :, :])
 
-        resonances = (torch.linspace(0, 0.999, resolution) ** resonance_exp)\
-            .view(resolution, 1).repeat(1, n_frames)
-        resonances = torch.cumprod(resonances, dim=-1)
-        self.register_buffer('resonance', resonances)
+#         resonances = (torch.linspace(0, 0.999, resolution) ** resonance_exp)\
+#             .view(resolution, 1).repeat(1, n_frames)
+#         resonances = torch.cumprod(resonances, dim=-1)
+#         self.register_buffer('resonance', resonances)
     
-    @property
-    def n_bands(self):
-        return self.scale.n_bands
+#     @property
+#     def n_bands(self):
+#         return self.scale.n_bands
     
-    def forward(self, x: torch.Tensor):
-        batch, bands, resolution = x.shape
+#     def forward(self, x: torch.Tensor):
+#         batch, bands, resolution = x.shape
 
-        if not self.is_continuous:
-            if bands != self.n_bands or resolution != self.resolution:
-                raise ValueError(
-                    f'Expecting tensor with shape (*, {self.n_bands}, {self.resolution})')
-            x = self.softmax_func(x)
-            x = x @ self.resonance
-        else:
-            x = (torch.clamp(x, 0, 1) ** self.resonance_exp) * 0.9999
-            x = torch.cumprod(x, dim=-1)
+#         if not self.is_continuous:
+#             if bands != self.n_bands or resolution != self.resolution:
+#                 raise ValueError(
+#                     f'Expecting tensor with shape (*, {self.n_bands}, {self.resolution})')
+#             x = self.softmax_func(x)
+#             x = x @ self.resonance
+#         else:
+#             x = (torch.clamp(x, 0, 1) ** self.resonance_exp) * 0.9999
+#             x = torch.cumprod(x, dim=-1)
 
-        x = F.interpolate(x, size=self.n_samples, mode='linear')
+#         x = F.interpolate(x, size=self.n_samples, mode='linear')
 
-        x = x * self.filter_bank
-        x = self.reduction(x)
-        return x
+#         x = x * self.filter_bank
+#         x = self.reduction(x)
+#         return x
 
 
     

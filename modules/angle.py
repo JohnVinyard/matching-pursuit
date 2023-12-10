@@ -1,4 +1,4 @@
-import zounds
+# import zounds
 from config.dotenv import Config
 import numpy as np
 from util import device
@@ -71,36 +71,3 @@ class Model(nn.Module):
     
     def forward(self):
         return self.params
-
-
-if __name__ == '__main__':
-    app = zounds.ZoundsApp(globals=globals(), locals=locals())
-    app.start_in_thread(9999)
-
-    model = Model().to(device)
-    optim = Adam(model.parameters(), lr=1e-4, betas=(0, 0.9))
-
-    data_stream = stream(1, 2**15, overfit=True)
-    data = next(data_stream)
-
-    def real(dim=0):
-        with torch.no_grad():
-            return spec_process(data).data.cpu().numpy().squeeze()[..., dim]
-    
-    def fake(dim=0):
-        with torch.no_grad():
-            return spec_process(estimate).data.cpu().numpy().squeeze()[..., dim]
-    
-    def listen():
-        return zounds.AudioSamples(estimate.squeeze().data.cpu().numpy(), zounds.SR22050()).pad_with_silence()
-
-    while True:
-        optim.zero_grad()
-        estimate = model()
-        loss = loss_func(estimate, data)
-        loss.backward()
-        optim.step()
-        print(loss.item())
-    
-
-    input()

@@ -35,6 +35,8 @@ def load_trained_weights_for_inference(
         print(f'Downloaded weights to {weights_path}')
     
     
+    print(f'loaded weights from {weights_path}')
+    
     # Now, we either have a local copy via previous training, via S3, or there
     # are no local weights to load
     try:

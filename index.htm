@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>HTML5 Boilerplate</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script type="text/javascript">
+      const docReady = () => {
+        const title = document.getElementById("title");
+        title.addEventListener("click", () => {
+          console.log("I was clicked");
+        });
+      };
+      document.addEventListener("DOMContentLoaded", docReady, false);
+    </script>
+  </head>
+
+  <body>
+    <h1 id="title">Page Title</h1>
+  </body>
+</html>

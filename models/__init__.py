@@ -1,0 +1,1 @@
+from .resonance import model

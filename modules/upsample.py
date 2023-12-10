@@ -1,19 +1,12 @@
-from itertools import chain
 from torch import nn
 import torch
 from torch.nn import functional as F
 import numpy as np
 from config.dotenv import Config
 from data.datastore import batch_stream
-from modules.activation import Sine
-from modules.linear import LinearOutputStack
-
-from modules.pos_encode import ExpandUsingPosEncodings
-from modules.transformer import Transformer
+# from modules.pos_encode import ExpandUsingPosEncodings
 from util import device
 
-import zounds
-from torch.optim import Adam
 
 from util.weight_init import make_initializer
 
@@ -112,59 +105,59 @@ def iter_layers(start_size, end_size):
         yield i, 2**i
 
 
-class PosEncodedUpsample(nn.Module):
-    def __init__(
-            self,
-            latent_dim,
-            channels,
-            size,
-            out_channels,
-            layers,
-            multiply=False,
-            learnable_encodings=False,
-            transformer=False,
-            concat=False,
-            filter_bank=False,
-            activation=None):
+# class PosEncodedUpsample(nn.Module):
+#     def __init__(
+#             self,
+#             latent_dim,
+#             channels,
+#             size,
+#             out_channels,
+#             layers,
+#             multiply=False,
+#             learnable_encodings=False,
+#             transformer=False,
+#             concat=False,
+#             filter_bank=False,
+#             activation=None):
 
-        super().__init__()
-        self.latent_dim = latent_dim
-        self.channels = channels
-        self.size = size
-        self.out_channels = out_channels
-        self.multiply = multiply
-        self.learnable_encodings = learnable_encodings
-        self.layers = layers
-        self.transformer = transformer
-        self.filter_bank = filter_bank
+#         super().__init__()
+#         self.latent_dim = latent_dim
+#         self.channels = channels
+#         self.size = size
+#         self.out_channels = out_channels
+#         self.multiply = multiply
+#         self.learnable_encodings = learnable_encodings
+#         self.layers = layers
+#         self.transformer = transformer
+#         self.filter_bank = filter_bank
 
-        self.expand = ExpandUsingPosEncodings(
-            channels, size, 16, latent_dim, multiply, learnable_encodings, concat=concat, filter_bank=filter_bank)
+#         self.expand = ExpandUsingPosEncodings(
+#             channels, size, 16, latent_dim, multiply, learnable_encodings, concat=concat, filter_bank=filter_bank)
 
-        if self.transformer:
-            encoder = nn.TransformerEncoderLayer(
-                channels, 2, channels, batch_first=True)
-            self.net = nn.Sequential(
-                nn.TransformerEncoder(encoder, layers, norm=None),
-                nn.Linear(channels, 1)
-            )
+#         if self.transformer:
+#             encoder = nn.TransformerEncoderLayer(
+#                 channels, 2, channels, batch_first=True)
+#             self.net = nn.Sequential(
+#                 nn.TransformerEncoder(encoder, layers, norm=None),
+#                 nn.Linear(channels, 1)
+#             )
 
-            # self.net = nn.Sequential(
-            #     Transformer(channels, layers),
-            #     nn.Linear(channels, out_channels)
-            # )
-        else:
-            self.net = LinearOutputStack(
-                channels, layers, out_channels=out_channels, activation=activation)
+#             # self.net = nn.Sequential(
+#             #     Transformer(channels, layers),
+#             #     nn.Linear(channels, out_channels)
+#             # )
+#         else:
+#             self.net = LinearOutputStack(
+#                 channels, layers, out_channels=out_channels, activation=activation)
 
-        self.apply(init_weights)
+#         self.apply(init_weights)
 
-    def forward(self, x):
-        x = x.view(x.shape[0], -1, self.latent_dim)
-        x = self.expand(x)
-        x = self.net(x)
-        x = x.permute(0, 2, 1)
-        return x
+#     def forward(self, x):
+#         x = x.view(x.shape[0], -1, self.latent_dim)
+#         x = self.expand(x)
+#         x = self.net(x)
+#         x = x.permute(0, 2, 1)
+#         return x
 
 
 class ConvUpsample(nn.Module):
@@ -291,104 +284,3 @@ class ExperimentParams(object):
         self.n_samples = n_samples
         self.size = size
         self.iterations = iterations
-
-
-class Experiment(object):
-    def __init__(self, batch_size, n_samples, size, iterations, name, make_decoder):
-        super().__init__()
-        self.batch_size = batch_size
-        self.n_samples = n_samples
-        self.size = size
-        self.iterations = iterations
-        self.make_decoder = make_decoder
-        self.name = name
-
-    def run(self):
-        encoder = SimpleEncoder(1, 32, self.size, 16).to(device)
-        decoder = self.make_decoder().to(device)
-        optim = Adam(
-            chain(encoder.parameters(), decoder.parameters()),
-            lr=1e-4,
-            betas=(0, 0.9))
-
-        losses = []
-        print('===========================================================================')
-        print('----------------------------------------------------------------')
-        print('Beginning', self.name)
-        print('----------------------------------------------------------------')
-
-        for i, b in enumerate(training_batch_stream(self.batch_size, self.n_samples, self.size)):
-            optim.zero_grad()
-            encoded = encoder(b)
-            decoded = decoder(encoded)
-
-            loss = F.mse_loss(decoded, b)
-            loss.backward()
-            optim.step()
-
-            if i % 1000 == 0:
-                print(i, loss.item() if len(losses)
-                      == 0 else np.mean(losses[-10:]))
-
-            losses.append(loss.item())
-
-            if i == self.iterations:
-                break
-
-        print('----------------------------------------------------------')
-        print(self.name, np.mean(losses[-10:]))
-        print('----------------------------------------------------------')
-        return self.name, b.data.cpu().numpy().squeeze(), decoded.data.cpu().numpy().squeeze()
-
-
-if __name__ == '__main__':
-
-    app = zounds.ZoundsApp(locals=locals(), globals=globals())
-    app.start_in_thread(9999)
-
-    results = {}
-
-    latent_dim = 16
-    channels = 32
-    size = 128
-
-    params = [
-        ExperimentParams('learned', lambda: ConvUpsample(
-            latent_dim, channels, 4, size, 'learned', 1)),
-        ExperimentParams('pos_multiply_learned', lambda: PosEncodedUpsample(
-            latent_dim, channels, size, 1, 5, transformer=False, multiply=True, learnable_encodings=True)),
-
-        ExperimentParams('fft_learned', lambda: ConvUpsample(
-            latent_dim, channels, 4, size, 'fft_learned', 1)),
-        ExperimentParams('fft', lambda: ConvUpsample(
-            latent_dim, channels, 4, size, 'fft', 1)),
-
-        ExperimentParams('pos', lambda: PosEncodedUpsample(
-            latent_dim, channels, size, 1, 5, transformer=False)),
-        ExperimentParams('pos_learned', lambda: PosEncodedUpsample(
-            latent_dim, channels, size, 1, 5, transformer=False, learnable_encodings=True)),
-        ExperimentParams('pos_multiply', lambda: PosEncodedUpsample(
-            latent_dim, channels, size, 1, 5, transformer=False, multiply=True)),
-        ExperimentParams('pos_transformer', lambda: PosEncodedUpsample(
-            latent_dim, channels, size, 1, 5, transformer=True)),
-
-
-        ExperimentParams('linear', lambda: ConvUpsample(
-            latent_dim, channels, 4, size, 'linear', 1)),
-        ExperimentParams('nearest', lambda: ConvUpsample(
-            latent_dim, channels, 4, size, 'nearest', 1))
-
-    ]
-
-    for param in params:
-        exp = Experiment(**param.__dict__)
-        name, real, fake = exp.run()
-        results[name] = (real, fake)
-
-    best = sorted(results.items(), key=lambda x: x[1], reverse=True)
-
-    print('==========================================')
-    for b in best:
-        print(b)
-
-    input('waiting....')
