@@ -562,13 +562,11 @@ class Model(nn.Module):
         print('STARTING WITH', x.shape)
         
         encoded = self.encode(x)
-        print('ENCODED', encoded.shape)
 
         dense = torch.mean(encoded, dim=-1)
         mean = self.to_context_mean(dense)
         std = self.to_context_std(dense)
         dense = mean + (torch.zeros_like(mean).normal_(0, 1) * std)
-        print('DENSE', dense.shape)
         
         
         encoded, packed, one_hot = sparsify2(encoded, n_to_keep=n_events)

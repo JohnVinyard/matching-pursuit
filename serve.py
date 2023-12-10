@@ -12,17 +12,11 @@ from io import BytesIO
 import numpy as np
 import requests
 
-queue = multiprocessing.Queue()
+from modules.normalization import max_norm
 
-'''
-/synth - takes parameters and generates audio
-/reconstruct - chooses a random musicnet segment, encodes it, also does synth to reconstruct
 
-https://music-net.s3.amazonaws.com/2155
-
-TODO: local list of all musicnet ids
-TODO: html and javascript for front-end
-'''
+# https://github.com/pytorch/pytorch/issues/82843
+torch.set_num_threads(1)
 
 json_example = {
     'events': [
@@ -71,22 +65,35 @@ MUSIC_NET_IDS = list(
     filter(lambda x: len(x) > 0, map(lambda x: x.split('.')[0], MUSIC_NET_FILENAMES)))
 
 
-SYNTH_TASK_NAME = 'synth'
-RECONSTRUCT_TASK_NAME = 'reconstruct'
-
 def json_params_to_dense(d: dict) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Transform d representing JSON parameters into an events and context
     tensor, respectively
     """
-    raise NotImplementedError()
+    events = d['events']
+    encoded = np.zeros((4096, 128), dtype=np.float32)
+    for atom, time, amp in events:
+        encoded[atom, time] = amp
+    encoded = torch.from_numpy(encoded).view(1, 4096, 128)
+    context = d['context']
+    context = np.array(context).astype(np.float32)
+    context = torch.from_numpy(context).view(1, 16)
+    return encoded, context
+    
 
-def synthesize(d: dict) -> bytes:
-    """
-    Transform d representing JSON parameters into audio
-    """
-    raise NotImplementedError()
 
+def dense_to_json_params(t: torch.Tensor, context: torch.Tensor) -> dict:
+    t = t.data.cpu().numpy().reshape((4096, 128))
+    a, b = np.nonzero(t)
+    
+    events = [(int(x), int(y), float(t[x, y])) for x, y in zip(a, b)]
+    
+    context = context.data.cpu().numpy().reshape((16,))
+    context = [float(x) for x in context]
+    return {
+        'events': events,
+        'context': context
+    }
 
 
 def get_segment(musicnet_id = None, start_index=None) -> Tuple[torch.Tensor, IO]:
@@ -106,7 +113,9 @@ def get_segment(musicnet_id = None, start_index=None) -> Tuple[torch.Tensor, IO]
         end_index = start_index + N_SAMPLES
         
         segment = audio[start_index: end_index].astype(np.float32)
-        audio_tensor = torch.from_numpy(segment)
+        segment /= (segment.max() + 1e-8)
+        audio_tensor = torch.from_numpy(segment).view(1, 1, N_SAMPLES)
+        
         bio = BytesIO()
         sf.write(bio, segment, samplerate=22050, format='wav')
         bio.seek(0)
@@ -130,7 +139,8 @@ def get_segment(musicnet_id = None, start_index=None) -> Tuple[torch.Tensor, IO]
         start_index = start_index or randint(0, total_samples - N_SAMPLES)
         end_index = start_index + N_SAMPLES
         segment = audio[start_index: end_index].astype(np.float32)
-        audio_tensor = torch.from_numpy(segment)
+        segment /= (segment.max() + 1e-8)
+        audio_tensor = torch.from_numpy(segment).view(1, 1, N_SAMPLES)
         
         bio2 = BytesIO()
         sf.write(bio2, segment, samplerate=22050, format='wav')
@@ -138,14 +148,32 @@ def get_segment(musicnet_id = None, start_index=None) -> Tuple[torch.Tensor, IO]
         
         return audio_tensor, bio2, start_index, end_index, total_samples
 
+def tensor_to_audio(t: torch.Tensor) -> IO:
+    arr = t.data.cpu().numpy().astype(np.float32)
+    bio = BytesIO()
+    sf.write(bio, arr, samplerate=22050, format='wav')
+    bio.seek(0)
+    return bio
 
-# def reconstruct():
-#     """
-#     Choose a random musicnet segment
-#     get both the encoding and the reconstruction
-#     """
-#     tensor, io = get_random_segment()
-#     return io
+
+def reconstruct_segment(musicnet_id, start):
+    tensor, audio_io, start, end, total = get_segment(musicnet_id, start)
+    x, _, _ = model.forward(tensor)
+    x = torch.sum(x, dim=1)
+    x = x.view(N_SAMPLES)
+    bio = tensor_to_audio(x)
+    return bio
+
+
+class Reconstruct(object):
+    
+    def on_get(self, req: falcon.Request, res: falcon.Response, musicnet, start):
+        bio = reconstruct_segment(musicnet, int(start))
+        data = bio.read()
+        res.set_header('content-type', 'audio/wav')
+        res.status = falcon.HTTP_OK
+        res.content_length = len(data)
+        res.body = data
 
 
 class Audio(object):
@@ -176,34 +204,34 @@ class Frontend(object):
         res.set_header('content-type', 'text/html')
 
 
-# TODO: This needs to be a POST
 class Synth(object):
     
     def on_post(self, req: falcon.Request, res: falcon.Response):
         
-        queue.put(['synth', req.media])
-        
-        raise NotImplementedError('Wait for task to be completed and grab result')
-        
-        shape = ''
+        encoding = req.media
+        encoded, context = json_params_to_dense(encoding)
+        audio, _, _ = model.from_sparse(encoded, context)
+        audio = torch.sum(audio, dim=1)
+        audio = audio.data.cpu().numpy().reshape((N_SAMPLES,))
+        bio = BytesIO()
+        sf.write(bio, audio, samplerate=22050, format='wav')
+        bio.seek(0)
+        data = bio.read()
         res.status = falcon.HTTP_OK
-        res.content_length = len(shape)
-        res.body = shape
+        res.content_length = len(data)
+        res.body = data
         res.set_header('content-type', 'audio/wav')
-    
 
-class Reconstruct(object):
-    
-    def on_post(self, req: falcon.Request, res: falcon.Response):
-        raise NotImplementedError()
 
-# class HealthCheck(object):
-#     def on_get(self, req: falcon.Request, res: falcon.Response):
-#         model_definition = str(model)
-#         res.status = falcon.HTTP_OK
-#         res.content_length = len(model_definition)
-#         res.body = model_definition
-#         res.set_header('content-type', 'text/html')
+class Encode(object):
+    
+    def on_get(self, req: falcon.Request, res: falcon.Response, musicnet, start):
+        tensor, audio_io, start, end, total = get_segment(musicnet, int(start))
+        encoded, dense = model.derive_events_and_context(tensor.view(1, 1, N_SAMPLES))
+        data = dense_to_json_params(encoded, dense)
+        res.status = falcon.HTTP_OK
+        res.media = data
+        res.set_header('content-type', 'application/json')
         
         
 
@@ -211,9 +239,14 @@ class App(falcon.API):
     def __init__(self, port):
         super().__init__(middleware=[])
         
-        # backend
+        # synthesize
         self.add_route('/synth', Synth())
-        self.add_route('/reconstruct', Reconstruct())
+        
+        # encode
+        self.add_route('/encode/{musicnet}/{start}', Encode())
+        
+        # reconstruct
+        self.add_route('/reconstruct/{musicnet}/{start}', Reconstruct())
         
         # audio
         self.add_route('/audio/{musicnet}/{start}', Audio())
@@ -272,18 +305,4 @@ def serve(
     return p
 
 
-print(MUSIC_NET_IDS)
 p = serve(8888)
-
-while True:
-    [task_name, task_params] = queue.get()
-    
-    if task_name == RECONSTRUCT_TASK_NAME:
-        pass
-    elif task_name == SYNTH_TASK_NAME:
-        pass
-    
-    # print(to_do)
-    # quick_check = torch.zeros(1, 1, 32768, device='cpu').uniform_(-1, 1)
-    # a, b, c = model.forward(quick_check)
-    # print(a.shape, b.shape, c.shape)

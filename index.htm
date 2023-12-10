@@ -3,14 +3,33 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>HTML5 Boilerplate</title>
-    <link rel="stylesheet" href="styles.css" />
+    <title>Matching Pursuit Demo</title>
     <script type="text/javascript">
-      const docReady = () => {
-        const title = document.getElementById("title");
-        title.addEventListener("click", () => {
-          console.log("I was clicked");
-        });
+      const docReady = async () => {
+        // find the audio element
+        const audioElement = document.getElementById("reconstruction");
+
+        // get the encoding for this piece of audio
+        const resp = await fetch("/encode/1727/2000").then((resp) =>
+          resp.json()
+        );
+
+        // display the encoded data
+        console.log(resp);
+
+        // post the encoding to get base64-encoded audio
+        const recon = await fetch("/synth", {
+          method: "POST",
+          body: JSON.stringify(resp),
+          headers: {
+            "Content-Type": "application/json",
+          },
+        }).then((resp) => resp.blob());
+
+        const dataUrl = URL.createObjectURL(recon);
+
+        // set the src of the audio element
+        audioElement.src = dataUrl;
       };
       document.addEventListener("DOMContentLoaded", docReady, false);
     </script>
@@ -18,5 +37,11 @@
 
   <body>
     <h1 id="title">Page Title</h1>
+
+    <audio src="/audio/1727/2000" controls></audio>
+
+    <audio src="/reconstruct/1727/2000" controls></audio>
+
+    <audio id="reconstruction" src="" controls></audio>
   </body>
 </html>
