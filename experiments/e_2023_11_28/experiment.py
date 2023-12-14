@@ -475,6 +475,7 @@ class Model(nn.Module):
 
         # self.apply(lambda x: exp.init_weights(x))
 
+
     def encode(self, x):
         batch_size = x.shape[0]
 
@@ -502,7 +503,10 @@ class Model(nn.Module):
 
     def generate(self, encoded, one_hot, packed, dense):
         
-        
+        print(dense.device)
+        print(encoded.device)
+        print(self.from_context.weight.device)
+        print(self.from_context.bias.device)
         
         # ctxt = torch.sum(encoded, dim=-1)
         # dense = self.embed_memory_context(ctxt)  # (batch, context_dim)
@@ -556,8 +560,22 @@ class Model(nn.Module):
         final, imp = self.generate(encoded, one_hot, packed, dense)
         return final, encoded, imp
     
-    def derive_events_and_context(self, x: torch.Tensor):
+    
+    def random_generation(self, exponent=2):
+        # generate context latent
+        z = torch.zeros(1, context_dim).normal_(0, 1)
         
+        # generate events
+        events = torch.zeros(1, 1, 4096, 128).uniform_(0, 10) ** exponent
+        events = F.avg_pool2d(events, (7, 7), (1, 1), (3, 3))
+        events = events.view(1, 4096, 128)
+        
+        ch, _, encoded = model.from_sparse(events, z)
+        ch = torch.sum(ch, dim=1, keepdim=True)
+        
+        return ch, encoded
+    
+    def derive_events_and_context(self, x: torch.Tensor):
         
         print('STARTING WITH', x.shape)
         

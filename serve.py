@@ -139,7 +139,7 @@ def get_segment(musicnet_id = None, start_index=None) -> Tuple[torch.Tensor, IO]
         start_index = start_index or randint(0, total_samples - N_SAMPLES)
         end_index = start_index + N_SAMPLES
         segment = audio[start_index: end_index].astype(np.float32)
-        segment /= (segment.max() + 1e-8)
+        
         audio_tensor = torch.from_numpy(segment).view(1, 1, N_SAMPLES)
         
         bio2 = BytesIO()
@@ -212,6 +212,7 @@ class Synth(object):
         encoded, context = json_params_to_dense(encoding)
         audio, _, _ = model.from_sparse(encoded, context)
         audio = torch.sum(audio, dim=1)
+        
         audio = audio.data.cpu().numpy().reshape((N_SAMPLES,))
         bio = BytesIO()
         sf.write(bio, audio, samplerate=22050, format='wav')
@@ -222,6 +223,21 @@ class Synth(object):
         res.body = data
         res.set_header('content-type', 'audio/wav')
 
+
+class Random(object):
+    def on_get(self, req: falcon.Request, res: falcon.Response):
+        t, encoded = model.random_generation()
+        
+        # TODO: factor this from here and synth
+        audio = t.data.cpu().numpy().reshape((N_SAMPLES,))
+        bio = BytesIO()
+        sf.write(bio, audio, samplerate=22050, format='wav')
+        bio.seek(0)
+        data = bio.read()
+        res.status = falcon.HTTP_OK
+        res.content_length = len(data)
+        res.body = data
+        res.set_header('content-type', 'audio/wav')
 
 class Encode(object):
     
@@ -241,6 +257,9 @@ class App(falcon.API):
         
         # synthesize
         self.add_route('/synth', Synth())
+        
+        # random
+        self.add_route('/random', Random())
         
         # encode
         self.add_route('/encode/{musicnet}/{start}', Encode())

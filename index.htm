@@ -14,9 +14,6 @@
           resp.json()
         );
 
-        // display the encoded data
-        console.log(resp);
-
         // post the encoding to get base64-encoded audio
         const recon = await fetch("/synth", {
           method: "POST",
@@ -36,12 +33,14 @@
   </head>
 
   <body>
-    <h1 id="title">Page Title</h1>
+    <h1 id="title">Page Title (Changed)</h1>
 
     <audio src="/audio/1727/2000" controls></audio>
 
     <audio src="/reconstruct/1727/2000" controls></audio>
 
     <audio id="reconstruction" src="" controls></audio>
+
+    <audio src="/random" controls></audio>
   </body>
 </html>
