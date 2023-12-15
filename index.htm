@@ -6,15 +6,17 @@
     <title>Matching Pursuit Demo</title>
     <script type="text/javascript">
       const docReady = async () => {
+
         // find the audio element
-        const audioElement = document.getElementById("reconstruction");
+        //const audioElement = document.getElementById("reconstruction");
 
         // get the encoding for this piece of audio
-        const resp = await fetch("/encode/1727/2000").then((resp) =>
-          resp.json()
-        );
+        //const resp = await fetch("/encode/1727/2000").then((resp) =>
+        //  resp.json()
+        //);
 
         // post the encoding to get base64-encoded audio
+        /*
         const recon = await fetch("/synth", {
           method: "POST",
           body: JSON.stringify(resp),
@@ -27,6 +29,8 @@
 
         // set the src of the audio element
         audioElement.src = dataUrl;
+        */
+        
       };
       document.addEventListener("DOMContentLoaded", docReady, false);
     </script>
@@ -35,12 +39,19 @@
   <body>
     <h1 id="title">Page Title (Changed)</h1>
 
-    <audio src="/audio/1727/2000" controls></audio>
+    <h2>Reconstructions</h2>
 
-    <audio src="/reconstruct/1727/2000" controls></audio>
+    <!-- <audio src="/audio/1727/2000" controls></audio> -->
 
-    <audio id="reconstruction" src="" controls></audio>
+    <!-- <audio src="/reconstruct/1727/2000" controls></audio> -->
+
+
+    <h2>Random Generations</h2>
 
     <audio src="/random" controls></audio>
+    <audio src="/random" controls></audio>
+    <audio src="/random" controls></audio>
+    <audio src="/random" controls></audio>
+
   </body>
 </html>

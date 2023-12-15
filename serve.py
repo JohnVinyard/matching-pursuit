@@ -15,6 +15,8 @@ import requests
 from modules.normalization import max_norm
 
 
+print('IMPORTED MODEL ID IS', id(model))
+
 # https://github.com/pytorch/pytorch/issues/82843
 torch.set_num_threads(1)
 
@@ -120,7 +122,7 @@ def get_segment(musicnet_id = None, start_index=None) -> Tuple[torch.Tensor, IO]
         sf.write(bio, segment, samplerate=22050, format='wav')
         bio.seek(0)
         
-        return audio_tensor, bio, start_index, end_index, total_samples
+        return audio_tensor, bio, start_index, end_index, total_samples, musicnet_id
     except IOError:
         r = requests.get(f'https://music-net.s3.amazonaws.com/{musicnet_id}')
         bio = BytesIO()
@@ -146,7 +148,7 @@ def get_segment(musicnet_id = None, start_index=None) -> Tuple[torch.Tensor, IO]
         sf.write(bio2, segment, samplerate=22050, format='wav')
         bio2.seek(0)
         
-        return audio_tensor, bio2, start_index, end_index, total_samples
+        return audio_tensor, bio2, start_index, end_index, total_samples, musicnet_id
 
 def tensor_to_audio(t: torch.Tensor) -> IO:
     arr = t.data.cpu().numpy().astype(np.float32)
@@ -157,7 +159,7 @@ def tensor_to_audio(t: torch.Tensor) -> IO:
 
 
 def reconstruct_segment(musicnet_id, start):
-    tensor, audio_io, start, end, total = get_segment(musicnet_id, start)
+    tensor, audio_io, start, end, total, musicnet_id = get_segment(musicnet_id, start)
     x, _, _ = model.forward(tensor)
     x = torch.sum(x, dim=1)
     x = x.view(N_SAMPLES)
@@ -179,7 +181,7 @@ class Reconstruct(object):
 class Audio(object):
     def on_get(self, req: falcon.Request, res: falcon.Response, musicnet=None, start=None):
         
-        _, bio, start, end, total = get_segment(
+        _, bio, start, end, total, musicnet_id = get_segment(
             musicnet_id=musicnet, 
             start_index=None if start is None else int(start))
         
@@ -187,6 +189,7 @@ class Audio(object):
         
         res.set_header('content-type', 'audio/wav')
         res.set_header('content-range', f'samples {start}-{end}/{total}')
+        res.set_header('location', f'/audio/{musicnet_id}/{start}')
         
         res.status = falcon.HTTP_OK
         res.content_length = len(data)
@@ -226,7 +229,7 @@ class Synth(object):
 
 class Random(object):
     def on_get(self, req: falcon.Request, res: falcon.Response):
-        t, encoded = model.random_generation()
+        t, encoded = model.random_generation(exponent=2)
         
         # TODO: factor this from here and synth
         audio = t.data.cpu().numpy().reshape((N_SAMPLES,))
@@ -242,7 +245,7 @@ class Random(object):
 class Encode(object):
     
     def on_get(self, req: falcon.Request, res: falcon.Response, musicnet, start):
-        tensor, audio_io, start, end, total = get_segment(musicnet, int(start))
+        tensor, audio_io, start, end, total, musicnet_id = get_segment(musicnet, int(start))
         encoded, dense = model.derive_events_and_context(tensor.view(1, 1, N_SAMPLES))
         data = dense_to_json_params(encoded, dense)
         res.status = falcon.HTTP_OK

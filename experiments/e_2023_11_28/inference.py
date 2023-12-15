@@ -6,5 +6,5 @@ model = load_trained_weights_for_inference(
     __file__, 
     ResonanceInferenceModel, 
     device='cpu', 
-    s3_bucket=Config.s3_bucket())
+    s3_bucket=Config.s3_bucket()).to('cpu').eval()
 

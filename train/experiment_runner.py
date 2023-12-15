@@ -3,7 +3,7 @@ from typing import Union
 import torch
 from torch import nn
 from config.experiment import Experiment
-from util import playable
+from util.playable import playable
 import numpy as np
 import zounds
 from conjure import LmdbCollection
@@ -21,7 +21,7 @@ def build_funcs(prefix):
             identifier=f'{prefix}audio',
         )
         def audio(data: torch.Tensor):
-            samples = playable(data, experiment.exp.samplerate)
+            samples = playable(data, zounds.SR22050())
             bio = samples.encode()
             return bio.read()
 
@@ -31,7 +31,7 @@ def build_funcs(prefix):
             identifier=f'{prefix}spec',
         )
         def spec(data: torch.Tensor):
-            samples = playable(data, experiment.exp.samplerate)
+            samples = playable(data, zounds.SR22050())
             x = np.abs(zounds.spectral.stft(samples))
             return (x / (x.max() + 1e-12))
 

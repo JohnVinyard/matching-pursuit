@@ -35,14 +35,14 @@ def load_trained_weights_for_inference(
         print(f'Downloaded weights to {weights_path}')
     
     
-    print(f'loaded weights from {weights_path}')
+    print(f'[INFO] - loaded weights from {weights_path}')
     
     # Now, we either have a local copy via previous training, via S3, or there
     # are no local weights to load
     try:
         model.load_state_dict(torch.load(weights_path, map_location=device))
     except IOError:
-        warn(f'No local or remote saved weights')
+        warn(f'[WARNING] - No local or remote saved weights')
     
     return model
     

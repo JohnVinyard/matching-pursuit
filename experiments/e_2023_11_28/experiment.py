@@ -7,6 +7,7 @@ import torch
 from scipy.signal import square, sawtooth
 from torch import nn
 from torch.nn import functional as F
+# from config.experiment import Experiment
 
 from modules.overlap_add import overlap_add
 from modules.angle import windowed_audio
@@ -562,16 +563,18 @@ class Model(nn.Module):
     
     
     def random_generation(self, exponent=2):
-        # generate context latent
-        z = torch.zeros(1, context_dim).normal_(0, 1)
-        
-        # generate events
-        events = torch.zeros(1, 1, 4096, 128).uniform_(0, 10) ** exponent
-        events = F.avg_pool2d(events, (7, 7), (1, 1), (3, 3))
-        events = events.view(1, 4096, 128)
-        
-        ch, _, encoded = model.from_sparse(events, z)
-        ch = torch.sum(ch, dim=1, keepdim=True)
+        with torch.no_grad():
+            # generate context latent
+            z = torch.zeros(1, context_dim).normal_(0, 1)
+            
+            # generate events
+            events = torch.zeros(1, 1, 4096, 128).uniform_(0, 10) ** exponent
+            events = F.avg_pool2d(events, (7, 7), (1, 1), (3, 3))
+            events = events.view(1, 4096, 128)
+            
+            ch, _, encoded = self.from_sparse(events, z)
+            ch = torch.sum(ch, dim=1, keepdim=True)
+            ch = max_norm(ch)
         
         return ch, encoded
     
@@ -592,7 +595,7 @@ class Model(nn.Module):
         return encoded, dense
 
 
-model = Model().to(device)
+model = Model()#.to(device)
 # optim = optimizer(model, lr=1e-3)
 
 
@@ -634,7 +637,7 @@ def single_channel_loss(target: torch.Tensor, recon: torch.Tensor):
 
     return loss
 
-    
+
 
 # def train(batch, i):
 #     optim.zero_grad()
@@ -653,20 +656,29 @@ def single_channel_loss(target: torch.Tensor, recon: torch.Tensor):
 
 
 #     with torch.no_grad():
+        
+#         # switch to cpu evaluation
+#         model.to('cpu')
+#         model.eval()
+        
 #         # generate context latent
-#         z = torch.zeros(1, context_dim, device=recon.device).normal_(0, 1)
+#         z = torch.zeros(1, context_dim).normal_(0, 1)
         
 #         # generate events
-#         events = torch.zeros(1, 1, 4096, 128, device=device).uniform_(0, 10) ** 2
+#         events = torch.zeros(1, 1, 4096, 128).uniform_(0, 10) ** 2
 #         events = F.avg_pool2d(events, (7, 7), (1, 1), (3, 3))
 #         events = events.view(1, 4096, 128)
         
 #         ch, _, encoded = model.from_sparse(events, z)
 #         ch = torch.sum(ch, dim=1, keepdim=True)
+        
+#         # switch back to GPU training
+#         model.to('cuda')
+#         model.train()
 
         
-#     recon = max_norm(recon_summed)
-#     # recon = max_norm(ch)
+#     # recon = max_norm(recon_summed)
+#     recon = max_norm(ch)
 #     encoded = max_norm(encoded)
     
 #     return loss, recon, encoded
