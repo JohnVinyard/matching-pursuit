@@ -5,7 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Matching Pursuit Demo</title>
     <style>
-      .events {
+      body {
+        font-family: sans-serif;
+
+      }
+      .events,
+      .context {
         padding: 10px;
         border: solid 1px black;
       }
@@ -19,22 +24,22 @@
         events.forEach(([a, b, c], index) => {
           const ratio = Math.floor(4096 / 512);
           const aDownScaled = Math.floor(a / ratio);
-
           ctx.fillStyle = "rgb(255, 255, 255)";
-          ctx.fillRect(aDownScaled, b, 3, 3);
+          ctx.fillRect(b, aDownScaled, 3, 3);
         });
       };
 
       const drawContext = (canvasElement, context) => {
         const ctx = canvasElement.getContext("2d");
 
-        const minValue = Math.min(context);
+        const minValue = Math.min(...context);
         const allPositive = context.map((x) => x - minValue);
-        const maxValue = Math.max(allPositive);
+        const maxValue = Math.max(...allPositive);
 
         allPositive.forEach((n, index) => {
           const b = Math.round((n / maxValue) * 255).toFixed(0);
-          ctx.fillStyle = `rgb(${b}, ${b}, ${b})`;
+          const fillStyle = `rgb(${b}, ${b}, ${b})`;
+          ctx.fillStyle = fillStyle;
           const height = 16;
           const width = 16;
           const position = index * height;
@@ -98,7 +103,14 @@
 
   <body>
     <h1 id="title">Sparse Interpretible Audio Model</h1>
-
+    <ul>
+      <li>
+        <a href="#reconstructions-section">Reconstructions</a>
+      </li>
+      <li>
+        <a href="#random-generation">Random Generations</a>
+      </li>
+    </ul>
     <p>
       Read more about the model
       <a
@@ -110,6 +122,7 @@
 
     <h2>Reconstructions</h2>
 
+    <a id="reconstructions-section"></a>
     <div>
       <audio class="original" src="" controls></audio>
       <audio class="reconstruction" src="" controls></audio>
@@ -223,7 +236,7 @@
     <hr />
 
     <h2>Random Generations</h2>
-
+    <a id="random-generation"></a>
     <audio src="/random?q=a" controls></audio>
     <audio src="/random?q=b" controls></audio>
     <audio src="/random?q=c" controls></audio>

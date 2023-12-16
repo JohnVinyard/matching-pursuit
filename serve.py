@@ -340,8 +340,8 @@ def serve(
             print('Exit because of worker failure')
             sys.exit(1)
 
-    worker_count = (multiprocessing.cpu_count() * 2) + 1
-    # worker_count = 2
+    # worker_count = (multiprocessing.cpu_count() * 2) + 1
+    worker_count = 4
 
     def run():
         standalone = StandaloneApplication(
