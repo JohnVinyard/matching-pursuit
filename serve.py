@@ -11,6 +11,7 @@ import soundfile as sf
 from io import BytesIO
 import numpy as np
 import requests
+import os.path
 
 from modules.normalization import max_norm
 
@@ -28,6 +29,8 @@ json_example = {
     'context': [0] * 16
 }
 
+N_RECON_EXAMPLES = 8
+SAMPLERATE = 22050
 N_SAMPLES = 2**15
 MUSIC_NET_FILENAMES = '''
 1727.wav  1791.wav  2079.wav  2167.wav  2224.wav  2302.wav  2371.wav  2433.wav  2506.wav  2572.wav
@@ -98,6 +101,10 @@ def dense_to_json_params(t: torch.Tensor, context: torch.Tensor) -> dict:
     }
 
 
+def has_local_copy(musicnet_id):
+    return os.path.exists(f'{musicnet_id}.wav')
+
+
 def get_segment(musicnet_id = None, start_index=None) -> Tuple[torch.Tensor, IO]:
     """
     Choose from local list
@@ -107,7 +114,7 @@ def get_segment(musicnet_id = None, start_index=None) -> Tuple[torch.Tensor, IO]
     musicnet_id = musicnet_id or choice(MUSIC_NET_IDS)
     
     try:
-        audio, sr = librosa.load(f'{musicnet_id}.wav', sr=22050, mono=True)
+        audio, sr = librosa.load(f'{musicnet_id}.wav', sr=SAMPLERATE, mono=True)
         
         total_samples = audio.shape[-1]
         
@@ -119,7 +126,7 @@ def get_segment(musicnet_id = None, start_index=None) -> Tuple[torch.Tensor, IO]
         audio_tensor = torch.from_numpy(segment).view(1, 1, N_SAMPLES)
         
         bio = BytesIO()
-        sf.write(bio, segment, samplerate=22050, format='wav')
+        sf.write(bio, segment, samplerate=SAMPLERATE, format='wav')
         bio.seek(0)
         
         return audio_tensor, bio, start_index, end_index, total_samples, musicnet_id
@@ -130,10 +137,10 @@ def get_segment(musicnet_id = None, start_index=None) -> Tuple[torch.Tensor, IO]
         bio.seek(0)
         
         # read the bytes and resample them
-        audio, sr = librosa.load(bio, sr=22050, mono=True)
+        audio, sr = librosa.load(bio, sr=SAMPLERATE, mono=True)
         
         # save the entire audio file for later
-        sf.write(f'{musicnet_id}.wav', audio, samplerate=22050, format='wav')
+        sf.write(f'{musicnet_id}.wav', audio, samplerate=SAMPLERATE, format='wav')
         
         total_samples = audio.shape[-1]
         
@@ -145,7 +152,7 @@ def get_segment(musicnet_id = None, start_index=None) -> Tuple[torch.Tensor, IO]
         audio_tensor = torch.from_numpy(segment).view(1, 1, N_SAMPLES)
         
         bio2 = BytesIO()
-        sf.write(bio2, segment, samplerate=22050, format='wav')
+        sf.write(bio2, segment, samplerate=SAMPLERATE, format='wav')
         bio2.seek(0)
         
         return audio_tensor, bio2, start_index, end_index, total_samples, musicnet_id
@@ -153,13 +160,14 @@ def get_segment(musicnet_id = None, start_index=None) -> Tuple[torch.Tensor, IO]
 def tensor_to_audio(t: torch.Tensor) -> IO:
     arr = t.data.cpu().numpy().astype(np.float32)
     bio = BytesIO()
-    sf.write(bio, arr, samplerate=22050, format='wav')
+    sf.write(bio, arr, samplerate=SAMPLERATE, format='wav')
     bio.seek(0)
     return bio
 
 
 def reconstruct_segment(musicnet_id, start):
     tensor, audio_io, start, end, total, musicnet_id = get_segment(musicnet_id, start)
+    tensor = max_norm(tensor)
     x, _, _ = model.forward(tensor)
     x = torch.sum(x, dim=1)
     x = x.view(N_SAMPLES)
@@ -218,7 +226,7 @@ class Synth(object):
         
         audio = audio.data.cpu().numpy().reshape((N_SAMPLES,))
         bio = BytesIO()
-        sf.write(bio, audio, samplerate=22050, format='wav')
+        sf.write(bio, audio, samplerate=SAMPLERATE, format='wav')
         bio.seek(0)
         data = bio.read()
         res.status = falcon.HTTP_OK
@@ -234,7 +242,7 @@ class Random(object):
         # TODO: factor this from here and synth
         audio = t.data.cpu().numpy().reshape((N_SAMPLES,))
         bio = BytesIO()
-        sf.write(bio, audio, samplerate=22050, format='wav')
+        sf.write(bio, audio, samplerate=SAMPLERATE, format='wav')
         bio.seek(0)
         data = bio.read()
         res.status = falcon.HTTP_OK
@@ -252,7 +260,26 @@ class Encode(object):
         res.media = data
         res.set_header('content-type', 'application/json')
         
+
+
+class Pairs(object):
+    
+    def on_get(self, req: falcon.Request, res: falcon.Response):
+        segments = []
+        for i in range(N_RECON_EXAMPLES):
+            _id = choice(MUSIC_NET_IDS)
+            approx_len = (60 * 1) * SAMPLERATE
+            start = randint(0, approx_len)
+            segments.append({
+                'original': f'/audio/{_id}/{start}', 
+                'reconstruction': f'/reconstruct/{_id}/{start}',
+                'encoding': f'/encode/{_id}/{start}'
+            })
         
+        res.status = falcon.HTTP_OK
+        res.media = segments
+        res.set_header('content-tyep', 'application/json')
+    
 
 class App(falcon.API):
     def __init__(self, port):
@@ -260,6 +287,9 @@ class App(falcon.API):
         
         # synthesize
         self.add_route('/synth', Synth())
+        
+        # get a set of links for original/reconstruction pairs
+        self.add_route('/suggestions', Pairs())
         
         # random
         self.add_route('/random', Random())
@@ -310,8 +340,8 @@ def serve(
             print('Exit because of worker failure')
             sys.exit(1)
 
-    # worker_count = (multiprocessing.cpu_count() * 2) + 1
-    worker_count = 2
+    worker_count = (multiprocessing.cpu_count() * 2) + 1
+    # worker_count = 2
 
     def run():
         standalone = StandaloneApplication(
