@@ -6,3 +6,7 @@
 
 # from .e_2023_11_28 import GraphRepresentation5 as Current
 # from .e_2023_12_5 import GraphRepresentation6 as Current
+
+# from .e_2023_12_16 import GraphRepresentation7 as Current
+
+from .e_2023_12_18 import ApproxMatchingPursuit as Current

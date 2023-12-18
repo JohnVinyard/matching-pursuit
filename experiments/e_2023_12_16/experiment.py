@@ -13,13 +13,14 @@ from modules.overlap_add import overlap_add
 from modules.angle import windowed_audio
 from modules.ddsp import NoiseModel
 from modules.decompose import fft_frequency_decompose
-from modules.fft import fft_convolve
+from modules.fft import fft_convolve, fft_shift
 from modules.linear import LinearOutputStack
 from modules.normalization import max_norm, unit_norm
 from modules.refractory import make_refractory_filter
 from modules.reverb import ReverbGenerator
-from modules.sparse import sparsify2
+from modules.sparse import soft_dirac, sparsify2, sparsify_vectors
 from modules.stft import stft
+from modules.transfer import ImpulseGenerator
 from train.experiment_runner import BaseExperimentRunner, MonitoredValueDescriptor
 from train.optim import optimizer
 from modules.upsample import ConvUpsample
@@ -34,7 +35,7 @@ exp = Experiment(
     model_dim=256,
     kernel_size=512)
 
-n_events = 64
+n_events = 16
 context_dim = 16
 impulse_size = 4096
 resonance_size = 32768
@@ -42,6 +43,17 @@ samplerate = 22050
 n_samples = 32768
 
 
+def training_softmax(x, dim=-1):
+    """
+    Produce a random mixture of the soft and hard functions, such
+    that softmax cannot be replied upon.  This _should_ cause
+    the model to gravitate to the areas where the soft and hard functions
+    are near equivalent
+    """
+    mixture = torch.zeros(x.shape[0], x.shape[1], 1, device=x.device).uniform_(0, 1)
+    sm = torch.softmax(x, dim=dim)
+    d = soft_dirac(x)
+    return (d * mixture) + (sm * (1 - mixture))
 
 
 class ResonanceModel2(nn.Module):
@@ -314,6 +326,9 @@ class UNet(nn.Module):
     def __init__(self, channels):
         super().__init__()
         self.channels = channels
+        
+        self.embed_spec = nn.Conv1d(1024, 1024, 1, 1, 0)
+        self.pos = nn.Parameter(torch.zeros(1, 1024, 128).uniform_(-0.01, 0.01))
 
         self.down = nn.Sequential(
             # 64
@@ -398,10 +413,14 @@ class UNet(nn.Module):
             ),
         )
 
-        self.weighting = nn.Conv1d(1024, 4096, 1, 1, 0)
-        self.proj = nn.Conv1d(1024, 4096, 1, 1, 0)
+        self.proj = nn.Conv1d(1024, context_dim, 1, 1, 0)
+        self.attn = nn.Conv1d(1024, 1, 1, 1, 0)
 
     def forward(self, x):
+        
+        x = self.embed_spec(x)
+        x = x + self.pos
+        
         # Input will be (batch, 1024, 128)
         context = {}
         
@@ -417,16 +436,11 @@ class UNet(nn.Module):
             if size in context:
                 x = x + context[size]
 
-        # w = self.weighting(x)
-        # w = w.view(batch_size, -1)
-        # w = torch.softmax(w, dim=-1) * w.shape[1]
 
+        attn = self.attn(x)
         x = self.proj(x)
-        # w = w.view(x.shape)
         
-        # x = w * x
-        
-        return x
+        return x, attn
 
 
 class Model(nn.Module):
@@ -456,25 +470,16 @@ class Model(nn.Module):
             mixture_over_time=True,
             n_frames=128)
 
-        # self.mix = GenerateMix(256, 128, n_events, mixer_channels=3)
+        self.to_embeddings = nn.Linear(context_dim, 256)
         self.to_amp = nn.Linear(256, 1)
 
-        # self.verb_context = nn.Linear(4096, 32)
         self.verb = ReverbGenerator(
             context_dim, 3, samplerate, n_samples, norm=nn.LayerNorm((context_dim,)))
-
-        self.to_context_mean = nn.Linear(4096, context_dim)
-        self.to_context_std = nn.Linear(4096, context_dim)
-        self.embed_memory_context = nn.Linear(4096, context_dim)
-
-        self.from_context = nn.Linear(context_dim, 256)
         
-
-        self.refractory_period = 8
-        self.register_buffer('refractory', make_refractory_filter(
-            self.refractory_period, power=10, device=device))
-
-        # self.apply(lambda x: exp.init_weights(x))
+        self.to_pos = nn.Linear(256, 256)
+        self.imp_generator = ImpulseGenerator(exp.n_samples, softmax=lambda x: x)
+        
+        self.apply(lambda x: exp.init_weights(x))
 
 
     def encode(self, x):
@@ -483,51 +488,28 @@ class Model(nn.Module):
         x = stft(x, 2048, 256, pad=True).view(
             batch_size, 128, 1025)[..., :1024].permute(0, 2, 1)
 
-        encoded = self.encoder.forward(x)
-        encoded = F.dropout(encoded, 0.05)
-
-        ref = F.pad(self.refractory,
-                    (0, encoded.shape[-1] - self.refractory_period))
-        encoded = fft_convolve(encoded, ref)[..., :encoded.shape[-1]]
+        encoded, attn = self.encoder.forward(x)
+        encoded, indices = sparsify_vectors(encoded, attn, n_to_keep=n_events, normalize=False)
 
         return encoded
     
-    def sparse_encode(self, x):
-        encoded = self.encode(x)
-        encoded, packed, one_hot = sparsify2(encoded, n_to_keep=n_events)
-        return encoded
+    # def sparse_encode(self, x):
+    #     encoded = self.encode(x)
+    #     encoded, packed, one_hot = sparsify2(encoded, n_to_keep=n_events)
+    #     return encoded
     
-    def from_sparse(self, sparse, ctxt):
-        encoded, packed, one_hot = sparsify2(sparse, n_to_keep=n_events)
-        x, imp = self.generate(encoded, one_hot, packed, ctxt)
-        return x, imp, encoded
+    # def from_sparse(self, sparse, ctxt):
+    #     encoded, packed, one_hot = sparsify2(sparse, n_to_keep=n_events)
+    #     x, imp = self.generate(encoded, one_hot, packed, ctxt)
+    #     return x, imp, encoded
 
-    def generate(self, encoded, one_hot, packed, dense):
+    def generate(self, encoded):
         
-        print(dense.device)
-        print(encoded.device)
-        print(self.from_context.weight.device)
-        print(self.from_context.bias.device)
+        ctxt = torch.sum(encoded, dim=1)
         
-        # ctxt = torch.sum(encoded, dim=-1)
-        # dense = self.embed_memory_context(ctxt)  # (batch, context_dim)
+        embeddings = self.to_embeddings(encoded)
 
-        # ctxt is a single vector
-        # ce = self.embed_context(ctxt)
-
-        # one hot is n_events vectors
-        proj = self.from_context(dense)
-        oh = self.embed_one_hot(one_hot)
-        
-        # print(dense.shape, proj.shape, oh.shape)
-
-        embeddings = proj[:, None, :] + oh
-
-        # generate...
-
-        # impulses
         imp = self.imp.forward(embeddings)
-        # padded = F.pad(imp, (0, resonance_size - impulse_size))
 
         # resonances
         mixed = self.res.forward(embeddings, imp)
@@ -535,68 +517,61 @@ class Model(nn.Module):
 
         amps = torch.abs(self.to_amp(embeddings))
         mixed = mixed * amps
+        final = mixed
 
-        final = F.pad(mixed, (0, n_samples - mixed.shape[-1]))
-        up = torch.zeros(final.shape[0], n_events, n_samples, device=final.device)
-        up[:, :, ::256] = packed
-
+        pos = self.to_pos.forward(embeddings)
+        pos = training_softmax(pos, dim=-1)
+        up = self.imp_generator.forward(pos.view(-1, 256), softmax=lambda x: x)
+        up = up.view(-1, n_events, exp.n_samples)
         final = fft_convolve(final, up)[..., :n_samples]
+        
 
-        final = self.verb.forward(dense, final)
+        final = self.verb.forward(ctxt, final)
 
-        return final, imp
+        return final, imp, pos
 
     def forward(self, x):
         encoded = self.encode(x)
         
-        dense = torch.mean(encoded, dim=-1)
-        mean = self.to_context_mean(dense)
-        std = self.to_context_std(dense)
-        dense = mean + (torch.zeros_like(mean).normal_(0, 1) * std)
-        
-        encoded, packed, one_hot = sparsify2(encoded, n_to_keep=n_events)
-        encoded = torch.relu(encoded)
-        
-
-        final, imp = self.generate(encoded, one_hot, packed, dense)
-        return final, encoded, imp
+        final, imp, pos = self.generate(encoded)
+        return final, encoded, imp, pos
     
     
-    def random_generation(self, exponent=2):
-        with torch.no_grad():
-            # generate context latent
-            z = torch.zeros(1, context_dim).normal_(0, 1)
+    # def random_generation(self, exponent=2):
+    #     with torch.no_grad():
+    #         # generate context latent
+    #         z = torch.zeros(1, context_dim).normal_(0, 1)
             
-            # generate events
-            events = torch.zeros(1, 1, 4096, 128).uniform_(0, 10) ** exponent
-            events = F.avg_pool2d(events, (7, 7), (1, 1), (3, 3))
-            events = events.view(1, 4096, 128)
+    #         # generate events
+    #         events = torch.zeros(1, 1, 4096, 128).uniform_(0, 10) ** exponent
+    #         events = F.avg_pool2d(events, (7, 7), (1, 1), (3, 3))
+    #         events = events.view(1, 4096, 128)
             
-            ch, _, encoded = self.from_sparse(events, z)
-            ch = torch.sum(ch, dim=1, keepdim=True)
-            ch = max_norm(ch)
+    #         ch, _, encoded = self.from_sparse(events, z)
+    #         ch = torch.sum(ch, dim=1, keepdim=True)
+    #         ch = max_norm(ch)
         
-        return ch, encoded
+    #     return ch, encoded
     
-    def derive_events_and_context(self, x: torch.Tensor):
+    # def derive_events_and_context(self, x: torch.Tensor):
         
-        print('STARTING WITH', x.shape)
+    #     print('STARTING WITH', x.shape)
         
-        encoded = self.encode(x)
+    #     encoded = self.encode(x)
 
-        dense = torch.mean(encoded, dim=-1)
-        mean = self.to_context_mean(dense)
-        std = self.to_context_std(dense)
-        dense = mean + (torch.zeros_like(mean).normal_(0, 1) * std)
+    #     dense = torch.mean(encoded, dim=-1)
+    #     mean = self.to_context_mean(dense)
+    #     std = self.to_context_std(dense)
+    #     dense = mean + (torch.zeros_like(mean).normal_(0, 1) * std)
         
         
-        encoded, packed, one_hot = sparsify2(encoded, n_to_keep=n_events)
-        encoded = torch.relu(encoded)
-        return encoded, dense
+    #     encoded, packed, one_hot = sparsify2(encoded, n_to_keep=n_events)
+    #     encoded = torch.relu(encoded)
+    #     return encoded, dense
 
 
-model = Model()#.to(device)
-# optim = optimizer(model, lr=1e-3)
+model = Model().to(device)
+optim = optimizer(model, lr=1e-3)
 
 
 def dict_op(
@@ -639,57 +614,39 @@ def single_channel_loss(target: torch.Tensor, recon: torch.Tensor):
 
 
 
+
 def train(batch, i):
     optim.zero_grad()
 
     b = batch.shape[0]
     
-    recon, encoded, imp = model.forward(batch)
+    recon, encoded, imp, pos = model.forward(batch)
+    
     
     recon_summed = torch.sum(recon, dim=1, keepdim=True)
 
-    loss = single_channel_loss(batch, recon)
-    # loss = ratio_loss(batch, recon)
+    recon_loss = single_channel_loss(batch, recon)
+    
+    loss = recon_loss
     
     loss.backward()
     optim.step()
 
-
-    with torch.no_grad():
         
-        # switch to cpu evaluation
-        model.to('cpu')
-        model.eval()
-        
-        # generate context latent
-        z = torch.zeros(1, context_dim).normal_(0, 1)
-        
-        # generate events
-        events = torch.zeros(1, 1, 4096, 128).uniform_(0, 10) ** 2
-        events = F.avg_pool2d(events, (7, 7), (1, 1), (3, 3))
-        events = events.view(1, 4096, 128)
-        
-        ch, _, encoded = model.from_sparse(events, z)
-        ch = torch.sum(ch, dim=1, keepdim=True)
-        
-        # switch back to GPU training
-        model.to('cuda')
-        model.train()
-
-        
-    # recon = max_norm(recon_summed)
-    recon = max_norm(ch)
+    recon = max_norm(recon_summed)
     encoded = max_norm(encoded)
     
-    return loss, recon, encoded
+    return loss, recon, pos
 
 
 def make_conjure(experiment: BaseExperimentRunner):
     @numpy_conjure(experiment.collection, content_type=SupportedContentType.Spectrogram.value)
     def encoded(x: torch.Tensor):
-        x = x[:, None, :, :]
-        x = F.max_pool2d(x, (16, 8), (16, 8))
-        x = x.view(x.shape[0], x.shape[2], x.shape[3])
+        
+        # x = x[:, None, :, :]
+        # x = F.max_pool2d(x, (16, 8), (16, 8))
+        # x = x.view(x.shape[0], x.shape[2], x.shape[3])
+        
         x = x.data.cpu().numpy()[0]
         return x
 
@@ -697,7 +654,7 @@ def make_conjure(experiment: BaseExperimentRunner):
 
 
 @readme
-class GraphRepresentation5(BaseExperimentRunner):
+class GraphRepresentation7(BaseExperimentRunner):
     encoded = MonitoredValueDescriptor(make_conjure)
 
     def __init__(self, stream, port=None, load_weights=True, save_weights=False, model=model):

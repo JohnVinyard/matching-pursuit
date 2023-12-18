@@ -31,7 +31,7 @@ from util.readmedocs import readme
 
 
 exp = Experiment(
-    samplerate=zounds.SR22050(),
+    samplerate=22050,
     n_samples=2**15,
     weight_init=0.1,
     model_dim=128,

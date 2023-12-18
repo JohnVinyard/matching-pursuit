@@ -299,7 +299,8 @@ def sparse_code(
         visit_key_point=None,
         return_residual=False,
         local_contrast_norm=False,
-        return_sparse_feature_map=False):
+        return_sparse_feature_map=False,
+        compute_feature_map=None):
     
     batch, channels, time = signal.shape
 
@@ -329,7 +330,9 @@ def sparse_code(
     for i in range(n_steps):
         
         print('sparse coding step', i)
-        if approx is None:
+        if compute_feature_map is not None:
+            fm = compute_feature_map(residual, d)
+        elif approx is None:
             padded = F.pad(residual, (0, atom_size))
             fm = F.conv1d(padded, d.view(
                 n_atoms, channels, atom_size))[..., :n_samples]
@@ -366,6 +369,7 @@ def sparse_code(
         local_instances = []
 
         for j in range(batch):
+            
             ai = atom_index[j].item()
             p = position[j][None, ...]
             a = at[j][None, ...]
@@ -407,7 +411,8 @@ def dictionary_learning_step(
         n_steps: int = 100,
         device=None,
         approx=None,
-        local_constrast_norm: bool = False):
+        local_constrast_norm: bool = False,
+        compute_feature_map=None):
 
     batch, channels, time = signal.shape
     signal = signal.view(signal.shape[0], channels, -1)
@@ -432,7 +437,13 @@ def dictionary_learning_step(
         return segments
 
     instances, scatter_segments = sparse_code(
-        signal, d, n_steps=n_steps, device=device, approx=approx, local_contrast_norm=local_constrast_norm)
+        signal, 
+        d, 
+        n_steps=n_steps, 
+        device=device, 
+        approx=approx, 
+        local_contrast_norm=local_constrast_norm, 
+        compute_feature_map=compute_feature_map)
 
 
     for index in instances.keys():
