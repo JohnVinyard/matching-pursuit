@@ -19,8 +19,8 @@ exp = Experiment(
     model_dim=128,
     kernel_size=512)
 
-d_size = 1024
-atom_size = 8192
+d_size = 2048
+atom_size = 16384
 sparse_coding_steps = 32
 
 latent_dim = 32
@@ -119,7 +119,7 @@ def train(batch, i):
             device=device, 
             compute_feature_map=compute_feature_map)
         
-        d[:] = new_d
+        d[:] = (new_d * 0.5) + (d * 0.5)
         
     
     batch_coeffs = torch.fft.rfft(batch, dim=-1)
