@@ -119,7 +119,7 @@ def train(batch, i):
             device=device, 
             compute_feature_map=compute_feature_map)
         
-        d[:] = (new_d * 0.5) + (d * 0.5)
+        d[:] = (new_d * 0.1) + (d * 0.9)
         
     
     batch_coeffs = torch.fft.rfft(batch, dim=-1)
