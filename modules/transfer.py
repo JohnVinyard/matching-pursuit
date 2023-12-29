@@ -2,16 +2,231 @@ from functools import reduce
 from typing import Any, Collection
 import torch
 from torch import nn
+from modules.atoms import unit_norm
 # import zounds
 
 from modules.ddsp import overlap_add
+from modules.linear import LinearOutputStack
 from modules.pos_encode import pos_encoded
+from modules.upsample import ConvUpsample
 from util import device
-from .phase import morlet_filter_bank
 import numpy as np
 from torch.nn import functional as F
 
 
+
+
+def freq_domain_transfer_function_to_resonance(
+    window_size: int, 
+    coeffs: torch.Tensor,
+    start_coeffs: torch.Tensor, 
+    n_frames: int) -> torch.Tensor:
+    
+    step_size = window_size // 2
+    total_samples = step_size * n_frames
+    
+    
+    expected_coeffs = window_size // 2 + 1
+    
+    group_delay = torch.linspace(0, np.pi, expected_coeffs)
+    
+    # assert coeffs.shape[-1] == expected_coeffs
+    # noise = torch.zeros(window_size, device=coeffs.device).uniform_(-1, 1)
+    # initial = torch.abs(torch.fft.rfft(noise))[None, :] * coeffs
+    initial = start_coeffs
+    
+    res = coeffs.view(-1, expected_coeffs, 1).repeat(1, 1, n_frames)
+    res = torch.log(res + 1e-12)
+    res = torch.cumsum(res, dim=-1)
+    res = torch.exp(res)
+    
+    
+    initial = initial.view(-1, expected_coeffs, 1)
+    
+    spec = initial * res
+    spec = spec.view(-1, expected_coeffs, n_frames).permute(0, 2, 1).view(-1, 1, n_frames, expected_coeffs)
+    
+    phase = torch.zeros_like(spec)
+    phase[:, :, :, :] = group_delay[None, None, None, :]
+    phase = torch.cumsum(phase, dim=2)
+    
+    # convert from polar coordinates
+    spec = spec * torch.exp(1j * phase)
+    
+    
+    windowed = torch.fft.irfft(spec, dim=-1).view(-1, 1, n_frames, window_size)
+    windowed = windowed * torch.hamming_window(window_size, device=coeffs.device)[None, None, None, :]
+    audio = overlap_add(windowed, apply_window=False)[..., :total_samples]
+    audio = audio.view(-1, 1, total_samples)
+    return audio
+
+
+class ResonanceBank(nn.Module):
+    def __init__(self, n_resonances, window_size, n_frames, initial):
+        super().__init__()
+        self.n_coeffs = window_size // 2 + 1
+        self.window_size = window_size
+        # self.initial = initial
+        
+        assert initial.shape == (n_resonances, window_size)
+        
+        self.res = nn.Parameter(torch.zeros(n_resonances, self.n_coeffs).uniform_(-6, 6))
+        # self.initial = nn.Parameter(torch.abs(torch.fft.rfft(initial, dim=-1)))
+        self.register_buffer('initial', torch.abs(torch.fft.rfft(initial, dim=-1)))
+        
+        self.n_frames = n_frames
+        self.base_resonance = 0.02
+        self.resonance_factor = (1 - self.base_resonance) * 0.98
+    
+    def forward(self, selection: torch.Tensor, initial_selection: torch.Tensor):
+        
+        # selection produces a linear combination of resonances
+        x = selection @ self.res
+        init = initial_selection @ self.initial
+        
+        x = self.base_resonance + (torch.sigmoid(x) * self.resonance_factor)
+        
+        res = freq_domain_transfer_function_to_resonance(self.window_size, x, init, self.n_frames)
+        return res
+
+class TimeVaryingMix(nn.Module):
+    def __init__(self, latent_dim, channels, n_mixer_channels, n_frames):
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.channels = channels
+        self.n_mixer_channels = n_mixer_channels
+        self.n_frames = n_frames
+        
+        self.to_time_varying_mix = ConvUpsample(
+            latent_dim, 
+            channels, 
+            start_size=4, 
+            mode='learned',
+            end_size=self.n_frames, 
+            out_channels=n_mixer_channels, 
+            from_latent=True, 
+            batch_norm=True)
+    
+    def forward(self, x, audio_channels):
+        total_samples = audio_channels.shape[-1]
+        mix = self.to_time_varying_mix(x).view(-1, self.n_mixer_channels, self.n_frames)
+        mix = torch.softmax(mix, dim=1)
+        mix = F.interpolate(mix, size=total_samples, mode='linear')
+        
+        x = audio_channels * mix
+        x = torch.sum(x, dim=1)
+        return x
+        
+
+class ResonanceBlock(nn.Module):
+    def __init__(self, n_atoms, window_size, n_frames, total_samples, mix_channels, channels, latent_dim, initial):
+        super().__init__()
+        self.n_atoms = n_atoms
+        self.window_size = window_size
+        self.n_frames = n_frames
+        self.total_samples = total_samples
+        self.mix_channels = mix_channels
+        self.channels = channels
+        self.latent_dim = latent_dim
+        self.initial = initial
+        
+        self.bank = ResonanceBank(n_atoms, window_size, n_frames, self.initial)
+        
+        self.generate_mix = TimeVaryingMix(
+            latent_dim, channels, mix_channels, n_frames)
+        
+        # produce a resonance for each element in the mix
+        self.res_choices = nn.ModuleList([
+            # nn.Linear(latent_dim, n_atoms) 
+            nn.Sequential(
+                LinearOutputStack(
+                    channels, layers=3, out_channels=n_atoms, in_channels=latent_dim, norm=nn.LayerNorm((channels,))),
+                nn.Softmax(dim=-1)
+            )
+            for _ in range(mix_channels)
+        ])
+        
+        self.init_choices = nn.ModuleList([
+            # nn.Linear(latent_dim, n_atoms) 
+            nn.Sequential(
+                LinearOutputStack(
+                    channels, layers=3, out_channels=n_atoms, in_channels=latent_dim, norm=nn.LayerNorm((channels,))),
+                nn.Softmax(dim=-1)
+            )
+            for _ in range(mix_channels)
+        ])
+        
+        self.final_mix = nn.Linear(latent_dim, 2)
+    
+    def forward(self, x, impulse):
+        impulse_samples = impulse.shape[-1]
+        
+        final_mix = self.final_mix(x)
+        final_mix = torch.softmax(final_mix, dim=-1)
+        final_mix = final_mix.view(-1, 1, 1, 2)
+        
+        resonances = [res_choice(x)[:, None, ...] for res_choice in self.res_choices]
+        inits = [init_choice(x)[:, None, ...] for init_choice in self.init_choices]
+        resonances = [self.bank.forward(res, inits[i]) for i, res in enumerate(resonances)]
+        # resonances = [unit_norm(r) for r in resonances]
+        
+        impulse = F.pad(impulse, (0, self.total_samples - impulse_samples))
+        impulse = impulse.view(-1, 1, self.total_samples)
+        # impulse = unit_norm(impulse)
+        
+        resonances = torch.cat(resonances, dim=1).view(-1, self.mix_channels, self.total_samples)
+        
+        final = fft_convolve(resonances, impulse)
+        
+        # this will generate a mix over time of the different convolutions
+        # with a resonance function
+        mixed_down = self.generate_mix.forward(x, final).view(-1, 1, self.total_samples)
+        
+        imp_and_res = torch.cat([impulse[..., None], mixed_down[..., None]], dim=-1)
+        
+        x = imp_and_res * final_mix
+        x = torch.sum(x, dim=-1)
+        
+        return x
+        
+
+
+class ResonanceChain(nn.Module):
+    def __init__(self, depth, n_atoms, window_size, n_frames, total_samples, mix_channels, channels, latent_dim, initial):
+        super().__init__()
+        self.n_atoms = n_atoms
+        self.window_size = window_size
+        self.n_frames = n_frames
+        self.total_samples = total_samples
+        self.mix_channels = mix_channels
+        self.channels = channels
+        self.latent_dim = latent_dim
+        self.depth = depth
+        self.initial = initial
+        
+        self.res = nn.ModuleList([
+            ResonanceBlock(n_atoms, window_size, n_frames, total_samples, mix_channels, channels, latent_dim, initial) 
+            for _ in range(depth)
+        ])
+        
+        self.to_mix = nn.Linear(latent_dim, depth)
+    
+    def forward(self, latent: torch.Tensor, impulse: torch.Tensor):
+        imp = impulse
+        outputs = []
+        
+        for i in range(self.depth):
+            imp = self.res[i].forward(latent, imp)
+            outputs.append(imp[..., None])
+        
+        outputs = torch.cat(outputs, dim=-1)
+        mx = self.to_mix(latent).view(-1, 1, 1, self.depth)
+        
+        outputs = outputs * mx
+        outputs = torch.sum(outputs, dim=-1)
+        
+        return outputs
+            
 
 def fft_convolve(*args, correlation=False):
     args = list(args)

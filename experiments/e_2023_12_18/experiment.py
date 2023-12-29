@@ -15,7 +15,7 @@ import numpy as np
 exp = Experiment(
     samplerate=22050,
     n_samples=2**15,
-    weight_init=0.1,
+    weight_init=0.05,
     model_dim=128,
     kernel_size=512)
 
@@ -35,8 +35,8 @@ class LinearAutoencoder(nn.Module):
         self.in_size = in_size
         self.out_size = out_size
         
-        self.encoder = nn.Linear(in_size, out_size)
-        self.decoder = nn.Linear(out_size, in_size)
+        self.encoder = nn.Linear(in_size, out_size, bias=False)
+        self.decoder = nn.Linear(out_size, in_size, bias=False)
         
         self.apply(lambda x: exp.init_weights(x))
     
@@ -119,7 +119,7 @@ def train(batch, i):
             device=device, 
             compute_feature_map=compute_feature_map)
         
-        d[:] = (new_d * 0.1) + (d * 0.9)
+        d[:] = new_d
         
     
     batch_coeffs = torch.fft.rfft(batch, dim=-1)
