@@ -10,3 +10,10 @@
 - events are modelled as `f(event_vec, pos, t)` and optimized to also emit 0 before the event has begun
 - pif feature inversion and sparse coding
 - alternating optimization of positions and atom audio
+
+
+# Questions
+
+- is one channel at a time more important, or just the multi-band loss that
+  weights higher bands more heavily
+- 
