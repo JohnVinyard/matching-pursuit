@@ -16,4 +16,4 @@
 
 - is one channel at a time more important, or just the multi-band loss that
   weights higher bands more heavily
-- 
+- can the new, more general model work with raw audio "atoms"?

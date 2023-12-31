@@ -6,6 +6,7 @@ from modules.atoms import unit_norm
 # import zounds
 
 from modules.ddsp import overlap_add
+from modules.decompose import fft_frequency_decompose, fft_frequency_recompose
 from modules.linear import LinearOutputStack
 from modules.pos_encode import pos_encoded
 from modules.upsample import ConvUpsample
@@ -66,19 +67,51 @@ class ResonanceBank(nn.Module):
         super().__init__()
         self.n_coeffs = window_size // 2 + 1
         self.window_size = window_size
+        self.n_resonances = n_resonances
+        self.n_samples = (window_size // 2) * n_frames
+        
         # self.initial = initial
         
-        assert initial.shape == (n_resonances, window_size)
+        # assert initial.shape == (n_resonances, window_size)
         
-        self.res = nn.Parameter(torch.zeros(n_resonances, self.n_coeffs).uniform_(-6, 6))
+        # self.res = nn.Parameter(torch.zeros(n_resonances, self.n_coeffs).uniform_(-6, 6))
+        
+        
+        self.res_samples = nn.Parameter(torch.zeros(n_resonances, (window_size // 2) * n_frames).uniform_(-1, 1))
+        self.amplitudes = nn.Parameter(torch.zeros(n_resonances, 128).uniform_(-6, 6))
+        self.filters = nn.Parameter(torch.zeros(n_resonances, 128).uniform_(-1, 1))
+        
         # self.initial = nn.Parameter(torch.abs(torch.fft.rfft(initial, dim=-1)))
-        self.register_buffer('initial', torch.abs(torch.fft.rfft(initial, dim=-1)))
+        # self.register_buffer('initial', torch.abs(torch.fft.rfft(initial, dim=-1)))
         
-        self.n_frames = n_frames
-        self.base_resonance = 0.02
-        self.resonance_factor = (1 - self.base_resonance) * 0.98
+        # self.n_frames = n_frames
+        # self.base_resonance = 0.02
+        # self.resonance_factor = (1 - self.base_resonance) * 0.98
     
-    def forward(self, selection: torch.Tensor, initial_selection: torch.Tensor):
+    def forward(self, selection: torch.Tensor, initial_selection: torch.Tensor, filter_selection: torch.Tensor):
+        
+        # choose a linear combination of filters
+        filt = filter_selection @ self.filters
+        filt = filt.view(-1, 1, 128)
+        filt = filt * torch.hamming_window(128, device=filt.device)[None, None, :]
+        
+        # choose a linear combination of envelopes
+        amp = torch.sigmoid(initial_selection @ self.amplitudes).view(-1, 1, 128)
+        amp = F.interpolate(amp, size=self.n_samples, mode='linear')
+
+        res = selection @ self.res_samples
+
+        amp = amp.view(*res.shape)        
+        
+        # apply the envelopes
+        res = res * amp
+        
+        # convolve with filters
+        filt = F.pad(filt, (0, self.n_samples - 128))
+        filt = filt.view(*res.shape)
+        res = fft_convolve(filt, res)[..., :self.n_samples]
+        return res
+    
         
         # selection produces a linear combination of resonances
         x = selection @ self.res
@@ -156,6 +189,16 @@ class ResonanceBlock(nn.Module):
             for _ in range(mix_channels)
         ])
         
+        self.filt_choice = nn.ModuleList([
+            # nn.Linear(latent_dim, n_atoms) 
+            nn.Sequential(
+                LinearOutputStack(
+                    channels, layers=3, out_channels=n_atoms, in_channels=latent_dim, norm=nn.LayerNorm((channels,))),
+                nn.Softmax(dim=-1)
+            )
+            for _ in range(mix_channels)
+        ])
+        
         self.final_mix = nn.Linear(latent_dim, 2)
     
     def forward(self, x, impulse):
@@ -167,7 +210,9 @@ class ResonanceBlock(nn.Module):
         
         resonances = [res_choice(x)[:, None, ...] for res_choice in self.res_choices]
         inits = [init_choice(x)[:, None, ...] for init_choice in self.init_choices]
-        resonances = [self.bank.forward(res, inits[i]) for i, res in enumerate(resonances)]
+        filts = [filt_choice(x)[:, None, ...] for filt_choice in self.filt_choice]
+        
+        resonances = [self.bank.forward(res, inits[i], filts[i]) for i, res in enumerate(resonances)]
         # resonances = [unit_norm(r) for r in resonances]
         
         impulse = F.pad(impulse, (0, self.total_samples - impulse_samples))

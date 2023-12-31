@@ -3,37 +3,37 @@ from typing import Callable, Dict
 import numpy as np
 import torch
 
-from conjure import numpy_conjure, SupportedContentType
+# from conjure import numpy_conjure, SupportedContentType
 from scipy.signal import square, sawtooth
 from torch import nn
 from torch.nn import functional as F
-from config.experiment import Experiment
+# from config.experiment import Experiment
 
 from modules.overlap_add import overlap_add
 from modules.angle import windowed_audio
 from modules.ddsp import NoiseModel
-from modules.decompose import fft_frequency_decompose
-from modules.fft import fft_convolve, fft_shift
+# from modules.decompose import fft_frequency_decompose
+from modules.fft import fft_convolve
 from modules.linear import LinearOutputStack
 from modules.normalization import max_norm, unit_norm
 from modules.refractory import make_refractory_filter
 from modules.reverb import ReverbGenerator
 from modules.sparse import sparsify2
 from modules.stft import stft
-from modules.transfer import ResonanceChain
-from train.experiment_runner import BaseExperimentRunner, MonitoredValueDescriptor
-from train.optim import optimizer
+# from modules.transfer import ResonanceChain
+# from train.experiment_runner import BaseExperimentRunner, MonitoredValueDescriptor
+# from train.optim import optimizer
 from modules.upsample import ConvUpsample
 from util import device
-from util.readmedocs import readme
+# from util.readmedocs import readme
 
 
-exp = Experiment(
-    samplerate=22050,
-    n_samples=2 ** 15,
-    weight_init=0.1,
-    model_dim=256,
-    kernel_size=512)
+# exp = Experiment(
+#     samplerate=22050,
+#     n_samples=2 ** 15,
+#     weight_init=0.1,
+#     model_dim=256,
+#     kernel_size=512)
 
 n_events = 16
 context_dim = 16
@@ -42,108 +42,7 @@ resonance_size = 32768
 samplerate = 22050
 n_samples = 32768
 
-# class RecurrentResonance(nn.Module):
-#     def __init__(
-#         self, 
-#         latent_dim, 
-#         channels, 
-#         resonance_size, 
-#         n_atoms, 
-#         n_piecewise, 
-#         init_atoms=None, 
-#         learnable_atoms=False,
-#         mixture_over_time=False,
-#         n_frames = 128):
         
-#         super().__init__()
-        
-#         self.n_frames = n_frames
-#         self.latent_dim = latent_dim
-#         self.channels = channels
-#         self.resonance_size = resonance_size
-#         self.n_atoms = n_atoms
-#         self.n_piecewise = n_piecewise
-#         self.init_atoms = init_atoms
-#         self.learnable_atoms = learnable_atoms
-#         self.mixture_over_time = mixture_over_time
-        
-#         self.n_coeffs = (self.resonance_size // 2) + 1
-#         self.coarse_coeffs = 32
-        
-#         self.base_resonance = 0.02
-#         self.res_factor = (1 - self.base_resonance) * 0.95
-        
-#         self.register_buffer('group_delay', torch.linspace(0, np.pi, 257))
-        
-#         self.to_resonances = ConvUpsample(
-#             latent_dim,
-#             channels,
-#             start_size=8,
-#             end_size=self.n_frames,
-#             mode='learned',
-#             out_channels=257 * 2,
-#             batch_norm=True,
-#             from_latent=True
-#         )
-        
-        
-    
-#     def forward(self, latent, impulse):
-#         '''
-#             - take stft of impulse
-#             - generate a sequence of transfer functions (including phase dither)
-#             - each time step is current_input + (previous input * resonance)
-#         '''
-#         batch_size, n_events, _ = impulse.shape
-        
-#         latent = latent.view(-1, self.latent_dim)
-#         impulse = F.pad(impulse, (0, resonance_size - impulse_size))
-#         impulse = impulse.view(-1, resonance_size)
-        
-        
-#         imp = stft(impulse, 512, 256, pad=True, return_complex=True)[:, :self.n_frames, :]
-#         imp = imp.view(-1, self.n_frames, 257)
-#         prev = torch.zeros(batch_size * n_events, 257, dtype=torch.complex128, device=device)
-        
-#         resonances = self.to_resonances(latent).view(-1, 257 * 2, self.n_frames)
-#         mags, phases = resonances[:, :257, :], resonances[:, 257:, :]
-        
-#         # mags = self.base_resonance + (torch.sigmoid(mags) * self.res_factor)
-#         # phase_dither = torch.sigmoid(phases) * torch.zeros_like(phases).uniform_(0, 1) * self.group_delay[None, :, None]
-        
-#         out_frames = []
-        
-#         for i in range(self.n_frames):
-#             current_input = imp[:, i, :]
-            
-#             if i > 0:
-#                 prev_frame = out_frames[i - 1].view(*prev.shape)
-#             else:
-#                 prev_frame = prev
-            
-#             current_res = mags[:, :, i]
-#             current_phase = phases[:, :, i]
-#             current = torch.complex(current_res, current_phase)
-            
-#             # prev_mag = torch.abs(prev_frame)
-#             # prev_phase = torch.angle(prev_frame)
-#             # res_mag = prev_mag * current_res
-#             # res_phase = prev_phase + current_phase
-#             # prev = res_mag * torch.exp(1j * res_phase)
-            
-#             # real = res_mag * torch.cos(res_phase)
-#             # imag = res_mag * torch.sin(res_phase)            
-#             # prev = torch.complex(real, imag)
-            
-#             next_frame = current_input + (prev_frame * current)
-            
-#             out_frames.append(next_frame[:, None, :])
-        
-#         out_frames = torch.cat(out_frames, dim=1)
-#         out_frames = torch.fft.irfft(out_frames, dim=-1)
-#         out_frames = overlap_add(out_frames[:, None, :, :], apply_window=False)[..., :exp.n_samples]
-#         out_frames = out_frames.view(batch_size, n_events, resonance_size)
-#         return out_frames
         
 
 class ResonanceModel2(nn.Module):
@@ -579,6 +478,7 @@ class Model(nn.Module):
         #     channels=128, 
         #     latent_dim=256,
         #     initial=waves)
+        
 
         # self.mix = GenerateMix(256, 128, n_events, mixer_channels=3)
         self.to_amp = nn.Linear(256, 1)
@@ -601,7 +501,7 @@ class Model(nn.Module):
         self.register_buffer('refractory', make_refractory_filter(
             self.refractory_period, power=10, device=device))
 
-        self.apply(lambda x: exp.init_weights(x))
+        # self.apply(lambda x: exp.init_weights(x))
     
     def from_sparse(self, sparse, ctxt):
         encoded, packed, one_hot = sparsify2(sparse, n_to_keep=n_events)
@@ -692,7 +592,6 @@ class Model(nn.Module):
         encoded, packed, one_hot = sparsify2(encoded, n_to_keep=n_events)
         encoded = torch.relu(encoded)
         
-
         final, imp = self.generate(encoded, one_hot, packed, dense)
         return final, encoded, imp
     
@@ -700,10 +599,10 @@ class Model(nn.Module):
     def random_generation(self, exponent=2):
         with torch.no_grad():
             # generate context latent
-            z = torch.zeros(1, context_dim).normal_(0, 1)
+            z = torch.zeros(1, context_dim).normal_(0, 0.1)
             
             # generate events
-            events = torch.zeros(1, 1, 4096, 128).uniform_(0, 10) ** exponent
+            events = torch.zeros(1, 1, 4096, 128).uniform_(0, 1.6)
             events = F.avg_pool2d(events, (7, 7), (1, 1), (3, 3))
             events = events.view(1, 4096, 128)
             
@@ -727,130 +626,133 @@ class Model(nn.Module):
         
         encoded, packed, one_hot = sparsify2(encoded, n_to_keep=n_events)
         encoded = torch.relu(encoded)
+        
+        
         return encoded, dense
 
 
-model = Model().to(device)
-optim = optimizer(model, lr=1e-3)
+# model = Model().to(device)
+# optim = optimizer(model, lr=1e-3)
 
 
-def dict_op(
-        a: Dict[int, torch.Tensor],
-        b: Dict[int, torch.Tensor],
-        op: Callable[[torch.Tensor, torch.Tensor], torch.Tensor]) -> Dict[int, torch.Tensor]:
-    return {k: op(v, b[k]) for k, v in a.items()}
+# def dict_op(
+#         a: Dict[int, torch.Tensor],
+#         b: Dict[int, torch.Tensor],
+#         op: Callable[[torch.Tensor, torch.Tensor], torch.Tensor]) -> Dict[int, torch.Tensor]:
+#     return {k: op(v, b[k]) for k, v in a.items()}
 
 
-def multiband_transform(x: torch.Tensor):
-    bands = fft_frequency_decompose(x, 512)
-    d1 = {f'{k}_long': stft(v, 128, 64, pad=True) for k, v in bands.items()}
-    d2 = {f'{k}_short': stft(v, 64, 32, pad=True) for k, v in bands.items()}
-    return dict(**d1, **d2)
+# def multiband_transform(x: torch.Tensor):
+#     bands = fft_frequency_decompose(x, 512)
+#     d1 = {f'{k}_long': stft(v, 128, 64, pad=True) for k, v in bands.items()}
+#     d2 = {f'{k}_short': stft(v, 64, 32, pad=True) for k, v in bands.items()}
+#     return dict(**d1, **d2)
     
 
-def single_channel_loss(target: torch.Tensor, recon: torch.Tensor):
+# def single_channel_loss(target: torch.Tensor, recon: torch.Tensor):
 
-    target = multiband_transform(target)
+#     target = multiband_transform(target)
 
-    full = torch.sum(recon, dim=1, keepdim=True)
-    full = multiband_transform(full)
+#     full = torch.sum(recon, dim=1, keepdim=True)
+#     full = multiband_transform(full)
 
-    residual = dict_op(target, full, lambda a, b: a - b)
+#     residual = dict_op(target, full, lambda a, b: a - b)
     
-    loss = 0
+#     loss = 0
     
-    i = np.random.randint(0, n_events)
-    ch = recon[:, i: i + 1, :]
+#     i = np.random.randint(0, n_events)
+#     ch = recon[:, i: i + 1, :]
     
-    ch = multiband_transform(ch)
+#     ch = multiband_transform(ch)
 
-    t = dict_op(residual, ch, lambda a, b: a + b)
+#     t = dict_op(residual, ch, lambda a, b: a + b)
 
-    diff = dict_op(ch, t, lambda a, b: a - b)
-    loss = loss + sum([torch.abs(y).sum() for y in diff.values()])
+#     diff = dict_op(ch, t, lambda a, b: a - b)
+#     loss = loss + sum([torch.abs(y).sum() for y in diff.values()])
 
-    return loss
+#     return loss
 
 
 
-def train(batch, i):
-    optim.zero_grad()
+# def train(batch, i):
+#     optim.zero_grad()
 
-    b = batch.shape[0]
+#     b = batch.shape[0]
     
-    recon, encoded, imp = model.forward(batch)
+#     recon, encoded, imp = model.forward(batch)
     
-    recon_summed = torch.sum(recon, dim=1, keepdim=True)
+#     recon_summed = torch.sum(recon, dim=1, keepdim=True)
 
-    loss = single_channel_loss(batch, recon)
-    # loss = ratio_loss(batch, recon)
+#     loss = single_channel_loss(batch, recon)
     
-    loss.backward()
-    optim.step()
+#     loss.backward()
+#     optim.step()
     
     
-    # with torch.no_grad():
+#     # with torch.no_grad():
         
-    #     # switch to cpu evaluation
-    #     model.to('cpu')
-    #     model.eval()
         
-    #     # generate context latent
-    #     z = torch.zeros(1, context_dim).normal_(0, 1)
+#     #     # switch to cpu evaluation
+#     #     model.to('cpu')
+#     #     model.eval()
         
-    #     # generate events
-    #     events = torch.zeros(1, 1, 4096, 128).uniform_(0, 10) ** 2
-    #     events = F.avg_pool2d(events, (7, 7), (1, 1), (3, 3))
-    #     events = events.view(1, 4096, 128)
+#     #     # generate context latent
+#     #     z = torch.zeros(1, context_dim).normal_(0, 0.14)
         
-    #     ch, _, encoded = model.from_sparse(events, z)
-    #     ch = torch.sum(ch, dim=1, keepdim=True)
+#     #     # generate events
+#     #     events = torch.zeros(1, 1, 4096, 128).uniform_(0, 1.6)
+#     #     events = F.avg_pool2d(events, (7, 7), (1, 1), (3, 3))
+#     #     events = events.view(1, 4096, 128)
         
-    #     # switch back to GPU training
-    #     model.to('cuda')
-    #     model.train()
+#     #     ch, _, encoded = model.from_sparse(events, z)
+#     #     ch = torch.sum(ch, dim=1, keepdim=True)
+        
+#     #     # switch back to GPU training
+#     #     model.to('cuda')
+#     #     model.train()
     
-    # recon = max_norm(ch)
-    recon = max_norm(recon_summed)
-    encoded = max_norm(encoded)
+#     # recon = max_norm(ch)
     
-    return loss, recon, encoded
+#     recon = max_norm(recon_summed)
+#     encoded = max_norm(encoded)
+    
+#     return loss, recon, encoded
 
 
-def make_conjure(experiment: BaseExperimentRunner):
-    @numpy_conjure(experiment.collection, content_type=SupportedContentType.Spectrogram.value)
-    def encoded(x: torch.Tensor):
-        x = x[:, None, :, :]
-        x = F.max_pool2d(x, (16, 8), (16, 8))
-        x = x.view(x.shape[0], x.shape[2], x.shape[3])
-        x = x.data.cpu().numpy()[0]
-        return x
+# def make_conjure(experiment: BaseExperimentRunner):
+#     @numpy_conjure(experiment.collection, content_type=SupportedContentType.Spectrogram.value)
+#     def encoded(x: torch.Tensor):
+#         x = x[:, None, :, :]
+#         x = F.max_pool2d(x, (16, 8), (16, 8))
+#         x = x.view(x.shape[0], x.shape[2], x.shape[3])
+#         x = x.data.cpu().numpy()[0]
+#         return x
 
-    return (encoded,)
-
-
-@readme
-class PhysicalModel(BaseExperimentRunner):
-    encoded = MonitoredValueDescriptor(make_conjure)
-
-    def __init__(self, stream, port=None, load_weights=True, save_weights=False, model=model):
-        super().__init__(
-            stream, 
-            train, 
-            exp, 
-            port=port, 
-            load_weights=load_weights, 
-            save_weights=save_weights, 
-            model=model)
-
-    def run(self):
-        for i, item in enumerate(self.iter_items()):
-            item = item.view(-1, 1, n_samples)
-            l, r, e = train(item, i)
+#     return (encoded,)
 
 
-            self.real = item
-            self.fake = r
-            self.encoded = e
-            print(i, l.item())
-            self.after_training_iteration(l, i)
+# @readme
+# class PhysicalModel(BaseExperimentRunner):
+#     encoded = MonitoredValueDescriptor(make_conjure)
+
+#     def __init__(self, stream, port=None, load_weights=True, save_weights=False, model=model):
+#         super().__init__(
+#             stream, 
+#             train, 
+#             exp, 
+#             port=port, 
+#             load_weights=load_weights, 
+#             save_weights=save_weights, 
+#             model=model)
+
+#     def run(self):
+#         for i, item in enumerate(self.iter_items()):
+#             item = item.view(-1, 1, n_samples)
+#             l, r, e = train(item, i)
+
+
+#             self.real = item
+#             self.fake = r
+#             self.encoded = e
+#             print(i, l.item())
+#             self.after_training_iteration(l, i)
