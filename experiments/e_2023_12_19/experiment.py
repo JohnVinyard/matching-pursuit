@@ -1,4 +1,4 @@
-from typing import Callable, Dict
+# from typing import Callable, Dict
 
 import numpy as np
 import torch
@@ -16,6 +16,7 @@ from modules.ddsp import NoiseModel
 from modules.fft import fft_convolve
 from modules.linear import LinearOutputStack
 from modules.normalization import max_norm, unit_norm
+# from modules.phase import AudioCodec, MelScale
 from modules.refractory import make_refractory_filter
 from modules.reverb import ReverbGenerator
 from modules.sparse import sparsify2
@@ -465,8 +466,7 @@ class Model(nn.Module):
         
         # total_atoms = 1024
         # f0s = np.linspace(40, 4000, total_atoms // 4)
-        # waves = make_waves(512, f0s, int(samplerate))
-        # waves = waves * torch.hamming_window(512)[None, ...]
+        # waves = make_waves(resonance_size, f0s, int(samplerate))
         
         # self.res = ResonanceChain(
         #     2, 
@@ -642,11 +642,25 @@ class Model(nn.Module):
 #     return {k: op(v, b[k]) for k, v in a.items()}
 
 
+
 # def multiband_transform(x: torch.Tensor):
 #     bands = fft_frequency_decompose(x, 512)
-#     d1 = {f'{k}_long': stft(v, 128, 64, pad=True) for k, v in bands.items()}
-#     d2 = {f'{k}_short': stft(v, 64, 32, pad=True) for k, v in bands.items()}
-#     return dict(**d1, **d2)
+    
+#     d = {}
+#     for size, band in bands.items():
+#         step = band.shape[-1] // 128
+#         window = step * 2
+#         # print(size, window, step)
+#         d[str(size)] = stft(band, window, step, pad=True)
+    
+#     return dict(**d)
+
+#     # d1 = {f'{k}_long': stft(v, 128, 64, pad=True) for k, v in bands.items()}
+#     # d2 = {f'{k}_short': stft(v, 64, 32, pad=True) for k, v in bands.items()}
+#     # return dict(**d1, **d2)
+    
+#     # feat = exp.perceptual_feature(x, log_amplitude=False)
+#     # return dict(pif=feat)
     
 
 # def single_channel_loss(target: torch.Tensor, recon: torch.Tensor):
@@ -682,7 +696,7 @@ class Model(nn.Module):
 #     recon, encoded, imp = model.forward(batch)
     
 #     recon_summed = torch.sum(recon, dim=1, keepdim=True)
-
+    
 #     loss = single_channel_loss(batch, recon)
     
 #     loss.backward()

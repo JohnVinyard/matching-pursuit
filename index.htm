@@ -7,7 +7,6 @@
     <style>
       body {
         font-family: sans-serif;
-
       }
       .events,
       .context {
@@ -16,6 +15,44 @@
       }
     </style>
     <script type="text/javascript">
+      const vector = (parentElement, data, minValue, maxValue) => {
+        // clear
+        // parentElement.innerHTML = "";
+
+        const maxWidth = 100;
+
+        data.forEach((item, index) => {
+          const px = Math.abs((item / maxValue) * maxWidth);
+
+          const div = document.createElement("div");
+
+          let interval = null;
+
+          div.addEventListener("mousedown", () => {
+            interval = setInterval(() => {
+              // mutate and re-render
+              console.log(new Date().getMilliseconds().toString());
+            }, 100);
+          });
+
+          div.addEventListener("mouseup", () => {
+            clearInterval(interval);
+          });
+
+          div.addEventListener("mouseleave", () => {
+            clearInterval(interval);
+          });
+
+          div.style.height = "20px";
+          div.style.width = `${px}px`;
+          div.style.backgroundColor = "#000";
+          div.style.cursor = "pointer";
+          div.style.padding = "2px";
+
+          parentElement.appendChild(div);
+        });
+      };
+
       const drawEvents = (canvasElement, events) => {
         const ctx = canvasElement.getContext("2d");
         ctx.fillStyle = "rgb(0, 0, 0)";
@@ -71,6 +108,9 @@
                   const ctxt = contextElements.item(index);
                   drawEvents(cnv, events);
                   drawContext(ctxt, context);
+                  const canvasParent = ctxt.parentElement;
+
+                  vector(canvasParent, context, -0.2, 0.2);
                 });
             });
           });

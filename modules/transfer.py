@@ -17,49 +17,49 @@ from torch.nn import functional as F
 
 
 
-def freq_domain_transfer_function_to_resonance(
-    window_size: int, 
-    coeffs: torch.Tensor,
-    start_coeffs: torch.Tensor, 
-    n_frames: int) -> torch.Tensor:
+# def freq_domain_transfer_function_to_resonance(
+#     window_size: int, 
+#     coeffs: torch.Tensor,
+#     start_coeffs: torch.Tensor, 
+#     n_frames: int) -> torch.Tensor:
     
-    step_size = window_size // 2
-    total_samples = step_size * n_frames
-    
-    
-    expected_coeffs = window_size // 2 + 1
-    
-    group_delay = torch.linspace(0, np.pi, expected_coeffs)
-    
-    # assert coeffs.shape[-1] == expected_coeffs
-    # noise = torch.zeros(window_size, device=coeffs.device).uniform_(-1, 1)
-    # initial = torch.abs(torch.fft.rfft(noise))[None, :] * coeffs
-    initial = start_coeffs
-    
-    res = coeffs.view(-1, expected_coeffs, 1).repeat(1, 1, n_frames)
-    res = torch.log(res + 1e-12)
-    res = torch.cumsum(res, dim=-1)
-    res = torch.exp(res)
+#     step_size = window_size // 2
+#     total_samples = step_size * n_frames
     
     
-    initial = initial.view(-1, expected_coeffs, 1)
+#     expected_coeffs = window_size // 2 + 1
     
-    spec = initial * res
-    spec = spec.view(-1, expected_coeffs, n_frames).permute(0, 2, 1).view(-1, 1, n_frames, expected_coeffs)
+#     group_delay = torch.linspace(0, np.pi, expected_coeffs)
     
-    phase = torch.zeros_like(spec)
-    phase[:, :, :, :] = group_delay[None, None, None, :]
-    phase = torch.cumsum(phase, dim=2)
+#     # assert coeffs.shape[-1] == expected_coeffs
+#     # noise = torch.zeros(window_size, device=coeffs.device).uniform_(-1, 1)
+#     # initial = torch.abs(torch.fft.rfft(noise))[None, :] * coeffs
+#     initial = start_coeffs
     
-    # convert from polar coordinates
-    spec = spec * torch.exp(1j * phase)
+#     res = coeffs.view(-1, expected_coeffs, 1).repeat(1, 1, n_frames)
+#     res = torch.log(res + 1e-12)
+#     res = torch.cumsum(res, dim=-1)
+#     res = torch.exp(res)
     
     
-    windowed = torch.fft.irfft(spec, dim=-1).view(-1, 1, n_frames, window_size)
-    windowed = windowed * torch.hamming_window(window_size, device=coeffs.device)[None, None, None, :]
-    audio = overlap_add(windowed, apply_window=False)[..., :total_samples]
-    audio = audio.view(-1, 1, total_samples)
-    return audio
+#     initial = initial.view(-1, expected_coeffs, 1)
+    
+#     spec = initial * res
+#     spec = spec.view(-1, expected_coeffs, n_frames).permute(0, 2, 1).view(-1, 1, n_frames, expected_coeffs)
+    
+#     phase = torch.zeros_like(spec)
+#     phase[:, :, :, :] = group_delay[None, None, None, :]
+#     phase = torch.cumsum(phase, dim=2)
+    
+#     # convert from polar coordinates
+#     spec = spec * torch.exp(1j * phase)
+    
+    
+#     windowed = torch.fft.irfft(spec, dim=-1).view(-1, 1, n_frames, window_size)
+#     windowed = windowed * torch.hamming_window(window_size, device=coeffs.device)[None, None, None, :]
+#     audio = overlap_add(windowed, apply_window=False)[..., :total_samples]
+#     audio = audio.view(-1, 1, total_samples)
+#     return audio
 
 
 class ResonanceBank(nn.Module):
@@ -70,23 +70,11 @@ class ResonanceBank(nn.Module):
         self.n_resonances = n_resonances
         self.n_samples = (window_size // 2) * n_frames
         
-        # self.initial = initial
-        
-        # assert initial.shape == (n_resonances, window_size)
-        
-        # self.res = nn.Parameter(torch.zeros(n_resonances, self.n_coeffs).uniform_(-6, 6))
-        
-        
-        self.res_samples = nn.Parameter(torch.zeros(n_resonances, (window_size // 2) * n_frames).uniform_(-1, 1))
+        # self.res_samples = nn.Parameter(torch.zeros(n_resonances, (window_size // 2) * n_frames).uniform_(-1, 1))
+        self.res_samples = nn.Parameter(initial)
         self.amplitudes = nn.Parameter(torch.zeros(n_resonances, 128).uniform_(-6, 6))
         self.filters = nn.Parameter(torch.zeros(n_resonances, 128).uniform_(-1, 1))
         
-        # self.initial = nn.Parameter(torch.abs(torch.fft.rfft(initial, dim=-1)))
-        # self.register_buffer('initial', torch.abs(torch.fft.rfft(initial, dim=-1)))
-        
-        # self.n_frames = n_frames
-        # self.base_resonance = 0.02
-        # self.resonance_factor = (1 - self.base_resonance) * 0.98
     
     def forward(self, selection: torch.Tensor, initial_selection: torch.Tensor, filter_selection: torch.Tensor):
         
@@ -112,15 +100,6 @@ class ResonanceBank(nn.Module):
         res = fft_convolve(filt, res)[..., :self.n_samples]
         return res
     
-        
-        # selection produces a linear combination of resonances
-        x = selection @ self.res
-        init = initial_selection @ self.initial
-        
-        x = self.base_resonance + (torch.sigmoid(x) * self.resonance_factor)
-        
-        res = freq_domain_transfer_function_to_resonance(self.window_size, x, init, self.n_frames)
-        return res
 
 class TimeVaryingMix(nn.Module):
     def __init__(self, latent_dim, channels, n_mixer_channels, n_frames):
@@ -237,7 +216,18 @@ class ResonanceBlock(nn.Module):
 
 
 class ResonanceChain(nn.Module):
-    def __init__(self, depth, n_atoms, window_size, n_frames, total_samples, mix_channels, channels, latent_dim, initial):
+    def __init__(
+            self, 
+            depth, 
+            n_atoms, 
+            window_size, 
+            n_frames, 
+            total_samples, 
+            mix_channels, 
+            channels, 
+            latent_dim, 
+            initial):
+        
         super().__init__()
         self.n_atoms = n_atoms
         self.window_size = window_size
