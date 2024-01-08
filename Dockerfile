@@ -15,7 +15,10 @@ RUN pip install \
     boto3 \
     requests
 
+
 COPY . /
+
+COPY model-demo/out /
 
 EXPOSE 8888
 

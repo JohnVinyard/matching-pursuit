@@ -204,15 +204,15 @@ class Audio(object):
         res.body = data
 
 
-class Frontend(object):
-    def on_get(self, req: falcon.Request, res: falcon.Response):
-        with open('index.htm', 'r') as f:
-            doc = f.read()
+# class Frontend(object):
+#     def on_get(self, req: falcon.Request, res: falcon.Response):
+#         with open('index.htm', 'r') as f:
+#             doc = f.read()
             
-        res.status = falcon.HTTP_OK
-        res.content_length = len(doc)
-        res.body = doc
-        res.set_header('content-type', 'text/html')
+#         res.status = falcon.HTTP_OK
+#         res.content_length = len(doc)
+#         res.body = doc
+#         res.set_header('content-type', 'text/html')
 
 
 class Synth(object):
@@ -307,7 +307,9 @@ class App(falcon.API):
         
         
         # HTML/javascript app
-        self.add_route('/app', Frontend())
+        # self.add_route('/app', Frontend())
+        
+        self.add_static_route('/', '/')
         
 
 
