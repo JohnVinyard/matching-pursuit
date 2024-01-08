@@ -32,3 +32,4 @@ sparse_conditioned_disc.dat
 siam.dat
 
 reverbs/*
+model-demo/*

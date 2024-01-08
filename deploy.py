@@ -122,7 +122,11 @@ def create_or_update_vm():
     else:
         update_compte_instance()
 
+def build_frontend():
+    pass
+
 def deploy():
+    build_frontend()
     ensure_repository_exists()
     build_local_image()
     push_image()
