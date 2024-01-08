@@ -15,7 +15,7 @@ interface ModelDemoViewProps {
   nReconstructions: number;
 }
 
-const ModelDemoView: React.FC<ModelDemoViewProps> = ({}) => {
+const ModelDemoView: React.FC<ModelDemoViewProps> = ({ nReconstructions }) => {
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
 
   useEffect(() => {
@@ -23,7 +23,6 @@ const ModelDemoView: React.FC<ModelDemoViewProps> = ({}) => {
       .then((resp) => resp.json())
       .then((suggestions) => {
         setSuggestions(suggestions);
-        console.log(suggestions);
       });
   }, []);
 
@@ -41,7 +40,7 @@ const ModelDemoView: React.FC<ModelDemoViewProps> = ({}) => {
           <CardContent>
             <Stack spacing={2}>
               <Grid item>{suggestions.length === 0 && <LinearProgress />}</Grid>
-              {suggestions.map((suggestion) => (
+              {suggestions.slice(0, nReconstructions).map((suggestion) => (
                 <Reconstruction suggestion={suggestion} />
               ))}
             </Stack>
