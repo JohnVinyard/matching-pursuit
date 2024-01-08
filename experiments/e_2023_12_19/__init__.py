@@ -1,1 +1,1 @@
-# from .experiment import PhysicalModel
+from .experiment import PhysicalModel

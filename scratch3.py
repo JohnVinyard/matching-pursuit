@@ -9,8 +9,8 @@ from modules.angle import windowed_audio
 from util.playable import playable
 import zounds
 
-# torch.linspace(0, np.pi, 257)
 
+# TODO: try matrix rotation instead: https://eecs.qmul.ac.uk/~gslabaugh/publications/euler.pdf
 def to_polar(x):
     mag = torch.abs(x)
     phase = torch.angle(x)
@@ -39,8 +39,7 @@ def test():
     
     n_frames = windowed.shape[-2]
     
-    transfer_func = torch.zeros(1, n_coeffs)
-    transfer_func[:, 2] = 1
+    transfer_func = torch.zeros(1, n_coeffs).uniform_(0, 0.5)
     
     
     frames = []

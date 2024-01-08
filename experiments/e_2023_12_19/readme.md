@@ -1,7 +1,10 @@
 # Current Experiment
 
+Is MSE good enough?
 
-# Other things to try
-- new, more general model
-- successive layers of resonance should be harder to "deform", i.e., fewer different resonance "heads"
-- transfer functions, functions that produce transfer functions, functions that produce functions that produce transfer functions, etc.
+In other words, using a model we know performs well, does this loss work
+better?  Is the real value the multiband transform, and not the single-channel loss?
+
+
+Next thing: resonance model 3 with old loss, but averaged
+and resonance model 2 with old loss, but averaged

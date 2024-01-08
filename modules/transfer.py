@@ -17,66 +17,78 @@ from torch.nn import functional as F
 
 
 
-# def freq_domain_transfer_function_to_resonance(
-#     window_size: int, 
-#     coeffs: torch.Tensor,
-#     start_coeffs: torch.Tensor, 
-#     n_frames: int) -> torch.Tensor:
+def freq_domain_transfer_function_to_resonance(
+    window_size: int, 
+    coeffs: torch.Tensor,
+    # start_coeffs: torch.Tensor, 
+    n_frames: int) -> torch.Tensor:
     
-#     step_size = window_size // 2
-#     total_samples = step_size * n_frames
-    
-    
-#     expected_coeffs = window_size // 2 + 1
-    
-#     group_delay = torch.linspace(0, np.pi, expected_coeffs)
-    
-#     # assert coeffs.shape[-1] == expected_coeffs
-#     # noise = torch.zeros(window_size, device=coeffs.device).uniform_(-1, 1)
-#     # initial = torch.abs(torch.fft.rfft(noise))[None, :] * coeffs
-#     initial = start_coeffs
-    
-#     res = coeffs.view(-1, expected_coeffs, 1).repeat(1, 1, n_frames)
-#     res = torch.log(res + 1e-12)
-#     res = torch.cumsum(res, dim=-1)
-#     res = torch.exp(res)
+    step_size = window_size // 2
+    total_samples = step_size * n_frames
     
     
-#     initial = initial.view(-1, expected_coeffs, 1)
+    expected_coeffs = window_size // 2 + 1
     
-#     spec = initial * res
-#     spec = spec.view(-1, expected_coeffs, n_frames).permute(0, 2, 1).view(-1, 1, n_frames, expected_coeffs)
+    group_delay = torch.linspace(0, np.pi, expected_coeffs)
     
-#     phase = torch.zeros_like(spec)
-#     phase[:, :, :, :] = group_delay[None, None, None, :]
-#     phase = torch.cumsum(phase, dim=2)
+    # assert coeffs.shape[-1] == expected_coeffs
+    # noise = torch.zeros(window_size, device=coeffs.device).uniform_(-1, 1)
+    # initial = torch.abs(torch.fft.rfft(noise))[None, :] * coeffs
+    # initial = start_coeffs
     
-#     # convert from polar coordinates
-#     spec = spec * torch.exp(1j * phase)
+    res = coeffs.view(-1, expected_coeffs, 1).repeat(1, 1, n_frames)
+    res = torch.log(res + 1e-12)
+    res = torch.cumsum(res, dim=-1)
+    res = torch.exp(res)
     
     
-#     windowed = torch.fft.irfft(spec, dim=-1).view(-1, 1, n_frames, window_size)
-#     windowed = windowed * torch.hamming_window(window_size, device=coeffs.device)[None, None, None, :]
-#     audio = overlap_add(windowed, apply_window=False)[..., :total_samples]
-#     audio = audio.view(-1, 1, total_samples)
-#     return audio
+    # initial = initial.view(-1, expected_coeffs, 1)
+    
+    spec = res
+    # spec = initial * res
+    spec = spec.view(-1, expected_coeffs, n_frames).permute(0, 2, 1).view(-1, 1, n_frames, expected_coeffs)
+    
+    phase = torch.zeros_like(spec)
+    phase[:, :, :, :] = group_delay[None, None, None, :]
+    phase = torch.cumsum(phase, dim=2)
+    
+    # convert from polar coordinates
+    spec = spec * torch.exp(1j * phase)
+    
+    
+    windowed = torch.fft.irfft(spec, dim=-1).view(-1, 1, n_frames, window_size)
+    windowed = windowed * torch.hamming_window(window_size, device=coeffs.device)[None, None, None, :]
+    audio = overlap_add(windowed, apply_window=False)[..., :total_samples]
+    audio = audio.view(-1, 1, total_samples)
+    return audio
 
 
+# TODO: frame-based FFT variant of this
 class ResonanceBank(nn.Module):
-    def __init__(self, n_resonances, window_size, n_frames, initial):
+    def __init__(self, n_resonances, window_size, n_frames, initial, fft_based_resonance=False):
         super().__init__()
         self.n_coeffs = window_size // 2 + 1
         self.window_size = window_size
         self.n_resonances = n_resonances
         self.n_samples = (window_size // 2) * n_frames
+        self.fft_based_resonance = fft_based_resonance
         
-        # self.res_samples = nn.Parameter(torch.zeros(n_resonances, (window_size // 2) * n_frames).uniform_(-1, 1))
-        self.res_samples = nn.Parameter(initial)
-        self.amplitudes = nn.Parameter(torch.zeros(n_resonances, 128).uniform_(-6, 6))
+        # self.res_samples = nn.Parameter(initial)
+        
+        self.base_resonance = 0.02
+        self.res_factor = (1 - self.base_resonance) * 0.99
+        
+        self.register_buffer('res_samples', initial)
+        self.decay = nn.Linear(n_resonances, 128)
+        # self.amplitudes = nn.Parameter(torch.zeros(n_resonances, n_frames).uniform_(-6, 6))
         self.filters = nn.Parameter(torch.zeros(n_resonances, 128).uniform_(-1, 1))
+        
+        self.fft_res = nn.Parameter(torch.zeros(n_resonances, self.n_coeffs).uniform_(-6, -6))
         
     
     def forward(self, selection: torch.Tensor, initial_selection: torch.Tensor, filter_selection: torch.Tensor):
+        
+        batch_size = selection.shape[0]
         
         # choose a linear combination of filters
         filt = filter_selection @ self.filters
@@ -84,10 +96,26 @@ class ResonanceBank(nn.Module):
         filt = filt * torch.hamming_window(128, device=filt.device)[None, None, :]
         
         # choose a linear combination of envelopes
-        amp = torch.sigmoid(initial_selection @ self.amplitudes).view(-1, 1, 128)
-        amp = F.interpolate(amp, size=self.n_samples, mode='linear')
+        
+        decay = torch.sigmoid(self.decay(initial_selection))
+        decay = self.base_resonance + (decay * self.res_factor)
+        decay = torch.log(1e-12 + decay)
+        decay = torch.cumsum(decay, dim=-1)
+        
+        decay = torch.exp(decay).view(batch_size, -1, 128)
+        
+        amp = F.interpolate(decay, size=self.n_samples, mode='linear')
+        
+        # amp = torch.sigmoid(torch.relu(initial_selection) @ self.amplitudes).view(-1, 1, 128)
+        
+        # amp = F.interpolate(amp, size=self.n_samples, mode='linear')
 
-        res = selection @ self.res_samples
+        if not self.fft_based_resonance:
+            res = selection @ self.res_samples
+        else:
+            coeffs = torch.sigmoid(selection @ self.fft_res)
+            res = freq_domain_transfer_function_to_resonance(self.window_size, coeffs, 128)
+        
 
         amp = amp.view(*res.shape)        
         
@@ -122,6 +150,8 @@ class TimeVaryingMix(nn.Module):
     def forward(self, x, audio_channels):
         total_samples = audio_channels.shape[-1]
         mix = self.to_time_varying_mix(x).view(-1, self.n_mixer_channels, self.n_frames)
+        
+        # TODO: is softmax the best choice for the time-varying mix
         mix = torch.softmax(mix, dim=1)
         mix = F.interpolate(mix, size=total_samples, mode='linear')
         
@@ -142,37 +172,37 @@ class ResonanceBlock(nn.Module):
         self.latent_dim = latent_dim
         self.initial = initial
         
-        self.bank = ResonanceBank(n_atoms, window_size, n_frames, self.initial)
+        self.bank = ResonanceBank(n_atoms, window_size, n_frames, self.initial, fft_based_resonance=False)
         
         self.generate_mix = TimeVaryingMix(
             latent_dim, channels, mix_channels, n_frames)
         
         # produce a resonance for each element in the mix
         self.res_choices = nn.ModuleList([
-            # nn.Linear(latent_dim, n_atoms) 
             nn.Sequential(
-                LinearOutputStack(
-                    channels, layers=3, out_channels=n_atoms, in_channels=latent_dim, norm=nn.LayerNorm((channels,))),
+                nn.Linear(latent_dim, n_atoms),
+                # LinearOutputStack(
+                #     channels, layers=3, out_channels=n_atoms, in_channels=latent_dim, norm=nn.LayerNorm((channels,))),
                 nn.Softmax(dim=-1)
             )
             for _ in range(mix_channels)
         ])
         
         self.init_choices = nn.ModuleList([
-            # nn.Linear(latent_dim, n_atoms) 
             nn.Sequential(
-                LinearOutputStack(
-                    channels, layers=3, out_channels=n_atoms, in_channels=latent_dim, norm=nn.LayerNorm((channels,))),
+                nn.Linear(latent_dim, n_atoms) ,
+                # LinearOutputStack(
+                #     channels, layers=3, out_channels=n_atoms, in_channels=latent_dim, norm=nn.LayerNorm((channels,))),
                 nn.Softmax(dim=-1)
             )
             for _ in range(mix_channels)
         ])
         
         self.filt_choice = nn.ModuleList([
-            # nn.Linear(latent_dim, n_atoms) 
             nn.Sequential(
-                LinearOutputStack(
-                    channels, layers=3, out_channels=n_atoms, in_channels=latent_dim, norm=nn.LayerNorm((channels,))),
+                nn.Linear(latent_dim, n_atoms) ,
+                # LinearOutputStack(
+                #     channels, layers=3, out_channels=n_atoms, in_channels=latent_dim, norm=nn.LayerNorm((channels,))),
                 nn.Softmax(dim=-1)
             )
             for _ in range(mix_channels)
