@@ -12,7 +12,7 @@ interface VectorProps {
   min: number;
   max: number;
   onVectorChange: (vector: number[]) => void;
-  readonly: boolean;
+  readonly?: boolean;
 }
 
 const Vector: React.FC<VectorProps> = ({
@@ -20,7 +20,7 @@ const Vector: React.FC<VectorProps> = ({
   min,
   max,
   onVectorChange,
-  readonly,
+  readonly = false,
 }) => {
   const sliderChange = (newValue: number, index: number) => {
     const newVector = [...vector];
@@ -41,7 +41,7 @@ const Vector: React.FC<VectorProps> = ({
                 size="medium"
                 orientation="vertical"
                 style={{ height: "100px", width: "20px" }}
-                disabled={!readonly}
+                disabled={readonly}
                 min={min}
                 max={max}
                 value={v}

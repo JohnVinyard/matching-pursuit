@@ -597,8 +597,8 @@ class Model(nn.Module):
         
         final, imp = self.generate(encoded, one_hot, packed, dense)
         
-        # print('ENCODED', encoded.max().item())
-        # print('DENSE', dense.mean().item(), dense.std().item())
+        print('ENCODED', encoded.max().item())
+        print('DENSE', dense.mean().item(), dense.std().item())
         
         
         return final, encoded, imp
@@ -732,31 +732,30 @@ def train(batch, i):
     optim.step()
     
     
-    # with torch.no_grad():
+    with torch.no_grad():
         
+        # switch to cpu evaluation
+        model.to('cpu')
+        model.eval()
         
-    #     # switch to cpu evaluation
-    #     model.to('cpu')
-    #     model.eval()
+        # generate context latent
+        z = torch.zeros(1, context_dim).normal_(0, 0.26)
         
-    #     # generate context latent
-    #     z = torch.zeros(1, context_dim).normal_(0, 15)
+        # generate events
+        events = torch.zeros(1, 1, 4096, 128).uniform_(0, 3.25)
+        events = F.avg_pool2d(events, (7, 7), (1, 1), (3, 3))
+        events = events.view(1, 4096, 128)
         
-    #     # generate events
-    #     events = torch.zeros(1, 1, 4096, 128).uniform_(0, 105)
-    #     events = F.avg_pool2d(events, (7, 7), (1, 1), (3, 3))
-    #     events = events.view(1, 4096, 128)
+        ch, _, encoded = model.from_sparse(events, z)
+        ch = torch.sum(ch, dim=1, keepdim=True)
         
-    #     ch, _, encoded = model.from_sparse(events, z)
-    #     ch = torch.sum(ch, dim=1, keepdim=True)
-        
-    #     # switch back to GPU training
-    #     model.to('cuda')
-    #     model.train()
+        # switch back to GPU training
+        model.to('cuda')
+        model.train()
     
-    # recon = max_norm(ch)
+    recon = max_norm(ch)
     
-    recon = max_norm(recon_summed)
+    # recon = max_norm(recon_summed)
     encoded = max_norm(encoded)
     
     return loss, recon, encoded
