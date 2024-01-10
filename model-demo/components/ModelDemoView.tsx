@@ -10,7 +10,6 @@ import {
   DialogContent,
   DialogTitle,
   Grid,
-  IconButton,
   LinearProgress,
   Stack,
   Typography,
@@ -41,6 +40,10 @@ const ModelDemoView: React.FC<ModelDemoViewProps> = ({ nReconstructions }) => {
 
   const onRequestRandomPattern = () => {
     setRandomPattern(randomEncoding());
+  };
+
+  const onRequestRandomPatternFromBasis = async (encoding: Encoding) => {
+    setRandomPattern(encoding);
   };
 
   const onCloseDialog = () => {
@@ -99,7 +102,7 @@ const ModelDemoView: React.FC<ModelDemoViewProps> = ({ nReconstructions }) => {
               <Grid item>
                 <Button
                   onClick={onRequestRandomPattern}
-                  variant="contained"
+                  variant="outlined"
                   color="primary"
                 >
                   Random Pattern
@@ -107,7 +110,10 @@ const ModelDemoView: React.FC<ModelDemoViewProps> = ({ nReconstructions }) => {
               </Grid>
               <Grid item>{suggestions.length === 0 && <LinearProgress />}</Grid>
               {suggestions.slice(0, nReconstructions).map((suggestion) => (
-                <Reconstruction suggestion={suggestion} />
+                <Reconstruction
+                  suggestion={suggestion}
+                  randomPatternRequested={onRequestRandomPatternFromBasis}
+                />
               ))}
             </Stack>
           </CardContent>

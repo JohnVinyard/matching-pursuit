@@ -123,7 +123,7 @@ def create_or_update_vm():
         update_compte_instance()
 
 def build_frontend():
-    pass
+    print(f'WARNING: This should buld the nextjs static app')
 
 def deploy():
     build_frontend()
