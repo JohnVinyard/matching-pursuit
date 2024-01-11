@@ -100,6 +100,19 @@ const ModelDemoView: React.FC<ModelDemoViewProps> = ({ nReconstructions }) => {
             </Dialog>
             <Stack spacing={2}>
               <Grid item>
+                <Typography variant="body1">
+                  The model decomposes short (~1.5s) of audio into two
+                  components:
+                  <ul>
+                    <li>A sparse set of "events"</li>
+                    <li>
+                      A 16-dimensional context vector, which determines global
+                      properties of the segment
+                    </li>
+                  </ul>
+                </Typography>
+              </Grid>
+              <Grid item>
                 <Button
                   onClick={onRequestRandomPattern}
                   variant="outlined"

@@ -223,6 +223,7 @@ class Synth(object):
         encoded, context = json_params_to_dense(encoding)
         audio, _, _ = model.from_sparse(encoded, context)
         audio = torch.sum(audio, dim=1)
+        audio = max_norm(audio)
         
         audio = audio.data.cpu().numpy().reshape((N_SAMPLES,))
         bio = BytesIO()
