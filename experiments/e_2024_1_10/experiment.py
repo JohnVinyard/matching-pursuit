@@ -27,7 +27,7 @@ from train.optim import optimizer
 from modules.upsample import ConvUpsample
 from util import device
 from util.readmedocs import readme
-
+from sklearn.cluster import MiniBatchKMeans
 
 exp = Experiment(
     samplerate=22050,
@@ -325,6 +325,7 @@ class UNet(nn.Module):
         super().__init__()
         self.channels = channels
         
+        
         self.embed_spec = nn.Conv1d(1024, 1024, 1, 1, 0)
         self.pos = nn.Parameter(torch.zeros(1, 1024, 128).uniform_(-0.01, 0.01))
         
@@ -411,13 +412,23 @@ class UNet(nn.Module):
                 nn.BatchNorm1d(channels)
             ),
         )
+        
 
         self.weighting = nn.Conv1d(1024, 4096, 1, 1, 0)
         self.proj = nn.Conv1d(1024, 4096, 1, 1, 0)
+        
+        
+        
 
     def forward(self, x):
         # Input will be (batch, 1024, 128)
         context = {}
+        
+        batch_size = x.shape[0]
+        
+        if x.shape[1] == 1:
+            x = stft(x, 2048, 256, pad=True).view(
+                batch_size, 128, 1025)[..., :1024].permute(0, 2, 1)
         
         x = self.embed_spec(x)
         x = x + self.pos
@@ -427,6 +438,7 @@ class UNet(nn.Module):
         for layer in self.down:
             x = layer(x)
             context[x.shape[-1]] = x
+        
 
         for layer in self.up:
             x = layer(x)
@@ -643,6 +655,7 @@ model = Model().to(device)
 optim = optimizer(model, lr=1e-3)
 
 
+
 import zounds
 band = zounds.FrequencyBand(40, 22050 // 2)
 scale = zounds.MelScale(band, 128)
@@ -652,30 +665,84 @@ filter_bank = morlet_filter_bank(sr, 128, scale, 0.1, normalize=True).real
 filter_bank = torch.from_numpy(filter_bank).to(device).float()
 
 
-def norm_loss(batch: torch.Tensor, recon: torch.Tensor):
-    """
-    Going through channels in a random order, try to maximize
-    the reduction in norm at each step
-    """
-    real_spec = stft(batch, 2048, 256, pad=True)
+# def norm_loss(batch: torch.Tensor, recon: torch.Tensor, loudest_down=False):
+#     """
+#     Going through channels in a random order, try to maximize
+#     the reduction in norm at each step
+#     """
     
-    residual = real_spec
+#     batch_size = batch.shape[0]
     
-    indices = np.random.permutation(n_events)
+#     real_spec = stft(batch, 2048, 256, pad=True)
+#     recon_specs = stft(recon, 2048, 256, pad=True)
     
-    loss = 0
     
-    for index in indices:
-        channel_spec = stft(recon[:, index: index + 1, :], 2048, 256, pad=True)
-        start_norm = torch.norm(real_spec, dim=(-1, -2))
-        residual = residual - channel_spec
-        end_norm = torch.norm(residual, dim=(-1, 2))
-        ratio = end_norm / (start_norm + 1e-6)
-        ratio = torch.clamp(ratio, 0, 2)
-        loss = loss + ratio.mean()
     
-    return loss
+#     loss = 0
+    
+#     if loudest_down:
+#         for i in range(batch_size):
+#             residual = real_spec[i]
+            
+#             norms = torch.norm(recon_specs[i], dim=(-1, -2))
+#             indices = torch.argsort(norms, dim=-1, descending=True)
+#             for index in indices:
+#                 channel_spec = recon_specs[i, index]
+#                 start_norm = torch.norm(residual, dim=(-1, -2))
+#                 residual = residual - channel_spec
+#                 end_norm = torch.norm(residual, dim=(-1, -2))
+#                 ratio = end_norm / (start_norm + 1e-6)
+#                 ratio = torch.clamp(ratio, 0, 2)
+#                 loss = loss + ratio.mean() / n_events
+#     else:
+#         residual = real_spec
+#         indices = np.random.permutation(n_events)
+#         for index in indices:
+#             channel_spec = stft(recon[:, index: index + 1, :], 2048, 256, pad=True)
+#             start_norm = torch.norm(residual, dim=(-1, -2))
+#             residual = residual - channel_spec
+#             end_norm = torch.norm(residual, dim=(-1, 2))
+#             ratio = end_norm / (start_norm + 1e-6)
+#             ratio = torch.clamp(ratio, 0, 2)
+#             loss = loss + ratio.mean()
+    
+#     return loss
         
+
+
+def multiband_pif(x: torch.Tensor):
+    
+    bands = fft_frequency_decompose(x, 512)
+    d = {}
+    for size, band in bands.items():
+        spec = F.conv1d(band, filter_bank.view(128, 1, 128), stride=1, padding=64)
+        spec = torch.relu(spec)
+        
+        spec = F.pad(spec, (0, 64))
+        windowed = spec.unfold(-1, 64, 32)
+        windowed = torch.fft.rfft(windowed, dim=-1)
+        windowed = torch.abs(windowed)
+        d[size] = windowed
+    return d
+
+
+def dict_op(
+        a: Dict[int, torch.Tensor],
+        b: Dict[int, torch.Tensor],
+        op: Callable[[torch.Tensor, torch.Tensor], torch.Tensor]) -> Dict[int, torch.Tensor]:
+    return {k: op(v, b[k]) for k, v in a.items()}
+
+
+
+
+def multiband_pif_loss(a: torch.Tensor, b: torch.Tensor):
+    batch_size = a.shape[0]
+    a = multiband_pif(a)
+    b = multiband_pif(b)
+    diff = dict_op(a, b, lambda a, b: a - b)
+    loss = sum([torch.abs(y).sum() for y in diff.values()])
+    return loss / batch_size
+
 
 def train(batch, i):
     optim.zero_grad()
@@ -686,34 +753,18 @@ def train(batch, i):
     
     recon_summed = torch.sum(recon, dim=1, keepdim=True)
     
-    # loss = single_channel_loss(batch, recon)
     
-    channel_specs = stft(recon, 2048, 256, pad=True)
-    batch_size, channels, time, bins = channel_specs.shape
+    channel_specs = stft(recon, 2048, 256, pad=True).view(-1, 128, 1025)
     
-    # smear a little, so we don't get a checkerboard solution
-    # channel_specs = channel_specs.view(batch_size * channels, time, bins).permute(0, 2, 1)
-    # channel_specs = F.avg_pool1d(channel_specs, 25, 1, 12)
-    # channel_specs = channel_specs.permute(0, 2, 1).view(batch_size, channels, time, bins)
+    sim = channel_specs @ channel_specs.permute(0, 2, 1)
+    sim = torch.triu(sim)
+    difference_loss = sim.mean() * 0.1
     
+    spec_loss = multiband_pif_loss(batch, recon_summed) * 1e-6
     
-    # print('=======================================')
-    # channel_specs = channel_specs.view(batch_size, channels, -1)
-    # sim = channel_specs @ channel_specs.permute(0, 2, 1)
-    # # print(sim.shape)
-    # sim = torch.triu(sim)
-    # difference_loss = sim.mean() * 1e-3
+    print(spec_loss.item(), difference_loss.item())
     
-    # real_spec = stft(batch, 2048, 256, pad=True)
-    # fake_spec = stft(recon_summed, 2048, 256, pad=True)
-    # spec_loss = F.mse_loss(fake_spec, real_spec)
-    
-    # print(difference_loss.item(), spec_loss.item())
-    
-    # loss = spec_loss + difference_loss
-    # loss = spec_loss
-    
-    loss = norm_loss(batch, recon)
+    loss = spec_loss + difference_loss
     
     loss.backward()
     optim.step()
@@ -726,10 +777,10 @@ def train(batch, i):
     #     model.eval()
         
     #     # generate context latent
-    #     z = torch.zeros(1, context_dim).normal_(0, 0.26)
+    #     z = torch.zeros(1, context_dim).normal_(0, 0.69)
         
     #     # generate events
-    #     events = torch.zeros(1, 1, 4096, 128).uniform_(0, 3.25)
+    #     events = torch.zeros(1, 1, 4096, 128).uniform_(0, 12)
     #     events = F.avg_pool2d(events, (7, 7), (1, 1), (3, 3))
     #     events = events.view(1, 4096, 128)
         
@@ -778,7 +829,6 @@ class OrthogonalEvents(BaseExperimentRunner):
         for i, item in enumerate(self.iter_items()):
             item = item.view(-1, 1, n_samples)
             l, r, e = train(item, i)
-
 
             self.real = item
             self.fake = r

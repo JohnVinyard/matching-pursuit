@@ -1,6 +1,7 @@
 Problems to Solve:
 
 - lots of redundant events
+- classic artifacts at beginning and end of filter, since it's generated using "classic" conv network
 
 Questions to answer about current model performance:
 
@@ -12,11 +13,17 @@ Questions to answer about current model performance:
 
 Things to try:
 
-- plain MSE (is model regularization enough?)
-- local contrast normalized spectrogram
-- MSE loss with atoms being pushed apart
+- ~~plain MSE (is model regularization enough?)~~ - **NO**
+- ~~MSE loss with atoms being pushed apart~~ - **NO**
+    - CON: atoms being pushed apart
+
 - maximizing norm reduction at each step
+    - randomized
+    - loud to quiet
+
+- MSE + discriminator loss
 - MSE with energy penalty
+- local contrast normalized spectrogram
 - dense labels for spectogram -> cluster -> match event with nearest cluster
 
 
@@ -29,3 +36,7 @@ and equilibrium is reached and we just oscillate at a poor loss?
     - 
 
 The problem with energy penalty is that it might be possible for the model to "make up" the volume in another parameter, and effectively change nothing.  We'd have to take great care that is wasn't the case, by making sure the resonance energy is entirely dependent on the impulse.
+
+
+# Front-runner
+- maximizing norm reduction - random order (still not as good as current loss)
