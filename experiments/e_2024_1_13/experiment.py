@@ -29,6 +29,8 @@ from util import device
 from util.readmedocs import readme
 from sklearn.cluster import MiniBatchKMeans
 
+from vector_quantize_pytorch import VectorQuantize
+
 exp = Experiment(
     samplerate=22050,
     n_samples=2 ** 15,
@@ -515,12 +517,15 @@ class Model(nn.Module):
         self.refractory_period = 8
         self.register_buffer('refractory', make_refractory_filter(
             self.refractory_period, power=10, device=device))
-
+        
         self.atom_bias = nn.Parameter(torch.zeros(4096).uniform_(-0.01, 0.01))
 
         # self.apply(lambda x: exp.init_weights(x))
     
-
+    def from_sparse(self, sparse, ctxt):
+        encoded, packed, one_hot = sparsify2(sparse, n_to_keep=n_events)
+        x, imp = self.generate(encoded, one_hot, packed, ctxt)
+        return x, imp, encoded
 
 
     def encode(self, x):
@@ -532,26 +537,36 @@ class Model(nn.Module):
         encoded = self.encoder.forward(x)
         encoded = F.dropout(encoded, 0.05)
 
-        # ref = F.pad(self.refractory,
-        #             (0, encoded.shape[-1] - self.refractory_period))
-        # encoded = fft_convolve(encoded, ref)[..., :encoded.shape[-1]]
+        ref = F.pad(self.refractory,
+                    (0, encoded.shape[-1] - self.refractory_period))
+        encoded = fft_convolve(encoded, ref)[..., :encoded.shape[-1]]
 
         return encoded
-
+    
+    def sparse_encode(self, x):
+        encoded = self.encode(x)
+        encoded, packed, one_hot = sparsify2(encoded, n_to_keep=n_events)
+        return encoded
+    
     def from_sparse(self, sparse, ctxt):
         encoded, packed, one_hot = sparsify2(sparse, n_to_keep=n_events)
         x, imp = self.generate(encoded, one_hot, packed, ctxt)
         return x, imp, encoded
-    
-    
+
     def generate(self, encoded, one_hot, packed, dense):
         
+        
+        # ctxt = torch.sum(encoded, dim=-1)
+        # dense = self.embed_memory_context(ctxt)  # (batch, context_dim)
+
+        # ctxt is a single vector
+        # ce = self.embed_context(ctxt)
 
         # one hot is n_events vectors
         proj = self.from_context(dense)
-        
         oh = self.embed_one_hot(one_hot)
         
+        # print(dense.shape, proj.shape, oh.shape)
 
         embeddings = proj[:, None, :] + oh
 
@@ -592,73 +607,148 @@ class Model(nn.Module):
         mean = self.to_context_mean(dense)
         std = self.to_context_std(dense)
         dense = mean + (torch.zeros_like(mean).normal_(0, 1) * std)
-
         
         encoded = encoded + self.atom_bias[None, :, None]
         encoded = torch.relu(encoded)
-
-        # note that some of the "top" channels will be zero, the eventual
-        # scheduling convolution will make the event silent        
+        
         encoded, packed, one_hot = sparsify2(encoded, n_to_keep=n_events)
+        encoded = torch.relu(encoded)
         
         final, imp = self.generate(encoded, one_hot, packed, dense)
         
-        print('ENCODED', encoded.max().item())
-        print('DENSE', dense.mean().item(), dense.std().item())
+        # print('ENCODED', encoded.max().item())
+        # print('DENSE', dense.mean().item(), dense.std().item())
         
         
         return final, encoded, imp
     
     
+    def random_generation(self, exponent=2):
+        with torch.no_grad():
+            # generate context latent
+            z = torch.zeros(1, context_dim).normal_(0, 0.1)
+            
+            # generate events
+            events = torch.zeros(1, 1, 4096, 128).uniform_(0, 1.6)
+            events = F.avg_pool2d(events, (7, 7), (1, 1), (3, 3))
+            events = events.view(1, 4096, 128)
+            
+            ch, _, encoded = self.from_sparse(events, z)
+            ch = torch.sum(ch, dim=1, keepdim=True)
+            ch = max_norm(ch)
+        
+        return ch, encoded
+    
+    def derive_events_and_context(self, x: torch.Tensor):
+        
+        print('STARTING WITH', x.shape)
+        
+        encoded = self.encode(x)
+
+        dense = torch.mean(encoded, dim=-1)
+        mean = self.to_context_mean(dense)
+        std = self.to_context_std(dense)
+        dense = mean + (torch.zeros_like(mean).normal_(0, 1) * std)
+        
+        
+        encoded, packed, one_hot = sparsify2(encoded, n_to_keep=n_events)
+        encoded = torch.relu(encoded)
+        
+        
+        return encoded, dense
+
+
 
 
 model = Model().to(device)
 optim = optimizer(model, lr=1e-3)
 
+vq = VectorQuantize(9*9, 36, 128, heads=1, kmeans_init=True, threshold_ema_dead_code=2).to(device)
+vq_optim = optimizer(vq, lr=1e-3)
 
 
 import zounds
-band = zounds.FrequencyBand(40, 22050 // 2)
-scale = zounds.LinearScale(band, 128)
-sr = zounds.SR22050()
+band = zounds.FrequencyBand(40, exp.samplerate)
+scale = zounds.MelScale(band, 1024)
+bank = morlet_filter_bank(exp.samplerate, 512, scale, scaling_factor=0.1, normalize=True).real.astype(np.float32)
+bank = torch.from_numpy(bank).to(device).view(1024, 1, 512)
 
-filter_bank = morlet_filter_bank(sr, 128, scale, 0.1, normalize=True).real
-filter_bank = torch.from_numpy(filter_bank).to(device).float()
+def spectral(a: torch.Tensor):
+    return stft(a, 2048, 256, pad=True).view(a.shape[0], 128, 1025).permute(0, 2, 1)
+    # # return codec.to_frequency_domain(a.view(-1, exp.n_samples))[..., 0]
+    # spec = F.conv1d(a, bank, padding=256)
+    # spec = torch.relu(spec)
+    # spec = F.avg_pool1d(spec, 512, 256, padding=256)
+    # return spec
 
-
-
-def multiband_pif(x: torch.Tensor):
+def patches(spec: torch.Tensor, size: int = 9, step: int = 3):
+    batch, channels, time = spec.shape
     
-    bands = fft_frequency_decompose(x, 512)
-    d = {}
-    for size, band in bands.items():
-        spec = F.conv1d(band, filter_bank.view(128, 1, 128), stride=1, padding=64)
-        spec = torch.relu(spec)
-        
-        spec = F.pad(spec, (0, 64))
-        windowed = spec.unfold(-1, 64, 32)
-        windowed = torch.fft.rfft(windowed, dim=-1)
-        windowed = torch.abs(windowed)
-        d[size] = windowed
-    return d
+    p = spec.unfold(1, size, step).unfold(2, size, step)
+    last_dim = np.prod(p.shape[-2:])
+    p = p.reshape(batch, -1, last_dim)
+    norms = torch.norm(p, dim=-1, keepdim=True)
+    normed = p / (norms + 1e-12)
+    
+    return p, norms, normed
 
+def learn_and_label(patches: torch.Tensor):
+    vq_optim.zero_grad()
+    batch, n_patches, patch_size = patches.shape
+    quantized, indices, loss = vq.forward(patches)
+    loss = loss + F.mse_loss(quantized.view(*patches.shape), patches)
+    loss.backward()
+    vq_optim.step()
+    return indices.view(batch, n_patches, 1)
+    
 
-def dict_op(
-        a: Dict[int, torch.Tensor],
-        b: Dict[int, torch.Tensor],
-        op: Callable[[torch.Tensor, torch.Tensor], torch.Tensor]) -> Dict[int, torch.Tensor]:
-    return {k: op(v, b[k]) for k, v in a.items()}
-
-
-
-
-def multiband_pif_loss(a: torch.Tensor, b: torch.Tensor):
-    batch_size = a.shape[0]
-    a = multiband_pif(a)
-    b = multiband_pif(b)
-    diff = dict_op(a, b, lambda a, b: a - b)
-    loss = sum([torch.abs(y).sum() for y in diff.values()])
-    return loss / batch_size
+def experiment_loss(batch: torch.Tensor, fake: torch.Tensor, channels: torch.Tensor, encoded: torch.Tensor):
+    # used_elements = (torch.abs(encoded).sum() / batch.shape[0]) * 1e-3
+    
+    real_spec = spectral(batch)
+    fake_spec = spectral(fake)
+    
+    # smoothness_loss = F.mse_loss(fake_spec, real_spec)
+    
+    # channel_specs = stft(channels, 2048, 256, pad=True).view(batch.shape[0], n_events, -1)
+    
+    # # encourage events to be orthogonal/non-overlapping
+    # # TODO: Use constant-q spectrogram with better frequency resolution
+    # sim = channel_specs @ channel_specs.permute(0, 2, 1)
+    # sim = torch.triu(sim)
+    # difference_loss = sim.mean() * 1e-2
+    
+    # break up the spectrograms into overlapping patches
+    rp, rn, rnorm = patches(real_spec)
+    fp, fn, fnorm = patches(fake_spec)
+    
+    
+    real_labels: torch.Tensor = learn_and_label(rnorm)
+    
+    total_elements = real_labels.nelement()
+    counts = torch.bincount(real_labels.view(-1), minlength=36)
+    # this is the percentage of patches that belong to this cluster/label
+    frequency = counts / total_elements
+    # we want inverse frequency
+    weighting = 1 / frequency
+    
+    # get patch losses
+    diff = ((rp - fp) ** 2).mean(dim=-1, keepdim=True)
+    
+    # get importance weighting for each patch
+    weights = weighting[real_labels.view(-1)].view(batch.shape[0], -1, 1)
+    
+    # weight patch losses by importance
+    loss = (diff * weights).mean()
+    
+    # print(loss.item(), smoothness_loss.item(), used_elements.item())
+    
+    # loss = loss + smoothness_loss + used_elements
+    
+    
+    return loss
+    
+    
 
 
 def train(batch, i):
@@ -668,30 +758,9 @@ def train(batch, i):
     
     recon, encoded, imp = model.forward(batch)
     
-    ef = encoded.view(-1)
-    # indices = torch.where(ef > 0)
-    
-    nz = (encoded > 0).sum() / b
-    print(f'Average of {nz.item()} elements per batch')
-    
-    # encourage the encoding to use as few events as possible
-    used_elements = (torch.abs(encoded).sum() / b) * 1e-3
-    
     recon_summed = torch.sum(recon, dim=1, keepdim=True)
     
-    channel_specs = stft(recon, 2048, 256, pad=True).view(-1, 128, 1025)
-    
-    # encourage events to be orthogonal/non-overlapping
-    # TODO: Use constant-q spectrogram with better frequency resolution
-    sim = channel_specs @ channel_specs.permute(0, 2, 1)
-    sim = torch.triu(sim)
-    difference_loss = sim.mean() * 0.1
-    
-    # reconstruction loss
-    # TODO: use patch info loss for reconstruction
-    spec_loss = multiband_pif_loss(batch, recon_summed) * 1e-6
-    
-    loss = spec_loss + used_elements + difference_loss
+    loss = experiment_loss(batch, recon_summed, recon, encoded)
     
     loss.backward()
     optim.step()
@@ -704,10 +773,10 @@ def train(batch, i):
     #     model.eval()
         
     #     # generate context latent
-    #     z = torch.zeros(1, context_dim).normal_(0, 0.69)
+    #     z = torch.zeros(1, context_dim).normal_(0, 12)
         
     #     # generate events
-    #     events = torch.zeros(1, 1, 4096, 128).uniform_(0, 12)
+    #     events = torch.zeros(1, 1, 4096, 128).uniform_(0, 130)
     #     events = F.avg_pool2d(events, (7, 7), (1, 1), (3, 3))
     #     events = events.view(1, 4096, 128)
         
@@ -739,7 +808,7 @@ def make_conjure(experiment: BaseExperimentRunner):
 
 
 @readme
-class OrthogonalEvents(BaseExperimentRunner):
+class PatchInfoLoss(BaseExperimentRunner):
     encoded = MonitoredValueDescriptor(make_conjure)
 
     def __init__(self, stream, port=None, load_weights=True, save_weights=False, model=model):
