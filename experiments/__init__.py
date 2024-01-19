@@ -17,5 +17,8 @@
 # from .e_2023_12_19 import PhysicalModel as Current
 # from .e_2023_12_25 import IterativeDecomposition as Current
 
-# from .e_2024_1_10 import OrthogonalEvents as Current
-from .e_2024_1_13 import PatchInfoLoss as Current
+from .e_2024_1_10 import OrthogonalEvents as Current
+# from .e_2024_1_13 import PatchInfoLoss as Current
+# from .e_2024_1_15 import Hybrid as Current
+
+# from .e_2024_1_19 import SparseLoss as Current

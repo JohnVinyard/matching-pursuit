@@ -1,1 +1,0 @@
-Try another iteration of transfer function experiment with element-wise sparsity

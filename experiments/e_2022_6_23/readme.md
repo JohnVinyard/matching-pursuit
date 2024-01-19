@@ -1,1 +1,0 @@
-Can I learn a multi-band, sparse representation of sound

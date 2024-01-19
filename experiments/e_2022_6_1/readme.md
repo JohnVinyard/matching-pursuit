@@ -1,1 +1,0 @@
-Can I generate using complex-valued frame coefficients?

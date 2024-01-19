@@ -1,1 +1,0 @@
-Build an encoder that outputs positions and atoms

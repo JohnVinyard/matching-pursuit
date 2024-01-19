@@ -1,1 +1,0 @@
-Typical autoregessive setting, with a discriminator for the probability assignment

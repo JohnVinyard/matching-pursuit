@@ -1,0 +1,1 @@
+Can I generate dynamic dictionaries of impulses and and transfer functions

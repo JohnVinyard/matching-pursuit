@@ -1,1 +1,0 @@
-How well do approximate convolutions perform compared to the full thing?

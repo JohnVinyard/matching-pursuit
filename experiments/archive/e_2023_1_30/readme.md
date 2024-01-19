@@ -1,0 +1,1 @@
+Model that chooses some atoms and reverb params

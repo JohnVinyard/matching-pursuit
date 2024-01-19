@@ -1,1 +1,0 @@
-Where do we lose the thread when moving from dense to sparse loss?

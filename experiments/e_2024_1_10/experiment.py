@@ -516,10 +516,9 @@ class Model(nn.Module):
         self.register_buffer('refractory', make_refractory_filter(
             self.refractory_period, power=10, device=device))
 
-        self.atom_bias = nn.Parameter(torch.zeros(4096).uniform_(-0.01, 0.01))
+        # self.atom_bias = nn.Parameter(torch.zeros(4096).uniform_(-0.01, 0.01))
 
         # self.apply(lambda x: exp.init_weights(x))
-    
 
 
 
@@ -532,9 +531,9 @@ class Model(nn.Module):
         encoded = self.encoder.forward(x)
         encoded = F.dropout(encoded, 0.05)
 
-        # ref = F.pad(self.refractory,
-        #             (0, encoded.shape[-1] - self.refractory_period))
-        # encoded = fft_convolve(encoded, ref)[..., :encoded.shape[-1]]
+        ref = F.pad(self.refractory,
+                    (0, encoded.shape[-1] - self.refractory_period))
+        encoded = fft_convolve(encoded, ref)[..., :encoded.shape[-1]]
 
         return encoded
 
@@ -592,10 +591,9 @@ class Model(nn.Module):
         mean = self.to_context_mean(dense)
         std = self.to_context_std(dense)
         dense = mean + (torch.zeros_like(mean).normal_(0, 1) * std)
-
         
-        encoded = encoded + self.atom_bias[None, :, None]
-        encoded = torch.relu(encoded)
+        # encoded = encoded + self.atom_bias[None, :, None]
+        # encoded = torch.relu(encoded)
 
         # note that some of the "top" channels will be zero, the eventual
         # scheduling convolution will make the event silent        
@@ -603,8 +601,8 @@ class Model(nn.Module):
         
         final, imp = self.generate(encoded, one_hot, packed, dense)
         
-        print('ENCODED', encoded.max().item())
-        print('DENSE', dense.mean().item(), dense.std().item())
+        # print('ENCODED', encoded.max().item())
+        # print('DENSE', dense.mean().item(), dense.std().item())
         
         
         return final, encoded, imp
@@ -623,25 +621,57 @@ scale = zounds.LinearScale(band, 128)
 sr = zounds.SR22050()
 
 filter_bank = morlet_filter_bank(sr, 128, scale, 0.1, normalize=True).real
-filter_bank = torch.from_numpy(filter_bank).to(device).float()
+filter_bank = torch.from_numpy(filter_bank).to(device).float().view(128, 1, 128)
 
 
-
-def multiband_pif(x: torch.Tensor):
+def compute_features(
+    x: torch.Tensor, 
+    kernel_size=128, 
+    pif_window=256,
+    pif_step=64, 
+    scattering_factor=100, 
+    time_residual_factor=500, 
+    harm_residual_factor=250):
     
-    bands = fft_frequency_decompose(x, 512)
-    d = {}
-    for size, band in bands.items():
-        spec = F.conv1d(band, filter_bank.view(128, 1, 128), stride=1, padding=64)
-        spec = torch.relu(spec)
-        
-        spec = F.pad(spec, (0, 64))
-        windowed = spec.unfold(-1, 64, 32)
-        windowed = torch.fft.rfft(windowed, dim=-1)
-        windowed = torch.abs(windowed)
-        d[size] = windowed
-    return d
+    batch_size = x.shape[0]
+    
+    full_spec = F.conv1d(x, filter_bank, stride=1, padding=kernel_size // 2)
+    full_spec = torch.relu(full_spec)
+    
+    pooled = F.avg_pool1d(full_spec, kernel_size, 1, padding=kernel_size // 2)[..., :full_spec.shape[-1]]
+    residual = full_spec - pooled
+    windowed = residual.unfold(-1, pif_window, pif_step)
+    scattering = torch.abs(torch.fft.rfft(windowed, dim=-1)) * scattering_factor
+    
+    pooled = F.avg_pool1d(full_spec, kernel_size, kernel_size // 2, padding=kernel_size // 2)
+    
+    time_pooled = F.avg_pool1d(pooled, kernel_size=25, stride=1, padding=12)
+    time_residual = (pooled - time_pooled) * time_residual_factor
+    
+    pooled = pooled.permute(0, 2, 1)
+    harm_pooled = F.avg_pool1d(pooled, kernel_size=25, stride=1, padding=12)
+    harm_residual = (pooled - harm_pooled) * harm_residual_factor
+    
+    x = torch.cat([
+        scattering.reshape(batch_size, -1), 
+        time_pooled.reshape(batch_size, -1), 
+        time_residual.reshape(batch_size, -1),
+        harm_pooled.reshape(batch_size, -1),
+        harm_residual.reshape(batch_size, -1)
+    ], dim=-1)
+    
+    return x
 
+
+def feature(x: torch.Tensor):
+    bands = fft_frequency_decompose(x, 1024)
+    feature = torch.cat([compute_features(y) for y in bands.values()], dim=-1)
+    return feature
+
+def feature_loss(a: torch.Tensor, b: torch.Tensor):
+    a = feature(a)
+    b = feature(b)
+    return F.mse_loss(a, b)
 
 def dict_op(
         a: Dict[int, torch.Tensor],
@@ -651,14 +681,71 @@ def dict_op(
 
 
 
+def scattering(x: torch.Tensor):
+    x = stft(x, 2048, 256, pad=True).view(-1, 128, 1025)
+    
+    spectral_pooled = F.avg_pool1d(x, 25, 1, padding=12)
+    spectral_residual = x - spectral_pooled
+    
+    x = x.permute(0, 2, 1)
+    
+    time_pooled = F.avg_pool1d(x, 25, 1, padding=12)
+    time_residual = x - time_pooled
+    
+    return spectral_residual, time_residual, spectral_pooled, time_pooled
 
-def multiband_pif_loss(a: torch.Tensor, b: torch.Tensor):
-    batch_size = a.shape[0]
-    a = multiband_pif(a)
-    b = multiband_pif(b)
-    diff = dict_op(a, b, lambda a, b: a - b)
-    loss = sum([torch.abs(y).sum() for y in diff.values()])
-    return loss / batch_size
+
+def scattering_loss(a: torch.Tensor, b: torch.Tensor):
+    rsr, rtr, rsp, rtp = scattering(a)    
+    fsr, ftr, fsp, ftp = scattering(b)    
+    
+    spec_residual_loss = F.mse_loss(fsr, rsr) * 100
+    time_residual_loss = F.mse_loss(ftr, rtr) * 500
+    
+    spec_pooled_loss = F.mse_loss(fsp, rsp)
+    time_pooled_loss = F.mse_loss(ftp, rtp)
+    
+    
+    return spec_residual_loss + time_residual_loss + spec_pooled_loss + time_pooled_loss
+
+
+def multiband_transform(x: torch.Tensor):
+    bands = fft_frequency_decompose(x, 512)
+    d1 = {f'{k}_long': stft(v, 128, 64, pad=True) for k, v in bands.items()}
+    d2 = {f'{k}_short': stft(v, 64, 32, pad=True) for k, v in bands.items()}
+    return dict(**d1, **d2)
+    
+
+
+def single_channel_loss(target: torch.Tensor, recon: torch.Tensor):
+
+    target = multiband_transform(target)
+
+    full = torch.sum(recon, dim=1, keepdim=True)
+    full = multiband_transform(full)
+
+    residual = dict_op(target, full, lambda a, b: a - b)
+    
+    # we want to make sure that all the atoms bring the residual 
+    # as close to 0 as possible.  The atoms should fully explain
+    # the audio segment, and should also not require that the random
+    # channel chosen has to make up for other channel's mistakes
+    overshoot = sum([torch.norm(x) for x in residual.values()]) / len(residual)
+    print('OVERSHOOT', overshoot.item())
+    
+    # since the residual contains elements from the network itself
+    # make sure we're not optimizing those values
+    residual = {k: v.clone().detach() for k, v in residual.items()}
+    
+    i = np.random.randint(0, n_events)
+    ch = recon[:, i: i + 1, :]
+    ch = multiband_transform(ch)
+    t = dict_op(residual, ch, lambda a, b: a + b)
+    # ask one channel to explain as much of the residual as possible
+    diff = dict_op(ch, t, lambda a, b: a - b)
+    loss = sum([torch.abs(y).mean() for y in diff.values()]) / len(diff)
+    return loss + overshoot
+
 
 
 def train(batch, i):
@@ -668,31 +755,17 @@ def train(batch, i):
     
     recon, encoded, imp = model.forward(batch)
     
-    ef = encoded.view(-1)
-    # indices = torch.where(ef > 0)
     
-    nz = (encoded > 0).sum() / b
-    print(f'Average of {nz.item()} elements per batch')
-    
-    # encourage the encoding to use as few events as possible
-    used_elements = (torch.abs(encoded).sum() / b) * 1e-3
     
     recon_summed = torch.sum(recon, dim=1, keepdim=True)
     
-    channel_specs = stft(recon, 2048, 256, pad=True).view(-1, 128, 1025)
     
-    # encourage events to be orthogonal/non-overlapping
-    # TODO: Use constant-q spectrogram with better frequency resolution
-    sim = channel_specs @ channel_specs.permute(0, 2, 1)
-    sim = torch.triu(sim)
-    difference_loss = sim.mean() * 0.1
+    # TODO: add single-channel loss, orthogonal loss and sparsity loss
+    # loss = single_channel_loss(batch, recon)
+    # loss = scattering_loss(batch, recon_summed)
+    loss = feature_loss(recon_summed, batch)
     
-    # reconstruction loss
-    # TODO: use patch info loss for reconstruction
-    spec_loss = multiband_pif_loss(batch, recon_summed) * 1e-6
-    
-    loss = spec_loss + used_elements + difference_loss
-    
+        
     loss.backward()
     optim.step()
     
@@ -704,10 +777,10 @@ def train(batch, i):
     #     model.eval()
         
     #     # generate context latent
-    #     z = torch.zeros(1, context_dim).normal_(0, 0.69)
+    #     z = torch.zeros(1, context_dim).normal_(0, 0.3)
         
     #     # generate events
-    #     events = torch.zeros(1, 1, 4096, 128).uniform_(0, 12)
+    #     events = torch.zeros(1, 1, 4096, 128).uniform_(0, 4)
     #     events = F.avg_pool2d(events, (7, 7), (1, 1), (3, 3))
     #     events = events.view(1, 4096, 128)
         

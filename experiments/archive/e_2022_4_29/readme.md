@@ -1,0 +1,1 @@
+Try the synth module in a GAN setting

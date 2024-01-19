@@ -1,1 +1,0 @@
-Try a simpler (non-DDSP) atom generation model

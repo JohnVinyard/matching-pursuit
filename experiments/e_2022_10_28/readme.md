@@ -1,1 +1,0 @@
-Can I just learn to reconstruct using atoms localized in time and frequency?

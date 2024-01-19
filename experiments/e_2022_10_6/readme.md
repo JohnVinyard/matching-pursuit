@@ -1,1 +1,0 @@
-Maybe all the transfer function stuff is unnecessary with different losses?

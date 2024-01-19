@@ -1,1 +1,0 @@
-This experiment will extend the work from 10-2, introducing a sparsity penalty

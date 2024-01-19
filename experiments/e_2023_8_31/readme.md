@@ -1,1 +1,0 @@
-What happens when I impose a sparsity penalty rather than an explicit number of active neurons?

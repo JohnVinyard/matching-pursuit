@@ -1,1 +1,0 @@
-Try a multi-band autoencoder with DDSP-style generator

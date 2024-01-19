@@ -1,1 +1,0 @@
-Use the DDSP autoencoder model in a GAN setting to see if we can produce crisper, less "blurry" audio

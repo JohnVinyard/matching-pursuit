@@ -1,1 +1,0 @@
-Trying vanilla matching pursuit for the 100th time

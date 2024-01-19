@@ -1,1 +1,0 @@
-See if I can take learnings from my sine optimization experiment and apply them to a decoder

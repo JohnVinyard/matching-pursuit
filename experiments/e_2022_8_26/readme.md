@@ -1,1 +1,0 @@
-Can I build a synthesizer from oscillators and filtered noise?

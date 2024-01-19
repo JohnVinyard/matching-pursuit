@@ -1,0 +1,1 @@
+What do I get when optimizing for multiscale self-similarity?

@@ -1,1 +1,0 @@
-Yesterday's experiment ended with realistic, but homogenous textures.  Is this because the discriminator is limited to a single vector per example?

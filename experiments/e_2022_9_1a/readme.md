@@ -1,1 +1,0 @@
-Let's try to use learnable wavetable synthesis to generate our events

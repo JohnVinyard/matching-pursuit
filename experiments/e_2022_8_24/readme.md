@@ -1,1 +1,0 @@
-Try learning a model that predicts loss from the synth params

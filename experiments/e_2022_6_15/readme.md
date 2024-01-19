@@ -1,1 +1,0 @@
-Trying out a middle ground for DDSP-style generators.  Hopefully the noise will guide everything else.

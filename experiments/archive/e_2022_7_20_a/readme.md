@@ -1,0 +1,1 @@
+Sort of a GAN autoencoder-like setting

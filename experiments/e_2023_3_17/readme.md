@@ -1,1 +1,0 @@
-Another try at a simple, physically-inspired model

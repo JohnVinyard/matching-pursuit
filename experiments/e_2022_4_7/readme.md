@@ -1,1 +1,0 @@
-The simplest and most naive possible diffusion-like experiment

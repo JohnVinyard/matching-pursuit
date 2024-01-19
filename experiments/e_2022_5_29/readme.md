@@ -1,1 +1,0 @@
-Can I make an end-run around the tokenized representation?

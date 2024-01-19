@@ -1,1 +1,0 @@
-multi-band gan.  Discriminator has no filterbanks, generator use osc+noise model

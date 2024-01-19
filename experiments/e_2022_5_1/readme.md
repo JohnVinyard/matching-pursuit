@@ -1,1 +1,0 @@
-Can I train a GAN to learn to produce realistic audio from tokens

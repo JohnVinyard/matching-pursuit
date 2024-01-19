@@ -1,0 +1,1 @@
+First try using the keypoint loss idea on spectrograms

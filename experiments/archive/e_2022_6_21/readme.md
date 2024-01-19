@@ -1,0 +1,1 @@
+Can I train a real-valued sequence prediction transformer using an adversarial loss?

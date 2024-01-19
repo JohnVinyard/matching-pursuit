@@ -1,1 +1,0 @@
-Just go for it and try a NERF-like experiment with a room simulation

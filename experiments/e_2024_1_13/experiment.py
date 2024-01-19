@@ -663,7 +663,10 @@ class Model(nn.Module):
 model = Model().to(device)
 optim = optimizer(model, lr=1e-3)
 
-vq = VectorQuantize(9*9, 36, 128, heads=1, kmeans_init=True, threshold_ema_dead_code=2).to(device)
+
+n_patch_centroids = 64
+
+vq = VectorQuantize(9*9, n_patch_centroids, 128, heads=1, kmeans_init=True, threshold_ema_dead_code=2).to(device)
 vq_optim = optimizer(vq, lr=1e-3)
 
 
@@ -726,7 +729,7 @@ def experiment_loss(batch: torch.Tensor, fake: torch.Tensor, channels: torch.Ten
     real_labels: torch.Tensor = learn_and_label(rnorm)
     
     total_elements = real_labels.nelement()
-    counts = torch.bincount(real_labels.view(-1), minlength=36)
+    counts = torch.bincount(real_labels.view(-1), minlength=n_patch_centroids)
     # this is the percentage of patches that belong to this cluster/label
     frequency = counts / total_elements
     # we want inverse frequency

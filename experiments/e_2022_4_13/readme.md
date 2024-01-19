@@ -1,1 +1,0 @@
-Try out learning a high-dimensional, sparse representation

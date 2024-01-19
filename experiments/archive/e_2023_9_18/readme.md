@@ -1,0 +1,1 @@
+Try visualizing the sparse representation to understand the phenomenon of "channel collapse"

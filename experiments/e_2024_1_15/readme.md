@@ -1,0 +1,1 @@
+Try patch-info loss on its own for 40K iterations

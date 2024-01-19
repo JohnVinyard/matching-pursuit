@@ -1,0 +1,1 @@
+More fine-grained resonance atoms

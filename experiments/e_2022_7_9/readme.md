@@ -1,1 +1,0 @@
-Start from scratch.  Single-band sparse audio experiment.

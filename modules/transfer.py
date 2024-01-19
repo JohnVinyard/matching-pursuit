@@ -65,20 +65,24 @@ def freq_domain_transfer_function_to_resonance(
 
 # TODO: frame-based FFT variant of this
 class ResonanceBank(nn.Module):
-    def __init__(self, n_resonances, window_size, n_frames, initial, fft_based_resonance=False):
+    def __init__(self, n_resonances, window_size, n_frames, initial, fft_based_resonance=False, learnable_resonances=True):
         super().__init__()
         self.n_coeffs = window_size // 2 + 1
         self.window_size = window_size
         self.n_resonances = n_resonances
         self.n_samples = (window_size // 2) * n_frames
         self.fft_based_resonance = fft_based_resonance
+        self.learnable_resonances = learnable_resonances
         
-        # self.res_samples = nn.Parameter(initial)
+        if self.learnable_resonances:
+            self.res_samples = nn.Parameter(initial)
+        else:
+            self.register_buffer('res_samples', initial)
+            
         
         self.base_resonance = 0.02
         self.res_factor = (1 - self.base_resonance) * 0.99
         
-        self.register_buffer('res_samples', initial)
         self.decay = nn.Linear(n_resonances, 128)
         # self.amplitudes = nn.Parameter(torch.zeros(n_resonances, n_frames).uniform_(-6, 6))
         self.filters = nn.Parameter(torch.zeros(n_resonances, 128).uniform_(-1, 1))
@@ -161,7 +165,7 @@ class TimeVaryingMix(nn.Module):
         
 
 class ResonanceBlock(nn.Module):
-    def __init__(self, n_atoms, window_size, n_frames, total_samples, mix_channels, channels, latent_dim, initial):
+    def __init__(self, n_atoms, window_size, n_frames, total_samples, mix_channels, channels, latent_dim, initial, learnable_resonances):
         super().__init__()
         self.n_atoms = n_atoms
         self.window_size = window_size
@@ -172,7 +176,7 @@ class ResonanceBlock(nn.Module):
         self.latent_dim = latent_dim
         self.initial = initial
         
-        self.bank = ResonanceBank(n_atoms, window_size, n_frames, self.initial, fft_based_resonance=False)
+        self.bank = ResonanceBank(n_atoms, window_size, n_frames, self.initial, fft_based_resonance=True, learnable_resonances=learnable_resonances)
         
         self.generate_mix = TimeVaryingMix(
             latent_dim, channels, mix_channels, n_frames)
@@ -256,7 +260,8 @@ class ResonanceChain(nn.Module):
             mix_channels, 
             channels, 
             latent_dim, 
-            initial):
+            initial,
+            learnable_resonances=True):
         
         super().__init__()
         self.n_atoms = n_atoms
@@ -270,7 +275,7 @@ class ResonanceChain(nn.Module):
         self.initial = initial
         
         self.res = nn.ModuleList([
-            ResonanceBlock(n_atoms, window_size, n_frames, total_samples, mix_channels, channels, latent_dim, initial) 
+            ResonanceBlock(n_atoms, window_size, n_frames, total_samples, mix_channels, channels, latent_dim, initial, learnable_resonances) 
             for _ in range(depth)
         ])
         

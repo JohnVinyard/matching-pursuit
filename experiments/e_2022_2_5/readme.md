@@ -1,2 +1,0 @@
-After yesterday's detour, I'm returning to the fairly promising experiment from 2-1-2022.  Unfortunately, the GAN experiment using the same model
-performed very poorly.  What if I try a combination of MSE and adversarial loss.

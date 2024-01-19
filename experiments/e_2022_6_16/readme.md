@@ -1,1 +1,0 @@
-Trying to implement the scattering transform (again)

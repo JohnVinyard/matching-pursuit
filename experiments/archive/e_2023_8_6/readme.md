@@ -1,0 +1,1 @@
+How does a sparse scheduling generator work in the GAN setting?
