@@ -176,7 +176,7 @@ class ResonanceBlock(nn.Module):
         self.latent_dim = latent_dim
         self.initial = initial
         
-        self.bank = ResonanceBank(n_atoms, window_size, n_frames, self.initial, fft_based_resonance=True, learnable_resonances=learnable_resonances)
+        self.bank = ResonanceBank(n_atoms, window_size, n_frames, self.initial, fft_based_resonance=False, learnable_resonances=learnable_resonances)
         
         self.generate_mix = TimeVaryingMix(
             latent_dim, channels, mix_channels, n_frames)

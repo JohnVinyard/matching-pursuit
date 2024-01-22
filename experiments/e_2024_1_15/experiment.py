@@ -663,7 +663,11 @@ class Model(nn.Module):
 model = Model().to(device)
 optim = optimizer(model, lr=1e-3)
 
-vq = VectorQuantize(9*9, 36, 128, heads=1, kmeans_init=True, threshold_ema_dead_code=2).to(device)
+n_centroids = 512
+window_size = (25, 25)
+step_size = (6, 6)
+
+vq = VectorQuantize(np.prod(window_size), n_centroids, 128, heads=1, kmeans_init=True, threshold_ema_dead_code=2).to(device)
 vq_optim = optimizer(vq, lr=1e-3)
 
 
@@ -671,55 +675,28 @@ vq_optim = optimizer(vq, lr=1e-3)
 
 import zounds
 band = zounds.FrequencyBand(40, 22050 // 2)
-scale = zounds.LinearScale(band, 128)
+scale = zounds.MelScale(band, 1024)
 sr = zounds.SR22050()
 
-filter_bank = morlet_filter_bank(sr, 128, scale, 0.1, normalize=True).real
-filter_bank = torch.from_numpy(filter_bank).to(device).float()
+filter_bank = morlet_filter_bank(sr, 512, scale, 0.1, normalize=True).real
+filter_bank = torch.from_numpy(filter_bank).to(device).float().view(1024, 1, 512)
 
-
-
-def multiband_pif(x: torch.Tensor):
-    
-    bands = fft_frequency_decompose(x, 512)
-    d = {}
-    for size, band in bands.items():
-        spec = F.conv1d(band, filter_bank.view(128, 1, 128), stride=1, padding=64)
-        spec = torch.relu(spec)
-        
-        spec = F.pad(spec, (0, 64))
-        windowed = spec.unfold(-1, 64, 32)
-        windowed = torch.fft.rfft(windowed, dim=-1)
-        windowed = torch.abs(windowed)
-        d[size] = windowed
-    return d
-
-
-def dict_op(
-        a: Dict[int, torch.Tensor],
-        b: Dict[int, torch.Tensor],
-        op: Callable[[torch.Tensor, torch.Tensor], torch.Tensor]) -> Dict[int, torch.Tensor]:
-    return {k: op(v, b[k]) for k, v in a.items()}
-
-
-
-
-def multiband_pif_loss(a: torch.Tensor, b: torch.Tensor):
-    batch_size = a.shape[0]
-    a = multiband_pif(a)
-    b = multiband_pif(b)
-    diff = dict_op(a, b, lambda a, b: a - b)
-    loss = sum([torch.abs(y).sum() for y in diff.values()])
-    return loss / batch_size
 
 
 def spectral(a: torch.Tensor):
-    return stft(a, 2048, 256, pad=True).view(a.shape[0], 128, 1025).permute(0, 2, 1)
+    # return stft(a, 2048, 256, pad=True).view(a.shape[0], 128, 1025).permute(0, 2, 1)
+    spec = F.conv1d(a, filter_bank, stride=1, padding=256)
+    spec = torch.relu(spec)
+    spec = F.avg_pool1d(spec, 512, 256, padding=256)
+    return spec
 
-def patches(spec: torch.Tensor, size: int = 9, step: int = 3):
+def patches(spec: torch.Tensor, size: int = window_size, step: int = step_size):
     batch, channels, time = spec.shape
     
-    p = spec.unfold(1, size, step).unfold(2, size, step)
+    wa, wb = window_size
+    sa, sb = step_size
+    
+    p = spec.unfold(1, wa, sa).unfold(2, wb, sb)
     last_dim = np.prod(p.shape[-2:])
     p = p.reshape(batch, -1, last_dim)
     norms = torch.norm(p, dim=-1, keepdim=True)
@@ -760,23 +737,25 @@ def experiment_loss(batch: torch.Tensor, fake: torch.Tensor, channels: torch.Ten
     real_labels: torch.Tensor = learn_and_label(rnorm)
     
     total_elements = real_labels.nelement()
-    counts = torch.bincount(real_labels.view(-1), minlength=36)
+    counts = torch.bincount(real_labels.view(-1), minlength=n_centroids)
     # this is the percentage of patches that belong to this cluster/label
     frequency = counts / total_elements
     # we want inverse frequency
     weighting = 1 / frequency
     
+    
     # get patch losses
-    diff = ((rp - fp) ** 2).mean(dim=-1, keepdim=True)
+    # diff = ((rp - fp) ** 2).mean(dim=-1, keepdim=True)
+    
+    diff = torch.abs(rp - fp).sum(dim=-1, keepdim=True)
     
     # get importance weighting for each patch
     weights = weighting[real_labels.view(-1)].view(batch.shape[0], -1, 1)
     
     # weight patch losses by importance
-    loss = (diff * weights).mean()
+    loss = (diff * weights).sum()
     
     
-    loss = loss
     
     return loss
     
