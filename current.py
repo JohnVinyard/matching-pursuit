@@ -1,7 +1,6 @@
 from config import config_values, Config
 import json
 from data.audioiter import AudioIterator
-from experiments import Current
 import os
 import zounds
 import argparse
@@ -43,8 +42,8 @@ def train(batch, i):
 
 @readme
 class {class_name}(BaseExperimentRunner):
-    def __init__(self, stream, port=None):
-        super().__init__(stream, train, exp, port=port)
+    def __init__(self, stream, port=None, save_weights=False, load_weights=False):
+        super().__init__(stream, train, exp, port=port, save_weights=save_weights, load_weights=load_weights)
     '''
     return experiment_template
 
@@ -101,6 +100,8 @@ if __name__ == '__main__':
     if args.new:
         new_experiment(args.classname, args.postfix)
     elif args.push_trained_weights:
+        from experiments import Current
+        
         port = os.environ['PORT']
 
         print(args)
@@ -129,7 +130,9 @@ if __name__ == '__main__':
         store_trained_weights_remoteley(
             path, model, device='cpu', s3_bucket=Config.s3_bucket())
     else:
+        from experiments import Current
         port = os.environ['PORT']
+        
 
         print(args)
         

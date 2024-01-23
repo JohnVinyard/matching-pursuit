@@ -23,3 +23,5 @@
 # from .e_2024_1_15 import Hybrid as Current
 
 # from .e_2024_1_19 import SparseLoss as Current
+
+from .e_2024_1_22 import WithLowerFrequencyLoss as Current

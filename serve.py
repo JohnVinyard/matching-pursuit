@@ -105,7 +105,7 @@ def has_local_copy(musicnet_id):
     return os.path.exists(f'{musicnet_id}.wav')
 
 
-def get_segment(musicnet_id = None, start_index=None) -> Tuple[torch.Tensor, IO]:
+def get_segment(musicnet_id = None, start_index=None, normalize=False) -> Tuple[torch.Tensor, IO]:
     """
     Choose from local list
     check if file is downloaded locally
@@ -124,6 +124,8 @@ def get_segment(musicnet_id = None, start_index=None) -> Tuple[torch.Tensor, IO]
         segment = audio[start_index: end_index].astype(np.float32)
         segment /= (segment.max() + 1e-8)
         audio_tensor = torch.from_numpy(segment).view(1, 1, N_SAMPLES)
+        if normalize:
+            audio_tensor = max_norm(audio_tensor)
         
         bio = BytesIO()
         sf.write(bio, segment, samplerate=SAMPLERATE, format='wav')
@@ -150,6 +152,8 @@ def get_segment(musicnet_id = None, start_index=None) -> Tuple[torch.Tensor, IO]
         segment = audio[start_index: end_index].astype(np.float32)
         
         audio_tensor = torch.from_numpy(segment).view(1, 1, N_SAMPLES)
+        if normalize:
+            audio_tensor = max_norm(audio_tensor)
         
         bio2 = BytesIO()
         sf.write(bio2, segment, samplerate=SAMPLERATE, format='wav')
@@ -170,6 +174,7 @@ def reconstruct_segment(musicnet_id, start):
     tensor = max_norm(tensor)
     x, _, _ = model.forward(tensor)
     x = torch.sum(x, dim=1)
+    x = max_norm(x)
     x = x.view(N_SAMPLES)
     bio = tensor_to_audio(x)
     return bio
@@ -191,7 +196,8 @@ class Audio(object):
         
         _, bio, start, end, total, musicnet_id = get_segment(
             musicnet_id=musicnet, 
-            start_index=None if start is None else int(start))
+            start_index=None if start is None else int(start),
+            normalize=True)
         
         data = bio.read()
         
@@ -254,7 +260,7 @@ class Random(object):
 class Encode(object):
     
     def on_get(self, req: falcon.Request, res: falcon.Response, musicnet, start):
-        tensor, audio_io, start, end, total, musicnet_id = get_segment(musicnet, int(start))
+        tensor, audio_io, start, end, total, musicnet_id = get_segment(musicnet, int(start), normalize=True)
         encoded, dense = model.derive_events_and_context(tensor.view(1, 1, N_SAMPLES))
         data = dense_to_json_params(encoded, dense)
         res.status = falcon.HTTP_OK

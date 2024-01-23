@@ -1,0 +1,1 @@
+Trying a loss that focuses less on high frequencies

@@ -101,8 +101,10 @@ const ModelDemoView: React.FC<ModelDemoViewProps> = ({ nReconstructions }) => {
             <Stack spacing={2}>
               <Grid item>
                 <Typography variant="body1">
-                  The model decomposes short (~1.5s) of audio into two
-                  components:
+                  <p>
+                    The model decomposes short (~1.5s) of audio into two
+                    components:
+                  </p>
                   <ul>
                     <li>A sparse set of "events"</li>
                     <li>
@@ -110,6 +112,12 @@ const ModelDemoView: React.FC<ModelDemoViewProps> = ({ nReconstructions }) => {
                       properties of the segment
                     </li>
                   </ul>
+                  <p>
+                    You can read about the model in more detail here:
+                    <a href="https://johnvinyard.github.io/machine-learning/2023/11/15/sparse-physical-model.html">
+                      blog post
+                    </a>
+                  </p>
                 </Typography>
               </Grid>
               <Grid item>
