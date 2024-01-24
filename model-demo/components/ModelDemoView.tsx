@@ -17,7 +17,7 @@ import {
 import Reconstruction from "./Reconstruction";
 import { Encoding, N_TIME_STEPS, randomEncoding } from "../models/Encoding";
 import SegmentEditor from "./SegmentEditor";
-import { Refresh } from "@mui/icons-material";
+import { Equalizer, Refresh } from "@mui/icons-material";
 
 interface ModelDemoViewProps {
   nReconstructions: number;
@@ -30,12 +30,16 @@ const ModelDemoView: React.FC<ModelDemoViewProps> = ({ nReconstructions }) => {
     undefined
   );
 
-  useEffect(() => {
+  const fetchSuggestions = () => {
     fetch("/suggestions")
       .then((resp) => resp.json())
       .then((suggestions) => {
         setSuggestions(suggestions);
       });
+  };
+
+  useEffect(() => {
+    fetchSuggestions();
   }, []);
 
   const onRequestRandomPattern = () => {
@@ -48,6 +52,10 @@ const ModelDemoView: React.FC<ModelDemoViewProps> = ({ nReconstructions }) => {
 
   const onCloseDialog = () => {
     setRandomPattern(undefined);
+  };
+
+  const onRefresh = () => {
+    window.location.reload();
   };
 
   return (
@@ -114,20 +122,33 @@ const ModelDemoView: React.FC<ModelDemoViewProps> = ({ nReconstructions }) => {
                   </ul>
                   <p>
                     You can read about the model in more detail here:
-                    <a href="https://johnvinyard.github.io/machine-learning/2023/11/15/sparse-physical-model.html">
+                    <a href="https://blog.cochlea.xyz/machine-learning/2023/11/15/sparse-physical-model.html">
                       blog post
                     </a>
                   </p>
                 </Typography>
               </Grid>
-              <Grid item>
-                <Button
-                  onClick={onRequestRandomPattern}
-                  variant="outlined"
-                  color="primary"
-                >
-                  Random Pattern
-                </Button>
+              <Grid item container direction="row" spacing={2}>
+                <Grid item>
+                  <Button
+                    onClick={onRequestRandomPattern}
+                    variant="outlined"
+                    color="primary"
+                    endIcon={<Equalizer />}
+                  >
+                    Random Pattern
+                  </Button>
+                </Grid>
+                <Grid item>
+                  <Button
+                    onClick={onRefresh}
+                    variant="outlined"
+                    color="primary"
+                    endIcon={<Refresh />}
+                  >
+                    Load New Reconstructions
+                  </Button>
+                </Grid>
               </Grid>
               <Grid item>{suggestions.length === 0 && <LinearProgress />}</Grid>
               {suggestions.slice(0, nReconstructions).map((suggestion) => (

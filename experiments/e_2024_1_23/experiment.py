@@ -1,10 +1,13 @@
 
 import numpy as np
 import torch
+# from conjure import numpy_conjure, SupportedContentType
 
 from scipy.signal import square, sawtooth
 from torch import nn
 from torch.nn import functional as F
+# from config.experiment import Experiment
+# from modules.decompose import fft_frequency_decompose
 
 from modules.overlap_add import overlap_add
 from modules.angle import windowed_audio
@@ -12,12 +15,15 @@ from modules.ddsp import NoiseModel
 from modules.fft import fft_convolve
 from modules.linear import LinearOutputStack
 from modules.normalization import max_norm, unit_norm
-from modules.refractory import make_refractory_filter
+# from modules.refractory import make_refractory_filter
 from modules.reverb import ReverbGenerator
 from modules.sparse import sparsify2
 from modules.stft import stft
 from modules.upsample import ConvUpsample
+# from train.experiment_runner import BaseExperimentRunner, MonitoredValueDescriptor
+# from train.optim import optimizer
 from util import device
+# from util.readmedocs import readme
 
 
 # exp = Experiment(
@@ -34,7 +40,6 @@ resonance_size = 32768
 samplerate = 22050
 n_samples = 32768
 
-        
 
 
 class ResonanceModel2(nn.Module):
@@ -504,9 +509,9 @@ class Model(nn.Module):
         self.shift_factor = (256 / resonance_size) * 0.5
         
 
-        self.refractory_period = 8
-        self.register_buffer('refractory', make_refractory_filter(
-            self.refractory_period, power=10, device=device))
+        # self.refractory_period = 8
+        # self.register_buffer('refractory', make_refractory_filter(
+        #     self.refractory_period, power=10, device=device))
 
         # self.atom_bias = nn.Parameter(torch.zeros(4096).uniform_(-0.01, 0.01))
 
@@ -523,9 +528,9 @@ class Model(nn.Module):
         encoded = self.encoder.forward(x)
         # encoded = F.dropout(encoded, 0.05)
 
-        ref = F.pad(self.refractory,
-                    (0, encoded.shape[-1] - self.refractory_period))
-        encoded = fft_convolve(encoded, ref)[..., :encoded.shape[-1]]
+        # ref = F.pad(self.refractory,
+        #             (0, encoded.shape[-1] - self.refractory_period))
+        # encoded = fft_convolve(encoded, ref)[..., :encoded.shape[-1]]
 
         return encoded
 
@@ -585,7 +590,7 @@ class Model(nn.Module):
         dense = mean + (torch.zeros_like(mean).normal_(0, 1) * std)
         
         # encoded = encoded + self.atom_bias[None, :, None]
-        # encoded = torch.relu(encoded)
+        encoded = torch.relu(encoded)
 
         # note that some of the "top" channels will be zero, the eventual
         # scheduling convolution will make the event silent        
@@ -627,6 +632,8 @@ class Model(nn.Module):
         dense = mean + (torch.zeros_like(mean).normal_(0, 1) * std)
         
         
+        encoded = torch.relu(encoded)
+        
         encoded, packed, one_hot = sparsify2(encoded, n_to_keep=n_events)
         
         
@@ -637,16 +644,10 @@ class Model(nn.Module):
 # optim = optimizer(model, lr=1e-3)
 
 
-loss_n_bands = 512
-loss_kernel_size = 512
+# loss_n_bands = 512
+# loss_kernel_size = 512
 
-# import zounds
-# band = zounds.FrequencyBand(40, 22050 // 2)
-# scale = zounds.MelScale(band, loss_n_bands)
-# sr = zounds.SR22050()
 
-# filter_bank = morlet_filter_bank(sr, loss_kernel_size, scale, 0.1, normalize=True).real
-# filter_bank = torch.from_numpy(filter_bank).to(device).float().view(loss_n_bands, 1, loss_kernel_size)
 
 # def multiband_transform(x: torch.Tensor):
 #     bands = fft_frequency_decompose(x, 512)
@@ -658,7 +659,7 @@ loss_kernel_size = 512
 # def transform(x: torch.Tensor):
 #     batch, channels, time = x.shape
 #     d = multiband_transform(x)
-#     feat = torch.cat([z.view(batch, channels, -1) / np.prod(z.shape[-2:]) for z in d.values()], dim=-1)
+#     feat = torch.cat([z.view(batch, channels, -1) for z in d.values()], dim=-1)
 #     return feat
 
 
@@ -697,15 +698,21 @@ loss_kernel_size = 512
 #     b = batch.shape[0]
     
 #     recon, encoded, imp = model.forward(batch)
+#     mask = encoded > 0
+#     print(f'Non-zero: {mask.sum().item() / b}')
     
 #     recon_summed = torch.sum(recon, dim=1, keepdim=True)
     
     
 #     print('==================================')
     
-#     single_loss = single_channel_loss_3(batch, recon)
+#     sparse_loss = torch.sum(encoded) * 1e-4
     
-#     loss = single_loss
+#     single_loss = single_channel_loss_3(batch, recon) * 1e-5
+    
+#     print(single_loss.item(), sparse_loss.item())
+    
+#     loss = single_loss + sparse_loss
     
         
 #     loss.backward()
@@ -719,12 +726,12 @@ loss_kernel_size = 512
 #         model.eval()
         
 #         # generate context latent
-#         z = torch.zeros(1, context_dim).normal_(0, 0.3)
+#         z = torch.zeros(1, context_dim).normal_(0, 0.59)
         
 #         # generate events
-#         events = torch.zeros(1, 1, 4096, 128).uniform_(0, 4)
-#         events = F.avg_pool2d(events, (7, 7), (1, 1), (3, 3))
-#         events = events.view(1, 4096, 128)
+#         events = torch.zeros(1, 4096, 128).uniform_(0, 0.2)
+#         # events = F.avg_pool2d(events, (7, 7), (1, 1), (3, 3))
+#         # events = events.view(1, 4096, 128)
         
 #         ch, _, encoded = model.from_sparse(events, z)
 #         ch = torch.sum(ch, dim=1, keepdim=True)
@@ -754,7 +761,7 @@ loss_kernel_size = 512
 
 
 # @readme
-# class WithLowerFrequencyLoss(BaseExperimentRunner):
+# class SparsityConstraint(BaseExperimentRunner):
 #     encoded = MonitoredValueDescriptor(make_conjure)
 
 #     def __init__(self, stream, port=None, load_weights=True, save_weights=False, model=model):

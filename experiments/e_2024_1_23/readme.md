@@ -1,0 +1,1 @@
+Try adding a sparsity loss to avoid "garbage events" and have better random generations
