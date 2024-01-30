@@ -1,0 +1,1 @@
+Get rid of up-scaling and sparsity, just generate events directly

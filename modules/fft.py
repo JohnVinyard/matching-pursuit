@@ -3,16 +3,16 @@ from torch.nn import functional as F
 from functools import reduce
 import numpy as np
 
-def fft_convolve(*args) -> torch.Tensor:
+def fft_convolve(*args, norm=None) -> torch.Tensor:
 
     n_samples = args[0].shape[-1]
 
     # pad to avoid wraparound artifacts
     padded = [F.pad(x, (0, x.shape[-1])) for x in args]
     
-    specs = [torch.fft.rfft(x, dim=-1) for x in padded]
+    specs = [torch.fft.rfft(x, dim=-1, norm=norm) for x in padded]
     spec = reduce(lambda accum, current: accum * current, specs[1:], specs[0])
-    final = torch.fft.irfft(spec, dim=-1)
+    final = torch.fft.irfft(spec, dim=-1, norm=norm)
 
     # remove padding
     return final[..., :n_samples]

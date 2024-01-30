@@ -65,7 +65,8 @@ const ModelDemoView: React.FC<ModelDemoViewProps> = ({ nReconstructions }) => {
           <CardHeader
             title={
               <Typography variant="h2">
-                Sparse Interpretible Audio Demo
+                Sparse Interpretible Audio Demo{" "}
+                <Typography variant="caption">(2024-1-28)</Typography>
               </Typography>
             }
           ></CardHeader>

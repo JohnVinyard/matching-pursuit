@@ -124,6 +124,9 @@ def create_or_update_vm():
 
 def build_frontend():
     print(f'WARNING: This should buld the nextjs static app')
+    
+def assign_static_ip():
+    print('WARNING: No static IP, follow instructions here https://cloud.google.com/sdk/gcloud/reference/compute/instances/update')
 
 def deploy():
     build_frontend()
@@ -131,6 +134,7 @@ def deploy():
     build_local_image()
     push_image()
     create_or_update_vm()
+    assign_static_ip()
     
 
 if __name__ == '__main__':

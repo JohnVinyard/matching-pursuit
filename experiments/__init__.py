@@ -27,3 +27,12 @@
 # from .e_2024_1_22 import WithLowerFrequencyLoss as Current
 
 # from .e_2024_1_23 import SparsityConstraint as Current
+
+# from .e_2024_1_24 import TransformerAnalyzer as Current
+
+# from .e_2024_1_25 import IterativeDecomposition as Current
+# from .e_2024_1_26 import AntiCausalConv as Current
+# from .e_2024_1_27 import L0Norm as Current
+# from .e_2024_1_28 import NoSparsity as Current
+
+from .e_2024_1_29 import BetterSparsity as Current

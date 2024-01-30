@@ -1,13 +1,16 @@
+from typing import Tuple
 import numpy as np
 import torch
 import torch.nn.functional as F
 from matplotlib import pyplot as plt
 from torch import nn
+from modules.fft import fft_convolve
 from modules.overlap_add import overlap_add
 
-from modules.angle import windowed_audio
-from util.playable import playable
-import zounds
+from matplotlib import pyplot as plt
+
+from modules.refractory import make_refractory_filter
+
 
 
 # TODO: try matrix rotation instead: https://eecs.qmul.ac.uk/~gslabaugh/publications/euler.pdf
@@ -67,14 +70,54 @@ def test():
     audio = overlap_add(frames, apply_window=True)[..., :n_samples]
     
     return audio
+
+
+def anticausal_inhibition(x: torch.Tensor, inhibitory_area: Tuple[int, int]):
+    batch, channels, time = x.shape
+    width, height = inhibitory_area
+    x = x[:, None, :, :]
+    avg = F.avg_pool2d(x, inhibitory_area, stride=(1, 1), padding=(width // 2, height // 2))
+    x = x - avg
+    x = torch.relu(x)
+    return x.view(batch, channels, time)
+    
+
+def sparsify_test(iterations: int = 10):
+    
+    start_shape = (1, 128, 128)
+    start = torch.zeros(*start_shape).uniform_(-10, 10)
+    start = torch.relu(start)
+    
+    
+    for i in range(iterations):
+        start = anticausal_inhibition(start, (9, 9))
+        print(start.shape)
+        print(f'iteration {i}, non-zero: {(start > 0).sum().item()}, max value: {start.max().item()}')
+        display = start.data.cpu().numpy().reshape(*start_shape[1:])
+        plt.matshow(display)
+        plt.show()
     
 
 
 if __name__ == '__main__':
-    audio = test()
-    print(audio.shape)
+    # audio = test()
+    # print(audio.shape)
     
-    audio = playable(audio.squeeze(), zounds.SR22050(), normalize=True)
-    audio.save('test.wav')
+    # audio = playable(audio.squeeze(), zounds.SR22050(), normalize=True)
+    # audio.save('test.wav')
+    
+    # inp = torch.zeros(4, 16, 128).uniform_(0, 1)
+    
+    # net = AntiCausalStack(16, 2, dilations=[1, 2, 4, 8, 16, 32, 64])
+    
+    # result = net.forward(inp)
+    
+    # result = result.data.cpu().numpy()[0]
+    
+    # plt.matshow(result)
+    # plt.show()
+    
+    
+    sparsify_test(20)
     
     
