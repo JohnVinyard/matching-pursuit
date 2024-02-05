@@ -8,3 +8,4 @@ with the diversity of codes.  Hopefully this leads to:
 Things to try next:
 - original single-channel loss
 - normalization that never has across-sample dependencies
+- anti-causal model with something other than batch norm!

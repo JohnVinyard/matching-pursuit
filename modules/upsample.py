@@ -6,6 +6,7 @@ from config.dotenv import Config
 from data.datastore import batch_stream
 # from modules.pos_encode import ExpandUsingPosEncodings
 from util import device
+from torch.nn.utils.weight_norm import weight_norm as wnorm
 
 
 from util.weight_init import make_initializer
@@ -19,11 +20,17 @@ class UpsampleBlock(nn.Module):
             self,
             in_channels,
             out_channels,
-            mode='nearest'):
+            mode='nearest',
+            weight_norm=False):
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
-        self.conv = nn.Conv1d(in_channels, out_channels, 3, 1, 1)
+        
+        if weight_norm:
+            self.conv = wnorm(nn.Conv1d(in_channels, out_channels, 3, 1, 1))
+        else:
+            self.conv = nn.Conv1d(in_channels, out_channels, 3, 1, 1)
+        
         self.mode = mode
 
     def forward(self, x):
@@ -33,19 +40,22 @@ class UpsampleBlock(nn.Module):
 
 
 class Nearest(UpsampleBlock):
-    def __init__(self, in_channels, out_channels):
-        super().__init__(in_channels, out_channels, 'nearest')
+    def __init__(self, in_channels, out_channels, weight_norm=False):
+        super().__init__(in_channels, out_channels, 'nearest', weight_norm=weight_norm)
 
 
 class Linear(UpsampleBlock):
-    def __init__(self, in_channels, out_channels):
-        super().__init__(in_channels, out_channels, 'linear')
+    def __init__(self, in_channels, out_channels, weight_norm=False):
+        super().__init__(in_channels, out_channels, 'linear', weight_norm=weight_norm)
 
 
 class LearnedUpsampleBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=4, step_size=2, padding=1):
+    def __init__(self, in_channels, out_channels, kernel_size=4, step_size=2, padding=1, weight_norm=False):
         super().__init__()
-        self.conv = nn.ConvTranspose1d(in_channels, out_channels, kernel_size, step_size, padding)
+        if weight_norm:
+            self.conv = wnorm(nn.ConvTranspose1d(in_channels, out_channels, kernel_size, step_size, padding))
+        else:
+            self.conv = nn.ConvTranspose1d(in_channels, out_channels, kernel_size, step_size, padding)
 
     def forward(self, x):
         x = self.conv(x)
@@ -53,7 +63,7 @@ class LearnedUpsampleBlock(nn.Module):
 
 
 class FFTUpsampleBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, size, factor=2, infer=False):
+    def __init__(self, in_channels, out_channels, size, factor=2, infer=False, weight_norm=False):
         super().__init__()
         self.channels = in_channels
         self.size = size
@@ -171,6 +181,8 @@ class ConvUpsample(nn.Module):
             out_channels,
             from_latent=True,
             batch_norm=False,
+            layer_norm=False,
+            weight_norm=False,
             norm=nn.Identity(),
             activation_factory=lambda: nn.LeakyReLU(0.2)):
 
@@ -182,36 +194,46 @@ class ConvUpsample(nn.Module):
         self.end_size = end_size
         self.n_layers = int(np.log2(end_size) - np.log2(start_size))
         self.from_latent = from_latent
+        self.layer_norm = layer_norm
+        self.batch_norm = batch_norm
+        self.weight_norm = weight_norm
 
         self.begin = nn.Linear(
             self.latent_dim, self.channels * self.start_size)
         self.out_channels = out_channels
 
         if mode == 'learned':
-            def layer(channels, size): return LearnedUpsampleBlock(
-                channels, channels)
+            def layer(channels, size, weight_norm): return LearnedUpsampleBlock(
+                channels, channels, weight_norm=weight_norm)
         elif mode == 'nearest':
-            def layer(channels, size): return Nearest(channels, channels)
+            def layer(channels, size, weight_norm): return Nearest(channels, channels, weight_norm=weight_norm)
         elif mode == 'linear':
-            def layer(channels, size): return Linear(channels, channels)
+            def layer(channels, size, weight_norm): return Linear(channels, channels, weight_norm=weight_norm)
         elif mode == 'fft':
-            def layer(channels, size): return FFTUpsampleBlock(
-                channels, channels, size)
+            def layer(channels, size, weight_norm): return FFTUpsampleBlock(
+                channels, channels, size, weight_norm=weight_norm)
         elif mode == 'fft_learned':
-            def layer(channels, size): return FFTUpsampleBlock(
-                channels, channels, size, infer=True)
+            def layer(channels, size, weight_norm): return FFTUpsampleBlock(
+                channels, channels, size, infer=True, weight_norm=weight_norm)
 
         self.net = nn.Sequential(*[nn.Sequential(
-            layer(channels, size),
-            nn.BatchNorm1d(channels) if batch_norm else norm,
+            layer(channels, size, weight_norm),
+            # nn.BatchNorm1d(channels) if batch_norm else norm,
+            self._build_norm_layer(channels, size),
             activation_factory(),
-            # nn.LeakyReLU(0.2),
-            # Sine()
         ) for _, size in iter_layers(start_size, end_size)])
 
         self.final = nn.Conv1d(channels, self.out_channels, 3, 1, 1)
 
         self.apply(init_weights)
+    
+    def _build_norm_layer(self, channels, size):
+        if self.batch_norm:
+            return nn.BatchNorm1d(channels)
+        elif self.layer_norm:
+            return nn.LayerNorm((channels, size * 2), elementwise_affine=False)
+        else:
+            return nn.Identity()
 
     def __iter__(self):
         return iter(self.net)

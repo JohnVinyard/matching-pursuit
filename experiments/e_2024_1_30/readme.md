@@ -1,0 +1,1 @@
+Try using layer norm everywhere, so there are no inter-batch dependencies, and inference will work as expected

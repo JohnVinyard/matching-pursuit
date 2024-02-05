@@ -374,7 +374,9 @@ class NoiseModel(nn.Module):
             squared=False,
             mask_after=None,
             return_params=False,
-            batch_norm=False):
+            batch_norm=False,
+            layer_norm=False,
+            weight_norm=False):
 
         super().__init__()
         self.return_params = return_params
@@ -387,6 +389,7 @@ class NoiseModel(nn.Module):
         self.squared = squared
         self.mask_after = mask_after
         self.batch_norm = batch_norm
+        self.layer_norm = layer_norm
 
         noise_step = n_audio_samples // n_noise_frames
         noise_window = noise_step * 2
@@ -400,7 +403,9 @@ class NoiseModel(nn.Module):
             mode='learned', 
             out_channels=self.noise_coeffs, 
             from_latent=False, 
-            batch_norm=batch_norm)
+            batch_norm=batch_norm,
+            layer_norm=layer_norm,
+            weight_norm=weight_norm)
 
 
     def forward(self, x, add_noise=False):

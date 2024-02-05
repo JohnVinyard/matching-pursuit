@@ -148,14 +148,13 @@ class TimeVaryingMix(nn.Module):
             mode='learned',
             end_size=self.n_frames, 
             out_channels=n_mixer_channels, 
-            from_latent=True, 
-            batch_norm=True)
+            from_latent=True)
     
     def forward(self, x, audio_channels):
         total_samples = audio_channels.shape[-1]
         mix = self.to_time_varying_mix(x).view(-1, self.n_mixer_channels, self.n_frames)
         
-        # TODO: is softmax the best choice for the time-varying mix
+        # TODO: is softmax the best choice for the time-varying mix?
         mix = torch.softmax(mix, dim=1)
         mix = F.interpolate(mix, size=total_samples, mode='linear')
         

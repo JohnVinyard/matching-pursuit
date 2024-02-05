@@ -1,2 +1,2 @@
-from experiments.e_2024_1_27.inference import model
+from experiments.e_2024_1_30.inference import model
 

@@ -98,6 +98,13 @@ def sparsify_test(iterations: int = 10):
         plt.show()
     
 
+def gumbel_softmax_test():
+    t = torch.zeros(128).normal_(0, 1)
+    t = F.gumbel_softmax(t, tau=0.1, hard=False)
+    t = t.data.cpu().numpy()
+    plt.plot(t)
+    plt.show()
+
 
 if __name__ == '__main__':
     # audio = test()
@@ -118,6 +125,7 @@ if __name__ == '__main__':
     # plt.show()
     
     
-    sparsify_test(20)
+    # sparsify_test(20)
+    gumbel_softmax_test()
     
     
