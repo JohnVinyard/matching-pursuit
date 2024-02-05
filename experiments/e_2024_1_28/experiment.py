@@ -592,6 +592,11 @@ class Model(nn.Module):
         
         
         return final, b, logits, amps
+
+    def forward_with_pruning(self, x, n=5):
+        final, b, logits, amps = self.forward(x)
+        srted = keep_top_n(final, p=2, n=5)
+        return srted
     
     # def random_generation(self, exponent=2):
     #     with torch.no_grad():
@@ -633,8 +638,6 @@ model = Model().to(device)
 optim = optimizer(model, lr=1e-3)
 
 
-
-
 def multiband_transform(x: torch.Tensor):
     bands = fft_frequency_decompose(x, 512)
     d1 = {f'{k}_long': stft(v, 128, 64, pad=True) for k, v in bands.items()}
@@ -647,6 +650,21 @@ def transform(x: torch.Tensor):
     d = multiband_transform(x)
     feat = torch.cat([z.view(batch, channels, -1) for z in d.values()], dim=-1)
     return feat
+
+
+def sort_by_norm_desc(recon_channels: torch.Tensor, p=2) -> torch.Tensor:
+    norms = torch.norm(recon_channels, dim=(-1), p=p)
+    indices = torch.argsort(norms, dim=-1, descending=True)
+    srt = torch.take_along_dim(recon_channels, indices[:, :, None], dim=1)
+    return srt
+
+def keep_top_n(recon_channels: torch.Tensor, p=2, n=5) -> torch.Tensor:
+    srted = sort_by_norm_desc(recon_channels, p=p)
+    mask = torch.ones_like(recon_channels)
+    mask[:, n:, :] = 0
+    masked = srted * mask
+    return masked
+
 
 
 def single_channel_loss_3(target: torch.Tensor, recon: torch.Tensor):
@@ -733,6 +751,7 @@ def train(batch, i):
         
     print(indices.squeeze())
     
+    # masked = keep_top_n(recon, p=2, n=2)
     recon_summed = torch.sum(recon, dim=1, keepdim=True)
     
     loss = single_channel_loss_3(batch, recon) * 1e-5
