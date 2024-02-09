@@ -1,5 +1,4 @@
 
-from typing import Callable, Dict, Tuple
 import numpy as np
 import torch
 from conjure import numpy_conjure, SupportedContentType
@@ -9,32 +8,32 @@ from torch import nn
 from torch.nn import functional as F
 from config.experiment import Experiment
 from modules.decompose import fft_frequency_decompose
-from modules.mixer import MixerStack
 
 from modules.overlap_add import overlap_add
 from modules.angle import windowed_audio
 from modules.ddsp import NoiseModel
-from modules.fft import fft_convolve
+from modules.fft import fft_convolve, fft_shift
 from modules.linear import LinearOutputStack
 from modules.normalization import max_norm, unit_norm
-from modules.phase import morlet_filter_bank
 from modules.refractory import make_refractory_filter
 from modules.reverb import ReverbGenerator
+from modules.softmax import hard_softmax, sparse_softmax
 from modules.sparse import sparsify2
 from modules.stft import stft
-from modules.transfer import ResonanceChain
+from modules.transfer import ImpulseGenerator, ResonanceChain
 from modules.upsample import ConvUpsample
 from train.experiment_runner import BaseExperimentRunner, MonitoredValueDescriptor
 from train.optim import optimizer
 from util import device
 from util.readmedocs import readme
 from torch.nn.utils.weight_norm import weight_norm
-from vector_quantize_pytorch import VectorQuantize
+from torch.distributions import Normal
+
 
 exp = Experiment(
     samplerate=22050,
     n_samples=2 ** 15,
-    weight_init=0.02,
+    weight_init=0.1,
     model_dim=256,
     kernel_size=512)
 
@@ -45,25 +44,12 @@ resonance_size = 32768
 samplerate = 22050
 n_samples = 32768
 
-def anticausal_inhibition(x: torch.Tensor, inhibitory_area: Tuple[int, int]):
-    batch, channels, time = x.shape
-    width, height = inhibitory_area
-    x = x[:, None, :, :]
-    
-    # give 0 mean
-    mean = F.avg_pool2d(x, inhibitory_area, stride=(1, 1), padding=(width // 2, height // 2))
-    x = x - mean
-    
-    new_mean = F.avg_pool2d(x, inhibitory_area, stride=(1, 1), padding=(width // 2, height // 2))
-    
-    # give unit std deviation
-    deviations = (x - new_mean) ** 2
-    std_deviations = F.avg_pool2d(deviations, inhibitory_area, stride=(1, 1), padding=(width // 2, height // 2))
-    std_deviations = torch.sqrt(std_deviations)
-    
-    x = x / (std_deviations + 1e-4)
-    
-    return x.view(batch, channels, time)
+alternate_model = False
+
+
+def gumbel_straight_through_estimator(x: torch.Tensor):
+    # return sparse_softmax(x, normalize=True)
+    return F.gumbel_softmax(x, tau=1, hard=True)
 
 
 class ResonanceModel2(nn.Module):
@@ -131,7 +117,6 @@ class ResonanceModel2(nn.Module):
         self.decay = nn.Linear(latent_dim, self.n_frames)
         
         
-        
         self.to_filter = ConvUpsample(
             latent_dim,
             channels,
@@ -140,7 +125,7 @@ class ResonanceModel2(nn.Module):
             mode='nearest',
             out_channels=self.coarse_coeffs,
             from_latent=True,
-            layer_norm=False,
+            batch_norm=False,
             weight_norm=True
         )
         
@@ -152,13 +137,12 @@ class ResonanceModel2(nn.Module):
             mode='nearest', 
             out_channels=n_piecewise, 
             from_latent=True, 
-            layer_norm=False,
+            batch_norm=False,
             weight_norm=True
         )
         
         
         self.final_mix = nn.Linear(latent_dim, 2)
-        
         
     
     def forward(self, latent, impulse):
@@ -240,7 +224,6 @@ class ResonanceModel2(nn.Module):
         
         final = stacked @ final_mx[..., None]
         final = final.view(-1, n_events, self.resonance_size)
-        
     
         return final
 
@@ -310,7 +293,7 @@ class GenerateImpulse(nn.Module):
             mode='learned',
             end_size=self.n_frames,
             out_channels=channels,
-            layer_norm=False,
+            batch_norm=False,
             weight_norm=True
         )
 
@@ -320,7 +303,7 @@ class GenerateImpulse(nn.Module):
             self.n_frames * 4,
             self.n_samples,
             self.channels,
-            layer_norm=False,
+            batch_norm=False,
             weight_norm=True,
             squared=True,
             activation=lambda x: torch.sigmoid(x),
@@ -342,58 +325,6 @@ class GenerateImpulse(nn.Module):
         return x
 
 
-class Planner(nn.Module):
-    
-    def __init__(
-        self, 
-        one_hot_dim: int, 
-        time_dim: int, 
-        context_dim: int, 
-        embedding_dim: int, 
-        mixer_planning: bool = False):
-        
-        super().__init__()
-        self.one_hot_dim = one_hot_dim
-        self.time_dim = time_dim
-        self.context_dim = context_dim
-        self.embedding_dim = embedding_dim
-        self.mixer_planning = mixer_planning
-        
-        self.embed_one_hot = nn.Linear(one_hot_dim, embedding_dim)
-        self.embed_time = nn.Linear(time_dim, embedding_dim)
-        
-        self.to_weight = nn.Linear(context_dim, embedding_dim * 2)
-        self.to_bias = nn.Linear(context_dim, embedding_dim * 2)
-        
-        self.to_embedding = nn.Linear(embedding_dim * 2, embedding_dim)
-        
-        if self.mixer_planning:
-            self.mixer = MixerStack(embedding_dim, embedding_dim, n_events, 4, 4, channels_last=True)
-    
-    def forward(self, one_hot, time, context):
-        
-        batch, n_events, _ = one_hot.shape
-        
-        context = context.view(batch, self.context_dim)
-        
-        oh = self.embed_one_hot(one_hot)
-        time = self.embed_time(time)
-        
-        x = torch.cat([oh, time], dim=-1)
-        
-        w = torch.sigmoid(self.to_weight(context))
-        b = self.to_bias(context)
-        
-        x = (x * w) + b
-        
-        x = self.to_embedding(x)
-        
-        x = x.view(batch, n_events, self.embedding_dim)
-        
-        if self.mixer_planning:
-            x = x + self.mixer.forward(x)
-        
-        return x
 
 
 class UNet(nn.Module):
@@ -417,7 +348,7 @@ class UNet(nn.Module):
                 nn.Dropout(0.1),
                 weight_norm(nn.Conv1d(channels, channels, 3, 2, 1)),
                 nn.LeakyReLU(0.2),
-                # nn.LayerNorm((1024, 64), elementwise_affine=False)
+                # nn.BatchNorm1d(channels)
             ),
 
             # 32
@@ -425,7 +356,7 @@ class UNet(nn.Module):
                 nn.Dropout(0.1),
                 weight_norm(nn.Conv1d(channels, channels, 3, 2, 1)),
                 nn.LeakyReLU(0.2),
-                # nn.LayerNorm((1024, 32), elementwise_affine=False)
+                # nn.BatchNorm1d(channels)
             ),
 
             # 16
@@ -433,7 +364,7 @@ class UNet(nn.Module):
                 nn.Dropout(0.1),
                 weight_norm(nn.Conv1d(channels, channels, 3, 2, 1)),
                 nn.LeakyReLU(0.2),
-                # nn.LayerNorm((1024, 16), elementwise_affine=False)
+                # nn.BatchNorm1d(channels)
             ),
 
             # 8
@@ -441,7 +372,7 @@ class UNet(nn.Module):
                 nn.Dropout(0.1),
                 weight_norm(nn.Conv1d(channels, channels, 3, 2, 1)),
                 nn.LeakyReLU(0.2),
-                # nn.LayerNorm((1024, 8), elementwise_affine=False)
+                # nn.BatchNorm1d(channels)
             ),
 
             # 4
@@ -449,7 +380,7 @@ class UNet(nn.Module):
                 nn.Dropout(0.1),
                 weight_norm(nn.Conv1d(channels, channels, 3, 2, 1)),
                 nn.LeakyReLU(0.2),
-                # nn.LayerNorm((1024, 4), elementwise_affine=False)
+                # nn.BatchNorm1d(channels)
             ),
         )
 
@@ -459,43 +390,17 @@ class UNet(nn.Module):
                 nn.Dropout(0.1),
                 weight_norm(nn.ConvTranspose1d(channels, channels, 4, 2, 1)),
                 nn.LeakyReLU(0.2),
-                # nn.LayerNorm((1024, 8), elementwise_affine=False)
+                # nn.BatchNorm1d(channels)
             ),
             # 16
             nn.Sequential(
-                nn.Dropout(0.1),
                 weight_norm(nn.ConvTranspose1d(channels, channels, 4, 2, 1)),
-                nn.LeakyReLU(0.2),
-                # nn.LayerNorm((1024, 16), elementwise_affine=False)
-            ),
-
-            # 32
-            nn.Sequential(
-                nn.Dropout(0.1),
-                weight_norm(nn.ConvTranspose1d(channels, channels, 4, 2, 1)),
-                nn.LeakyReLU(0.2),
-                # nn.LayerNorm((1024, 32), elementwise_affine=False)
-            ),
-
-            # 64
-            nn.Sequential(
-                nn.Dropout(0.1),
-                weight_norm(nn.ConvTranspose1d(channels, channels, 4, 2, 1)),
-                nn.LeakyReLU(0.2),
-                # nn.LayerNorm((1024, 64), elementwise_affine=False)
-            ),
-
-            # 128
-            nn.Sequential(
-                nn.Dropout(0.1),
-                weight_norm(nn.ConvTranspose1d(channels, channels, 4, 2, 1)),
-                nn.LeakyReLU(0.2),
-                # nn.LayerNorm((1024, 128), elementwise_affine=False)
             ),
         )
         
-        self.bias = nn.Conv1d(1024, 4096, 1, 1, 0)
-        self.proj = nn.Conv1d(1024, 4096, 1, 1, 0)
+                
+        self.proj = nn.Conv1d(channels, 256, 1, 1, 0)
+
         
 
     def forward(self, x):
@@ -527,16 +432,12 @@ class UNet(nn.Module):
             if size in context:
                 x = x + context[size]
 
-        b = self.bias(x)
-        x = self.proj(x)
-        x = x - b
-                
+        x = self.proj(x).permute(0, 2, 1)
+        
         if self.return_latent:
             return x, z
         
         return x
-
-
 
 
 class Model(nn.Module):
@@ -545,14 +446,9 @@ class Model(nn.Module):
 
         self.encoder = UNet(1024, return_latent=True)
     
-        self.embed_context = nn.Linear(4096, 256)
-        self.embed_one_hot = nn.Linear(4096, 256)
-        self.down = nn.Linear(512, 256)
-        self.embed_latent = nn.Linear(1024, context_dim)
 
         self.imp = GenerateImpulse(256, 128, impulse_size, 16, n_events)
 
-        
         total_atoms = 2048
         f0s = np.linspace(40, 4000, total_atoms // 4)
         waves = make_waves(resonance_size, f0s, int(samplerate))
@@ -569,60 +465,36 @@ class Model(nn.Module):
             n_frames=128)
         
         
-        # total_atoms = 1024
-        # f0s = np.linspace(40, 4000, total_atoms // 4)
-        # waves = make_waves(resonance_size, f0s, int(samplerate))
+        self.to_pos = nn.Linear(256, 1024)
         
-        # self.res = ResonanceChain(
-        #     2, 
-        #     n_atoms=1024, 
-        #     window_size=512, 
-        #     n_frames=128, 
-        #     total_samples=resonance_size, 
-        #     mix_channels=4, 
-        #     channels=128, 
-        #     latent_dim=256,
-        #     initial=waves,
-        #     learnable_resonances=False)
-        
-
-        # self.mix = GenerateMix(256, 128, n_events, mixer_channels=3)
+        self.imp_gen = ImpulseGenerator(exp.n_samples, lambda x: gumbel_straight_through_estimator(x))
         self.to_amp = nn.Linear(256, 1)
-
-        # self.verb_context = nn.Linear(4096, 32)
+        
         self.verb = ReverbGenerator(
             context_dim, 3, samplerate, n_samples, norm=nn.LayerNorm((context_dim,)))
 
-        self.to_context_mean = nn.Linear(4096, context_dim)
-        self.to_context_std = nn.Linear(4096, context_dim)
+        self.to_context_mean = nn.Linear(256, context_dim)
+        self.to_context_std = nn.Linear(256, context_dim)
         
-        self.embed_memory_context = nn.Linear(4096, context_dim)
 
         self.from_context = nn.Linear(context_dim, 256)
         
-        # self.fine_shift = nn.Linear(256, 1)
-        # self.shift_factor = (256 / resonance_size) * 0.5
+        self.from_latent = nn.Linear(1024, context_dim)
+        
+        self.embbedding_bottleneck_down = nn.Linear(256, 16)
         
         
-
-        self.atom_bias = nn.Parameter(torch.zeros(4096).uniform_(-1, 1))
-
-        self.apply(lambda x: exp.init_weights(x))
+        self.embbedding_bottleneck_up = nn.Linear(16, 256)
         
-
+        
+        
     def encode(self, x):
         batch_size = x.shape[0]
 
         x = stft(x, 2048, 256, pad=True).view(
             batch_size, 128, 1025)[..., :1024].permute(0, 2, 1)
 
-        
         encoded, z = self.encoder.forward(x)
-        encoded = F.dropout(encoded, p=0.05, training=self.training)
-        encoded = anticausal_inhibition(encoded, (9, 9))
-        encoded = torch.relu(encoded)
-        
-        
         return encoded, z
 
     def from_sparse(self, sparse, ctxt):
@@ -631,300 +503,263 @@ class Model(nn.Module):
         return x, imp, encoded
     
     
-    def generate(self, encoded, one_hot, packed, dense):
+    def generate(self, embeddings, dense, hard=False, random_timings=False):
         
-        # one hot is n_events vectors
-        proj = self.from_context(dense).view(-1, 1, 256).repeat(1, n_events, 1)
-        
-        # amps, amp_indices = torch.max(one_hot, dim=-1, keepdim=True)
-        
-        oh = self.embed_one_hot(one_hot)
-        
-        amps = torch.abs(self.to_amp(oh))
-        
-        # oh = unit_norm(oh, dim=-1)
-        # proj = unit_norm(proj, dim=-1)
-        # embeddings = unit_norm(proj + oh, dim=-1)
-        embeddings = oh
-        
-        embeddings = torch.cat([proj, oh], dim=-1)
-        embeddings = self.down(embeddings)
-
         # generate...
-
+        
         # impulses
         imp = self.imp.forward(embeddings)
-        # imp = unit_norm(imp)
         # padded = F.pad(imp, (0, resonance_size - impulse_size))
 
         # resonances
         mixed = self.res.forward(embeddings, imp)
         mixed = mixed.view(-1, n_events, resonance_size)
+        mixed = unit_norm(mixed)
 
+        amps = torch.abs(self.to_amp(embeddings))
+        
         mixed = mixed * amps
-        # mixed = unit_norm(mixed)
+
+        pos = self.to_pos.forward(embeddings)
         
-        # shift = torch.tanh(self.fine_shift(embeddings)) * self.shift_factor
-
-        # coarse positioning
-        final = F.pad(mixed, (0, n_samples - mixed.shape[-1]))
-        up = torch.zeros(final.shape[0], n_events, n_samples, device=final.device)
-        up[:, :, ::256] = packed
+        if random_timings:
+            pos = torch.zeros_like(pos).uniform_(0, 1)
         
-        # fine positioning
-        # up = fft_shift(up, shift)
-
-        final = fft_convolve(final, up)[..., :n_samples]
-
-        final = self.verb.forward(unit_norm(dense, dim=-1), final)
-
-        return final, imp
-
-    def forward(self, x):
+        loc, logits = self.imp_gen.forward(
+            pos.view(-1, 1024), 
+            return_logits=True)
         
-        encoded, z = self.encode(x)
+        loc = loc.view(-1, n_events, exp.n_samples)
+        final = fft_convolve(mixed, loc)
+
+        final = self.verb.forward(dense, final)
+
+        return final, embeddings, logits, amps.squeeze(), mixed
+
+    def forward(self, x, hard=False, random_events=False, random_context=False, random_timings=False, return_context=False):
         
-        # dense = torch.mean(encoded, dim=-1)
+        embeddings, z = self.encode(x)
+        dense = self.from_latent(z)
+        
+        if random_context:
+            ctxt_mean, ctxt_std = random_context
+            
+            # if dense.shape[0] > 1:
+            #     means = torch.mean(dense, dim=0)
+            #     stds = torch.std(dense, dim=0)
+            #     norm = Normal(means, stds)
+            #     dense = norm.sample((x.shape[0],))
+            # else:
+            #     means = torch.mean(dense)
+            #     stds = torch.std(dense)
+            #     norm = Normal(means, stds)
+            #     dense = norm.sample((1, context_dim))
+            norm = Normal(ctxt_mean, ctxt_std)
+            
+            dense = norm.sample((x.shape[0],))
+            print('RANDOM CONTEXT', dense.shape)
+        
+        
+        b = self.embbedding_bottleneck_down(embeddings)
+        
+        if random_events:
+            means, stds = random_events
+            # means = torch.mean(b, dim=(0, 1))
+            # stds = torch.std(b, dim=(0, 1))
+            norm = Normal(means, stds)
+            b = norm.sample((x.shape[0], n_events))
+            print('RANDOM EVENTS', b.shape)
+            
+        
+        embeddings = self.embbedding_bottleneck_up(b)
+        
+        # dense = torch.mean(embeddings, dim=1)
         # mean = self.to_context_mean(dense)
         # std = self.to_context_std(dense)
         # dense = mean + (torch.zeros_like(mean).normal_(0, 1) * std)
         
-        dense = self.embed_latent(z)
+        final, imp, logits, amps, mixed = self.generate(embeddings, dense, hard=hard, random_timings=random_timings)
         
-        # encoded = encoded + self.atom_bias[None, :, None]
-        # encoded = torch.relu(encoded)
+        if return_context:
+            return final, b, logits, amps, dense, mixed
+        
+        return final, b, logits, amps
 
-        # note that some of the "top" channels will be zero, the eventual
-        # scheduling convolution will make the event silent        
-        encoded, packed, one_hot = sparsify2(encoded, n_to_keep=n_events)
-        
-        final, imp = self.generate(encoded, one_hot, packed, dense)
-        
-        # print('ENCODED', encoded.max().item())
-        # print('DENSE', dense.mean().item(), dense.std().item())
-        
-        
-        return final, encoded, imp
+    def forward_with_pruning(self, x, n=5):
+        final, b, logits, amps = self.forward(x)
+        srted = keep_top_n(final, p=2, n=5)
+        return srted
     
-    # def random_generation(self, exponent=2):
-    #     with torch.no_grad():
-    #         # generate context latent
-    #         z = torch.zeros(1, context_dim).normal_(0, 0.2)
-            
-    #         # generate events
-    #         events = torch.zeros(1, 1, 4096, 128).uniform_(0, 3)
-    #         events = F.avg_pool2d(events, (7, 7), (1, 1), (3, 3))
-    #         events = events.view(1, 4096, 128)
-            
-    #         ch, _, encoded = self.from_sparse(events, z)
-    #         ch = torch.sum(ch, dim=1, keepdim=True)
-    #         ch = max_norm(ch)
-        
-    #     return ch, encoded
-    
-    # def derive_events_and_context(self, x: torch.Tensor):
-        
-    #     print('STARTING WITH', x.shape)
-        
-    #     encoded = self.encode(x)
-
-    #     dense = torch.mean(encoded, dim=-1)
-    #     mean = self.to_context_mean(dense)
-    #     std = self.to_context_std(dense)
-    #     dense = mean + (torch.zeros_like(mean).normal_(0, 1) * std)
-        
-        
-    #     # encoded = torch.relu(encoded)
-        
-    #     encoded, packed, one_hot = sparsify2(encoded, n_to_keep=n_events)
-        
-        
-    #     return encoded, dense
     
 
 model = Model().to(device)
-optim = optimizer(model, lr=1e-4)
+optim = optimizer(model, lr=1e-3)
 
 
-def l0_norm(x: torch.Tensor):
+def multiband_transform(x: torch.Tensor):
+    bands = fft_frequency_decompose(x, 512)
+    d1 = {f'{k}_long': stft(v, 128, 64, pad=True) for k, v in bands.items()}
+    d2 = {f'{k}_short': stft(v, 64, 32, pad=True) for k, v in bands.items()}
+    return dict(**d1, **d2)
     
-    mask = (x > 0).float()
     
-    forward = mask
-    backward = x
-    
-    y = backward + (forward - backward).detach()
-    
-    return y.sum()
+def transform(x: torch.Tensor):
+    batch, channels, time = x.shape
+    d = multiband_transform(x)
+    feat = torch.cat([z.view(batch, channels, -1) for z in d.values()], dim=-1)
+    return feat
 
 
-n_centroids = 64
-window_size = (9, 9)
-step_size = (3, 3)
+def sort_by_norm_desc(recon_channels: torch.Tensor, p=2) -> torch.Tensor:
+    norms = torch.norm(recon_channels, dim=(-1), p=p)
+    indices = torch.argsort(norms, dim=-1, descending=True)
+    srt = torch.take_along_dim(recon_channels, indices[:, :, None], dim=1)
+    return srt
 
-vq = VectorQuantize(np.prod(window_size), n_centroids, 128, heads=1, kmeans_init=True, threshold_ema_dead_code=2).to(device)
-vq_optim = optimizer(vq, lr=1e-3)
-
-
-
-
-import zounds
-band = zounds.FrequencyBand(40, 22050 // 2)
-scale = zounds.MelScale(band, 1024)
-sr = zounds.SR22050()
-
-filter_bank = morlet_filter_bank(sr, 512, scale, 0.1, normalize=True).real
-filter_bank = torch.from_numpy(filter_bank).to(device).float().view(1024, 1, 512)
+def keep_top_n(recon_channels: torch.Tensor, p=2, n=5) -> torch.Tensor:
+    srted = sort_by_norm_desc(recon_channels, p=p)
+    mask = torch.ones_like(recon_channels)
+    mask[:, n:, :] = 0
+    masked = srted * mask
+    return masked
 
 
-
-def spectral(a: torch.Tensor):
-    return stft(a, 2048, 256, pad=True).view(a.shape[0], 128, 1025).permute(0, 2, 1)
-    # spec = F.conv1d(a, filter_bank, stride=1, padding=256)
-    # spec = torch.relu(spec)
-    # spec = F.avg_pool1d(spec, 512, 256, padding=256)
-    # return spec
-
-def patches(spec: torch.Tensor, size: int = window_size, step: int = step_size):
-    batch, channels, time = spec.shape
+def single_channel_loss_3(target: torch.Tensor, recon: torch.Tensor):
     
-    wa, wb = window_size
-    sa, sb = step_size
+    target = transform(target).view(target.shape[0], -1)
     
-    p = spec.unfold(1, wa, sa).unfold(2, wb, sb)
-    last_dim = np.prod(p.shape[-2:])
-    p = p.reshape(batch, -1, last_dim)
-    norms = torch.norm(p, dim=-1, keepdim=True)
-    normed = p / (norms + 1e-12)
+    # full = torch.sum(recon, dim=1, keepdim=True)
+    # full = transform(full).view(*target.shape)
     
-    return p, norms, normed
-
-def learn_and_label(patches: torch.Tensor):
-    vq_optim.zero_grad()
-    batch, n_patches, patch_size = patches.shape
-    quantized, indices, loss = vq.forward(patches)
-    loss = loss + F.mse_loss(quantized.view(*patches.shape), patches)
-    loss.backward()
-    vq_optim.step()
-    return indices.view(batch, n_patches, 1)
+    channels = transform(recon)
     
-
-def experiment_loss(batch: torch.Tensor, fake: torch.Tensor, channels: torch.Tensor, encoded: torch.Tensor):
-    # used_elements = (torch.abs(encoded).sum() / batch.shape[0]) * 1e-3
+    residual = target
     
-    real_spec = spectral(batch)
-    fake_spec = spectral(fake)
+    # Try L1 norm instead of L@
+    # Try choosing based on loudest patch/segment
     
-    smoothness_loss = torch.abs(fake_spec - real_spec).sum()
+    # sort channels from loudest to softest
+    diff = torch.norm(channels, dim=(-1), p = 1)
+    indices = torch.argsort(diff, dim=-1, descending=True)
     
+    srt = torch.take_along_dim(channels, indices[:, :, None], dim=1)
     
-    # channel_specs = stft(channels, 2048, 256, pad=True).view(batch.shape[0], n_events, -1)
-    
-    # # encourage events to be orthogonal/non-overlapping
-    # # TODO: Use constant-q spectrogram with better frequency resolution
-    # sim = channel_specs @ channel_specs.permute(0, 2, 1)
-    # sim = torch.triu(sim)
-    # difference_loss = sim.mean() * 1e-2
-    
-    # break up the spectrograms into overlapping patches
-    rp, rn, rnorm = patches(real_spec)
-    fp, fn, fnorm = patches(fake_spec)
-    
-    
-    real_labels: torch.Tensor = learn_and_label(rnorm)
-    
-    total_elements = real_labels.nelement()
-    counts = torch.bincount(real_labels.view(-1), minlength=n_centroids)
-    # this is the percentage of patches that belong to this cluster/label
-    frequency = counts / total_elements
-    # we want inverse frequency
-    weighting = 1 / frequency
-    
-    
-    # get patch losses
-    # diff = ((rp - fp) ** 2).mean(dim=-1, keepdim=True)
-    
-    diff = torch.abs(rp - fp).sum(dim=-1, keepdim=True)
-    
-    # get importance weighting for each patch
-    weights = weighting[real_labels.view(-1)].view(batch.shape[0], -1, 1)
-    
-    # weight patch losses by importance
-    loss = (diff * weights).sum()
-    
-    
-    print(loss.item(), smoothness_loss.item())
-    loss = loss + smoothness_loss
+    loss = 0
+    for i in range(n_events):
+        current = srt[:, i, :]
+        start_norm = torch.norm(residual, dim=-1, p=1)
+        # TODO: should the residual be cloned and detached each time,
+        # so channels are optimized independently?
+        residual = residual - current
+        end_norm = torch.norm(residual, dim=-1, p=1)
+        diff = -(start_norm - end_norm)
+        loss = loss + diff.sum()
+        
     
     return loss
+
+
+# def single_channel_loss_3(target: torch.Tensor, recon: torch.Tensor):
+#     target = transform(target)
+#     full = torch.sum(recon, dim=1, keepdim=True)
+#     full = transform(full)
+    
+#     channels = transform(recon)
+    
+#     residual = target - full
+    
+    
+#     # find the channel closest to the residual
+#     diff = torch.norm(channels - residual, dim=(-1))
+#     indices = torch.argsort(diff, dim=-1)
+    
+#     srt = torch.take_along_dim(channels, indices[:, :, None], dim=1)
+    
+#     channel = 0
+#     chosen = srt[:, channel, :]
+    
+#     # add the chosen channel back to the residual
+#     with_residual = chosen + residual.view(*chosen.shape)
+    
+#     # make the chosen channel explain more of the residual    
+#     loss = torch.abs(chosen - with_residual).sum()
+    
+#     return loss
+
     
 
 def train(batch, i):
     optim.zero_grad()
 
-    b = batch.shape[0]
     
-    recon, encoded, imp = model.forward(batch)
+    recon, encoded, logits, amps = model.forward(
+        batch, 
+        hard=True, 
+        random_events=False, 
+        random_context=False,
+        random_timings=False)
+    
+    logits = logits.view(-1, n_events, 1024)
+    
+    values, indices = torch.max(logits, dim=-1)
+    print(indices.squeeze())
+    
     recon_summed = torch.sum(recon, dim=1, keepdim=True)
-    print('MAX', torch.max(torch.abs(recon_summed)).item())
     
-    # sparse_loss = l0_norm(encoded)
-    # sparse_loss = torch.clamp(sparse_loss - (b * 2), 0, np.inf)
-    
-    # recon_loss = single_channel_loss_3(batch, recon)
-    recon_loss = experiment_loss(batch, recon_summed, recon, encoded)
-    
-    loss = recon_loss
+    loss = single_channel_loss_3(batch, recon) * 1e-5
     
         
     loss.backward()
     optim.step()
     
     
-    # with torch.no_grad():
-        
-    #     # switch to cpu evaluation
-    #     model.to('cpu')
-    #     model.eval()
-        
-    #     # generate context latent
-    #     z = torch.zeros(1, context_dim).normal_(0, 32)
-        
-    #     # generate events
-    #     events = torch.zeros(1, 4096, 128).uniform_(0, 132)
-    #     # events = F.avg_pool2d(events, (7, 7), (1, 1), (3, 3))
-    #     # events = events.view(1, 4096, 128)
-        
-    #     ch, _, encoded = model.from_sparse(events, z)
-    #     ch = torch.sum(ch, dim=1, keepdim=True)
-        
-    #     # switch back to GPU training
-    #     model.to('cuda')
-    #     model.train()
-    
-    # recon = max_norm(ch)
-    
     recon = max_norm(recon_summed)
-    encoded = max_norm(encoded)
-    
-    return loss, recon, encoded
+    # encoded = max_norm(encoded)
+    return loss, recon, encoded, logits, amps
 
 
 def make_conjure(experiment: BaseExperimentRunner):
+    
     @numpy_conjure(experiment.collection, content_type=SupportedContentType.Spectrogram.value)
     def encoded(x: torch.Tensor):
-        x = x[:, None, :, :]
-        x = F.max_pool2d(x, (16, 8), (16, 8))
-        x = x.view(x.shape[0], x.shape[2], x.shape[3])
-        x = x.data.cpu().numpy()[0]
-        return x
+        x = x - x.min()
+        x = x / (x.max() + 1e-5)
+        x = x.data.cpu().numpy()
+        return x[0]
 
     return (encoded,)
 
+def make_conjure_amps(experiment: BaseExperimentRunner):
+    
+    @numpy_conjure(experiment.collection, content_type=SupportedContentType.Spectrogram.value)
+    def amps(x: torch.Tensor):
+        x = x - x.min()
+        x = x / (x.max() + 1e-5)
+        x = x.data.cpu().numpy()
+        x = np.sort(x, axis=-1)
+        return x
+
+    return (amps,)
+
+
+def make_conjure_logits(experiment: BaseExperimentRunner):
+    
+    @numpy_conjure(experiment.collection, content_type=SupportedContentType.Spectrogram.value)
+    def logits(x: torch.Tensor):
+        x = x.view(-1, n_events, 1024)[0]
+        x = x.data.cpu().numpy()
+        indices = np.argmax(x, axis=-1)
+        maxes = np.max(x, axis=-1)
+        return x
+
+    return (logits,)
+
 
 @readme
-class LayerNorm(BaseExperimentRunner):
+class NoSparsityVQ(BaseExperimentRunner):
     encoded = MonitoredValueDescriptor(make_conjure)
+    logits = MonitoredValueDescriptor(make_conjure_logits)
+    amps = MonitoredValueDescriptor(make_conjure_amps)
 
     def __init__(self, stream, port=None, load_weights=True, save_weights=False, model=model):
         super().__init__(
@@ -939,10 +774,13 @@ class LayerNorm(BaseExperimentRunner):
     def run(self):
         for i, item in enumerate(self.iter_items()):
             item = item.view(-1, 1, n_samples)
-            l, r, e = train(item, i)
+            l, r, e, logits, amps = train(item, i)
 
             self.real = item
             self.fake = r
             self.encoded = e
+            self.logits = logits
+            self.amps = amps
+            
             print(i, l.item())
             self.after_training_iteration(l, i)

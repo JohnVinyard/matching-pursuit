@@ -557,28 +557,40 @@ class Model(nn.Module):
 
         final = self.verb.forward(dense, final)
 
-        return final, embeddings, logits, amps.squeeze()
+        return final, embeddings, logits, amps.squeeze(), mixed
 
-    def forward(self, x, hard=False, random_events=False, random_context=False, random_timings=False):
-        
+    def forward(self, x, hard=False, random_events=False, random_context=False, random_timings=False, return_context=False):
         
         embeddings, z = self.encode(x)
         dense = self.from_latent(z)
+        
         if random_context:
-            means = torch.mean(dense, dim=-1)
-            stds = torch.std(dense, dim=-1)
-            norm = Normal(means, stds)
+            ctxt_mean, ctxt_std = random_context
+            
+            # if dense.shape[0] > 1:
+            #     means = torch.mean(dense, dim=0)
+            #     stds = torch.std(dense, dim=0)
+            #     norm = Normal(means, stds)
+            #     dense = norm.sample((x.shape[0],))
+            # else:
+            #     means = torch.mean(dense)
+            #     stds = torch.std(dense)
+            #     norm = Normal(means, stds)
+            #     dense = norm.sample((1, context_dim))
+            norm = Normal(ctxt_mean, ctxt_std)
+            
             dense = norm.sample((x.shape[0],))
+            print('RANDOM CONTEXT', dense.shape)
         
         b = self.embbedding_bottleneck_down(embeddings)
         
         if random_events:
-            means = torch.mean(b, dim=(0, 1))
-            stds = torch.std(b, dim=(0, 1))
+            means, stds = random_events
+            # means = torch.mean(b, dim=(0, 1))
+            # stds = torch.std(b, dim=(0, 1))
             norm = Normal(means, stds)
-            print(means.shape, stds.shape)
             b = norm.sample((x.shape[0], n_events))
-            print(b.shape)
+            print('RANDOM EVENTS', b.shape)
             
         
         embeddings = self.embbedding_bottleneck_up(b)
@@ -588,8 +600,11 @@ class Model(nn.Module):
         # std = self.to_context_std(dense)
         # dense = mean + (torch.zeros_like(mean).normal_(0, 1) * std)
         
-        final, imp, logits, amps = self.generate(embeddings, dense, hard=hard, random_timings=random_timings)
+        final, imp, logits, amps, mixed = self.generate(embeddings, dense, hard=hard, random_timings=random_timings)
         
+        
+        if return_context:
+            return final, b, logits, amps, dense, mixed
         
         return final, b, logits, amps
 

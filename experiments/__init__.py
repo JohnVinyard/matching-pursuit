@@ -33,7 +33,14 @@
 # from .e_2024_1_25 import IterativeDecomposition as Current
 # from .e_2024_1_26 import AntiCausalConv as Current
 # from .e_2024_1_27 import L0Norm as Current
-from .e_2024_1_28 import NoSparsity as Current
+
 
 # from .e_2024_1_29 import BetterSparsity as Current
+
 # from .e_2024_1_30 import LayerNorm as Current
+
+
+# from .e_2024_1_28 import NoSparsity as Current
+# from .e_2024_2_5 import NoSparsityVQ as Current
+
+from .e_2024_2_9 import NeuralMatchingPursuit as Current
