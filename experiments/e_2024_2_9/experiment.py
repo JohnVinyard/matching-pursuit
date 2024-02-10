@@ -650,13 +650,20 @@ def train(batch, i):
     
     output = torch.zeros_like(padded)
     
+    loss = 0
+    
     for i in indices:
         ch = recon[:, i: i + 1, :]
         ch_samples = unit_norm(ch)
         
         ch = torch.cat([ch, padding, padding], dim=-1)
         ch = transform(ch)
+        
+        start = residual
         amps, indices, residual = convolve_spectrograms(residual, ch)
+        
+        local_loss = -(start[:, 128:-128, :] - residual[:, 128:-128, :]).sum()
+        loss = loss + local_loss
         
         sample_index = indices * 256
         
@@ -672,7 +679,6 @@ def train(batch, i):
             output[b, :, si: si + n_samples] = output[b, :, si: si + n_samples] + (ch_samples[b, :, :size[1]] * a)
     
     
-    loss = torch.norm(residual[:, 128:-128, :], dim=(1, 2)).sum()
     
     # print(f'start norm {start_norm.item()}, end_norm {loss.item()}')
         

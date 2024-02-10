@@ -43,4 +43,6 @@
 # from .e_2024_1_28 import NoSparsity as Current
 # from .e_2024_2_5 import NoSparsityVQ as Current
 
-from .e_2024_2_9 import NeuralMatchingPursuit as Current
+# from .e_2024_2_9 import NeuralMatchingPursuit as Current
+
+from .e_2024_2_10 import InfoAndSparsity as Current

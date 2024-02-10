@@ -18,6 +18,7 @@ from modules.fft import fft_convolve
 from modules.linear import LinearOutputStack
 from modules.normalization import max_norm, unit_norm
 from modules.phase import morlet_filter_bank
+from modules.pos_encode import ExpandUsingPosEncodings
 from modules.refractory import make_refractory_filter
 from modules.reverb import ReverbGenerator
 from modules.sparse import sparsify2
@@ -229,6 +230,7 @@ class ResonanceModel2(nn.Module):
         windowed = torch.fft.irfft(windowed)
         final_convs = overlap_add(windowed, apply_window=False)[..., :self.resonance_size]\
             .view(-1, n_events, self.resonance_size)
+        final_convs = unit_norm(final_convs)
         
         final_mx = self.final_mix(latent)
         final_mx = torch.softmax(final_mx, dim=-1)
@@ -289,6 +291,35 @@ class GenerateMix(nn.Module):
         x = x.view(-1, self.encoding_channels, 1)
         x = torch.softmax(x, dim=-1)
         return x
+
+class SimpleGenerateImpulse(nn.Module):
+    
+    def __init__(self, latent_dim, channels, n_samples, n_filter_bands, encoding_channels):
+        super().__init__()
+        
+        self.n_samples = n_samples
+        
+        self.filter_size = 64
+        
+        self.to_envelope = LinearOutputStack(channels, layers=3, out_channels=self.n_samples // 128, in_channels=latent_dim, norm=nn.LayerNorm((channels,)))
+        
+        self.to_filt = LinearOutputStack(channels, layers=3, out_channels=self.filter_size, in_channels=latent_dim, norm=nn.LayerNorm((channels,)))
+    
+    def forward(self, x):
+        env = self.to_envelope(x)
+        env = F.interpolate(env, size=self.n_samples, mode='linear')
+        env = torch.relu(env).view(-1, n_events, self.n_samples)
+        
+        filt = self.to_filt(x).view(-1, n_events, self.filter_size)
+        
+        noise = torch.zeros(x.shape[0], n_events, self.n_samples, device=x.device).uniform_(-1, 1)
+        
+        noise = noise * env
+        
+        filt = F.pad(filt, (0, self.n_samples - self.filter_size))
+        
+        final = fft_convolve(noise, filt)
+        return final
 
 
 class GenerateImpulse(nn.Module):
@@ -550,7 +581,8 @@ class Model(nn.Module):
         self.down = nn.Linear(512, 256)
         self.embed_latent = nn.Linear(1024, context_dim)
 
-        self.imp = GenerateImpulse(256, 128, impulse_size, 16, n_events)
+        # self.imp = GenerateImpulse(256, 128, impulse_size, 16, n_events)
+        self.imp = SimpleGenerateImpulse(256, 128, impulse_size, 16, n_events)
 
         
         total_atoms = 2048
@@ -567,6 +599,7 @@ class Model(nn.Module):
             learnable_atoms=False, 
             mixture_over_time=True,
             n_frames=128)
+        
         
         
         # total_atoms = 1024
@@ -654,12 +687,14 @@ class Model(nn.Module):
 
         # impulses
         imp = self.imp.forward(embeddings)
-        # imp = unit_norm(imp)
+        imp = unit_norm(imp)
         # padded = F.pad(imp, (0, resonance_size - impulse_size))
 
         # resonances
         mixed = self.res.forward(embeddings, imp)
         mixed = mixed.view(-1, n_events, resonance_size)
+        mixed = unit_norm(mixed)
+        
 
         mixed = mixed * amps
         # mixed = unit_norm(mixed)
@@ -700,8 +735,8 @@ class Model(nn.Module):
         
         final, imp = self.generate(encoded, one_hot, packed, dense)
         
-        print('ENCODED', encoded.max().item())
-        print('DENSE', dense.mean().item(), dense.std().item())
+        # print('ENCODED', encoded.max().item())
+        # print('DENSE', dense.mean().item(), dense.std().item())
         
         
         return final, encoded, imp
@@ -744,19 +779,6 @@ class Model(nn.Module):
 
 model = Model().to(device)
 optim = optimizer(model, lr=1e-4)
-
-
-def l0_norm(x: torch.Tensor):
-    
-    mask = (x > 0).float()
-    
-    forward = mask
-    backward = x
-    
-    y = backward + (forward - backward).detach()
-    
-    return y.sum()
-
 
 n_centroids = 64
 window_size = (9, 9)
@@ -857,7 +879,117 @@ def experiment_loss(batch: torch.Tensor, fake: torch.Tensor, channels: torch.Ten
     loss = loss + smoothness_loss
     
     return loss
+
+
+def l0_norm(x: torch.Tensor):
     
+    mask = (x > 0).float()
+    
+    forward = mask
+    backward = x
+    
+    y = backward + (forward - backward).detach()
+    
+    return y.sum()
+
+
+def dict_op(
+        a: Dict[int, torch.Tensor],
+        b: Dict[int, torch.Tensor],
+        op: Callable[[torch.Tensor, torch.Tensor], torch.Tensor]) -> Dict[int, torch.Tensor]:
+
+    return {k: op(v, b[k]) for k, v in a.items()}
+
+
+def multiband_transform(x: torch.Tensor):
+    bands = fft_frequency_decompose(x, 512)
+    d1 = {f'{k}_long': stft(v, 128, 64, pad=True) for k, v in bands.items()}
+    d2 = {f'{k}_short': stft(v, 64, 32, pad=True) for k, v in bands.items()}
+    return dict(**d1, **d2)
+
+def transform(x: torch.Tensor):
+    # batch, channels, time = x.shape
+    # d = multiband_transform(x)
+    # feat = torch.cat([z.view(batch, channels, -1) for z in d.values()], dim=-1)
+    # return feat
+    
+    pif = exp.perceptual_feature(x, log_amplitude=True)
+    return pif
+
+# def single_channel_loss(target: torch.Tensor, recon: torch.Tensor):
+
+#     target = multiband_transform(target)
+
+#     full = torch.sum(recon, dim=1, keepdim=True)
+#     full = multiband_transform(full)
+
+#     residual = dict_op(target, full, lambda a, b: a - b)
+    
+#     loss = 0
+    
+#     i = np.random.randint(0, n_events)
+#     ch = recon[:, i: i + 1, :]
+    
+#     ch = multiband_transform(ch)
+
+#     t = dict_op(residual, ch, lambda a, b: a + b)
+
+#     diff = dict_op(ch, t, lambda a, b: a - b)
+#     loss = loss + sum([torch.abs(y).sum() for y in diff.values()])
+
+#     return loss
+
+
+def single_channel_loss(target: torch.Tensor, recon: torch.Tensor):
+    target = transform(target)
+    
+    full = torch.sum(recon, dim=1, keepdim=True)
+    full = transform(full)
+    
+    residual = target - full
+    
+    i = np.random.randint(0, n_events)
+    ch = recon[:, i: i + 1, :]
+    ch = transform(ch)
+    
+    added_back = residual + ch
+    
+    diff = torch.abs(added_back - ch).sum()
+    return diff
+
+def single_channel_loss_3(target: torch.Tensor, recon: torch.Tensor):
+    
+    target = transform(target).view(target.shape[0], -1)
+    
+    # full = torch.sum(recon, dim=1, keepdim=True)
+    # full = transform(full).view(*target.shape)
+    
+    channels = transform(recon)
+    
+    residual = target
+    
+    # Try L1 norm instead of L@
+    # Try choosing based on loudest patch/segment
+    
+    # sort channels from loudest to softest
+    diff = torch.norm(channels, dim=(-1), p = 1)
+    indices = torch.argsort(diff, dim=-1, descending=True)
+    
+    srt = torch.take_along_dim(channels, indices[:, :, None], dim=1)
+    
+    loss = 0
+    for i in range(n_events):
+        current = srt[:, i, :]
+        start_norm = torch.norm(residual, dim=-1, p=1)
+        # TODO: should the residual be cloned and detached each time,
+        # so channels are optimized independently?
+        residual = residual - current
+        end_norm = torch.norm(residual, dim=-1, p=1)
+        diff = -(start_norm - end_norm)
+        loss = loss + diff.sum()
+        
+    
+    return loss
 
 def train(batch, i):
     optim.zero_grad()
@@ -866,13 +998,15 @@ def train(batch, i):
     
     recon, encoded, imp = model.forward(batch)
     recon_summed = torch.sum(recon, dim=1, keepdim=True)
-    print('MAX', torch.max(torch.abs(recon_summed)).item())
+    
+    # energy_loss = torch.abs(imp).sum()
     
     # sparse_loss = l0_norm(encoded)
     # sparse_loss = torch.clamp(sparse_loss - (b * 2), 0, np.inf)
     
-    # recon_loss = single_channel_loss_3(batch, recon)
-    recon_loss = experiment_loss(batch, recon_summed, recon, encoded)
+    recon_loss = single_channel_loss(batch, recon)
+    
+    # print(recon_loss.item(), sparse_loss.item(), energy_loss.item())
     
     loss = recon_loss
     
@@ -923,7 +1057,7 @@ def make_conjure(experiment: BaseExperimentRunner):
 
 
 @readme
-class LayerNorm(BaseExperimentRunner):
+class InfoAndSparsity(BaseExperimentRunner):
     encoded = MonitoredValueDescriptor(make_conjure)
 
     def __init__(self, stream, port=None, load_weights=True, save_weights=False, model=model):

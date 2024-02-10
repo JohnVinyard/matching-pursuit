@@ -148,7 +148,10 @@ class TimeVaryingMix(nn.Module):
             mode='learned',
             end_size=self.n_frames, 
             out_channels=n_mixer_channels, 
-            from_latent=True)
+            from_latent=True,
+            batch_norm=False,
+            layer_norm=False,
+            weight_norm=True)
     
     def forward(self, x, audio_channels):
         total_samples = audio_channels.shape[-1]
