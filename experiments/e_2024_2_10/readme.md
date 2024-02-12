@@ -18,3 +18,7 @@ Current:
 res2, single channel loss C, sparsity loss
 
 transform should produce pif feature
+
+
+# Note
+If PIF doesn't work, return to full multiband loss + single_channel_loss C with simple impulse generator

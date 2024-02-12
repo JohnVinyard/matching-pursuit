@@ -16,6 +16,9 @@ def musical_scale(start_midi=1, stop_midi=129):
         yield zounds.FrequencyBand(freq - 1, freq + 1)
 
 
+def musical_scale_hz(start_midi=21, stop_midi=106, n_steps=512):
+    return midi_to_hz(np.linspace(start_midi, stop_midi, n_steps))
+
 class MusicalScale(zounds.FrequencyScale):
     def __init__(self, start_midi=1, stop_midi=129):
         x = list(musical_scale(start_midi, stop_midi))

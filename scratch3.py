@@ -12,6 +12,7 @@ from modules.overlap_add import overlap_add
 from matplotlib import pyplot as plt
 
 from modules.refractory import make_refractory_filter
+from util.music import musical_scale, musical_scale_hz
 
 
 def convolve_spectrograms(batch: torch.Tensor, channels: torch.Tensor):
@@ -181,41 +182,12 @@ def gumbel_softmax_test():
 
 
 if __name__ == '__main__':
-    # audio = test()
-    # print(audio.shape)
+    # scale = [band.center_frequency for band in musical_scale(21, 109)]
+    # print(scale)
     
-    # audio = playable(audio.squeeze(), zounds.SR22050(), normalize=True)
-    # audio.save('test.wav')
+    scale = musical_scale_hz(21, 106, 512)
+    f0s = np.linspace(27, 4000, len(scale))
     
-    # inp = torch.zeros(4, 16, 128).uniform_(0, 1)
-    
-    # net = AntiCausalStack(16, 2, dilations=[1, 2, 4, 8, 16, 32, 64])
-    
-    # result = net.forward(inp)
-    
-    # result = result.data.cpu().numpy()[0]
-    
-    # plt.matshow(result)
-    # plt.show()
-    
-    
-    # sparsify_test(5)
-    # gumbel_softmax_test()
-    
-    gaussian = torch.hamming_window(512) * torch.zeros(512).uniform_(-1, 1)
-    
-    a1 = torch.zeros(4, 1, 2**15)
-    a1[:, :, 2048:2048 + 512] = gaussian[None, None, :]
-    
-    a2 = torch.zeros(4, 1, 2**15)
-    a2[:, :, :512] = gaussian[None, None, :]
-    
-    spec1 = stft(a1, 2048, 256, pad=True).view(4, 128, -1)
-    spec2 = stft(a2, 2048, 256, pad=True).view(4, 128, -1)
-    
-    
-    # print(spec1.shape, spec2.shape)
-    
-    a, b, c = convolve_spectrograms(spec1, spec2)
-    print(a, b, c.shape)
-    
+    plt.plot(scale)
+    plt.plot(f0s)
+    plt.show()
