@@ -45,4 +45,8 @@
 
 # from .e_2024_2_9 import NeuralMatchingPursuit as Current
 
-from .e_2024_2_10 import InfoAndSparsity as Current
+# from .e_2024_2_10 import InfoAndSparsity as Current
+
+
+
+from .e_2024_2_14 import NeuralMatchingPursuit2 as Current

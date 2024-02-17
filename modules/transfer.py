@@ -189,27 +189,32 @@ class ResonanceBlock(nn.Module):
                 nn.Linear(latent_dim, n_atoms),
                 # LinearOutputStack(
                 #     channels, layers=3, out_channels=n_atoms, in_channels=latent_dim, norm=nn.LayerNorm((channels,))),
-                nn.Softmax(dim=-1)
+                # nn.Softmax(dim=-1)
+                nn.ReLU()
             )
             for _ in range(mix_channels)
         ])
         
+        # produce a linear mixture of enevelopes
         self.init_choices = nn.ModuleList([
             nn.Sequential(
                 nn.Linear(latent_dim, n_atoms) ,
                 # LinearOutputStack(
                 #     channels, layers=3, out_channels=n_atoms, in_channels=latent_dim, norm=nn.LayerNorm((channels,))),
-                nn.Softmax(dim=-1)
+                # nn.Softmax(dim=-1)
+                nn.ReLU()
             )
             for _ in range(mix_channels)
         ])
         
+        # produce a linear mixture of filters
         self.filt_choice = nn.ModuleList([
             nn.Sequential(
                 nn.Linear(latent_dim, n_atoms) ,
                 # LinearOutputStack(
                 #     channels, layers=3, out_channels=n_atoms, in_channels=latent_dim, norm=nn.LayerNorm((channels,))),
-                nn.Softmax(dim=-1)
+                # nn.Softmax(dim=-1)
+                nn.ReLU()
             )
             for _ in range(mix_channels)
         ])

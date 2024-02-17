@@ -1,5 +1,5 @@
 
-from typing import Callable, Dict, Tuple
+from typing import Tuple
 import numpy as np
 import torch
 from conjure import numpy_conjure, SupportedContentType
@@ -9,21 +9,16 @@ from torch import nn
 from torch.nn import functional as F
 from config.experiment import Experiment
 from modules.decompose import fft_frequency_decompose
-from modules.mixer import MixerStack
 
 from modules.overlap_add import overlap_add
 from modules.angle import windowed_audio
-from modules.ddsp import NoiseModel
 from modules.fft import fft_convolve
 from modules.linear import LinearOutputStack
 from modules.normalization import max_norm, unit_norm
 from modules.phase import morlet_filter_bank
-from modules.pos_encode import ExpandUsingPosEncodings
-from modules.refractory import make_refractory_filter
 from modules.reverb import ReverbGenerator
 from modules.sparse import sparsify2
 from modules.stft import stft
-from modules.transfer import ResonanceChain
 from modules.upsample import ConvUpsample
 from train.experiment_runner import BaseExperimentRunner, MonitoredValueDescriptor
 from train.optim import optimizer
@@ -323,111 +318,6 @@ class SimpleGenerateImpulse(nn.Module):
         return final
 
 
-class GenerateImpulse(nn.Module):
-
-    def __init__(self, latent_dim, channels, n_samples, n_filter_bands, encoding_channels):
-        super().__init__()
-        self.latent_dim = latent_dim
-        self.n_samples = n_samples
-        self.n_frames = n_samples // 256
-        self.n_filter_bands = n_filter_bands
-        self.channels = channels
-        self.filter_kernel_size = 16
-        self.encoding_channels = encoding_channels
-
-        self.to_frames = ConvUpsample(
-            latent_dim,
-            channels,
-            start_size=4,
-            mode='learned',
-            end_size=self.n_frames,
-            out_channels=channels,
-            layer_norm=False,
-            weight_norm=True
-        )
-
-        self.noise_model = NoiseModel(
-            channels,
-            self.n_frames,
-            self.n_frames * 4,
-            self.n_samples,
-            self.channels,
-            layer_norm=False,
-            weight_norm=True,
-            squared=True,
-            activation=lambda x: torch.sigmoid(x),
-            mask_after=1
-        )
-        
-        self.to_env = nn.Linear(latent_dim, self.n_frames)
-
-    def forward(self, x):
-        
-        env = self.to_env(x) ** 2
-        env = F.interpolate(env, mode='linear', size=self.n_samples)
-        
-        x = self.to_frames(x)
-        x = self.noise_model(x)
-        x = x.view(-1, n_events, self.n_samples)
-        
-        x = x * env
-        return x
-
-
-class Planner(nn.Module):
-    
-    def __init__(
-        self, 
-        one_hot_dim: int, 
-        time_dim: int, 
-        context_dim: int, 
-        embedding_dim: int, 
-        mixer_planning: bool = False):
-        
-        super().__init__()
-        self.one_hot_dim = one_hot_dim
-        self.time_dim = time_dim
-        self.context_dim = context_dim
-        self.embedding_dim = embedding_dim
-        self.mixer_planning = mixer_planning
-        
-        self.embed_one_hot = nn.Linear(one_hot_dim, embedding_dim)
-        self.embed_time = nn.Linear(time_dim, embedding_dim)
-        
-        self.to_weight = nn.Linear(context_dim, embedding_dim * 2)
-        self.to_bias = nn.Linear(context_dim, embedding_dim * 2)
-        
-        self.to_embedding = nn.Linear(embedding_dim * 2, embedding_dim)
-        
-        if self.mixer_planning:
-            self.mixer = MixerStack(embedding_dim, embedding_dim, n_events, 4, 4, channels_last=True)
-    
-    def forward(self, one_hot, time, context):
-        
-        batch, n_events, _ = one_hot.shape
-        
-        context = context.view(batch, self.context_dim)
-        
-        oh = self.embed_one_hot(one_hot)
-        time = self.embed_time(time)
-        
-        x = torch.cat([oh, time], dim=-1)
-        
-        w = torch.sigmoid(self.to_weight(context))
-        b = self.to_bias(context)
-        
-        x = (x * w) + b
-        
-        x = self.to_embedding(x)
-        
-        x = x.view(batch, n_events, self.embedding_dim)
-        
-        if self.mixer_planning:
-            x = x + self.mixer.forward(x)
-        
-        return x
-
-
 class UNet(nn.Module):
     def __init__(self, channels, return_latent=False):
         super().__init__()
@@ -449,7 +339,6 @@ class UNet(nn.Module):
                 nn.Dropout(0.1),
                 weight_norm(nn.Conv1d(channels, channels, 3, 2, 1)),
                 nn.LeakyReLU(0.2),
-                # nn.LayerNorm((1024, 64), elementwise_affine=False)
             ),
 
             # 32
@@ -457,7 +346,6 @@ class UNet(nn.Module):
                 nn.Dropout(0.1),
                 weight_norm(nn.Conv1d(channels, channels, 3, 2, 1)),
                 nn.LeakyReLU(0.2),
-                # nn.LayerNorm((1024, 32), elementwise_affine=False)
             ),
 
             # 16
@@ -465,7 +353,6 @@ class UNet(nn.Module):
                 nn.Dropout(0.1),
                 weight_norm(nn.Conv1d(channels, channels, 3, 2, 1)),
                 nn.LeakyReLU(0.2),
-                # nn.LayerNorm((1024, 16), elementwise_affine=False)
             ),
 
             # 8
@@ -473,7 +360,6 @@ class UNet(nn.Module):
                 nn.Dropout(0.1),
                 weight_norm(nn.Conv1d(channels, channels, 3, 2, 1)),
                 nn.LeakyReLU(0.2),
-                # nn.LayerNorm((1024, 8), elementwise_affine=False)
             ),
 
             # 4
@@ -481,7 +367,6 @@ class UNet(nn.Module):
                 nn.Dropout(0.1),
                 weight_norm(nn.Conv1d(channels, channels, 3, 2, 1)),
                 nn.LeakyReLU(0.2),
-                # nn.LayerNorm((1024, 4), elementwise_affine=False)
             ),
         )
 
@@ -491,14 +376,12 @@ class UNet(nn.Module):
                 nn.Dropout(0.1),
                 weight_norm(nn.ConvTranspose1d(channels, channels, 4, 2, 1)),
                 nn.LeakyReLU(0.2),
-                # nn.LayerNorm((1024, 8), elementwise_affine=False)
             ),
             # 16
             nn.Sequential(
                 nn.Dropout(0.1),
                 weight_norm(nn.ConvTranspose1d(channels, channels, 4, 2, 1)),
                 nn.LeakyReLU(0.2),
-                # nn.LayerNorm((1024, 16), elementwise_affine=False)
             ),
 
             # 32
@@ -506,7 +389,6 @@ class UNet(nn.Module):
                 nn.Dropout(0.1),
                 weight_norm(nn.ConvTranspose1d(channels, channels, 4, 2, 1)),
                 nn.LeakyReLU(0.2),
-                # nn.LayerNorm((1024, 32), elementwise_affine=False)
             ),
 
             # 64
@@ -514,7 +396,6 @@ class UNet(nn.Module):
                 nn.Dropout(0.1),
                 weight_norm(nn.ConvTranspose1d(channels, channels, 4, 2, 1)),
                 nn.LeakyReLU(0.2),
-                # nn.LayerNorm((1024, 64), elementwise_affine=False)
             ),
 
             # 128
@@ -522,7 +403,6 @@ class UNet(nn.Module):
                 nn.Dropout(0.1),
                 weight_norm(nn.ConvTranspose1d(channels, channels, 4, 2, 1)),
                 nn.LeakyReLU(0.2),
-                # nn.LayerNorm((1024, 128), elementwise_affine=False)
             ),
         )
         
@@ -582,12 +462,10 @@ class Model(nn.Module):
         self.down = nn.Linear(512, 256)
         self.embed_latent = nn.Linear(1024, context_dim)
 
-        # self.imp = GenerateImpulse(256, 128, impulse_size, 16, n_events)
         self.imp = SimpleGenerateImpulse(256, 128, impulse_size, 16, n_events)
 
         
         total_atoms = 2048
-        # f0s = np.linspace(40, 4000, total_atoms // 4)
         f0s = musical_scale_hz(start_midi=21, stop_midi=106, n_steps=total_atoms // 4)
         waves = make_waves(resonance_size, f0s, int(samplerate))
         
@@ -605,7 +483,6 @@ class Model(nn.Module):
         
         
         # total_atoms = 1024
-        # # f0s = np.linspace(40, 4000, total_atoms // 4)
         # f0s = musical_scale_hz(40, 4000, total_atoms // 4)
         # waves = make_waves(resonance_size, f0s, int(samplerate))
         
@@ -643,7 +520,7 @@ class Model(nn.Module):
 
         self.atom_bias = nn.Parameter(torch.zeros(4096).uniform_(-1, 1))
 
-        self.apply(lambda x: exp.init_weights(x))
+        # self.apply(lambda x: exp.init_weights(x))
         
 
     def encode(self, x):
@@ -676,7 +553,8 @@ class Model(nn.Module):
         
         oh = self.embed_one_hot(one_hot)
         
-        amps = torch.abs(self.to_amp(oh))
+        # allow amps to be exactly 0
+        amps = torch.relu(self.to_amp(oh))
         
         # oh = unit_norm(oh, dim=-1)
         # proj = unit_norm(proj, dim=-1)
@@ -764,15 +642,10 @@ class Model(nn.Module):
         
         print('STARTING WITH', x.shape)
         
-        encoded = self.encode(x)
+        encoded, z = self.encode(x)
 
-        dense = torch.mean(encoded, dim=-1)
-        mean = self.to_context_mean(dense)
-        std = self.to_context_std(dense)
-        dense = mean + (torch.zeros_like(mean).normal_(0, 1) * std)
         
-        
-        # encoded = torch.relu(encoded)
+        dense = self.embed_latent(z)
         
         encoded, packed, one_hot = sparsify2(encoded, n_to_keep=n_events)
         
@@ -783,38 +656,115 @@ class Model(nn.Module):
 model = Model().to(device)
 optim = optimizer(model, lr=1e-4)
 
+import zounds
+band = zounds.FrequencyBand(40, 22050 // 2)
+scale = zounds.MelScale(band, 1024)
+sr = zounds.SR22050()
+
+n_centroids = 64
+window_size = (9, 9)
+step_size = (3, 3)
+
+vq = VectorQuantize(np.prod(window_size), n_centroids, 128, heads=1, kmeans_init=True, threshold_ema_dead_code=2).to(device)
+vq_optim = optimizer(vq, lr=1e-3)
+
+
+filter_bank = morlet_filter_bank(sr, 512, scale, 0.1, normalize=True).real
+filter_bank = torch.from_numpy(filter_bank).to(device).float().view(1024, 1, 512)
 
 
 
+def spectral(a: torch.Tensor):
+    return stft(a, 2048, 256, pad=True).view(a.shape[0], 128, 1025).permute(0, 2, 1)
+    # spec = F.conv1d(a, filter_bank, stride=1, padding=256)
+    # spec = torch.relu(spec)
+    # spec = F.avg_pool1d(spec, 512, 256, padding=256)
+    # return spec
 
-# import zounds
-# sr = zounds.SR22050()
-# scale = zounds.LinearScale.from_sample_rate(sr, 128)
-# filter_bank = morlet_filter_bank(sr, 128, scale, 0.1, normalize=True).real
-# filter_bank = torch.from_numpy(filter_bank).to(device).float().view(128, 1, 128)
-
-# def transform(x: torch.Tensor, window_size=64, step=32):
-#     batch_size = x.shape[0]
+def patches(spec: torch.Tensor, size: int = window_size, step: int = step_size, offset: Tuple[int] = (0, 0)):
+    x, y = offset
+    spec = spec[:, x:, y:]
     
-#     bands = fft_frequency_decompose(x, min_size=512)
-#     features = []
-#     for size, band in bands.items():
-#         spec = F.conv1d(band, filter_bank, padding=64)
-#         spec = torch.relu(spec)
-#         spec = F.pad(spec, (0, step))
-#         windowed = spec.unfold(-1, window_size, step)
-#         spec = torch.abs(torch.fft.rfft(windowed, dim=-1))
-#         features.append(spec.view(batch_size, -1))
     
-#     features = torch.cat(features, dim=-1)
-#     return features(
+    batch, channels, time = spec.shape
+    
+    wa, wb = window_size
+    sa, sb = step_size
+    
+    p = spec.unfold(1, wa, sa).unfold(2, wb, sb)
+    last_dim = np.prod(p.shape[-2:])
+    p = p.reshape(batch, -1, last_dim)
+    norms = torch.norm(p, dim=-1, keepdim=True)
+    normed = p / (norms + 1e-12)
+    
+    return p, norms, normed
 
+def learn_and_label(patches: torch.Tensor):
+    vq_optim.zero_grad()
+    batch, n_patches, patch_size = patches.shape
+    quantized, indices, loss = vq.forward(patches)
+    loss = loss + F.mse_loss(quantized.view(*patches.shape), patches)
+    loss.backward()
+    vq_optim.step()
+    return indices.view(batch, n_patches, 1)
+    
+
+def experiment_loss(batch: torch.Tensor, fake: torch.Tensor, channels: torch.Tensor, encoded: torch.Tensor):
+    # used_elements = (torch.abs(encoded).sum() / batch.shape[0]) * 1e-3
+    
+    step_size = np.random.randint(2, 5)
+    
+    real_spec = spectral(batch)
+    fake_spec = spectral(fake)
+    
+    # smoothness_loss = torch.abs(fake_spec - real_spec).sum() * 1e-2
+    
+    
+    # channel_specs = stft(channels, 2048, 256, pad=True).view(batch.shape[0], n_events, -1)
+    
+    # # encourage events to be orthogonal/non-overlapping
+    # # TODO: Use constant-q spectrogram with better frequency resolution
+    # sim = channel_specs @ channel_specs.permute(0, 2, 1)
+    # sim = torch.triu(sim)
+    # difference_loss = sim.mean() * 1e-2
+    
+    # break up the spectrograms into overlapping patches
+    rp, rn, rnorm = patches(real_spec, step=step_size)
+    fp, fn, fnorm = patches(fake_spec, step=step_size)
+    
+    
+    real_labels: torch.Tensor = learn_and_label(rnorm)
+    
+    total_elements = real_labels.nelement()
+    counts = torch.bincount(real_labels.view(-1), minlength=n_centroids)
+    # this is the percentage of patches that belong to this cluster/label
+    frequency = counts / total_elements
+    # we want inverse frequency
+    weighting = 1 / frequency
+    
+    
+    # get patch losses
+    # diff = ((rp - fp) ** 2).mean(dim=-1, keepdim=True)
+    
+    diff = torch.abs(rp - fp).sum(dim=-1, keepdim=True)
+    
+    # get importance weighting for each patch
+    weights = weighting[real_labels.view(-1)].view(batch.shape[0], -1, 1)
+    
+    # weight patch losses by importance
+    loss = (diff * weights).sum()
+    
+    
+    # print(loss.item(), smoothness_loss.item())
+    # loss = loss + smoothness_loss
+    
+    return loss
 
 
 def transform(x: torch.Tensor):
-    batch_size = x.shape[0]
+    batch_size, channels, _ = x.shape
     bands = multiband_transform(x)
-    return torch.cat([b.view(batch_size, -1) / np.prod(b.shape[1:]) for b in bands.values()], dim=-1)
+    return torch.cat([b.view(batch_size, channels, -1) for b in bands.values()], dim=-1)
 
 
         
@@ -823,9 +773,13 @@ def multiband_transform(x: torch.Tensor):
     # TODO: each band should have 256 frequency bins and also 256 time bins
     # this requires a window size of (n_samples // 256) * 2
     # and a window size of 512, 256
+    
     d1 = {f'{k}_long': stft(v, 128, 64, pad=True) for k, v in bands.items()}
-    d2 = {f'{k}_short': stft(v, 64, 32, pad=True) for k, v in bands.items()}
-    return dict(**d1, **d2, full=stft(x, 2048, 256, pad=True))
+    d2 = {f'{k}_xl': stft(v, 256, 128, pad=True) for k, v in bands.items()}
+    d3 = {f'{k}_short': stft(v, 64, 32, pad=True) for k, v in bands.items()}
+    d4 = {f'{k}_xs': stft(v, 16, 8, pad=True) for k, v in bands.items()}
+    
+    return dict(**d1, **d2, **d3, **d4)
 
 def l0_norm(x: torch.Tensor):
     mask = (x > 0).float()
@@ -835,63 +789,45 @@ def l0_norm(x: torch.Tensor):
     return y.sum()
 
 
-# def single_channel_loss_4(target: torch.Tensor, recon: torch.Tensor):
-#     batch_size = target.shape[0]
-    
-#     target = transform(target)
-#     full = torch.sum(recon, dim=1, keepdim=True)
-#     full = transform(full)
-    
-#     loss = 0
-    
-#     global_loss = torch.abs(target - full).sum() * 1e-5
-    
-#     residual = target.clone().detach()
-#     indices = np.random.permutation(n_events)
-#     for i in indices:
-#         ch = transform(recon[:, i: i + 1, :])
-#         new_residual = residual - ch
 
-#         mask = torch.abs(residual - new_residual) > 1e-4
-        
-#         print('PERCENT', mask.sum() / mask.nelement())
-        
-#         start_norm = torch.abs(residual * mask).sum()
-#         end_norm = torch.abs(new_residual * mask).sum()
-#         diff = end_norm / (start_norm + 1e-5)
-        
-#         loss = loss + diff
-#         residual = new_residual
+def single_channel_loss(target: torch.Tensor, recon: torch.Tensor):
+    target = transform(target)
+    full = torch.sum(recon, dim=1, keepdim=True)
+    full = transform(full)
+    residual = target - full
+    loss = 0
     
-#     return loss + global_loss
-        
+    i = np.random.randint(n_events)
+    
+    ch = recon[:, i: i + 1, :]
+    ch = transform(ch)
+    with_channel = residual + ch
+    loss = loss + torch.abs(with_channel - ch).sum()
+    
+    return loss
+
 
 def single_channel_loss_3(target: torch.Tensor, recon: torch.Tensor):
-    batch_size = target.shape[0]
-    
     target = transform(target)
     full = torch.sum(recon, dim=1, keepdim=True)
     full = transform(full)
     
-    channels = transform(recon.view(-1, 1, exp.n_samples)).view(batch_size, n_events, -1)
+    channels = transform(recon)
     
-    residual = (target - full).view(batch_size, 1, -1)
+    residual = target - full
     
     
     # find the channel closest to the residual
-    # TODO: try this with cosine distance instead;  shape matters more than magnitude
-    #   TODO: this should be the closest with each channel individually added back to the residual
-    diff = torch.norm((residual + channels) - channels, dim=(-1))
+    diff = torch.norm(channels - residual, dim=(-1), p=1)
     indices = torch.argsort(diff, dim=-1)
     
     srt = torch.take_along_dim(channels, indices[:, :, None], dim=1)
-    
-    # the first channel will be the one closest to residual 
-    channel = 0
-    chosen = srt[:, channel, :]
+
+    # the first channel will be on the one closest to the residual    
+    chosen = srt[:, :1, :]
     
     # add the chosen channel back to the residual
-    with_residual = chosen + residual.view(*chosen.shape)
+    with_residual = chosen + residual
     
     # make the chosen channel explain more of the residual    
     loss = torch.abs(chosen - with_residual).sum()
@@ -899,65 +835,6 @@ def single_channel_loss_3(target: torch.Tensor, recon: torch.Tensor):
     return loss
 
 
-
-
-# def single_channel_loss(target: torch.Tensor, recon: torch.Tensor):
-#     target = transform(target)
-    
-#     full = torch.sum(recon, dim=1, keepdim=True)
-#     full = transform(full)
-    
-#     global_loss = torch.abs(target - full).sum() * 1e-3
-    
-#     residual = target - full
-    
-#     i = np.random.randint(0, n_events)
-#     ch = recon[:, i: i + 1, :]
-#     ch = transform(ch)
-#     mask = ch > 1e-4
-#     total = mask.sum() / mask.nelement()
-#     print(f'{total * 100} percent non-zero')
-    
-#     added_back = residual + ch
-    
-#     diff = torch.abs((added_back - ch) * mask).sum()
-#     return diff + global_loss
-
-
-
-# def single_channel_loss_3(target: torch.Tensor, recon: torch.Tensor):
-    
-#     target = transform(target).view(target.shape[0], -1)
-    
-#     # full = torch.sum(recon, dim=1, keepdim=True)
-#     # full = transform(full).view(*target.shape)
-    
-#     channels = transform(recon)
-    
-#     residual = target
-    
-#     # Try L1 norm instead of L@
-#     # Try choosing based on loudest patch/segment
-    
-#     # sort channels from loudest to softest
-#     diff = torch.norm(channels, dim=(-1), p = 1)
-#     indices = torch.argsort(diff, dim=-1, descending=True)
-    
-#     srt = torch.take_along_dim(channels, indices[:, :, None], dim=1)
-    
-#     loss = 0
-#     for i in range(n_events):
-#         current = srt[:, i, :]
-#         start_norm = torch.norm(residual, dim=-1, p=1)
-#         # TODO: should the residual be cloned and detached each time,
-#         # so channels are optimized independently?
-#         residual = residual - current
-#         end_norm = torch.norm(residual, dim=-1, p=1)
-#         diff = -(start_norm - end_norm)
-#         loss = loss + diff.sum()
-        
-    
-#     return loss
 
 def train(batch, i):
     optim.zero_grad()
@@ -968,9 +845,11 @@ def train(batch, i):
     recon_summed = torch.sum(recon, dim=1, keepdim=True)
     
     # sparse_loss = l0_norm(encoded)
-    # sparse_loss = torch.clamp(sparse_loss - (b * 2), 0, np.inf)
+    # sparse_loss = torch.clamp(sparse_loss - (b * 2), 0, np.inf) * 1e-4
     
-    recon_loss = single_channel_loss_3(batch, recon)
+    # recon_loss = single_channel_loss_3(batch, recon)
+    
+    recon_loss = experiment_loss(batch, recon_summed, recon, encoded)
     
     # print(recon_loss.item(), sparse_loss.item())
     
@@ -987,7 +866,7 @@ def train(batch, i):
     #     model.eval()
         
     #     # generate context latent
-    #     z = torch.zeros(1, context_dim).normal_(0, 23)
+    #     z = torch.zeros(1, context_dim).normal_(0, 12)
         
     #     # generate events
     #     events = torch.zeros(1, 4096, 128).uniform_(0, 8)
@@ -1022,7 +901,7 @@ def make_conjure(experiment: BaseExperimentRunner):
 
 
 @readme
-class InfoAndSparsity(BaseExperimentRunner):
+class NeuralMatchingPursuit2(BaseExperimentRunner):
     encoded = MonitoredValueDescriptor(make_conjure)
 
     def __init__(self, stream, port=None, load_weights=True, save_weights=False, model=model):
@@ -1045,3 +924,6 @@ class InfoAndSparsity(BaseExperimentRunner):
             self.encoded = e
             print(i, l.item())
             self.after_training_iteration(l, i)
+
+
+    
