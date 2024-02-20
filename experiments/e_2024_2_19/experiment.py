@@ -15,7 +15,6 @@ from modules.angle import windowed_audio
 from modules.fft import fft_convolve
 from modules.linear import LinearOutputStack
 from modules.normalization import max_norm, unit_norm
-from modules.phase import morlet_filter_bank
 from modules.reverb import ReverbGenerator
 from modules.sparse import sparsify2
 from modules.stft import stft
@@ -26,7 +25,6 @@ from util import device
 from util.music import musical_scale_hz
 from util.readmedocs import readme
 from torch.nn.utils.weight_norm import weight_norm
-from vector_quantize_pytorch import VectorQuantize
 
 exp = Experiment(
     samplerate=22050,
@@ -306,7 +304,7 @@ class SimpleGenerateImpulse(nn.Module):
         env = F.interpolate(env, size=self.n_samples, mode='linear')
         
         # TODO: consider making this a hard choice via gumbel softmax as well
-        env = torch.relu(env).view(-1, n_events, self.n_samples)
+        env = torch.abs(env).view(-1, n_events, self.n_samples)
         
         filt = self.to_filt(x).view(-1, n_events, self.filter_size)
         
@@ -522,7 +520,7 @@ class Model(nn.Module):
 
         self.atom_bias = nn.Parameter(torch.zeros(4096).uniform_(-1, 1))
 
-        # self.apply(lambda x: exp.init_weights(x))
+        self.apply(lambda x: exp.init_weights(x))
         
 
     def encode(self, x):
@@ -618,8 +616,8 @@ class Model(nn.Module):
         
         final, imp = self.generate(encoded, one_hot, packed, dense)
         
-        print('ENCODED', encoded.max().item())
-        print('DENSE', dense.mean().item(), dense.std().item())
+        # print('ENCODED', encoded.max().item())
+        # print('DENSE', dense.mean().item(), dense.std().item())
         
         
         return final, encoded, imp
@@ -658,115 +656,11 @@ class Model(nn.Module):
 model = Model().to(device)
 optim = optimizer(model, lr=1e-4)
 
-import zounds
-band = zounds.FrequencyBand(40, 22050 // 2)
-scale = zounds.MelScale(band, 1024)
-sr = zounds.SR22050()
-
-n_centroids = 64
-window_size = (9, 9)
-step_size = (3, 3)
-
-vq = VectorQuantize(np.prod(window_size), n_centroids, 128, heads=1, kmeans_init=True, threshold_ema_dead_code=2).to(device)
-vq_optim = optimizer(vq, lr=1e-3)
-
-
-filter_bank = morlet_filter_bank(sr, 512, scale, 0.1, normalize=True).real
-filter_bank = torch.from_numpy(filter_bank).to(device).float().view(1024, 1, 512)
-
-
-
-def spectral(a: torch.Tensor):
-    return stft(a, 2048, 256, pad=True).view(a.shape[0], 128, 1025).permute(0, 2, 1)
-    # spec = F.conv1d(a, filter_bank, stride=1, padding=256)
-    # spec = torch.relu(spec)
-    # spec = F.avg_pool1d(spec, 512, 256, padding=256)
-    # return spec
-
-def patches(spec: torch.Tensor, size: int = window_size, step: int = step_size, offset: Tuple[int] = (0, 0)):
-    x, y = offset
-    spec = spec[:, x:, y:]
-    
-    
-    batch, channels, time = spec.shape
-    
-    wa, wb = window_size
-    sa, sb = step_size
-    
-    p = spec.unfold(1, wa, sa).unfold(2, wb, sb)
-    last_dim = np.prod(p.shape[-2:])
-    p = p.reshape(batch, -1, last_dim)
-    norms = torch.norm(p, dim=-1, keepdim=True)
-    normed = p / (norms + 1e-12)
-    
-    return p, norms, normed
-
-def learn_and_label(patches: torch.Tensor):
-    vq_optim.zero_grad()
-    batch, n_patches, patch_size = patches.shape
-    quantized, indices, loss = vq.forward(patches)
-    loss = loss + F.mse_loss(quantized.view(*patches.shape), patches)
-    loss.backward()
-    vq_optim.step()
-    return indices.view(batch, n_patches, 1)
-    
-
-def experiment_loss(batch: torch.Tensor, fake: torch.Tensor, channels: torch.Tensor, encoded: torch.Tensor):
-    # used_elements = (torch.abs(encoded).sum() / batch.shape[0]) * 1e-3
-    
-    
-    real_spec = spectral(batch)
-    fake_spec = spectral(fake)
-    
-    # smoothness_loss = torch.abs(fake_spec - real_spec).sum() * 1e-2
-    
-    
-    # channel_specs = stft(channels, 2048, 256, pad=True).view(batch.shape[0], n_events, -1)
-    
-    # # encourage events to be orthogonal/non-overlapping
-    # # TODO: Use constant-q spectrogram with better frequency resolution
-    # sim = channel_specs @ channel_specs.permute(0, 2, 1)
-    # sim = torch.triu(sim)
-    # difference_loss = sim.mean() * 1e-2
-    
-    # break up the spectrograms into overlapping patches
-    rp, rn, rnorm = patches(real_spec)
-    fp, fn, fnorm = patches(fake_spec)
-    
-    
-    real_labels: torch.Tensor = learn_and_label(rnorm)
-    
-    total_elements = real_labels.nelement()
-    counts = torch.bincount(real_labels.view(-1), minlength=n_centroids)
-    # this is the percentage of patches that belong to this cluster/label
-    frequency = counts / total_elements
-    # we want inverse frequency
-    weighting = 1 / frequency
-    
-    
-    # get patch losses
-    # diff = ((rp - fp) ** 2).mean(dim=-1, keepdim=True)
-    
-    diff = torch.abs(rp - fp).sum(dim=-1, keepdim=True)
-    
-    # get importance weighting for each patch
-    weights = weighting[real_labels.view(-1)].view(batch.shape[0], -1, 1)
-    
-    # weight patch losses by importance
-    loss = (diff * weights).sum()
-    
-    
-    # print(loss.item(), smoothness_loss.item())
-    # loss = loss + smoothness_loss
-    
-    return loss
-
 
 def transform(x: torch.Tensor):
     batch_size, channels, _ = x.shape
     bands = multiband_transform(x)
     return torch.cat([b.view(batch_size, channels, -1) for b in bands.values()], dim=-1)
-
 
         
 def multiband_transform(x: torch.Tensor):
@@ -776,11 +670,9 @@ def multiband_transform(x: torch.Tensor):
     # and a window size of 512, 256
     
     d1 = {f'{k}_long': stft(v, 128, 64, pad=True) for k, v in bands.items()}
-    d2 = {f'{k}_xl': stft(v, 256, 128, pad=True) for k, v in bands.items()}
     d3 = {f'{k}_short': stft(v, 64, 32, pad=True) for k, v in bands.items()}
     d4 = {f'{k}_xs': stft(v, 16, 8, pad=True) for k, v in bands.items()}
-    
-    return dict(**d1, **d2, **d3, **d4)
+    return dict(**d1, **d3, **d4)
 
 def l0_norm(x: torch.Tensor):
     mask = (x > 0).float()
@@ -807,106 +699,27 @@ def single_channel_loss(target: torch.Tensor, recon: torch.Tensor):
     return loss
 
 
-def single_channel_loss_5(target: torch.Tensor, recon: torch.Tensor):
-    target = transform(target)
-    full = torch.sum(recon, dim=1, keepdim=True)
-    full = transform(full)
-    residual = target - full
-    
-    # pick a random number of channels
-    n_channels = np.random.randint(1, 5)
-    # choose the channels
-    channels = np.random.permutation(n_events)[:n_channels]
-    
-    # choose the channels, sum and transform
-    seg = torch.cat([recon[:, i:i + 1, :] for i in channels], dim=1)
-    seg = torch.sum(seg, dim=1, keepdim=True)
-    ch = transform(seg)
-    
-    
-    with_channel = residual + ch
-    loss = torch.abs(with_channel - ch).sum()
-    
-    return loss
-
-
-def single_channel_loss_3(target: torch.Tensor, recon: torch.Tensor):
-    target = transform(target)
-    full = torch.sum(recon, dim=1, keepdim=True)
-    full = transform(full)
-    
-    channels = transform(recon)
-    
-    residual = target - full
-    
-    
-    # find the channel closest to the residual
-    diff = torch.norm(channels - residual, dim=(-1), p=1)
-    indices = torch.argsort(diff, dim=-1)
-    
-    srt = torch.take_along_dim(channels, indices[:, :, None], dim=1)
-
-    # the first channel will be on the one closest to the residual    
-    chosen = srt[:, :1, :]
-    
-    # add the chosen channel back to the residual
-    with_residual = chosen + residual
-    
-    # make the chosen channel explain more of the residual    
-    loss = torch.abs(chosen - with_residual).sum()
-    
-    return loss
-
-
-def single_channel_loss_3(target: torch.Tensor, recon: torch.Tensor):
-    
-    target = transform(target).view(target.shape[0], -1)
-    
-    # full = torch.sum(recon, dim=1, keepdim=True)
-    # full = transform(full).view(*target.shape)
-    
-    channels = transform(recon)
-    
-    residual = target
-    
-    # Try L1 norm instead of L@
-    # Try choosing based on loudest patch/segment
-    
-    # sort channels from loudest to softest
-    diff = torch.norm(channels, dim=(-1), p = 1)
-    indices = torch.argsort(diff, dim=-1, descending=True)
-    
-    srt = torch.take_along_dim(channels, indices[:, :, None], dim=1)
-    
-    loss = 0
-    for i in range(n_events):
-        current = srt[:, i, :]
-        start_norm = torch.norm(residual, dim=-1, p=1)
-        # TODO: should the residual be cloned and detached each time,
-        # so channels are optimized independently?
-        residual = residual - current
-        end_norm = torch.norm(residual, dim=-1, p=1)
-        diff = -(start_norm - end_norm)
-        loss = loss + diff.sum()
-        
-    
-    return loss
 
 
 def train(batch, i):
     optim.zero_grad()
+    
+    print('=====================================')
 
     b = batch.shape[0]
     
     recon, encoded, imp = model.forward(batch)  
     recon_summed = torch.sum(recon, dim=1, keepdim=True)
     
-    # sparse_loss = l0_norm(encoded)
-    # sparse_loss = torch.clamp(sparse_loss - (b * 2), 0, np.inf) * 1e-4
+    # energy_loss = torch.abs(imp).sum() * 1e-6
     
-    # recon_loss = single_channel_loss_5(batch, recon)
+    # nz = (encoded > 0).sum() / b
+    # print('NON-ZERO', nz.item())
     
-    recon_loss = experiment_loss(batch, recon_summed, recon, encoded)
+    # sparse_loss = l0_norm(encoded) * 1e-5
+    
+    recon_loss = single_channel_loss(batch, recon) * 1e-5
+    
     
     # print(recon_loss.item(), sparse_loss.item())
     
@@ -958,7 +771,7 @@ def make_conjure(experiment: BaseExperimentRunner):
 
 
 @readme
-class NeuralMatchingPursuit2(BaseExperimentRunner):
+class ManyEventsWithL0Norm(BaseExperimentRunner):
     encoded = MonitoredValueDescriptor(make_conjure)
 
     def __init__(self, stream, port=None, load_weights=True, save_weights=False, model=model):
