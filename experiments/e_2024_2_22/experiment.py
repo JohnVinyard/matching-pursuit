@@ -319,9 +319,10 @@ class SimpleGenerateImpulse(nn.Module):
 
 
 class UNet(nn.Module):
-    def __init__(self, channels, return_latent=False):
+    def __init__(self, channels, return_latent=False, is_disc=False):
         super().__init__()
         self.channels = channels
+        self.is_disc = is_disc
         
         self.return_latent = return_latent
         
@@ -369,6 +370,9 @@ class UNet(nn.Module):
                 nn.LeakyReLU(0.2),
             ),
         )
+        
+        if self.is_disc:
+            self.judge = nn.Linear(self.channels * 4, 1)
 
         self.up = nn.Sequential(
             # 8
@@ -409,6 +413,9 @@ class UNet(nn.Module):
         self.bias = nn.Conv1d(1024, 4096, 1, 1, 0)
         self.proj = nn.Conv1d(1024, 4096, 1, 1, 0)
         
+        if self.is_disc:
+            self.apply(lambda x: exp.init_weights(x))
+        
 
     def forward(self, x):
         # Input will be (batch, 1024, 128)
@@ -432,6 +439,9 @@ class UNet(nn.Module):
         if self.return_latent:
             z = self.to_latent(x.view(-1, self.channels * 4))
         
+        if self.is_disc:
+            j = self.judge(x.view(-1, self.channels * 4))
+            return j
 
         for layer in self.up:
             x = layer(x)
@@ -616,8 +626,8 @@ class Model(nn.Module):
         
         final, imp = self.generate(encoded, one_hot, packed, dense)
         
-        print('ENCODED', encoded.max().item())
-        print('DENSE', dense.mean().item(), dense.std().item())
+        # print('ENCODED', encoded.max().item())
+        # print('DENSE', dense.mean().item(), dense.std().item())
         
         
         return final, encoded, imp
@@ -655,6 +665,15 @@ class Model(nn.Module):
 
 model = Model().to(device)
 optim = optimizer(model, lr=1e-4)
+
+disc = UNet(1024, return_latent=False, is_disc=True).to(device)
+disc_optim = optimizer(disc)
+
+try:
+    disc.load_state_dict(torch.load('disc.dat'))
+    print('Loaded disc weights')
+except IOError:
+    print('No saved disc weights')
 
 
 def transform(x: torch.Tensor):
@@ -743,49 +762,37 @@ def train(batch, i):
 
     b = batch.shape[0]
     
-    recon, encoded, imp = model.forward(batch)  
+    recon, encoded, imp = model.forward(batch)
+    
+    # randomly drop events.  Events should stand on their own
+    mask = torch.zeros(b, n_events, 1, device=batch.device).bernoulli_(p=0.5)
+    for_disc = torch.sum(recon * mask, dim=1, keepdim=True).clone().detach()
+    
     recon_summed = torch.sum(recon, dim=1, keepdim=True)
     
-    # energy_loss = torch.abs(imp).sum() * 1e-6
-    
-    # nz = (encoded > 0).sum() / b
-    # print('NON-ZERO', nz.item())
-    
-    # sparse_loss = l0_norm(encoded) * 1e-5
-    
-    recon_loss = single_channel_loss_3(batch, recon)
+    j = disc.forward(recon_summed)
+    d_loss = torch.abs(1 - j).mean()
+    recon_loss = single_channel_loss_3(batch, recon) * 1e-4
     
     
-    # print(recon_loss.item(), sparse_loss.item())
-    
-    loss = recon_loss
+    loss = recon_loss + d_loss
         
     loss.backward()
     optim.step()
     
+    if i % 100 == 0:
+        torch.save(disc.state_dict(), 'disc.dat')
+        print('saving dem disc weights')
     
-    # with torch.no_grad():
-        
-    #     # switch to cpu evaluation
-    #     model.to('cpu')
-    #     model.eval()
-        
-    #     # generate context latent
-    #     z = torch.zeros(1, context_dim).normal_(0, 12)
-        
-    #     # generate events
-    #     events = torch.zeros(1, 4096, 128).uniform_(0, 8.7)
-    #     # events = F.avg_pool2d(events, (7, 7), (1, 1), (3, 3))
-    #     # events = events.view(1, 4096, 128)
-        
-    #     ch, _, encoded = model.from_sparse(events, z)
-    #     ch = torch.sum(ch, dim=1, keepdim=True)
-        
-    #     # switch back to GPU training
-    #     model.to('cuda')
-    #     model.train()
+
+    disc_optim.zero_grad()
     
-    # recon = max_norm(ch)
+    rj = disc.forward(batch)
+    fj = disc.forward(for_disc)
+    disc_loss = (torch.abs(1 - rj).mean() + torch.abs(0 - fj).mean()) * 0.5
+    disc_loss.backward()
+    disc_optim.step()
+    print('DISC', disc_loss.item())
     
     recon = max_norm(recon_summed)
     encoded = max_norm(encoded)
@@ -806,7 +813,7 @@ def make_conjure(experiment: BaseExperimentRunner):
 
 
 @readme
-class ManyEventsWithL0Norm(BaseExperimentRunner):
+class WithDiscriminator(BaseExperimentRunner):
     encoded = MonitoredValueDescriptor(make_conjure)
 
     def __init__(self, stream, port=None, load_weights=True, save_weights=False, model=model):

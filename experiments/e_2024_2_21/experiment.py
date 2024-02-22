@@ -9,6 +9,7 @@ from torch import nn
 from torch.nn import functional as F
 from config.experiment import Experiment
 from modules.decompose import fft_frequency_decompose
+from modules.infoloss import MultiBandSpectralInfoLoss, MultiWindowSpectralInfoLoss, PatchBandSpec, SpectralInfoLoss
 
 from modules.overlap_add import overlap_add
 from modules.angle import windowed_audio
@@ -616,8 +617,8 @@ class Model(nn.Module):
         
         final, imp = self.generate(encoded, one_hot, packed, dense)
         
-        print('ENCODED', encoded.max().item())
-        print('DENSE', dense.mean().item(), dense.std().item())
+        # print('ENCODED', encoded.max().item())
+        # print('DENSE', dense.mean().item(), dense.std().item())
         
         
         return final, encoded, imp
@@ -657,109 +658,53 @@ model = Model().to(device)
 optim = optimizer(model, lr=1e-4)
 
 
-def transform(x: torch.Tensor):
-    batch_size, channels, _ = x.shape
-    bands = multiband_transform(x)
-    return torch.cat([b.view(batch_size, channels, -1) for b in bands.values()], dim=-1)
+# loss_model = SpectralInfoLoss(
+#     stft_window_size=2048, 
+#     stft_step_size=256, 
+#     patch_size=(16, 16), 
+#     patch_step=(8, 8), 
+#     embedding_channels=32, 
+#     n_centroids=1024).to(device)
 
-        
-def multiband_transform(x: torch.Tensor):
-    bands = fft_frequency_decompose(x, 512)
-    # TODO: each band should have 256 frequency bins and also 256 time bins
-    # this requires a window size of (n_samples // 256) * 2
-    # and a window size of 512, 256
-    
-    d1 = {f'{k}_long': stft(v, 128, 64, pad=True) for k, v in bands.items()}
-    d3 = {f'{k}_short': stft(v, 64, 32, pad=True) for k, v in bands.items()}
-    d4 = {f'{k}_xs': stft(v, 16, 8, pad=True) for k, v in bands.items()}
-    return dict(**d1, **d3, **d4)
+# loss_model = MultiBandSpectralInfoLoss([
+#     PatchBandSpec(512, 64, 16, (4, 4), (2, 2), 256),
+#     PatchBandSpec(1024, 128, 32, (4, 4), (2, 2), 256),
+#     PatchBandSpec(2048, 256, 64, (8, 8), (4, 4), 256),
+#     PatchBandSpec(2048, 256, 64, (8, 8), (4, 4), 256),
+#     PatchBandSpec(4096, 512, 128, (8, 8), (4, 4), 256),
+#     PatchBandSpec(8192, 1024, 256, (8, 8), (4, 4), 256),
+#     PatchBandSpec(16384, 1024, 256, (16, 16), (8, 8), 256),
+#     PatchBandSpec(32768, 2048, 256, (16, 16), (8, 8), 256),
+# ]).to(device)
 
-def l0_norm(x: torch.Tensor):
-    mask = (x > 0).float()
-    forward = mask
-    backward = x
-    y = backward + (forward - backward).detach()
-    return y.sum()
-
-
-
-def single_channel_loss_3(target: torch.Tensor, recon: torch.Tensor):
-    
-    target = transform(target).view(target.shape[0], -1)
-    
-    full = torch.sum(recon, dim=1, keepdim=True)
-    full = transform(full).view(*target.shape)
-    
-    global_loss = torch.abs(target - full).sum() * 1e-5
-    
-    channels = transform(recon)
-    
-    residual = target
-    
-    
-    # sort channels from loudest to softest
-    # diff = torch.norm(channels, dim=(-1), p = 1)
-    
-    diff = torch.abs(channels).sum(dim=-1)
-    indices = torch.argsort(diff, dim=-1, descending=True)
-    srt = torch.take_along_dim(channels, indices[:, :, None], dim=1)
-    
-    
-    loss = 0
-    for i in range(n_events):
-        current = srt[:, i, :]
-        start_norm = torch.abs(residual).sum()
-        residual = residual - current
-        end_norm = torch.abs(residual).sum()
-        diff = -(start_norm - end_norm)
-        loss = loss + diff.sum()
-        
-    
-    return loss + global_loss
-
-
-def single_channel_loss(target: torch.Tensor, recon: torch.Tensor):
-    target = transform(target)
-    full = torch.sum(recon, dim=1, keepdim=True)
-    full = transform(full)
-    residual = target - full
-    
-    i = np.random.randint(n_events)
-    
-    ch = recon[:, i: i + 1, :]
-    ch = transform(ch)
-    with_channel = residual + ch
-    loss = torch.abs(with_channel - ch).sum()
-    
-    return loss
-
+loss_model = MultiWindowSpectralInfoLoss([
+    [(16, 16), (8, 8)],
+    [(3, 128), (1, 32)],
+    [(64, 3), (16, 1)],
+]).to(device)
+loss_optim = optimizer(loss_model, lr=1e-4)
 
 
 
 def train(batch, i):
     optim.zero_grad()
+    loss_optim.zero_grad()
     
-    print('=====================================')
+    # train loss
+    spec_recon, orig_normed = loss_model.forward(batch)
+    loss_loss = F.mse_loss(spec_recon, orig_normed.detach())
+    loss_loss.backward()
+    loss_optim.step()
+    print('LOSS MODEL', loss_loss.item())
+    
+    
 
     b = batch.shape[0]
     
     recon, encoded, imp = model.forward(batch)  
     recon_summed = torch.sum(recon, dim=1, keepdim=True)
     
-    # energy_loss = torch.abs(imp).sum() * 1e-6
-    
-    # nz = (encoded > 0).sum() / b
-    # print('NON-ZERO', nz.item())
-    
-    # sparse_loss = l0_norm(encoded) * 1e-5
-    
-    recon_loss = single_channel_loss_3(batch, recon)
-    
-    
-    # print(recon_loss.item(), sparse_loss.item())
-    
-    loss = recon_loss
-        
+    loss = loss_model.loss(batch, recon_summed)
     loss.backward()
     optim.step()
     
@@ -806,7 +751,7 @@ def make_conjure(experiment: BaseExperimentRunner):
 
 
 @readme
-class ManyEventsWithL0Norm(BaseExperimentRunner):
+class SpecInfoLoss(BaseExperimentRunner):
     encoded = MonitoredValueDescriptor(make_conjure)
 
     def __init__(self, stream, port=None, load_weights=True, save_weights=False, model=model):

@@ -51,4 +51,10 @@
 
 # from .e_2024_2_14 import NeuralMatchingPursuit2 as Current
 
-from .e_2024_2_19 import ManyEventsWithL0Norm as Current
+# from .e_2024_2_19 import ManyEventsWithL0Norm as Current
+
+
+
+
+# from .e_2024_2_21 import SpecInfoLoss as Current
+from .e_2024_2_22 import WithDiscriminator as Current

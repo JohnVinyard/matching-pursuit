@@ -7,13 +7,14 @@ from torch import nn
 from data.audioiter import AudioIterator
 from modules import stft
 from modules.fft import fft_convolve
+from modules.infoloss import SpectralInfoLoss
 from modules.overlap_add import overlap_add
 
 from matplotlib import pyplot as plt
 
 from modules.refractory import make_refractory_filter
 from util.music import musical_scale, musical_scale_hz
-
+import zounds
 
 def convolve_spectrograms(batch: torch.Tensor, channels: torch.Tensor):
     """
@@ -182,12 +183,26 @@ def gumbel_softmax_test():
 
 
 if __name__ == '__main__':
+    signal = torch.zeros(1, 1, 2**15).uniform_(-1, 1)
+    
+    sil = SpectralInfoLoss(2048, 256, patch_size=(16, 16), patch_step=(8, 8), embedding_channels=32)
+    one_hot, codes, weights, norms, normed, raw = sil.encode(signal)
+    print(codes)
+    print(weights)
+    
+    print(one_hot.shape)
+    print(codes.shape)
+    print(weights.shape)
+    
+    
+    
+    
     # scale = [band.center_frequency for band in musical_scale(21, 109)]
     # print(scale)
     
-    scale = musical_scale_hz(21, 106, 512)
-    f0s = np.linspace(27, 4000, len(scale))
+    # scale = musical_scale_hz(21, 106, 512)
+    # f0s = np.linspace(27, 4000, len(scale))
     
-    plt.plot(scale)
-    plt.plot(f0s)
-    plt.show()
+    # plt.plot(scale)
+    # plt.plot(f0s)
+    # plt.show()
