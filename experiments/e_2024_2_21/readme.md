@@ -1,5 +1,8 @@
 Try out the new spectral info loss model
 
+Ideally, this would be covariance across the _entire_ spectrogram.  In lieu of that,
+take a random subset at each batch, whatever number of samples is manageable.
+
 # Things to Investigate
 - reconstructions are reasonable
 - codes are diverse

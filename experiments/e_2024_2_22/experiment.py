@@ -626,8 +626,8 @@ class Model(nn.Module):
         
         final, imp = self.generate(encoded, one_hot, packed, dense)
         
-        # print('ENCODED', encoded.max().item())
-        # print('DENSE', dense.mean().item(), dense.std().item())
+        print('ENCODED', encoded.max().item())
+        print('DENSE', dense.mean().item(), dense.std().item())
         
         
         return final, encoded, imp
@@ -702,39 +702,39 @@ def l0_norm(x: torch.Tensor):
 
 
 
-def single_channel_loss_3(target: torch.Tensor, recon: torch.Tensor):
+# def single_channel_loss_3(target: torch.Tensor, recon: torch.Tensor):
     
-    target = transform(target).view(target.shape[0], -1)
+#     target = transform(target).view(target.shape[0], -1)
     
-    full = torch.sum(recon, dim=1, keepdim=True)
-    full = transform(full).view(*target.shape)
+#     full = torch.sum(recon, dim=1, keepdim=True)
+#     full = transform(full).view(*target.shape)
     
-    global_loss = torch.abs(target - full).sum() * 1e-5
+#     global_loss = torch.abs(target - full).sum() * 1e-5
     
-    channels = transform(recon)
+#     channels = transform(recon)
     
-    residual = target
-    
-    
-    # sort channels from loudest to softest
-    # diff = torch.norm(channels, dim=(-1), p = 1)
-    
-    diff = torch.abs(channels).sum(dim=-1)
-    indices = torch.argsort(diff, dim=-1, descending=True)
-    srt = torch.take_along_dim(channels, indices[:, :, None], dim=1)
+#     residual = target
     
     
-    loss = 0
-    for i in range(n_events):
-        current = srt[:, i, :]
-        start_norm = torch.abs(residual).sum()
-        residual = residual - current
-        end_norm = torch.abs(residual).sum()
-        diff = -(start_norm - end_norm)
-        loss = loss + diff.sum()
+#     # sort channels from loudest to softest
+#     # diff = torch.norm(channels, dim=(-1), p = 1)
+    
+#     diff = torch.abs(channels).sum(dim=-1)
+#     indices = torch.argsort(diff, dim=-1, descending=True)
+#     srt = torch.take_along_dim(channels, indices[:, :, None], dim=1)
+    
+    
+#     loss = 0
+#     for i in range(n_events):
+#         current = srt[:, i, :]
+#         start_norm = torch.abs(residual).sum()
+#         residual = residual - current
+#         end_norm = torch.abs(residual).sum()
+#         diff = -(start_norm - end_norm)
+#         loss = loss + diff.sum()
         
     
-    return loss + global_loss
+#     return loss + global_loss
 
 
 def single_channel_loss(target: torch.Tensor, recon: torch.Tensor):
@@ -752,7 +752,40 @@ def single_channel_loss(target: torch.Tensor, recon: torch.Tensor):
     
     return loss
 
+def single_channel_loss_3(target: torch.Tensor, recon: torch.Tensor):
+    target = transform(target)
+    full = torch.sum(recon, dim=1, keepdim=True)
+    full = transform(full)
+    
+    channels = transform(recon)
+    
+    residual = target - full
+    
+    
+    # find the channel closest to the residual
+    diff = torch.norm(channels - residual, dim=(-1))
+    indices = torch.argsort(diff, dim=-1)
+    
+    srt = torch.take_along_dim(channels, indices[:, :, None], dim=1)
+    
+    channel = 0
+    chosen = srt[:, channel, :]
+    
+    # add the chosen channel back to the residual
+    with_residual = chosen + residual.view(*chosen.shape)
+    
+    # make the chosen channel explain more of the residual    
+    loss = torch.abs(chosen - with_residual).sum()
+    
+    return loss
 
+#     # channel_specs = stft(recon, 2048, 256, pad=True).view(batch.shape[0], n_events, -1)
+    
+#     # # encourage events to be orthogonal/non-overlapping
+#     # # TODO: Use constant-q spectrogram with better frequency resolution
+#     # sim = channel_specs @ channel_specs.permute(0, 2, 1)
+#     # sim = torch.triu(sim)
+#     # difference_loss = sim.mean() * 1e-2
 
 
 def train(batch, i):
@@ -772,10 +805,13 @@ def train(batch, i):
     
     j = disc.forward(recon_summed)
     d_loss = torch.abs(1 - j).mean()
-    recon_loss = single_channel_loss_3(batch, recon) * 1e-4
+    # recon_loss = single_channel_loss_3(batch, recon) * 1e-4
+    r = transform(batch)
+    f = transform(recon_summed)
+    recon_loss = torch.abs(r - f).sum() * 1e-4
+    scl = single_channel_loss(batch, recon) * 1e-4
     
-    
-    loss = recon_loss + d_loss
+    loss = recon_loss + d_loss + scl
         
     loss.backward()
     optim.step()
@@ -793,6 +829,29 @@ def train(batch, i):
     disc_loss.backward()
     disc_optim.step()
     print('DISC', disc_loss.item())
+    
+    # with torch.no_grad():
+        
+    #     # switch to cpu evaluation
+    #     model.to('cpu')
+    #     model.eval()
+        
+    #     # generate context latent
+    #     z = torch.zeros(1, context_dim).normal_(0, 15)
+        
+    #     # generate events
+    #     events = torch.zeros(1, 4096, 128).uniform_(0, 8)
+    #     # events = F.avg_pool2d(events, (7, 7), (1, 1), (3, 3))
+    #     # events = events.view(1, 4096, 128)
+        
+    #     ch, _, encoded = model.from_sparse(events, z)
+    #     ch = torch.sum(ch, dim=1, keepdim=True)
+        
+    #     # switch back to GPU training
+    #     model.to('cuda')
+    #     model.train()
+    
+    # recon = max_norm(ch)
     
     recon = max_norm(recon_summed)
     encoded = max_norm(encoded)

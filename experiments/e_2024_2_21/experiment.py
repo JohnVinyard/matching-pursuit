@@ -10,6 +10,7 @@ from torch.nn import functional as F
 from config.experiment import Experiment
 from modules.decompose import fft_frequency_decompose
 from modules.infoloss import MultiBandSpectralInfoLoss, MultiWindowSpectralInfoLoss, PatchBandSpec, SpectralInfoLoss
+from modules.latent_loss import latent_loss
 
 from modules.overlap_add import overlap_add
 from modules.angle import windowed_audio
@@ -658,13 +659,13 @@ model = Model().to(device)
 optim = optimizer(model, lr=1e-4)
 
 
-# loss_model = SpectralInfoLoss(
-#     stft_window_size=2048, 
-#     stft_step_size=256, 
-#     patch_size=(16, 16), 
-#     patch_step=(8, 8), 
-#     embedding_channels=32, 
-#     n_centroids=1024).to(device)
+loss_model = SpectralInfoLoss(
+    stft_window_size=2048, 
+    stft_step_size=256, 
+    patch_size=(16, 16), 
+    patch_step=(8, 8), 
+    embedding_channels=32, 
+    n_centroids=1024).to(device)
 
 # loss_model = MultiBandSpectralInfoLoss([
 #     PatchBandSpec(512, 64, 16, (4, 4), (2, 2), 256),
@@ -677,25 +678,29 @@ optim = optimizer(model, lr=1e-4)
 #     PatchBandSpec(32768, 2048, 256, (16, 16), (8, 8), 256),
 # ]).to(device)
 
-loss_model = MultiWindowSpectralInfoLoss([
-    [(16, 16), (8, 8)],
-    [(3, 128), (1, 32)],
-    [(64, 3), (16, 1)],
-]).to(device)
+# loss_model = MultiWindowSpectralInfoLoss([
+#     [(16, 16), (8, 8)],
+#     [(3, 128), (1, 32)],
+#     [(64, 3), (16, 1)],
+# ]).to(device)
 loss_optim = optimizer(loss_model, lr=1e-4)
 
-
+try:
+    loss_model.load_state_dict(torch.load('loss_model.dat'))
+    print('Loaded disc weights')
+except IOError:
+    print('No saved disc weights')
 
 def train(batch, i):
     optim.zero_grad()
     loss_optim.zero_grad()
     
     # train loss
-    spec_recon, orig_normed = loss_model.forward(batch)
-    loss_loss = F.mse_loss(spec_recon, orig_normed.detach())
-    loss_loss.backward()
-    loss_optim.step()
-    print('LOSS MODEL', loss_loss.item())
+    # spec_recon, orig_normed = loss_model.forward(batch)
+    # loss_loss = F.mse_loss(spec_recon, orig_normed.detach())
+    # loss_loss.backward()
+    # loss_optim.step()
+    # print('LOSS MODEL', loss_loss.item())
     
     
 
@@ -704,9 +709,39 @@ def train(batch, i):
     recon, encoded, imp = model.forward(batch)  
     recon_summed = torch.sum(recon, dim=1, keepdim=True)
     
-    loss = loss_model.loss(batch, recon_summed)
+    # loss = loss_model.loss(batch, recon_summed)
+    
+    real_spec = stft(batch, 2048, 256, pad=True).view(b, 128, 1025)
+    mean = torch.mean(real_spec, dim=(0, 1), keepdim=True)
+    real_spec = real_spec - mean
+    std = torch.std(real_spec, dim=(0, 1), keepdim=True)
+    real_spec = real_spec / (std + 1e-12)
+    
+    fake_spec = stft(recon_summed, 2048, 256, pad=True).view(b, 128, 1025)
+    fake_spec = fake_spec - mean
+    fake_spec = fake_spec / (std + 1e-12)
+    
+    start_norm = torch.norm(real_spec, dim=(1, 2))
+    residual = real_spec - fake_spec
+    end_norm = torch.norm(residual, dim=(1, 2))
+    
+    # hinge loss, as long as the norm is the same or less, there's 0 loss
+    # this only kicks in if the reconstruction is _adding_ to the norm
+    norm_loss = torch.clamp(-(start_norm - end_norm), 0, np.inf).mean()
+    print('NORM', norm_loss.item())
+    
+    a = residual @ residual.permute(0, 2, 1)
+    b = residual.permute(0, 2, 1) @ residual
+    print(a.shape, b.shape)
+    loss = torch.triu(a).mean() + torch.triu(b).mean() + norm_loss
+    # loss = loss_model.loss(torch.zeros_like(residual).uniform_(0, 1e-6), residual)
+    
     loss.backward()
     optim.step()
+    
+    if i % 100 == 0:
+        torch.save(loss_model.state_dict(), 'loss_model.dat')
+        print('saving dem disc weights')
     
     
     # with torch.no_grad():

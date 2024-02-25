@@ -116,6 +116,7 @@ class MultiBandSpectralInfoLoss(nn.Module):
         return recon, target
 
 
+
 class SpectralInfoLoss(nn.Module):
     
     def __init__(
@@ -169,13 +170,59 @@ class SpectralInfoLoss(nn.Module):
         coarse_loss = F.mse_loss(fnorms, tnorms.detach()) * 1e-3
         
         return cat_loss + coarse_loss
+    
+    # def compute_total_information(self, signal: torch.Tensor):
+        
+    #     if signal.shape[1] != 1:
+    #         frames = signal.shape[1]
+    #         spec = signal.view(-1, frames, self.start_channels)
+    #     else:
+    #         frames = signal.shape[-1] // self.stft_step_size
+            
+    #         spec = stft(signal, self.stft_window_size, self.stft_step_size, pad=True)\
+    #             .view(-1, frames, self.start_channels)
+        
+    #     raw, norms, normed = patches2(spec, size=self.patch_size, step=self.patch_step)
+    #     # print(raw.shape, norms.shape, normed.shape, self.patch_embed)
+    #     spec_embed = self.patch_embed(normed)
+        
+    #     # TODO: the embedding should only be for frequency bin;  time is shift-invariant
+    #     x = spec_embed
+    #     x = self.proj(x)
+    #     x = self.up(x)
+    #     x = sparse_softmax(x, normalize=True)
+    #     one_hot = x
+        
+    #     codes = torch.argmax(x, dim=-1, keepdim=True).view(-1)
+    #     normed = normed.view(-1)
+        
+    #     # batch_size = signal.shape[0]
+        
+    #     # group patches according to code
+    #     accum = torch.zeros(1024, device=signal.device)
+
+    #     for i, code in enumerate(codes):
+    #         # this is kind of a trick.  Each norm of normed will always
+    #         # be 1, so this is a differentiable way to measure the total
+    #         # amount of information
+    #         accum[code] = accum[code] + torch.norm(normed[i])
+
+    #     # this is the total information present in each sample
+    #     inverse = 1 / (accum + 1)
+    #     total_info = inverse.sum()
+    #     return total_info
         
     
     def encode(self, signal: torch.Tensor):
-        frames = signal.shape[-1] // self.stft_step_size
         
-        spec = stft(signal, self.stft_window_size, self.stft_step_size, pad=True)\
-            .view(-1, frames, self.start_channels)
+        if signal.shape[1] != 1:
+            frames = signal.shape[1]
+            spec = signal.view(-1, frames, self.start_channels)
+        else:
+            frames = signal.shape[-1] // self.stft_step_size
+            
+            spec = stft(signal, self.stft_window_size, self.stft_step_size, pad=True)\
+                .view(-1, frames, self.start_channels)
         
         raw, norms, normed = patches2(spec, size=self.patch_size, step=self.patch_step)
         # print(raw.shape, norms.shape, normed.shape, self.patch_embed)
