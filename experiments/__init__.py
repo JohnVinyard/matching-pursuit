@@ -7,4 +7,5 @@
 
 
 # from .e_2024_2_21 import SpecInfoLoss as Current
-from .e_2024_2_22 import WithDiscriminator as Current
+# from .e_2024_2_22 import WithDiscriminator as Current
+from .e_2024_2_25 import SwitchEvents as Current

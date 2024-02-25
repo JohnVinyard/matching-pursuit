@@ -1,6 +1,9 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
+from torch.nn.utils.weight_norm import weight_norm
+
+from util import device
 
 
 class AntiCausalConv(nn.Module):
@@ -22,7 +25,6 @@ class AntiCausalBlock(nn.Module):
         self.dilation = dilation
         self.conv = AntiCausalConv(channels, channels, kernel_size, dilation)
         self.gate = AntiCausalConv(channels, channels, kernel_size, dilation)
-        self.norm = nn.BatchNorm1d(channels)
     
     def forward(self, x):
         skip = x
@@ -30,7 +32,6 @@ class AntiCausalBlock(nn.Module):
         b = torch.sigmoid(self.gate(x))
         x = a * b
         x = x + skip
-        x = self.norm(x)
         return x
 
 
@@ -38,7 +39,6 @@ class AntiCausalStack(nn.Module):
     def __init__(self, channels, kernel_size, dilations):
         super().__init__()
         self.blocks = nn.ModuleList([AntiCausalBlock(channels, kernel_size, d) for d in dilations])
-        self.norm = nn.BatchNorm1d(channels)
         self.ff = nn.Conv1d(channels, channels, 1, 1, 0)
     
     def forward(self, x):
@@ -46,7 +46,6 @@ class AntiCausalStack(nn.Module):
         for block in self.blocks:
             x = block.forward(x)
             output = output + x
-        output = self.norm(output)
         output = self.ff(output)
         return output
     

@@ -13,6 +13,7 @@ from modules.overlap_add import overlap_add
 from matplotlib import pyplot as plt
 
 from modules.refractory import make_refractory_filter
+from modules.sparse import sparsify
 from util.music import musical_scale, musical_scale_hz
 import zounds
 
@@ -183,16 +184,22 @@ def gumbel_softmax_test():
 
 
 if __name__ == '__main__':
-    signal = torch.zeros(1, 1, 2**15).uniform_(-1, 1)
     
-    sil = SpectralInfoLoss(2048, 256, patch_size=(16, 16), patch_step=(8, 8), embedding_channels=32)
-    one_hot, codes, weights, norms, normed, raw = sil.encode(signal)
-    print(codes)
-    print(weights)
+    signal = torch.zeros(8, 1, 128).uniform_(0, 1)
+    signal = sparsify(signal, n_to_keep=16)
     
-    print(one_hot.shape)
-    print(codes.shape)
-    print(weights.shape)
+    nz = signal > 0
+    
+    # signal = torch.zeros(1, 1, 2**15).uniform_(-1, 1)
+    
+    # sil = SpectralInfoLoss(2048, 256, patch_size=(16, 16), patch_step=(8, 8), embedding_channels=32)
+    # one_hot, codes, weights, norms, normed, raw = sil.encode(signal)
+    # print(codes)
+    # print(weights)
+    
+    # print(one_hot.shape)
+    # print(codes.shape)
+    # print(weights.shape)
     
     
     

@@ -12,9 +12,9 @@ def hard_softmax(x, dim=-1, invert=False, tau=1):
         hard=True)
 
 
-def sparse_softmax(x, normalize=False):
-    x_backward = torch.softmax(x, dim=-1)
-    values, indices = torch.max(x_backward, dim=-1, keepdim=True)
+def sparse_softmax(x, normalize=False, dim=-1):
+    x_backward = torch.softmax(x, dim=dim)
+    values, indices = torch.max(x_backward, dim=dim, keepdim=True)
     if normalize:
         values = values + (1 - values)
     x_forward = torch.zeros_like(x_backward)
@@ -28,3 +28,9 @@ def soft_clamp(x):
     y = x_backward + (x_forward - x_backward).detach()
     return y
 
+
+def step_func(x: torch.Tensor):
+    forward = torch.sign(x)
+    backward = x
+    y = backward + (forward - backward).detach()
+    return y

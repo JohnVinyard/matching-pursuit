@@ -803,9 +803,8 @@ def train(batch, i):
     
     recon_summed = torch.sum(recon, dim=1, keepdim=True)
     
-    j = disc.forward(recon_summed)
+    j = disc.forward(for_disc)
     d_loss = torch.abs(1 - j).mean()
-    # recon_loss = single_channel_loss_3(batch, recon) * 1e-4
     r = transform(batch)
     f = transform(recon_summed)
     recon_loss = torch.abs(r - f).sum() * 1e-4
