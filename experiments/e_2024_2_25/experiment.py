@@ -436,7 +436,6 @@ class Model(nn.Module):
         # coarse positioning
         final = F.pad(mixed, (0, n_samples - mixed.shape[-1]))
         up = torch.zeros(final.shape[0], n_events, n_samples, device=final.device)
-        print(up[:, :, ::256].shape, scheduling.shape)
         up[:, :, ::256] = scheduling
         
         # fine positioning
@@ -652,27 +651,43 @@ def single_channel_loss(target: torch.Tensor, recon: torch.Tensor):
     
     return loss
 
+def l0_norm(x: torch.Tensor):
+    mask = (x > 0).float()
+    forward = mask
+    backward = x
+    y = backward + (forward - backward).detach()
+    return y.sum()
 
 
 def train(batch, i):
     optim.zero_grad()
     
-    print('=====================================')
-
     b = batch.shape[0]
+    
     
     recon, encoded, imp, scheduling = model.forward(batch)
     recon_summed = torch.sum(recon, dim=1, keepdim=True)
+    # sparsity_loss = (l0_norm(scheduling) / (b * n_events)) * 1e-3
+    
+    # target/expectation is that everything will be somewhere between 
+    expectation = torch.zeros(1, device=batch.device).uniform_(
+        4 / scheduling.shape[-1], 
+        n_events / scheduling.shape[-1])
+ 
+    actual = torch.mean(scheduling, dim=(0, 1))
+    assert actual.shape == (128,)
+
+    dist_loss = torch.abs(actual - expectation).sum()
     
     # randomly drop events.  Events should stand on their own
     mask = torch.zeros(b, n_events, 1, device=batch.device).bernoulli_(p=0.5)
-    for_disc = torch.sum(recon * mask, dim=1, keepdim=True).clone().detach()
+    for_disc = torch.sum(recon * mask, dim=1, keepdim=True).clone().detach()    
     
     j = disc.forward(for_disc)
     d_loss = torch.abs(1 - j).mean()
     scl = single_channel_loss(batch, recon) * 1e-4
     
-    loss = scl + d_loss
+    loss = scl + d_loss + dist_loss
         
     loss.backward()
     optim.step()
