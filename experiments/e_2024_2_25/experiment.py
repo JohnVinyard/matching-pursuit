@@ -635,21 +635,55 @@ def multiband_transform(x: torch.Tensor):
 
 
 
-
-def single_channel_loss(target: torch.Tensor, recon: torch.Tensor):
-    target = transform(target)
-    full = torch.sum(recon, dim=1, keepdim=True)
-    full = transform(full)
-    residual = target - full
+def single_channel_loss_3(target: torch.Tensor, recon: torch.Tensor):
     
-    i = np.random.randint(n_events)
+    target = transform(target).view(target.shape[0], -1)
     
-    ch = recon[:, i: i + 1, :]
-    ch = transform(ch)
-    with_channel = residual + ch
-    loss = torch.abs(with_channel - ch).sum()
+    # full = torch.sum(recon, dim=1, keepdim=True)
+    # full = transform(full).view(*target.shape)
+    
+    channels = transform(recon)
+    
+    residual = target
+    
+    # Try L1 norm instead of L@
+    # Try choosing based on loudest patch/segment
+    
+    # sort channels from loudest to softest
+    diff = torch.norm(channels, dim=(-1), p = 1)
+    indices = torch.argsort(diff, dim=-1, descending=True)
+    
+    srt = torch.take_along_dim(channels, indices[:, :, None], dim=1)
+    
+    loss = 0
+    for i in range(n_events):
+        current = srt[:, i, :]
+        start_norm = torch.norm(residual, dim=-1, p=1)
+        # TODO: should the residual be cloned and detached each time,
+        # so channels are optimized independently?
+        residual = residual - current
+        end_norm = torch.norm(residual, dim=-1, p=1)
+        diff = -(start_norm - end_norm)
+        loss = loss + diff.sum()
+        
     
     return loss
+
+
+# def single_channel_loss(target: torch.Tensor, recon: torch.Tensor):
+#     target = transform(target)
+#     full = torch.sum(recon, dim=1, keepdim=True)
+#     full = transform(full)
+#     residual = target - full
+    
+#     i = np.random.randint(n_events)
+    
+#     ch = recon[:, i: i + 1, :]
+#     ch = transform(ch)
+#     with_channel = residual + ch
+#     loss = torch.abs(with_channel - ch).sum()
+    
+#     return loss
 
 def l0_norm(x: torch.Tensor):
     mask = (x > 0).float()
@@ -670,10 +704,11 @@ def train(batch, i):
     # sparsity_loss = (l0_norm(scheduling) / (b * n_events)) * 1e-3
     
     # target/expectation is that everything will be somewhere between 
+    
+    # MOTIVATION: the tendency of the model was to always place events in the same
+    # locations and then put all the information into the event vectors
     expectation = torch.zeros(1, device=batch.device).uniform_(
-        4 / scheduling.shape[-1], 
-        n_events / scheduling.shape[-1])
- 
+        2 / scheduling.shape[-1], n_events / scheduling.shape[-1]) 
     actual = torch.mean(scheduling, dim=(0, 1))
     assert actual.shape == (128,)
 
@@ -685,7 +720,7 @@ def train(batch, i):
     
     j = disc.forward(for_disc)
     d_loss = torch.abs(1 - j).mean()
-    scl = single_channel_loss(batch, recon) * 1e-4
+    scl = single_channel_loss_3(batch, recon) * 1e-4
     
     loss = scl + d_loss + dist_loss
         
