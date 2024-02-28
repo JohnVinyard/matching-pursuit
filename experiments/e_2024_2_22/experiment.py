@@ -797,6 +797,8 @@ def train(batch, i):
     
     recon, encoded, imp = model.forward(batch)
     
+    # sparsity_loss = (l0_norm(encoded) / (b * n_events)) * 1e-3
+    
     # randomly drop events.  Events should stand on their own
     mask = torch.zeros(b, n_events, 1, device=batch.device).bernoulli_(p=0.5)
     for_disc = torch.sum(recon * mask, dim=1, keepdim=True).clone().detach()
@@ -810,7 +812,7 @@ def train(batch, i):
     recon_loss = torch.abs(r - f).sum() * 1e-4
     scl = single_channel_loss(batch, recon) * 1e-4
     
-    loss = recon_loss + d_loss + scl
+    loss = recon_loss + d_loss + scl #+ sparsity_loss
         
     loss.backward()
     optim.step()

@@ -1,6 +1,6 @@
 from typing import Callable, Iterable, List, Tuple
 from data.audioiter import AudioIterator
-from experiments.e_2024_1_28.inference import model
+from experiments.e_2024_2_25.inference import model
 import zounds
 import torch
 from modules.normalization import max_norm
@@ -8,6 +8,9 @@ from util.playable import playable
 from base64 import b64encode
 from uuid import uuid4
 
+n_samples = 2 ** 15
+samplerate = zounds.SR22050()
+total_examples = 5
 
 
 class AudioTimeline(object):
@@ -18,14 +21,18 @@ class AudioTimeline(object):
         self.logits = logits
         self.events = events
         
-        logits = logits.view(-1, 1024)
+        logits = logits.view(-1, 128)
+        
+        # find the index with the max value for each event
         indices = torch.argmax(logits, dim=-1)
-        relative_positions = indices / 1024
+        relative_positions = indices / 128
+        self.relative_positions = relative_positions
         
-        time_sort = torch.argsort(indices, descending=False)
+        # get channel indices in order from earliest to latest in time
+        # time_sort = torch.argsort(indices, descending=False)
         
-        self.time_ordered_indices = time_sort
-        self.relative_positions = [relative_positions[i] for i in time_sort]
+        # self.time_ordered_indices = time_sort
+        # self.relative_positions = [relative_positions[i] for i in time_sort]
         
         event_norms = torch.norm(events, dim=-1)
         max_norm = torch.max(event_norms)
@@ -36,16 +43,15 @@ class AudioTimeline(object):
         return f'''
         <h4>Timeline</h4>
         <div class="timeline">
-            {''.join([hidden_audio_element(self.channels[0, index], self.events[0, index], self.relative_positions[index], self.max_norm) for index in self.time_ordered_indices])}
+            {''.join([hidden_audio_element(
+                self.channels[0, index], 
+                self.events[0, index], 
+                self.relative_positions[index], 
+                self.max_norm) for index in range(self.channels.shape[1])])}
         </div>
         '''
 
 
-n_samples = 2 ** 15
-samplerate = zounds.SR22050()
-time_ratio = n_samples // 1024
-
-total_examples = 3
 
 def svg_vector(vec: torch.Tensor, pixel_height: int, pixel_width: int, max_norm: torch.Tensor):
     vec = vec.view(-1)
@@ -61,7 +67,7 @@ def svg_vector(vec: torch.Tensor, pixel_height: int, pixel_width: int, max_norm:
     return f'''
         <svg height="{pixel_height}" width="{pixel_width}">
             <g>
-                {''.join([f'<rect x="0" y="{i * step}" width="{pixel_width}" height="{step}" fill-opacity="{opacity}" fill="rgb({int(vec[i].item() * 255)}, {int(vec[i].item() * 255)}, {int(vec[i].item() * 255)})"></rect>' for i in range(vec.shape[0])])}
+                {''.join([f'<rect x="0" y="{i * step}" width="{pixel_width}" height="{step}" fill-opacity="${opacity}" fill="rgb({int(vec[i].item() * 255)}, {int(vec[i].item() * 255)}, {int(vec[i].item() * 255)})"></rect>' for i in range(vec.shape[0])])}
             </g>
         </svg>
     '''
@@ -271,7 +277,7 @@ def get_batch_statistics(batch_size=16):
     
     batch = next(iter(stream)).view(batch_size, 1, n_samples).to('cpu')
     
-    final, embeddings, logits, amps, context, mixed = model.forward(batch, return_context=True)
+    final, embeddings, imp, scheduling, amps, context = model.forward(batch, return_context=True)
     
     embedding_means = torch.mean(embeddings, dim=(0, 1))
     embeddings_stds = torch.std(embeddings, dim=(0, 1))
@@ -292,14 +298,18 @@ def create_assets_for_single_item(
     
     print('===================================')
     
+    # NEW: final, vecs, imp, scheduling, amps, dense
+    # OLD: final, embeddings, logits, amps.squeeze(), mixed
+    
+    
     audio = audio.view(1, 1, n_samples)
     
     # full reconstruction
-    final, embeddings, logits, amps, context, mixed = model.forward(audio, return_context=True)
+    final, embeddings, _, logits, amps, context = model.forward(audio, return_context=True)
     full_recon = torch.sum(final, dim=1, keepdim=True)
     full_recon = max_norm(full_recon)
-    
-    timeline_container = AudioTimeline(mixed, amps, logits, embeddings)
+
+    timeline_container = AudioTimeline(final, amps, logits, embeddings)
     
     
     # with random events
@@ -317,7 +327,7 @@ def create_assets_for_single_item(
     random_context = torch.sum(ctxt, dim=1, keepdim=True)
     random_context = max_norm(random_context)
     
-    return audio, full_recon, random_events, random_timings, random_context, context, timeline_container, mixed
+    return audio, full_recon, random_events, random_timings, random_context, context, timeline_container, final
 
 
 if __name__ == '__main__':

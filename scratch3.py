@@ -8,6 +8,7 @@ from data.audioiter import AudioIterator
 from modules import stft
 from modules.fft import fft_convolve
 from modules.infoloss import SpectralInfoLoss
+from modules.latent_loss import normalized_covariance
 from modules.overlap_add import overlap_add
 
 from matplotlib import pyplot as plt
@@ -185,10 +186,21 @@ def gumbel_softmax_test():
 
 if __name__ == '__main__':
     
-    signal = torch.zeros(8, 1, 128).uniform_(0, 1)
-    signal = sparsify(signal, n_to_keep=16)
+    bad_scheduling = torch.zeros(16, 128)
+    bad_scheduling[:, 10] = 1
     
-    nz = signal > 0
+    good_scheduling = torch.zeros(16, 128).bernoulli_(p=0.125)
+    
+    bad_cov = normalized_covariance(bad_scheduling)
+    good_cov = normalized_covariance(good_scheduling)
+    
+    print(bad_cov.item(), good_cov.item())
+    
+    
+    # signal = torch.zeros(8, 1, 128).uniform_(0, 1)
+    # signal = sparsify(signal, n_to_keep=16)
+    
+    # nz = signal > 0
     
     # signal = torch.zeros(1, 1, 2**15).uniform_(-1, 1)
     

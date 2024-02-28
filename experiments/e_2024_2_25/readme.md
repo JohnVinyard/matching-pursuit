@@ -1,3 +1,11 @@
+Current theory:  Models are missing notes because the safest strategy with the discriminator is to
+produce just one or two well.
+
+
+We don't just have a single loss function, we have tens of them, at least, and they vary over time.  We
+have to learn to balance them such that none is ever too low
+
+
 Try with an explicit switching mechanism to turn events on or off
 
 # Benefits of this Model

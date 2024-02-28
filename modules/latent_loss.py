@@ -6,6 +6,14 @@ def covariance(x):
     cov = torch.matmul(x.T, x.clone().detach()) * (1 / x.shape[1])
     return cov
 
+def normalized_covariance(x: torch.Tensor):
+    cov = covariance(x)
+    d = torch.sqrt(torch.diag(cov))
+    cov = cov / (d[None, :] + 1e-12)
+    cov = cov / (d[:, None] + 1e-12)
+    cov = torch.abs(cov)
+    cov = cov.mean()
+    return cov
 
 def latent_loss(enc, mean_weight=1, std_weight=1):
     mean_loss = torch.abs(0 - enc.mean(dim=0)).mean()

@@ -10,7 +10,7 @@ from torch.nn import functional as F
 from config.experiment import Experiment
 from modules.decompose import fft_frequency_decompose
 from modules.infoloss import MultiBandSpectralInfoLoss, MultiWindowSpectralInfoLoss, PatchBandSpec, SpectralInfoLoss
-from modules.latent_loss import latent_loss
+from modules.latent_loss import latent_loss, normalized_covariance
 
 from modules.overlap_add import overlap_add
 from modules.angle import windowed_audio
@@ -711,30 +711,39 @@ def train(batch, i):
     # loss = loss_model.loss(batch, recon_summed)
     
     real_spec = stft(batch, 2048, 256, pad=True).view(b, 128, 1025)
-    mean = torch.mean(real_spec, dim=(0, 1), keepdim=True)
-    real_spec = real_spec - mean
-    std = torch.std(real_spec, dim=(0, 1), keepdim=True)
-    real_spec = real_spec / (std + 1e-12)
+    # mean = torch.mean(real_spec, dim=(0, 1), keepdim=True)
+    # real_spec = real_spec - mean
+    # std = torch.std(real_spec, dim=(0, 1), keepdim=True)
+    # real_spec = real_spec / (std + 1e-12)
     
     fake_spec = stft(recon_summed, 2048, 256, pad=True).view(b, 128, 1025)
-    fake_spec = fake_spec - mean
-    fake_spec = fake_spec / (std + 1e-12)
+    # fake_spec = fake_spec - mean
+    # fake_spec = fake_spec / (std + 1e-12)
     
-    # start_norm = torch.norm(real_spec, dim=(1, 2))
+    start_norm = torch.norm(real_spec, dim=(1, 2))
     residual = real_spec - fake_spec
-    # end_norm = torch.norm(residual, dim=(1, 2))
+    end_norm = torch.norm(residual, dim=(1, 2))
+    
+    residual = residual.view(b, -1)
+    
+    indices = torch.randperm(128 * 1025, device=batch.device)[:1024]
+    residual = torch.take_along_dim(residual, indices[None, :], dim=-1)
+    
+    cov = normalized_covariance(residual)
+    loss = cov
     
     # hinge loss, as long as the norm is the same or less, there's 0 loss
     # this only kicks in if the reconstruction is _adding_ to the norm
-    # norm_loss = torch.clamp(-(start_norm - end_norm), 0, np.inf).mean()
-    # print('NORM', norm_loss.item())
+    norm_loss = torch.clamp(-(start_norm - end_norm), 0, np.inf).mean()
+    print('NORM', norm_loss.item())
     
-    a = residual @ residual.permute(0, 2, 1)
-    b = residual.permute(0, 2, 1) @ residual
-    print(a.shape, b.shape)
-    loss = torch.triu(a).mean() + torch.triu(b).mean()
+    # a = residual @ residual.permute(0, 2, 1)
+    # b = residual.permute(0, 2, 1) @ residual
+    # print(a.shape, b.shape)
+    # loss = torch.triu(a).mean() + torch.triu(b).mean()
     # loss = loss_model.loss(torch.zeros_like(residual).uniform_(0, 1e-6), residual)
     
+    loss = loss + norm_loss
     loss.backward()
     optim.step()
     

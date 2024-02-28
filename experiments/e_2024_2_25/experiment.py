@@ -353,7 +353,7 @@ class Model(nn.Module):
         
 
         # self.mix = GenerateMix(256, 128, n_events, mixer_channels=3)
-        self.to_amp = nn.Linear(256, 1)
+        # self.to_amp = nn.Linear(256, 1)
 
         # self.verb_context = nn.Linear(4096, 32)
         self.verb = ReverbGenerator(
@@ -412,7 +412,9 @@ class Model(nn.Module):
         
         
         # allow amps to be exactly 0
-        amps = torch.relu(self.to_amp(embeddings))
+        # amps = torch.relu(self.to_amp(embeddings))
+        
+        amps = torch.sum(scheduling, dim=-1, keepdim=True)
         
 
         # generate...
@@ -445,19 +447,34 @@ class Model(nn.Module):
 
         final = self.verb.forward(unit_norm(dense, dim=-1), final)
 
-        return final, imp
+        return final, imp, amps
 
-    def forward(self, x):
+    def forward(self, x, random_timings=False, random_events=False, random_context=False, return_context=True):
+        
+        batch_size = x.shape[0]
         
         vecs, z, scheduling = self.encode(x)
-        
         dense = self.embed_latent(z)
         
+        if random_context:
+            dense = torch.zeros_like(dense).normal_(dense.mean(), dense.std())
         
-        final, imp = self.generate(vecs, scheduling, dense)
+        if random_events:
+            vecs = torch.zeros_like(vecs).normal_(vecs.mean(), vecs.std())
         
+        if random_timings:
+            orig_shape = scheduling.shape
+            scheduling = torch.zeros_like(scheduling).view(batch_size * n_events, 1, -1).uniform_(scheduling.min(), scheduling.max())
+            scheduling, indices, values = sparsify(scheduling, n_to_keep=1, return_indices=True)
+            scheduling = scheduling.view(*orig_shape)
+            
         
-        return final, vecs, imp, scheduling
+        final, imp, amps = self.generate(vecs, scheduling, dense)
+        
+        if return_context:
+            return final, vecs, imp, scheduling, amps, dense
+        else:
+            return final, vecs, imp, scheduling, amps
     
     
 
@@ -699,20 +716,22 @@ def train(batch, i):
     b = batch.shape[0]
     
     
-    recon, encoded, imp, scheduling = model.forward(batch)
+    recon, encoded, imp, scheduling, amps, _ = model.forward(batch)
     recon_summed = torch.sum(recon, dim=1, keepdim=True)
     # sparsity_loss = (l0_norm(scheduling) / (b * n_events)) * 1e-3
+    
     
     # target/expectation is that everything will be somewhere between 
     
     # MOTIVATION: the tendency of the model was to always place events in the same
-    # locations and then put all the information into the event vectors
-    expectation = torch.zeros(1, device=batch.device).uniform_(
-        2 / scheduling.shape[-1], n_events / scheduling.shape[-1]) 
-    actual = torch.mean(scheduling, dim=(0, 1))
+    # locations and then put all the information into the event vectors.
+    # I'm using a step func because I don't want this to simply make amp values
+    # smaller
+    actual = torch.mean(step_func(scheduling), dim=(0, 1))
     assert actual.shape == (128,)
-
-    dist_loss = torch.abs(actual - expectation).sum()
+    mean_diff = torch.abs(actual[None, :] - actual[:, None])
+    ut = torch.triu(mean_diff)
+    dist_loss = ut.sum() * 1e-3
     
     # randomly drop events.  Events should stand on their own
     mask = torch.zeros(b, n_events, 1, device=batch.device).bernoulli_(p=0.5)
