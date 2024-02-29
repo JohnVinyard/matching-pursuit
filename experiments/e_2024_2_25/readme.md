@@ -8,6 +8,9 @@ have to learn to balance them such that none is ever too low
 
 Try with an explicit switching mechanism to turn events on or off
 
+
+I need to try again to apply a balanced l0 loss
+
 # Benefits of this Model
 - streaming, no fixed size
 
@@ -15,18 +18,18 @@ Try with an explicit switching mechanism to turn events on or off
 - l0 norm for sparsity.  Will this obviate the need for shift loss?
 
 # Next Up
-- shift loss to ensure that the network isn't learning fixed event positions
 - padding at the beginning to allow events to start before the window the model can see
-- add a loss to ensure that certain times/frames aren't over-represented;  distribution should be random (what is the likelihood/expectation of an event at a particular position?)
 
 # Outcomes
 - discriminator loss with masking helps! Keep it
+- shift loss to ensure that the network isn't learning fixed event positions - (this did not work)
+- add a loss to ensure that certain times/frames aren't over-represented;  distribution should be random (what is the likelihood/expectation of an event at a particular position?) This worked, keep it
 
 
 # Things to Add
 - more efficient way to split each non-zero value into its own channel
 - event vectors could be quantized in a compression phase
-- remove amplitude to simplify model
+- ~~remove amplitude to simplify model~~ DONE
 - would softmax work better than a scalar for the event switching?
 - fft_shift or some other fine-grained scheduling adjustment
 - different versions of covariance loss (with subsampling)?

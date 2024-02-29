@@ -10,7 +10,7 @@ from uuid import uuid4
 
 n_samples = 2 ** 15
 samplerate = zounds.SR22050()
-total_examples = 5
+total_examples = 7
 
 
 class AudioTimeline(object):
@@ -28,13 +28,7 @@ class AudioTimeline(object):
         relative_positions = indices / 128
         self.relative_positions = relative_positions
         
-        # get channel indices in order from earliest to latest in time
-        # time_sort = torch.argsort(indices, descending=False)
-        
-        # self.time_ordered_indices = time_sort
-        # self.relative_positions = [relative_positions[i] for i in time_sort]
-        
-        event_norms = torch.norm(events, dim=-1)
+        event_norms = torch.norm(channels, dim=-1)
         max_norm = torch.max(event_norms)
         self.max_norm = max_norm
     
@@ -53,7 +47,13 @@ class AudioTimeline(object):
 
 
 
-def svg_vector(vec: torch.Tensor, pixel_height: int, pixel_width: int, max_norm: torch.Tensor):
+def svg_vector(
+        vec: torch.Tensor, 
+        pixel_height: int, 
+        pixel_width: int, 
+        max_norm: torch.Tensor,
+        audio: torch.Tensor = None):
+    
     vec = vec.view(-1)
     
     vec = vec - vec.min()
@@ -61,7 +61,7 @@ def svg_vector(vec: torch.Tensor, pixel_height: int, pixel_width: int, max_norm:
     
     step = pixel_height / vec.shape[0]
     
-    vec_norm = torch.norm(vec)
+    vec_norm = torch.norm(audio) if audio is not None else torch.norm(vec)
     opacity = (vec_norm / (max_norm + 1e-5)).item()
     
     return f'''
@@ -79,6 +79,8 @@ def hidden_audio_element(
         relative_position: float,
         max_norm: torch.Tensor):
     
+    orig_audio = audio
+    
     audio: zounds.AudioSamples = playable(audio, samplerate)
     bio = audio.encode()
     bio.seek(0)
@@ -92,7 +94,7 @@ def hidden_audio_element(
 
         <div class="event" id="{_id}" style="left:{percentage_position}%;">
             <audio id="audio-{_id}" src="{data_url}"></audio>
-            {svg_vector(event_vector, 100, 15, max_norm)}
+            {svg_vector(event_vector, 100, 15, max_norm, orig_audio)}
         </div>
         
         <script type="text/javascript">
@@ -104,7 +106,7 @@ def hidden_audio_element(
     '''
 
 
-def audio_element(audio: torch.Tensor, title: str):
+def audio_element(audio: torch.Tensor, title: str, subtitle: str = None):
     audio: zounds.AudioSamples = playable(audio, samplerate)
     bio = audio.encode()
     bio.seek(0)
@@ -113,6 +115,7 @@ def audio_element(audio: torch.Tensor, title: str):
     return f'''
     <div class="audio-player">
         <h4>{title}</h4>
+        {'' if subtitle is None else f'<p>{subtitle}</p>'}
         <audio controls src="{data_url}" />
     </div>
     '''
@@ -135,11 +138,12 @@ def demo_example(
         <div>
             {audio_element(orig, 'Original')}
             {audio_element(recon, 'Recon')}
-            {audio_element(random_events, 'With Random Event Vectors')}
+            {audio_element(random_events, 'With Random Event Vectors', '(based on mean and variance of event vectors for this sample)')}
             {audio_element(random_timings, 'With Random Timings')}
             {audio_element(random_context, 'With Random Global Context Vector')}
             <div>
                 <h3>Global Context Vector for Original</h3>
+                <p>individual events can be played by clicking on vectors</p>
                 {svg_vector(context_vector, 100, 15, norm)}
             </div>
             <div>
@@ -220,6 +224,8 @@ def html_doc(elements: Iterable[str]):
                     
                     While global context and local event data are encoded as real-valued vectors and not discrete values, the 
                     representation learned still lends itself to a sparse, interpretible, and hopefully easy-to-manipulate encoding.
+                    
+                    This first draft was trained using the amazing <a href="https://www.kaggle.com/datasets/imsparsh/musicnet-dataset">MusicNet dataset</a>.
                 </p>
                 <p>
                     Each sound sample below includes the following elements:
@@ -231,8 +237,16 @@ def html_doc(elements: Iterable[str]):
                         <li>New audio using the original timing and event vectors, but with a <em>random global context vector</em></li>
                     </ol>
                 </p>
+                <h3>Future Directions</h3>
+                <p>
+                    There are several areas that could provide further gains in compression and interpretibility:
+                    <ul>
+                        <li>Imposing sparsity constraints on the number of events produced.  You may notice that there are often many redundant events that could be merged into one.</li>
+                        <li>Performing vector quantization on the event vectors such that there is a discrete set of possible events</li>
+                    </ul>
+                </p>
                 <div>
-                    <img src="https://matching-pursuit-repo-media.s3.amazonaws.com/vector_siam.drawio.png" />
+                    <img src="https://matching-pursuit-repo-media.s3.amazonaws.com/vector_siam.drawio2.png" />
                 </div>
                 <h4>Cite this Work</h4>
                 <pre>
@@ -277,7 +291,7 @@ def get_batch_statistics(batch_size=16):
     
     batch = next(iter(stream)).view(batch_size, 1, n_samples).to('cpu')
     
-    final, embeddings, imp, scheduling, amps, context = model.forward(batch, return_context=True)
+    final, embeddings, imp, scheduling, amps, context, mixed = model.forward(batch, return_context=True)
     
     embedding_means = torch.mean(embeddings, dim=(0, 1))
     embeddings_stds = torch.std(embeddings, dim=(0, 1))
@@ -298,36 +312,33 @@ def create_assets_for_single_item(
     
     print('===================================')
     
-    # NEW: final, vecs, imp, scheduling, amps, dense
-    # OLD: final, embeddings, logits, amps.squeeze(), mixed
-    
     
     audio = audio.view(1, 1, n_samples)
     
     # full reconstruction
-    final, embeddings, _, logits, amps, context = model.forward(audio, return_context=True)
+    final, embeddings, _, logits, amps, context, mixed = model.forward(audio, return_context=True)
     full_recon = torch.sum(final, dim=1, keepdim=True)
     full_recon = max_norm(full_recon)
 
-    timeline_container = AudioTimeline(final, amps, logits, embeddings)
+    timeline_container = AudioTimeline(mixed, amps, logits, embeddings)
     
     
     # with random events
-    rnd, _, _, _, _, _ = model.forward(audio, return_context=True, random_events=event_stats)
+    rnd, _, _, _, _, _, _ = model.forward(audio, return_context=True, random_events=event_stats)
     random_events = torch.sum(rnd, dim=1, keepdim=True)
     random_events = max_norm(random_events)
     
     # with random timings
-    tm, _, _, _, _, _ = model.forward(audio, return_context=True, random_timings=True)
+    tm, _, _, _, _, _, _ = model.forward(audio, return_context=True, random_timings=True)
     random_timings = torch.sum(tm, dim=1, keepdim=True)
     random_timings = max_norm(random_timings)
     
     # with random context
-    ctxt, _, _, _, _, _ = model.forward(audio, return_context=True, random_context=context_stats)
+    ctxt, _, _, _, _, _, _ = model.forward(audio, return_context=True, random_context=context_stats)
     random_context = torch.sum(ctxt, dim=1, keepdim=True)
     random_context = max_norm(random_context)
     
-    return audio, full_recon, random_events, random_timings, random_context, context, timeline_container, final
+    return audio, full_recon, random_events, random_timings, random_context, context, timeline_container, mixed
 
 
 if __name__ == '__main__':
