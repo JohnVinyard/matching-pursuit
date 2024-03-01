@@ -1,35 +1,35 @@
-import zounds
 import torch
 from torch import nn
-from modules import MelScale, AudioCodec, stft
 from torch.nn import functional as F
 import numpy as np
+from matplotlib import pyplot as plt
+from torch.optim import Adam
 
-from train.optim import optimizer
-from util import playable
+# from train.optim import optimizer
 
-sr = zounds.SR22050()
-n_samples = 2**14
+n_samples = 2**15
 
-scale = MelScale()
-codec = AudioCodec(scale)
+def stft(
+        x: torch.Tensor,
+        ws: int = 512,
+        step: int = 256,
+        pad: bool = False,
+        log_epsilon: float = 1e-4):
 
+    frames = x.shape[-1] // step
 
-band = zounds.FrequencyBand(40, sr.nyquist)
-scale = zounds.MelScale(band, 128)
-fb = zounds.learn.FilterBank(sr, 512, scale, 0.1, normalize_filters=True, a_weighting=False)
+    if pad:
+        x = F.pad(x, (0, ws))
 
-def features(x):
-    x = x.view(-1, n_samples)
-    spec = codec.to_frequency_domain(x)
-    return spec[..., 0]
+    x = x.unfold(-1, ws, step)
+    win = torch.hann_window(ws).to(x.device)
+    x = x * win[None, None, :]
+    x = torch.fft.rfft(x, norm='ortho')
 
+    x = torch.abs(x)
 
-def loss(inp, target):
-    inp_spec = features(inp)
-    target_spec = features(target)
-    return F.mse_loss(inp_spec, target_spec)
-
+    x = x[:, :, :frames, :]
+    return x
 
 class Model(nn.Module):
     def __init__(self, n_osc=3, mode='complex'):
@@ -62,35 +62,41 @@ class Model(nn.Module):
 
         signal = amp[None, :, None] * torch.sin(torch.cumsum(accum, dim=-1) * np.pi)
         signal = signal.sum(dim=1)
-        return signal
+        return signal, self.params[:, 0]
 
 
 model = Model(n_osc=3)
-optim = optimizer(model, lr=1e-3)
+# optim = optimizer(model, lr=1e-3)
+optim = Adam(model.parameters(), lr=1e-3)
 
 if __name__ == '__main__':
 
-    app = zounds.ZoundsApp(globals=globals(), locals=locals())
-    app.start_in_thread(9999)
-
-    synth = zounds.SineSynthesizer(sr)
-    samples = synth.synthesize(sr.duration * n_samples, [220, 440, 880])
-
-    samples = torch.from_numpy(samples).view(1, 1, n_samples).float()
-
-    def listen():
-        return playable(inp, sr)
-
-    def look():
-        return features(inp).data.cpu().numpy().squeeze()
+    freq = np.array([220, 440, 880])
+    freq = (torch.from_numpy(freq) / 11025)
     
-    def real():
-        return features(samples).data.cpu().numpy().squeeze()
-
+    freq = freq.view(3, 1).repeat(1, n_samples)    
+    
+    samples = torch.sin(torch.cumsum(freq * np.pi, dim=-1))
+    samples = torch.sum(samples, dim=0).view(1, 1, n_samples)
+    
+    i = 0
+    
     while True:
         optim.zero_grad()
-        inp = model.forward(None)
-        l = loss(inp, samples)
+        inp, p = model.forward(None)
+        recon_loss = F.mse_loss(inp, samples)
+        param_loss = torch.abs(p).sum() * 10
+        l = recon_loss + param_loss
         l.backward()
         optim.step()
         print(l.item())
+        
+        if i > 0 and i % 1000 == 0:
+            real_spec = stft(samples.view(1, 1, -1), 2048, 256, pad=True)
+            fake_spec = stft(inp.view(1, 1, -1), 2048, 256, pad=True)
+            
+            plt.matshow(real_spec.data.cpu().numpy()[0].squeeze())
+            plt.show()
+            plt.matshow(fake_spec.data.cpu().numpy()[0].squeeze())
+            plt.show()
+        i += 1

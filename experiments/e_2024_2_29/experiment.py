@@ -401,7 +401,7 @@ class Model(nn.Module):
                 scheduling[b, j, index] = attn[b, 0][index]
                 
         
-        return vecs, z, scheduling
+        return vecs, z, scheduling, event_vecs
 
     
     def generate(self, vecs, scheduling, dense):
@@ -455,7 +455,7 @@ class Model(nn.Module):
         
         batch_size = x.shape[0]
         
-        vecs, z, scheduling = self.encode(x)
+        vecs, z, scheduling, event_vecs = self.encode(x)
         dense = self.embed_latent(z)
         
         if random_context:
@@ -477,7 +477,7 @@ class Model(nn.Module):
         final, imp, amps, mixed = self.generate(vecs, scheduling, dense)
         
         if return_context:
-            return final, vecs, imp, scheduling, amps, dense, mixed
+            return final, vecs, imp, scheduling, amps, dense, mixed, event_vecs
         else:
             return final, vecs, imp, scheduling, amps
     
@@ -721,9 +721,9 @@ def train(batch, i):
     b = batch.shape[0]
     
     
-    recon, encoded, imp, scheduling, amps, _, _ = model.forward(batch)
+    recon, encoded, imp, scheduling, amps, _, _, event_vecs = model.forward(batch)
     recon_summed = torch.sum(recon, dim=1, keepdim=True)
-    sparsity_loss = (l0_norm(scheduling) / (b * n_events)) * 1e-4
+    # sparsity_loss = (l0_norm(scheduling) / (b * n_events)) * 0.1
     
     
     # target/expectation is that everything will be somewhere between 
@@ -732,11 +732,11 @@ def train(batch, i):
     # locations and then put all the information into the event vectors.
     # I'm using a step func because I don't want this to simply make amp values
     # smaller
-    actual = torch.mean(step_func(scheduling), dim=(0, 1))
-    assert actual.shape == (128,)
-    mean_diff = torch.abs(actual[None, :] - actual[:, None])
-    ut = torch.triu(mean_diff)
-    dist_loss = ut.sum() * 1e-3
+    # actual = torch.mean(step_func(scheduling), dim=(0, 1))
+    # assert actual.shape == (128,)
+    # mean_diff = torch.abs(actual[None, :] - actual[:, None])
+    # ut = torch.triu(mean_diff)
+    # dist_loss = ut.sum() * 1e-3
     
     # randomly drop events.  Events should stand on their own
     mask = torch.zeros(b, n_events, 1, device=batch.device).bernoulli_(p=0.5)
@@ -746,7 +746,7 @@ def train(batch, i):
     d_loss = torch.abs(1 - j).mean()
     scl = single_channel_loss_3(batch, recon) * 1e-4
     
-    loss = scl + d_loss + dist_loss + sparsity_loss
+    loss = scl + d_loss #+ sparsity_loss
         
     loss.backward()
     optim.step()
@@ -770,7 +770,7 @@ def train(batch, i):
     recon = max_norm(recon_summed)
     encoded = max_norm(encoded)
     
-    return loss, recon, encoded, scheduling
+    return loss, recon, encoded, scheduling, event_vecs
 
 
 def make_conjure(experiment: BaseExperimentRunner):
@@ -797,10 +797,19 @@ def make_sched_conjure(experiment: BaseExperimentRunner):
     return (events,)
 
 
+def make_event_vec_conjure(experiment: BaseExperimentRunner):
+    @numpy_conjure(experiment.collection, content_type=SupportedContentType.Spectrogram.value)
+    def event_vecs(x: torch.Tensor):
+        x = x[0].data.cpu().numpy()
+        return x
+
+    return (event_vecs,)
+
 @readme
 class SwitchEventsWithSparsity(BaseExperimentRunner):
     encoded = MonitoredValueDescriptor(make_conjure)
     sched = MonitoredValueDescriptor(make_sched_conjure)
+    event_vecs = MonitoredValueDescriptor(make_event_vec_conjure)
 
     def __init__(self, stream, port=None, load_weights=True, save_weights=False, model=model):
         super().__init__(
@@ -815,12 +824,13 @@ class SwitchEventsWithSparsity(BaseExperimentRunner):
     def run(self):
         for i, item in enumerate(self.iter_items()):
             item = item.view(-1, 1, n_samples)
-            l, r, e, s = train(item, i)
+            l, r, e, s, ev = train(item, i)
 
             self.real = item
             self.fake = r
             self.encoded = e
             self.sched = s
+            self.event_vecs = ev
             
             print(i, l.item())
             self.after_training_iteration(l, i)

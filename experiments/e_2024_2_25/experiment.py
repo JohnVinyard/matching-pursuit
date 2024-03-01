@@ -721,7 +721,7 @@ def train(batch, i):
     b = batch.shape[0]
     
     
-    recon, encoded, imp, scheduling, amps, _ = model.forward(batch)
+    recon, encoded, imp, scheduling, amps, _, _ = model.forward(batch)
     recon_summed = torch.sum(recon, dim=1, keepdim=True)
     # sparsity_loss = (l0_norm(scheduling) / (b * n_events)) * 1e-3
     

@@ -1,6 +1,6 @@
 from typing import Callable, Iterable, List, Tuple
 from data.audioiter import AudioIterator
-from experiments.e_2024_2_25.inference import model
+from experiments.e_2024_2_29.inference import model
 import zounds
 import torch
 from modules.normalization import max_norm
