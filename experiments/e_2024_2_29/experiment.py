@@ -309,7 +309,9 @@ class Model(nn.Module):
         self.encoder = AntiCausalStack(1024, kernel_size=2, dilations=[1, 2, 4, 8, 16, 32, 64, 1])
         
         self.to_event_vectors = nn.Conv1d(1024, context_dim, 1, 1, 0)
+        
         self.to_event_switch = nn.Conv1d(1024, 1, 1, 1, 0)
+        # self.to_softmax_event_switch = nn.Conv1d(1024, 2, 1, 1, 0)
         
     
         self.embed_context = nn.Linear(4096, 256)
@@ -384,9 +386,22 @@ class Model(nn.Module):
         z = torch.mean(encoded, dim=-1)
         
         event_vecs = self.to_event_vectors(encoded).permute(0, 2, 1) # batch, time, channels
-        
         event_switch = self.to_event_switch(encoded)
+        
+        # sm_es = sparse_softmax(self.to_softmax_event_switch(encoded), dim=1, normalize=True)
+        # sm_es = F.gumbel_softmax(self.to_softmax_event_switch(encoded), dim=1, tau=1, hard=True)
+        # sm_es = sm_es.permute(0, 2, 1).view(batch_size, -1, 2)
+        
+        # values = torch.zeros(1, 2, device=x.device)
+        # values[:, 0] = 1
+        # g = sm_es @ values.T
+        # g = g.permute(0, 2, 1)
+        
         attn = torch.relu(event_switch).permute(0, 2, 1).view(batch_size, 1, -1)
+        
+        # assert attn.shape == g.shape
+        
+        # gated = attn * g
         
         attn, attn_indices, values = sparsify(attn, n_to_keep=n_events, return_indices=True)
         
@@ -723,7 +738,14 @@ def train(batch, i):
     
     recon, encoded, imp, scheduling, amps, _, _, event_vecs = model.forward(batch)
     recon_summed = torch.sum(recon, dim=1, keepdim=True)
-    # sparsity_loss = (l0_norm(scheduling) / (b * n_events)) * 0.1
+    sparsity_loss = (l0_norm(scheduling) / (b * n_events)) * 1
+    
+    nz = torch.sum(scheduling.sum(dim=1).view(b, -1) > 0) / b
+    print('NON-ZERO', nz.item())
+    
+    # summary of audio channels
+    acs = windowed_audio(recon[:1, None, :, :], 512, 256)
+    acs = torch.norm(torch.abs(acs).view(n_events, 128, 512), dim=-1)
     
     
     # target/expectation is that everything will be somewhere between 
@@ -744,9 +766,9 @@ def train(batch, i):
     
     j = disc.forward(for_disc)
     d_loss = torch.abs(1 - j).mean()
-    scl = single_channel_loss_3(batch, recon) * 1e-4
+    scl = single_channel_loss_3(batch, recon) * 1e-2
     
-    loss = scl + d_loss #+ sparsity_loss
+    loss = scl + d_loss + sparsity_loss
         
     loss.backward()
     optim.step()
@@ -770,7 +792,7 @@ def train(batch, i):
     recon = max_norm(recon_summed)
     encoded = max_norm(encoded)
     
-    return loss, recon, encoded, scheduling, event_vecs
+    return loss, recon, encoded, scheduling, event_vecs, acs
 
 
 def make_conjure(experiment: BaseExperimentRunner):
@@ -805,11 +827,21 @@ def make_event_vec_conjure(experiment: BaseExperimentRunner):
 
     return (event_vecs,)
 
+
+def make_acs_conjure(experiment: BaseExperimentRunner):
+    @numpy_conjure(experiment.collection, content_type=SupportedContentType.Spectrogram.value)
+    def acs(x: torch.Tensor):
+        x = x.data.cpu().numpy()
+        return x
+
+    return (acs,)
+
 @readme
 class SwitchEventsWithSparsity(BaseExperimentRunner):
     encoded = MonitoredValueDescriptor(make_conjure)
     sched = MonitoredValueDescriptor(make_sched_conjure)
     event_vecs = MonitoredValueDescriptor(make_event_vec_conjure)
+    acs = MonitoredValueDescriptor(make_acs_conjure)
 
     def __init__(self, stream, port=None, load_weights=True, save_weights=False, model=model):
         super().__init__(
@@ -824,13 +856,14 @@ class SwitchEventsWithSparsity(BaseExperimentRunner):
     def run(self):
         for i, item in enumerate(self.iter_items()):
             item = item.view(-1, 1, n_samples)
-            l, r, e, s, ev = train(item, i)
+            l, r, e, s, ev, acs = train(item, i)
 
             self.real = item
             self.fake = r
             self.encoded = e
             self.sched = s
             self.event_vecs = ev
+            self.acs = acs
             
             print(i, l.item())
             self.after_training_iteration(l, i)

@@ -18,7 +18,7 @@ def sparse_softmax(x, normalize=False, dim=-1):
     if normalize:
         values = values + (1 - values)
     x_forward = torch.zeros_like(x_backward)
-    x_forward = torch.scatter(x_forward, dim=-1, index=indices, src=values)
+    x_forward = torch.scatter(x_forward, dim=dim, index=indices, src=values)
     y = x_backward + (x_forward - x_backward).detach()
     return y
 
