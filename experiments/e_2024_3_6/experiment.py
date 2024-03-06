@@ -307,8 +307,8 @@ class MatchingPursuitBlock(nn.Module):
         super().__init__()
         self.channels = channels
         self.analysis_channels = analysis_channels
-        self.analysis = nn.Conv1d(channels, analysis_channels, 7, 1, 3)
-        self.synthesis = nn.Conv1d(analysis_channels, channels, 7, 1, 3)
+        self.analysis = weight_norm(nn.Conv1d(channels, analysis_channels, 7, 1, 3))
+        self.synthesis = weight_norm(nn.Conv1d(analysis_channels, channels, 7, 1, 3))
     
     def forward(self, x):
         a = self.analysis(x)
@@ -775,7 +775,7 @@ def train(batch, i):
     recon, encoded, imp, scheduling, amps, _, _, sa, residual, orig_event_vecs = model.forward(batch)
     
     sa = sa.view(b, n_events, -1, 128)
-    latent_loss = F.mse_loss(torch.sum(sa, dim=1), orig_event_vecs)
+    latent_loss = torch.abs(torch.sum(sa, dim=1) - orig_event_vecs).sum()
     
     recon_summed = torch.sum(recon, dim=1, keepdim=True)
     # sparsity_loss = (l0_norm(scheduling) / (b * n_events)) * 1e-3

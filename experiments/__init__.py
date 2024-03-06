@@ -14,4 +14,5 @@
 # from .e_2024_2_29 import SwitchEventsWithSparsity as Current
 # from .e_2024_3_4 import UnsupervisedEventSeparation as Current
 # from .e_2024_3_5 import ComplexDomainMatchingPursuit as Current
-from .e_2024_3_6 import IterativeDecompositionAgain as Current
+# from .e_2024_3_6 import IterativeDecompositionAgain as Current
+from .e_2024_3_6b import IterativeDecompositionAgain2 as Current
