@@ -313,11 +313,8 @@ class MatchingPursuitBlock(nn.Module):
     def forward(self, x):
         a = self.analysis(x)
         s = self.synthesis(a)
-        s = unit_norm(s, dim=(-1, -2))
-        corr = (s * x).sum(dim=(1, 2), keepdim=True)
-        scaled = s * corr
-        new_residual = x - scaled
-        return scaled, new_residual
+        new_residual = x - s
+        return s, new_residual
 
 
 class MatchingPursuitStack(nn.Module):
@@ -775,7 +772,7 @@ def train(batch, i):
     recon, encoded, imp, scheduling, amps, _, _, sa, residual, orig_event_vecs = model.forward(batch)
     
     sa = sa.view(b, n_events, -1, 128)
-    latent_loss = torch.abs(torch.sum(sa, dim=1) - orig_event_vecs).sum()
+    # latent_loss = F.mse_loss(torch.sum(sa, dim=1), orig_event_vecs.detach())
     
     recon_summed = torch.sum(recon, dim=1, keepdim=True)
     # sparsity_loss = (l0_norm(scheduling) / (b * n_events)) * 1e-3
@@ -798,11 +795,11 @@ def train(batch, i):
     for_disc = torch.sum(recon * mask, dim=1, keepdim=True).clone().detach()    
     
     j = disc.forward(for_disc)
-    d_loss = torch.abs(1 - j).mean()
-    # scl = single_channel_loss_3(batch, recon) * 1e-4
-    scl = torch.abs(transform(recon_summed) - transform(batch)).sum() * 1e-4
+    d_loss = torch.abs(1 - j).mean() * 1e-4
+    scl = single_channel_loss_3(batch, recon) * 1e-4
+    # scl = F.mse_loss(transform(recon_summed), transform(batch)).sum()
     
-    loss = scl + d_loss + latent_loss #+ dist_loss
+    loss = scl + d_loss #+ dist_loss
         
     loss.backward()
     optim.step()

@@ -105,12 +105,14 @@ class MatchingPursuitBlock(nn.Module):
         
         pallette = torch.zeros(*input_spec_shape, device=x.device)
         
+        
         for i in range(batch_size):
             ai = atom_index[i].item()
             pos = position[i].item()
+            amp = values[i]
             segment = pallette[i, :, pos:]
             size = segment.shape[-1]
-            pallette[i, :, pos:pos + size] += self.atoms[ai, :, :size]
+            pallette[i, :, pos:pos + size] += self.atoms[ai, :, :size] * amp
         
         normed = unit_norm(pallette, dim=(-1, -2))
         corr = (start_spec * normed).sum(dim=(-1, -2), keepdim=True)
@@ -147,7 +149,7 @@ class Model(nn.Module):
         return atoms, residual, spec
         
         
-model = Model(n_atoms=512, n_steps=16).to(device)
+model = Model(n_atoms=1024, n_steps=16).to(device)
 optim = optimizer(model, lr=1e-3)        
 
 
@@ -156,6 +158,8 @@ def train(batch, i):
     atoms, residual, spec = model.forward(batch)
     full_spec = torch.sum(atoms, dim=1)
     loss = F.mse_loss(full_spec, spec)
+    mx = torch.max(full_spec)
+    full_spec = full_spec / (mx + 1e-12)
     loss.backward()
     optim.step()
     return loss, None, full_spec

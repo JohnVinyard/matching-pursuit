@@ -84,7 +84,13 @@ if __name__ == '__main__':
     while True:
         optim.zero_grad()
         inp, p = model.forward(None)
-        recon_loss = F.mse_loss(inp, samples)
+        fake_spec = stft(inp)
+        real_spec = stft(samples)
+        
+        # recon_loss = F.mse_loss(inp, samples)
+        
+        recon_loss = F.mse_loss(fake_spec, real_spec)
+        
         param_loss = torch.abs(p).sum() * 10
         l = recon_loss + param_loss
         l.backward()
