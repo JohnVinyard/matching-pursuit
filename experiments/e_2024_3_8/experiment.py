@@ -10,6 +10,7 @@ from modules.anticausal import AntiCausalStack
 
 from modules.normalization import max_norm
 from modules.stft import stft
+from modules.upsample import ConvUpsample
 from train.experiment_runner import BaseExperimentRunner, MonitoredValueDescriptor
 from train.optim import optimizer
 from util import device
@@ -32,30 +33,59 @@ samplerate = 22050
 n_samples = 32768
 
 
+def experiment_spectrogram(x: torch.Tensor):
+    batch_size = x.shape[0]
+    
+    x = stft(x, 2048, 256, pad=True).view(
+            batch_size, 128, 1025)[..., :1024].permute(0, 2, 1)
+    return x
+
 
 class Model(nn.Module):
     def __init__(self):
         super().__init__()
         self.encoder = AntiCausalStack(1024, kernel_size=2, dilations=[1, 2, 4, 8, 16, 32, 64, 1])
-        self.decoder = nn.Conv2d(1, n_events, (9, 9), (1, 1), padding=(4, 4))
+        self.decoder = nn.Conv1d(1024, 1024 * n_events, 1, 1, 0, groups=n_events)
+        
+        self.to_latent = nn.Conv1d(1024, 64, 1, 1, 0)
+        self.to_samples = ConvUpsample(
+            64, 
+            64, 
+            start_size=128, 
+            end_size=exp.n_samples, 
+            mode='nearest', 
+            out_channels=1, 
+            from_latent=False, 
+            batch_norm=True)
+        
         self.apply(lambda x: exp.init_weights(x))
         
 
     def encode(self, x):
         batch_size = x.shape[0]
-        x = stft(x, 2048, 256, pad=True).view(
-            batch_size, 128, 1025)[..., :1024].permute(0, 2, 1)
+        # x = stft(x, 2048, 256, pad=True).view(
+        #     batch_size, 128, 1025)[..., :1024].permute(0, 2, 1)
+        
+        if x.shape[1] == 1:
+            x = experiment_spectrogram(x)
+        
         encoded = self.encoder.forward(x)
         return encoded, x
 
     
     def forward(self, x):
         encoded, orig_spec = self.encode(x)
-        encoded = encoded[:, None, :, :]
         decoded = self.decoder.forward(encoded)
-        decoded = torch.relu(decoded)
-        decoded = decoded.view(-1, n_events, 1024, 128)
-        return decoded, orig_spec
+        decoded = torch.abs(decoded)
+        
+        decoded = decoded.view(-1, 1024, 128)
+        
+        samples = self.to_latent(decoded)
+        samples = self.to_samples(samples).view(-1, n_events, 1, exp.n_samples)
+        
+        decoded = decoded.view(x.shape[0], n_events, 1024, 128)
+        
+        return decoded, orig_spec, samples
 
     
 
@@ -166,8 +196,9 @@ class UNet(nn.Module):
         
         
         if x.shape[1] == 1:
-            x = stft(x, 2048, 256, pad=True).view(
-                batch_size, 128, 1025)[..., :1024].permute(0, 2, 1)
+            # x = stft(x, 2048, 256, pad=True).view(
+            #     batch_size, 128, 1025)[..., :1024].permute(0, 2, 1)
+            x = experiment_spectrogram(x)
         
         x = self.embed_spec(x)
         x = x + self.pos
@@ -213,21 +244,48 @@ def train(batch, i):
     
     b = batch.shape[0]
     
-    recon, orig_spec = model.forward(batch)
+    recon, orig_spec, samples = model.forward(batch)
+    
+    norms = torch.norm(recon, dim=(2, 3))
+    print(norms.shape)
+    diffs = torch.abs(norms[:, None, :] - norms[:, :, None])
+    print(diffs.shape)
+    diffs = torch.triu(diffs, diagonal=1)
+    diff_loss = diffs.mean()
+    
     recon_summed = torch.sum(recon, dim=1)
+    
+    summed_samples = torch.sum(samples, dim=1)
+    sample_spec = experiment_spectrogram(summed_samples)
+    
+    
+    
+    # ensure that generated samples equal acutal samples
+    # in the frequency domain
+    sample_loss = F.mse_loss(sample_spec, orig_spec) * 100
     
     assert orig_spec.shape == recon_summed.shape
     
+    # ensure that the sum of spectrograms equals the original
+    # spectrogram
     recon_loss = F.mse_loss(recon_summed, orig_spec) * 100
     
     # randomly drop events.  Events should stand on their own
     mask = torch.zeros(b, n_events, 1, 1, device=batch.device).bernoulli_(p=0.5)
-    for_disc = torch.sum(recon * mask, dim=1).clone().detach()    
+    masked = recon * mask
     
+    with torch.no_grad():
+        # generate audio from masked channels
+        masked_spec = masked.view(-1, 1024, 128)
+        _, _, masked_samples = model.forward(masked_spec[:1, ...])
+        masked_samples = torch.sum(masked_samples, dim=1)
+    
+    # ensure the sum of masked channels passes the disc test    
+    for_disc = torch.sum(masked, dim=1).clone().detach()    
     j = disc.forward(for_disc)
     d_loss = torch.abs(1 - j).mean()
     
-    loss = recon_loss + d_loss
+    loss = recon_loss + d_loss + sample_loss + diff_loss
         
     loss.backward()
     optim.step()
@@ -241,9 +299,11 @@ def train(batch, i):
     disc_optim.step()
     print('DISC', disc_loss.item())
     
-    recon = max_norm(for_disc)
+    recon_spec = max_norm(for_disc.view(b, -1)).view(b, 1024, 128)
     
-    return loss, recon
+    recon = max_norm(masked_samples)
+    
+    return loss, recon, recon_spec
 
 
 def make_conjure(experiment: BaseExperimentRunner):
@@ -275,9 +335,10 @@ class UnsupervisedSourceSeparation2(BaseExperimentRunner):
     def run(self):
         for i, item in enumerate(self.iter_items()):
             item = item.view(-1, 1, n_samples)
-            l, r = train(item, i)
+            l, samples, r = train(item, i)
 
             self.real = item
+            self.fake = samples
             self.fake = torch.zeros_like(item)
             
             self.encoded = r
