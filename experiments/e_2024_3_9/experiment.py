@@ -437,7 +437,6 @@ class Model(nn.Module):
         vecs = torch.cat(vecs, dim=1)        
         schedules = torch.cat(schedules, dim=1)        
         
-        print(channels.shape, vecs.shape, schedules.shape)
         return channels, vecs, schedules
             
     
@@ -621,11 +620,11 @@ optim = optimizer(model, lr=1e-4)
 disc = UNet(1024, return_latent=False, is_disc=True).to(device)
 disc_optim = optimizer(disc)
 
-# try:
-#     disc.load_state_dict(torch.load('disc.dat'))
-#     print('Loaded disc weights')
-# except IOError:
-#     print('No saved disc weights')
+try:
+    disc.load_state_dict(torch.load('disc2.dat'))
+    print('Loaded disc weights')
+except IOError:
+    print('No saved disc weights')
 
 
 
@@ -691,6 +690,7 @@ def train(batch, i):
     
     recon, encoded, scheduling = model.iterative(batch)
     recon_summed = torch.sum(recon, dim=1, keepdim=True)
+    sparsity_loss = torch.abs(encoded).sum() * 1e-3
     
     # randomly drop events.  Events should stand on their own
     mask = torch.zeros(b, n_events, 1, device=batch.device).bernoulli_(p=0.5)
@@ -700,14 +700,15 @@ def train(batch, i):
     d_loss = torch.abs(1 - j).mean()
     scl = single_channel_loss_3(batch, recon) * 1e-4
     
-    loss = scl + d_loss
+    
+    loss = scl + d_loss + sparsity_loss
         
     loss.backward()
     optim.step()
     
-    # if i % 100 == 0:
-    #     torch.save(disc.state_dict(), 'disc.dat')
-    #     print('saving dem disc weights')
+    if i % 100 == 0:
+        torch.save(disc.state_dict(), 'disc2.dat')
+        print('saving dem disc weights')
     
 
     disc_optim.zero_grad()

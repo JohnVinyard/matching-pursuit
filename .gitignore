@@ -2,6 +2,7 @@
 *.png
 ae.dat
 disc.dat
+disc2.dat
 __pycache__
 audio
 blog
