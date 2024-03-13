@@ -386,6 +386,12 @@ class Model(nn.Module):
     def generate(self, vecs, scheduling, dense):
         batch_size = vecs.shape[0]
         
+        print('------------------------------')
+        print('VECS', vecs.shape)
+        print('SCHEDULING', scheduling.shape)
+        print('DENSE', dense.shape)
+        
+        
         embeddings = self.from_context(vecs)
         
         amps = torch.sum(scheduling, dim=-1, keepdim=True)
@@ -407,7 +413,7 @@ class Model(nn.Module):
         
         # coarse positioning
         final = F.pad(mixed, (0, n_samples - mixed.shape[-1]))
-        up = torch.zeros(final.shape[0], 1, n_samples, device=final.device)
+        up = torch.zeros(final.shape[0], final.shape[1], n_samples, device=final.device)
         up[:, :, ::256] = scheduling
         
         final = fft_convolve(final, up)[..., :n_samples]
@@ -420,6 +426,7 @@ class Model(nn.Module):
         channels = []
         schedules = []
         vecs = []
+        contexts = []
         
         spec = experiment_spectrogram(x)
         
@@ -432,24 +439,25 @@ class Model(nn.Module):
             current = experiment_spectrogram(ch)
             spec = (spec - current).clone().detach()
             channels.append(ch)
+            contexts.append(dense[:, None, :])
     
         channels = torch.cat(channels, dim=1)        
         vecs = torch.cat(vecs, dim=1)        
         schedules = torch.cat(schedules, dim=1)        
+        contexts = torch.cat(contexts, dim=1)
         
-        return channels, vecs, schedules
+        return channels, vecs, schedules, contexts
             
     
 
-    def forward(self, x, random_timings=False, random_events=False, random_context=False, return_context=True):
+    def forward(self, x, random_timings=False, random_events=False, return_context=True):
         
         batch_size = x.shape[0]
         
-        vecs, z, scheduling = self.encode(x)
-        dense = self.embed_latent(z)
+        # vecs, z, scheduling = self.encode(x)
+        # dense = self.embed_latent(z)
         
-        if random_context:
-            dense = torch.zeros_like(dense).normal_(dense.mean(), dense.std())
+        channels, vecs, scheduling, dense = self.iterative(x)
         
         if random_events:
             means = torch.mean(vecs, dim=(0, 1))
@@ -464,7 +472,14 @@ class Model(nn.Module):
             scheduling = scheduling.view(*orig_shape)
             
         
+        # In this model, there is a distinct context vector for every event.
+        # Make accommodations for the UI, which only shows a single context vector
+        # This hack assumes that the context/reverb parameters don't matter much
+        dense = dense.view(batch_size, -1, context_dim)
+        dense = torch.mean(dense, dim=1)
+        
         final, imp, amps, mixed = self.generate(vecs, scheduling, dense)
+        
         
         if return_context:
             return final, vecs, imp, scheduling, amps, dense, mixed
@@ -688,7 +703,7 @@ def train(batch, i):
     
     b = batch.shape[0]
     
-    recon, encoded, scheduling = model.iterative(batch)
+    recon, encoded, scheduling, contexts = model.iterative(batch)
     recon_summed = torch.sum(recon, dim=1, keepdim=True)
     sparsity_loss = torch.abs(encoded).sum() * 1e-3
     

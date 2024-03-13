@@ -1,6 +1,6 @@
 from typing import Callable, Iterable, List, Tuple
 from data.audioiter import AudioIterator
-from experiments.e_2024_2_25.inference import model
+from experiments.e_2024_3_9.inference import model
 import zounds
 import torch
 from modules.normalization import max_norm
@@ -126,7 +126,6 @@ def demo_example(
         recon: torch.Tensor, 
         random_events: torch.Tensor, 
         random_timings: torch.Tensor, 
-        random_context: torch.Tensor,
         context_vector: torch.Tensor,
         timeline: AudioTimeline):
     
@@ -140,7 +139,6 @@ def demo_example(
             {audio_element(recon, 'Recon')}
             {audio_element(random_events, 'With Random Event Vectors', '(based on mean and variance of event vectors for this sample)')}
             {audio_element(random_timings, 'With Random Timings')}
-            {audio_element(random_context, 'With Random Global Context Vector')}
             <div>
                 <h3>Global Context Vector for Original</h3>
                 <p>individual events can be played by clicking on vectors</p>
@@ -334,11 +332,11 @@ def create_assets_for_single_item(
     random_timings = max_norm(random_timings)
     
     # with random context
-    ctxt, _, _, _, _, _, _ = model.forward(audio, return_context=True, random_context=context_stats)
-    random_context = torch.sum(ctxt, dim=1, keepdim=True)
-    random_context = max_norm(random_context)
+    # ctxt, _, _, _, _, _, _ = model.forward(audio, return_context=True, random_context=context_stats)
+    # random_context = torch.sum(ctxt, dim=1, keepdim=True)
+    # random_context = max_norm(random_context)
     
-    return audio, full_recon, random_events, random_timings, random_context, context, timeline_container, mixed
+    return audio, full_recon, random_events, random_timings, context, timeline_container, mixed
 
 
 if __name__ == '__main__':
@@ -352,10 +350,10 @@ if __name__ == '__main__':
         for i, batch in enumerate(iter(stream)):
             batch = batch.to('cpu')
             
-            orig, recon, rnd_events, rnd_timings, rnd_ctxt, context, timeline, mixed = create_assets_for_single_item(
+            orig, recon, rnd_events, rnd_timings, context, timeline, mixed = create_assets_for_single_item(
                 batch, event_stats, context_stats)
             
-            section_html = demo_example(orig, recon, rnd_events, rnd_timings, rnd_ctxt, context, timeline)
+            section_html = demo_example(orig, recon, rnd_events, rnd_timings, context, timeline)
             sections.append(section_html)
             
             if i > total_examples:
