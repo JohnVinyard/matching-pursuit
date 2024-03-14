@@ -13,3 +13,4 @@ rather than all-at-once
   - show low-res view of audio "channels", not just event positions
   - update architecture diagram
   - try out info/entropy-based loss again and see where it gets us
+  - try out other resonance model, just for fun

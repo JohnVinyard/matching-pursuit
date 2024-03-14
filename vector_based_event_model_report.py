@@ -1,6 +1,6 @@
 from typing import Callable, Iterable, List, Tuple
 from data.audioiter import AudioIterator
-from experiments.e_2024_3_9.inference import model
+from experiments.e_2024_3_13.inference import model
 import zounds
 import torch
 from modules.normalization import max_norm
@@ -126,12 +126,9 @@ def demo_example(
         recon: torch.Tensor, 
         random_events: torch.Tensor, 
         random_timings: torch.Tensor, 
-        context_vector: torch.Tensor,
         timeline: AudioTimeline):
     
     
-    norm = torch.norm(context_vector, dim=-1)
-
     return f'''
     <section class="demo-example">
         <div>
@@ -139,11 +136,6 @@ def demo_example(
             {audio_element(recon, 'Recon')}
             {audio_element(random_events, 'With Random Event Vectors', '(based on mean and variance of event vectors for this sample)')}
             {audio_element(random_timings, 'With Random Timings')}
-            <div>
-                <h3>Global Context Vector for Original</h3>
-                <p>individual events can be played by clicking on vectors</p>
-                {svg_vector(context_vector, 100, 15, norm)}
-            </div>
             <div>
                 {timeline.to_html()}
             </div>
@@ -289,23 +281,20 @@ def get_batch_statistics(batch_size=16):
     
     batch = next(iter(stream)).view(batch_size, 1, n_samples).to('cpu')
     
-    final, embeddings, imp, scheduling, amps, context, mixed = model.forward(batch, return_context=True)
+    final, embeddings, imp, scheduling, amps, mixed = model.forward(batch, return_context=True)
     
     embedding_means = torch.mean(embeddings, dim=(0, 1))
     embeddings_stds = torch.std(embeddings, dim=(0, 1))
     
-    context_means = torch.mean(context, dim=0)
-    context_stds = torch.std(context, dim=0)
     
-    print(embedding_means.shape, embeddings_stds.shape, context_means.shape, context_stds.shape)
+    print(embedding_means.shape, embeddings_stds.shape)
     
-    return (embedding_means, embeddings_stds), (context_means, context_stds)
+    return (embedding_means, embeddings_stds)
     
 
 def create_assets_for_single_item(
         audio: torch.Tensor, 
-        event_stats: Tuple[torch.Tensor], 
-        context_stats: Tuple[torch.Tensor]):
+        event_stats: Tuple[torch.Tensor]):
     
     
     print('===================================')
@@ -314,7 +303,7 @@ def create_assets_for_single_item(
     audio = audio.view(1, 1, n_samples)
     
     # full reconstruction
-    final, embeddings, _, logits, amps, context, mixed = model.forward(audio, return_context=True)
+    final, embeddings, _, logits, amps, mixed = model.forward(audio, return_context=True)
     full_recon = torch.sum(final, dim=1, keepdim=True)
     full_recon = max_norm(full_recon)
 
@@ -322,12 +311,12 @@ def create_assets_for_single_item(
     
     
     # with random events
-    rnd, _, _, _, _, _, _ = model.forward(audio, return_context=True, random_events=event_stats)
+    rnd, _, _, _, _, _ = model.forward(audio, return_context=True, random_events=event_stats)
     random_events = torch.sum(rnd, dim=1, keepdim=True)
     random_events = max_norm(random_events)
     
     # with random timings
-    tm, _, _, _, _, _, _ = model.forward(audio, return_context=True, random_timings=True)
+    tm, _, _, _, _, _ = model.forward(audio, return_context=True, random_timings=True)
     random_timings = torch.sum(tm, dim=1, keepdim=True)
     random_timings = max_norm(random_timings)
     
@@ -336,7 +325,7 @@ def create_assets_for_single_item(
     # random_context = torch.sum(ctxt, dim=1, keepdim=True)
     # random_context = max_norm(random_context)
     
-    return audio, full_recon, random_events, random_timings, context, timeline_container, mixed
+    return audio, full_recon, random_events, random_timings, timeline_container, mixed
 
 
 if __name__ == '__main__':
@@ -344,16 +333,16 @@ if __name__ == '__main__':
     with torch.no_grad():
         sections = []
         
-        event_stats, context_stats = get_batch_statistics()
+        event_stats = get_batch_statistics()
         
         
         for i, batch in enumerate(iter(stream)):
             batch = batch.to('cpu')
             
-            orig, recon, rnd_events, rnd_timings, context, timeline, mixed = create_assets_for_single_item(
-                batch, event_stats, context_stats)
+            orig, recon, rnd_events, rnd_timings, timeline, mixed = create_assets_for_single_item(
+                batch, event_stats)
             
-            section_html = demo_example(orig, recon, rnd_events, rnd_timings, context, timeline)
+            section_html = demo_example(orig, recon, rnd_events, rnd_timings, timeline)
             sections.append(section_html)
             
             if i > total_examples:
