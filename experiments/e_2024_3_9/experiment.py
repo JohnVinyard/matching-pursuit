@@ -482,7 +482,7 @@ class Model(nn.Module):
         
         
         if return_context:
-            return final, vecs, imp, scheduling, amps, dense, mixed
+            return final, vecs, imp, scheduling, amps, mixed
         else:
             return final, vecs, imp, scheduling, amps
     

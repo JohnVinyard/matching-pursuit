@@ -326,37 +326,21 @@ class Model(nn.Module):
         self.imp = SimpleGenerateImpulse(256, 128, impulse_size, 16, n_events)
 
         
-        # total_atoms = 2048
-        # f0s = musical_scale_hz(start_midi=21, stop_midi=106, n_steps=total_atoms // 4)
-        # waves = make_waves(resonance_size, f0s, int(samplerate))
-        
-        # self.res = ResonanceModel2(
-        #     256, 
-        #     128, 
-        #     resonance_size, 
-        #     n_atoms=total_atoms, 
-        #     n_piecewise=4, 
-        #     init_atoms=waves, 
-        #     learnable_atoms=False, 
-        #     mixture_over_time=True,
-        #     n_frames=128)
-        
-        
-        total_atoms = 1024
-        f0s = musical_scale_hz(40, 4000, total_atoms // 4)
+        total_atoms = 2048
+        f0s = musical_scale_hz(start_midi=21, stop_midi=106, n_steps=total_atoms // 4)
         waves = make_waves(resonance_size, f0s, int(samplerate))
         
-        self.res = ResonanceChain(
-            2, 
-            n_atoms=1024, 
-            window_size=512, 
-            n_frames=128, 
-            total_samples=resonance_size, 
-            mix_channels=4, 
-            channels=128, 
-            latent_dim=256,
-            initial=waves,
-            learnable_resonances=False)
+        self.res = ResonanceModel2(
+            256, 
+            128, 
+            resonance_size, 
+            n_atoms=total_atoms, 
+            n_piecewise=4, 
+            init_atoms=waves, 
+            learnable_atoms=False, 
+            mixture_over_time=True,
+            n_frames=128)
+        
         
 
         self.verb = ReverbGenerator(
@@ -402,6 +386,7 @@ class Model(nn.Module):
 
     
     def generate(self, vecs, scheduling):
+        
         batch_size = vecs.shape[0]
         
         
@@ -432,6 +417,7 @@ class Model(nn.Module):
         final = fft_convolve(final, up)[..., :n_samples]
 
         final = self.verb.forward(unit_norm(vecs, dim=-1), final)
+        
 
         return final, imp, amps, mixed
     
@@ -462,9 +448,6 @@ class Model(nn.Module):
     def forward(self, x, random_timings=False, random_events=False, return_context=True):
         
         batch_size = x.shape[0]
-        
-        # vecs, z, scheduling = self.encode(x)
-        # dense = self.embed_latent(z)
         
         channels, vecs, scheduling = self.iterative(x)
         

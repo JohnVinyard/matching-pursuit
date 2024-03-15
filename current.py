@@ -8,6 +8,7 @@ from datetime import datetime
 import os
 import torch
 from conjure.serve import serve_conjure
+from pathlib import Path
 
 from train.experiment_runner import BaseExperimentRunner
 from util.store_trained_weights_remotely import store_trained_weights_remoteley
@@ -93,6 +94,7 @@ if __name__ == '__main__':
     parser.add_argument('--pattern', type=str, default='*.wav')
     parser.add_argument('--save-weights', action='store_true')
     parser.add_argument('--load-weights', action='store_true')
+    parser.add_argument('--clean', action='store_true')
     
 
     args = parser.parse_args()
@@ -105,6 +107,9 @@ if __name__ == '__main__':
         port = os.environ['PORT']
 
         print(args)
+        
+        path = Current.__module__
+        
         
         stream = AudioIterator(
             args.batch_size,
@@ -125,7 +130,6 @@ if __name__ == '__main__':
         if model is None:
             raise ValueError(f'Experiment {Current.__class__.__name__} does not have an associated model')
         
-        path = Current.__module__
         
         store_trained_weights_remoteley(
             path, model, device='cpu', s3_bucket=Config.s3_bucket())
@@ -133,6 +137,17 @@ if __name__ == '__main__':
         from experiments import Current
         port = os.environ['PORT']
         
+        path = Current.__module__
+        exp, date, _ = path.split('.')
+        base_path = os.path.join(exp, date)
+        
+        if args.clean:
+            try:
+                data_path = Path(base_path) / Path('experiment_data/data.mdb')
+                os.remove(data_path)
+                print('Removed old weights')
+            except IOError:
+                print('No weights to remove')
 
         print(args)
         

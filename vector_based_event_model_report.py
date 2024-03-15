@@ -1,16 +1,24 @@
+from io import BytesIO
 from typing import Callable, Iterable, List, Tuple
 from data.audioiter import AudioIterator
 from experiments.e_2024_3_13.inference import model
 import zounds
 import torch
 from modules.normalization import max_norm
+from modules.stft import stft
 from util.playable import playable
 from base64 import b64encode
 from uuid import uuid4
+from PIL import Image
+import numpy as np
 
 n_samples = 2 ** 15
 samplerate = zounds.SR22050()
-total_examples = 7
+total_examples = 3
+
+
+def create_data_url(b: bytes, content_type: str):
+    return  f'data:{content_type};base64,{b64encode(b).decode()}'
 
 
 class AudioTimeline(object):
@@ -45,6 +53,42 @@ class AudioTimeline(object):
         </div>
         '''
 
+
+def spectrogram(audio: torch.Tensor, window_size: int = 512, step_size: int = 128):
+    audio = audio.view(1, 1, n_samples)
+    spec = stft(audio, window_size, step_size, pad=True)
+    n_coeffs = window_size // 2 + 1
+    spec = max_norm(spec.view(-1)).view(-1, n_coeffs)
+    spec = spec.data.cpu().numpy()
+    spec = np.rot90(spec)
+    
+    img_data = np.zeros((spec.shape[0], spec.shape[1], 4), dtype=np.uint8)
+    
+    # image opacity is determined by spectrogram intensity
+    img_data[:, :, 3:] = np.clip((spec[:, :, None] * 255).astype(np.uint8), 0, 255)
+    
+    # image color is entirely black
+    img_data[:, :, :3] = 0
+    
+    
+    img = Image.fromarray(img_data, mode='RGBA')
+    scale = 4
+    x, y = img.size
+    img.thumbnail((x * scale, y * scale), Image.LANCZOS)
+    
+    bio = BytesIO()
+    img.save(bio, format='png')
+    bio.seek(0)
+    
+    data_url = create_data_url(bio.read(), 'image/png')
+    
+    return f'''
+        <div class="spectrogram-image">
+            <img height="{n_coeffs}px" width="128px" src="{data_url}"></img>
+        </div>
+    '''
+    
+    
 
 
 def svg_vector(
@@ -110,7 +154,8 @@ def audio_element(audio: torch.Tensor, title: str, subtitle: str = None):
     audio: zounds.AudioSamples = playable(audio, samplerate)
     bio = audio.encode()
     bio.seek(0)
-    data_url = f'data:audio/wav;base64,{b64encode(bio.read()).decode()}'
+    
+    data_url = create_data_url(bio.read(), 'audio/wav')
     
     return f'''
     <div class="audio-player">
@@ -126,8 +171,11 @@ def demo_example(
         recon: torch.Tensor, 
         random_events: torch.Tensor, 
         random_timings: torch.Tensor, 
-        timeline: AudioTimeline):
+        timeline: AudioTimeline,
+        positioned: torch.Tensor):
     
+    
+    spec_elements = [spectrogram(x) for x in positioned.view(-1, n_samples)]
     
     return f'''
     <section class="demo-example">
@@ -136,6 +184,9 @@ def demo_example(
             {audio_element(recon, 'Recon')}
             {audio_element(random_events, 'With Random Event Vectors', '(based on mean and variance of event vectors for this sample)')}
             {audio_element(random_timings, 'With Random Timings')}
+            <div class="spectrogram-image-container">
+                {''.join(spec_elements)}
+            </div>
             <div>
                 {timeline.to_html()}
             </div>
@@ -184,6 +235,19 @@ def html_doc(elements: Iterable[str]):
             
             code {{
                 backgroun-color: #eee;
+            }}
+            
+            .spectrogram-image {{
+                position: absolute;
+                top: 0;
+                left: 0;
+            }}
+            
+            .spectrogram-image-container {{
+                position: relative;
+                height: 257px;
+                width: 128px;
+                display: block;
             }}
         </style>
     </head>
@@ -306,9 +370,9 @@ def create_assets_for_single_item(
     final, embeddings, _, logits, amps, mixed = model.forward(audio, return_context=True)
     full_recon = torch.sum(final, dim=1, keepdim=True)
     full_recon = max_norm(full_recon)
+    positioned = max_norm(final, dim=-1)
 
     timeline_container = AudioTimeline(mixed, amps, logits, embeddings)
-    
     
     # with random events
     rnd, _, _, _, _, _ = model.forward(audio, return_context=True, random_events=event_stats)
@@ -320,12 +384,8 @@ def create_assets_for_single_item(
     random_timings = torch.sum(tm, dim=1, keepdim=True)
     random_timings = max_norm(random_timings)
     
-    # with random context
-    # ctxt, _, _, _, _, _, _ = model.forward(audio, return_context=True, random_context=context_stats)
-    # random_context = torch.sum(ctxt, dim=1, keepdim=True)
-    # random_context = max_norm(random_context)
     
-    return audio, full_recon, random_events, random_timings, timeline_container, mixed
+    return audio, full_recon, random_events, random_timings, timeline_container, mixed, positioned
 
 
 if __name__ == '__main__':
@@ -333,19 +393,22 @@ if __name__ == '__main__':
     with torch.no_grad():
         sections = []
         
+        print('Generating Batch Statistics')
         event_stats = get_batch_statistics()
         
         
         for i, batch in enumerate(iter(stream)):
             batch = batch.to('cpu')
+            print('==================================')
+            print(f'Generating example {i}')
             
-            orig, recon, rnd_events, rnd_timings, timeline, mixed = create_assets_for_single_item(
+            orig, recon, rnd_events, rnd_timings, timeline, mixed, positioned = create_assets_for_single_item(
                 batch, event_stats)
             
-            section_html = demo_example(orig, recon, rnd_events, rnd_timings, timeline)
+            section_html = demo_example(orig, recon, rnd_events, rnd_timings, timeline, positioned)
             sections.append(section_html)
             
-            if i > total_examples:
+            if (i + 1) >= total_examples:
                 break
         
         doc = html_doc(sections)

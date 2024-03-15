@@ -1,18 +1,44 @@
+from base64 import b64encode
+from io import BytesIO
 import numpy as np
 import torch
 import torch.nn.functional as F
 from data.audioiter import AudioIterator
 from modules import pos_encode
 from modules.angle import windowed_audio
+from modules.normalization import max_norm
 from modules.overlap_add import overlap_add
+from modules.stft import stft
 from util.playable import playable
 import zounds
 from torch import nn
 from torch.nn.utils.weight_norm import weight_norm
 from torch.optim import Adam
 from modules.pos_encode import pos_encoded
+from PIL import Image
 
 n_samples = 2**15
+
+def create_data_url(b: bytes, content_type: str):
+    return  f'data:{content_type};base64,{b64encode(b).decode()}'
+
+def spectrogram(audio: torch.Tensor, window_size: int = 2048, step_size: int = 256):
+    audio = audio.view(1, 1, n_samples)
+    spec = stft(audio, window_size, step_size, pad=True)
+    n_coeffs = window_size // 2 + 1
+    spec = max_norm(spec.view(-1)).view(-1, n_coeffs)
+    spec = spec.data.cpu().numpy()
+    spec = np.rot90(spec)
+    
+    img_data = np.zeros((spec.shape[0], spec.shape[1], 4), dtype=np.uint8)
+    
+    img_data[:, :, 3:] = np.clip((spec[:, :, None] * 255).astype(np.uint8), 0, 255)
+    img_data[:, :, :3] = 0
+    
+    
+    img = Image.fromarray(img_data, mode='RGBA')
+    img.save('spec.png', format='png')
+    
 
 # TODO: try matrix rotation instead: https://eecs.qmul.ac.uk/~gslabaugh/publications/euler.pdf
 def to_polar(x):
@@ -135,27 +161,30 @@ if __name__ == '__main__':
         1, n_samples=n_samples, samplerate=zounds.SR22050(), normalize=True, overfit=True)
     
     for i, batch in enumerate(iter(stream)):
-        batch = batch.view(1, 1, n_samples).cpu()
+        spectrogram(batch)
+        break
+    
+        # batch = batch.view(1, 1, n_samples).cpu()
         
-        optim.zero_grad()
-        encodings = pos_encoded(1, time_dim=n_samples, n_freqs=16)
+        # optim.zero_grad()
+        # encodings = pos_encoded(1, time_dim=n_samples, n_freqs=16)
         
-        recon, intermediates = model.forward(encodings)
-        recon = recon.view(1, 1, n_samples)
+        # recon, intermediates = model.forward(encodings)
+        # recon = recon.view(1, 1, n_samples)
         
-        recon_loss = F.mse_loss(recon, batch)
-        sparse_loss = l0_norm(intermediates) / intermediates.nelement() * 0
-        loss = recon_loss + sparse_loss
+        # recon_loss = F.mse_loss(recon, batch)
+        # sparse_loss = l0_norm(intermediates) / intermediates.nelement() * 0
+        # loss = recon_loss + sparse_loss
         
-        loss.backward()
-        optim.step()
+        # loss.backward()
+        # optim.step()
         
-        print(i, loss.item(), sparse_loss.item())
+        # print(i, loss.item(), sparse_loss.item())
         
-        if i > 0 and i % 10 == 0:
-            a = playable(recon, zounds.SR22050())
-            a.save('test.wav')
-            print('saved')
+        # if i > 0 and i % 10 == 0:
+        #     a = playable(recon, zounds.SR22050())
+        #     a.save('test.wav')
+        #     print('saved')
         
     
     
