@@ -2,11 +2,13 @@ from functools import reduce
 from typing import Any, Collection
 import torch
 from torch import nn
+from modules.angle import windowed_audio
 from modules.atoms import unit_norm
 # import zounds
 
 from modules.ddsp import overlap_add
 from modules.decompose import fft_frequency_decompose, fft_frequency_recompose
+from modules.hypernetwork import HyperNetworkLayer
 from modules.linear import LinearOutputStack
 from modules.pos_encode import pos_encoded
 from modules.upsample import ConvUpsample
@@ -647,3 +649,165 @@ class STFTTransferFunction(nn.Module):
 
 
     
+'''
+# TODO: try matrix rotation instead: https://eecs.qmul.ac.uk/~gslabaugh/publications/euler.pdf
+
+
+
+def test():
+
+    n_samples = 2 ** 15
+    window_size = 1024
+    step_size = window_size // 2
+    n_coeffs = window_size // 2 + 1
+    
+    impulse = torch.zeros(1, 1, 2048).uniform_(-1, 1)
+    impulse = F.pad(impulse, (0, n_samples - 2048))
+    windowed = windowed_audio(impulse, window_size, step_size)
+    
+    n_frames = windowed.shape[-2]
+    
+    transfer_func = torch.zeros(1, n_coeffs).uniform_(0, 0.99)
+    print(torch.norm(transfer_func).item())
+    transfer_warp = torch.eye(n_coeffs)
+    transfer_warp = torch.roll(transfer_warp, (0, 4), dims=(0, 1))
+    
+    
+    frames = []
+    
+    for i in range(n_frames):
+        
+        transfer_func = transfer_func @ transfer_warp
+        print(torch.norm(transfer_func).item())
+        
+        if i == 0:
+            spec = torch.fft.rfft(windowed[:, :, i, :], dim=-1)
+            spec = spec * transfer_func
+            audio = torch.fft.irfft(spec, dim=-1)
+            frames.append(audio)
+        else:
+            prev = frames[i - 1]
+            prev_spec = torch.fft.rfft(prev, dim=-1)
+            prev_spec = advance_one_frame(prev_spec)
+            
+            current_spec = torch.fft.rfft(windowed[:, :, i, :], dim=-1)
+            spec = current_spec + prev_spec
+            spec = spec * transfer_func
+            audio = torch.fft.irfft(spec, dim=-1)
+            frames.append(audio)
+    
+    
+    frames = torch.cat([f[:, :, None, :] for f in frames], dim=2)
+    audio = overlap_add(frames, apply_window=True)[..., :n_samples]
+    
+    return audio
+'''
+
+def to_polar(x):
+    mag = torch.abs(x)
+    phase = torch.angle(x)
+    return mag, phase
+
+def to_complex(mag, phase):
+    return mag * torch.exp(1j * phase)
+
+def advance_one_frame(x):
+    mag, phase = to_polar(x)
+    phase = phase + torch.linspace(0, np.pi, x.shape[-1], device=x.device)[None, None, :]
+    x = to_complex(mag, phase)
+    return x
+
+
+class STFTResonanceGenerator(nn.Module):
+    def __init__(self, window_size, n_samples, z_dim, inner_channels):
+        super().__init__()
+        self.window_size = window_size
+        self.step_size = window_size // 2
+        self.n_samples = n_samples
+        self.n_coeffs = window_size // 2 + 1
+        self.z_dim = z_dim
+        self.n_frames = n_samples // self.step_size
+        self.inner_channels = inner_channels
+        
+        self.to_initial_transfer_function = nn.Linear(self.z_dim, self.n_coeffs)
+        
+        self.base_resonance = 0.2
+        self.resonance_range = 0.9 - self.base_resonance
+        
+        self.to_transfer_function = ConvUpsample(
+            self.z_dim,
+            self.inner_channels,
+            start_size=8,
+            end_size=self.n_frames,
+            mode='nearest',
+            out_channels=self.n_coeffs,
+            weight_norm=True,
+            from_latent=True)
+        
+        # self.hypernetwork = HyperNetworkLayer(
+        #     self.inner_channels, self.z_dim, self.n_coeffs, self.n_coeffs)
+    
+    def forward(self, z, impulse):
+        batch, n_events, impulse_samples = impulse.shape
+        z_dim = z.shape[-1]
+        
+        impulse = F.pad(impulse, (0, self.n_samples - impulse_samples + self.window_size))
+        windowed = windowed_audio(impulse, self.window_size, self.step_size)
+        
+        # generate the initial transfer function
+        # transfer_func = \
+        #     self.base_resonance \
+        #     + (self.resonance_range * torch.sigmoid(self.to_initial_transfer_function(z)))
+        
+        
+        z = z.view(-1, self.z_dim)
+        transfer_funcs = self\
+            .to_transfer_function(z)\
+            .view(batch, n_events, self.n_coeffs, self.n_frames)\
+            .permute(0, 1, 3, 2)\
+            .view(batch, n_events, self.n_frames, self.n_coeffs)
+
+        # make sure transfer funcs are in the allowable range        
+        transfer_funcs = self.base_resonance + (torch.sigmoid(transfer_funcs) * self.resonance_range)
+        
+        
+        frames = []
+    
+        for i in range(self.n_frames):
+            
+            # get the transformation matrix for this frame
+            
+            # apply the transformation to get the new transformation matrix
+            transfer_func = transfer_funcs[:, :, i, :]
+            
+            
+            if i == 0:
+                spec = torch.fft.rfft(windowed[:, :, i, :], dim=-1)
+                spec = spec * transfer_func
+                audio = torch.fft.irfft(spec, dim=-1)
+                frames.append(audio)
+            else:
+                prev = frames[i - 1]
+                prev_spec = torch.fft.rfft(prev, dim=-1)
+                prev_spec = advance_one_frame(prev_spec)
+                
+                current_spec = torch.fft.rfft(windowed[:, :, i, :], dim=-1)
+                spec = current_spec + prev_spec
+                spec = spec * transfer_func
+                audio = torch.fft.irfft(spec, dim=-1)
+                frames.append(audio)
+            
+        
+        
+        frames = torch.cat([f[:, :, None, :] for f in frames], dim=2)
+        
+        frames = frames.view(batch, self.n_frames, n_events, self.window_size).permute(0, 2, 1, 3)
+        
+        audio = overlap_add(frames, apply_window=True)[..., :self.n_samples]
+        
+        return audio
+        
+        
+        
+        
+        

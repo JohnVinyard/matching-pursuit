@@ -52,26 +52,15 @@ class NeuralReverb(nn.Module):
 
     def forward(self, x, reverb_mix):
 
-        # mx, _ = torch.max(self.rooms, dim=-1, keepdim=True)
-        # rooms = self.rooms / (mx + 1e-12)
-
         # choose a linear mixture of "rooms"
         mix = (reverb_mix[:, None, :] @ self.rooms)
         
 
         orig_shape = x.shape
         x = x.view(mix.shape)
-        # x = fft_convolve(mix, x)
         x = simple_fft_convolve(mix, x)
         x = x.view(*orig_shape)
 
-        # reverb_spec = torch.fft.rfft(mix, dim=-1, norm='ortho')
-        # signal_spec = torch.fft.rfft(x, dim=-1, norm='ortho')
-
-        # # convolution in the frequency domain
-        # x = reverb_spec * signal_spec
-
-        # x = torch.fft.irfft(x, dim=-1, n=self.size, norm='ortho')
 
         return x
 

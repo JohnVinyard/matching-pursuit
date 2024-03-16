@@ -9,6 +9,7 @@ from modules.angle import windowed_audio
 from modules.normalization import max_norm
 from modules.overlap_add import overlap_add
 from modules.stft import stft
+from modules.transfer import STFTResonanceGenerator
 from util.playable import playable
 import zounds
 from torch import nn
@@ -153,40 +154,17 @@ def l0_norm(x: torch.Tensor):
     return y.sum()
 
 if __name__ == '__main__':
-    # audio = test()
-    # audio = playable(audio, zounds.SR22050())
-    # audio.save('test.wav')
+    z_dim = 16
     
-    stream = AudioIterator(
-        1, n_samples=n_samples, samplerate=zounds.SR22050(), normalize=True, overfit=True)
+    model = STFTResonanceGenerator(512, 2**15, z_dim, 128)
     
-    for i, batch in enumerate(iter(stream)):
-        spectrogram(batch)
-        break
+    batch_size = 8
+    n_events = 16
+    impulse_size = 8192
     
-        # batch = batch.view(1, 1, n_samples).cpu()
-        
-        # optim.zero_grad()
-        # encodings = pos_encoded(1, time_dim=n_samples, n_freqs=16)
-        
-        # recon, intermediates = model.forward(encodings)
-        # recon = recon.view(1, 1, n_samples)
-        
-        # recon_loss = F.mse_loss(recon, batch)
-        # sparse_loss = l0_norm(intermediates) / intermediates.nelement() * 0
-        # loss = recon_loss + sparse_loss
-        
-        # loss.backward()
-        # optim.step()
-        
-        # print(i, loss.item(), sparse_loss.item())
-        
-        # if i > 0 and i % 10 == 0:
-        #     a = playable(recon, zounds.SR22050())
-        #     a.save('test.wav')
-        #     print('saved')
-        
+    z = torch.zeros(batch_size, n_events, z_dim)
+    impulse = torch.zeros(batch_size, n_events, impulse_size)
     
-    
-    
-    
+    print(z.shape, impulse.shape)
+    audio = model.forward(z, impulse)
+    print(audio.shape)

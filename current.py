@@ -145,9 +145,9 @@ if __name__ == '__main__':
             try:
                 data_path = Path(base_path) / Path('experiment_data/data.mdb')
                 os.remove(data_path)
-                print('Removed old weights')
+                print('Removed old experiment data')
             except IOError:
-                print('No weights to remove')
+                print('No old experiment data to remove')
 
         print(args)
         
