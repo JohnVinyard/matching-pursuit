@@ -144,6 +144,7 @@ def hidden_audio_element(
         <script type="text/javascript">
             document.getElementById('{_id}').addEventListener('click', () => {{
                 const a = document.getElementById('audio-{_id}');
+                a.currentTime = 0;
                 a.play();   
             }})
         </script>
@@ -173,7 +174,6 @@ def demo_example(
         random_timings: torch.Tensor, 
         timeline: AudioTimeline,
         positioned: torch.Tensor):
-    
     
     spec_elements = [spectrogram(x) for x in positioned.view(-1, n_samples)]
     
@@ -271,13 +271,12 @@ def html_doc(elements: Iterable[str]):
                     following components:
                     
                     <ul>
-                        <li>A small (16-dimensional) global context vector</li>
                         <li>Some maximum number of small (16-dimensional) event vectors, representing individual audio events</li>
                         <li><em>Times</em> at which each event occurs</li>
                     </ul>
                     
-                    While global context and local event data are encoded as real-valued vectors and not discrete values, the 
-                    representation learned still lends itself to a sparse, interpretible, and hopefully easy-to-manipulate encoding.
+                    While event data are encoded as real-valued vectors and not discrete values, the 
+                    representation learned still lend themselves to a sparse, interpretible, and hopefully easy-to-manipulate encoding.
                     
                     This first draft was trained using the amazing <a href="https://www.kaggle.com/datasets/imsparsh/musicnet-dataset">MusicNet dataset</a>.
                 </p>
@@ -286,16 +285,15 @@ def html_doc(elements: Iterable[str]):
                     <ol>
                         <li>The original recording</li>
                         <li>The model's reconstruction</li>
-                        <li>New audio using the original timing and context vector, but <em>random event vectors</em></li>
-                        <li>New audio using the original event and context vectors, but with <em>random timings</em></li>
-                        <li>New audio using the original timing and event vectors, but with a <em>random global context vector</em></li>
+                        <li>New audio using the original timings, but <em>random event vectors</em></li>
+                        <li>New audio using the original event vectors, but with <em>random timings</em></li>
                     </ol>
                 </p>
                 <h3>Future Directions</h3>
                 <p>
                     There are several areas that could provide further gains in compression and interpretibility:
                     <ul>
-                        <li>Imposing sparsity constraints on the number of events produced.  You may notice that there are often many redundant events that could be merged into one.</li>
+                        <li>Imposing more severe sparsity constraints on the number of events produced.  You may notice that there are often many redundant events that could be merged into one.</li>
                         <li>Performing vector quantization on the event vectors such that there is a discrete set of possible events</li>
                     </ul>
                 </p>

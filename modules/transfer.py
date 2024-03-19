@@ -732,7 +732,7 @@ class STFTResonanceGenerator(nn.Module):
         self.to_initial_transfer_function = nn.Linear(self.z_dim, self.n_coeffs)
         
         self.base_resonance = 0.2
-        self.resonance_range = 0.9 - self.base_resonance
+        self.resonance_range = (1 - self.base_resonance) * 0.99
         
         self.to_transfer_function = ConvUpsample(
             self.z_dim,
@@ -789,7 +789,7 @@ class STFTResonanceGenerator(nn.Module):
             else:
                 prev = frames[i - 1]
                 prev_spec = torch.fft.rfft(prev, dim=-1)
-                prev_spec = advance_one_frame(prev_spec)
+                # prev_spec = advance_one_frame(prev_spec)
                 
                 current_spec = torch.fft.rfft(windowed[:, :, i, :], dim=-1)
                 spec = current_spec + prev_spec
