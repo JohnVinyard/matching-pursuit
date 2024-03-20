@@ -1,0 +1,1 @@
+What role does the discriminator play?  How does it sound to drop it?
