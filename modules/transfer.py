@@ -72,9 +72,11 @@ class ResonanceBank(nn.Module):
         self.n_coeffs = window_size // 2 + 1
         self.window_size = window_size
         self.n_resonances = n_resonances
-        self.n_samples = (window_size // 2) * n_frames
+        # self.n_samples = (window_size // 2) * n_frames
+        self.n_samples = initial.shape[-1]
         self.fft_based_resonance = fft_based_resonance
         self.learnable_resonances = learnable_resonances
+        self.n_frames = n_frames
         
         if self.learnable_resonances:
             self.res_samples = nn.Parameter(initial)
@@ -85,9 +87,9 @@ class ResonanceBank(nn.Module):
         self.base_resonance = 0.02
         self.res_factor = (1 - self.base_resonance) * 0.99
         
-        self.decay = nn.Linear(n_resonances, 128)
+        self.decay = nn.Linear(n_resonances, self.n_frames)
         # self.amplitudes = nn.Parameter(torch.zeros(n_resonances, n_frames).uniform_(-6, 6))
-        self.filters = nn.Parameter(torch.zeros(n_resonances, 128).uniform_(-1, 1))
+        self.filters = nn.Parameter(torch.zeros(n_resonances, self.n_frames).uniform_(-1, 1))
         
         self.fft_res = nn.Parameter(torch.zeros(n_resonances, self.n_coeffs).uniform_(-6, -6))
         
@@ -98,8 +100,8 @@ class ResonanceBank(nn.Module):
         
         # choose a linear combination of filters
         filt = filter_selection @ self.filters
-        filt = filt.view(-1, 1, 128)
-        filt = filt * torch.hamming_window(128, device=filt.device)[None, None, :]
+        filt = filt.view(-1, 1, self.n_frames)
+        filt = filt * torch.hamming_window(self.n_frames, device=filt.device)[None, None, :]
         
         # choose a linear combination of envelopes
         
@@ -108,7 +110,7 @@ class ResonanceBank(nn.Module):
         decay = torch.log(1e-12 + decay)
         decay = torch.cumsum(decay, dim=-1)
         
-        decay = torch.exp(decay).view(batch_size, -1, 128)
+        decay = torch.exp(decay).view(batch_size, -1, self.n_frames)
         
         amp = F.interpolate(decay, size=self.n_samples, mode='linear')
         
@@ -122,14 +124,13 @@ class ResonanceBank(nn.Module):
             coeffs = torch.sigmoid(selection @ self.fft_res)
             res = freq_domain_transfer_function_to_resonance(self.window_size, coeffs, 128)
         
-
         amp = amp.view(*res.shape)        
         
         # apply the envelopes
         res = res * amp
         
         # convolve with filters
-        filt = F.pad(filt, (0, self.n_samples - 128))
+        filt = F.pad(filt, (0, self.n_samples - self.n_frames))
         filt = filt.view(*res.shape)
         res = fft_convolve(filt, res)[..., :self.n_samples]
         return res

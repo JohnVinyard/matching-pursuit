@@ -16,8 +16,8 @@ Time to resolve the problems that are leaving me _just_ short of some really gor
 # Things that might help
 - denser resonances - This definitely helps!
 - more resonances to fade between - This definitely helps!
-- higher-res noise envelope
+- higher-res noise envelope - pending
+- higher time resolution mixture - pending
+- learnable resonances
 - noise is its own resonance chain
-- higher time resolution mixture
 - higher-frequency resolution loss
-- relu in mix
