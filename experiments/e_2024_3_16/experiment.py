@@ -619,8 +619,8 @@ class UNet(nn.Module):
 model = Model().to(device)
 optim = optimizer(model, lr=1e-4)
 
-disc = UNet(1024, return_latent=False, is_disc=True).to(device)
-disc_optim = optimizer(disc)
+# disc = UNet(1024, return_latent=False, is_disc=True).to(device)
+# disc_optim = optimizer(disc)
 
 
 
@@ -693,25 +693,25 @@ def train(batch, i):
     mask = torch.zeros(b, n_events, 1, device=batch.device).bernoulli_(p=0.5)
     for_disc = torch.sum(recon * mask, dim=1, keepdim=True).clone().detach()    
     
-    j = disc.forward(for_disc)
-    d_loss = torch.abs(1 - j).mean()
+    # j = disc.forward(for_disc)
+    # d_loss = torch.abs(1 - j).mean()
     scl = single_channel_loss_3(batch, recon) * 1e-4
     
     
-    loss = scl + d_loss + sparsity_loss
+    loss = scl + sparsity_loss
         
     loss.backward()
     optim.step()
     
 
-    disc_optim.zero_grad()
+    # disc_optim.zero_grad()
     
-    rj = disc.forward(batch)
-    fj = disc.forward(for_disc)
-    disc_loss = (torch.abs(1 - rj).mean() + torch.abs(0 - fj).mean()) * 0.5
-    disc_loss.backward()
-    disc_optim.step()
-    print('DISC', disc_loss.item())
+    # rj = disc.forward(batch)
+    # fj = disc.forward(for_disc)
+    # disc_loss = (torch.abs(1 - rj).mean() + torch.abs(0 - fj).mean()) * 0.5
+    # disc_loss.backward()
+    # disc_optim.step()
+    # print('DISC', disc_loss.item())
     
     
     recon = max_norm(recon_summed)

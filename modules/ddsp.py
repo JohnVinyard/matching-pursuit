@@ -537,7 +537,7 @@ class AudioModel(nn.Module):
             model_dim, 
             n_samples, 
             constrain=not use_wavetable, 
-            lowest_freq=40 / samplerate.nyquist,
+            lowest_freq=40 / (samplerate // 2),
             amp_activation=lambda x: x ** 2,
             complex_valued=complex_valued_osc,
             use_wavetable=use_wavetable)

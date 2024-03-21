@@ -433,7 +433,7 @@ class FFTShifter(torch.autograd.Function):
         x, = grad_outputs
         items, positions = self.saved_tensors
         # print(items.grad.shape)
-        print(positions.grad.shape)
+        # print(positions.grad.shape)
         return x
 
 differentiable_fft_shift = FFTShifter.apply
@@ -703,19 +703,43 @@ def test():
     return audio
 '''
 
-def to_polar(x):
-    mag = torch.abs(x)
-    phase = torch.angle(x)
-    return mag, phase
 
-def to_complex(mag, phase):
-    return mag * torch.exp(1j * phase)
+
+def to_polar(x):
+    
+    # mag = torch.abs(x)
+    # phase = torch.angle(x)
+    # return mag, phase
+    real = x.real[..., None]
+    imag = x.imag[..., None]
+    return torch.cat([real, imag], dim=-1)
+
+def to_complex(x):
+    return torch.complex(x[..., 0], x[..., 1])
 
 def advance_one_frame(x):
-    mag, phase = to_polar(x)
-    phase = phase + torch.linspace(0, np.pi, x.shape[-1], device=x.device)[None, None, :]
-    x = to_complex(mag, phase)
-    return x
+    batch, _, coeffs = x.shape
+    
+    x = to_polar(x)
+    # print('BEFORE ROTATION', x.shape)
+    # mag, phase = x[..., 0], x[..., 1]
+    
+    group_delay = torch.linspace(0, np.pi, x.shape[-2], device=x.device)
+    s = torch.sin(group_delay)
+    c = torch.cos(group_delay)
+    rotation_matrices = torch.cat([c[:, None], -s[:, None], s[:, None], -c[:, None]], dim=-1).reshape(-1, 2, 2)
+    # print(rotation_matrices.shape)
+    
+    # print(phase.shape, rotation_matrices.shape)
+    # phase = phase @ rotation_matrices
+    x = x.view(batch, coeffs, 1, 2) @ rotation_matrices
+    # print('AFTER ROTATION', x.shape)
+    x = x.view(batch, 1, coeffs, 2)
+    # phase = phase + torch.linspace(0, np.pi, x.shape[-1], device=x.device)[None, None, :]
+    # x = to_complex(mag, phase)
+    return to_complex(x)
+
+    # return x
 
 
 class STFTResonanceGenerator(nn.Module):
@@ -731,7 +755,7 @@ class STFTResonanceGenerator(nn.Module):
         
         self.to_initial_transfer_function = nn.Linear(self.z_dim, self.n_coeffs)
         
-        self.base_resonance = 0.2
+        self.base_resonance = 0.02
         self.resonance_range = (1 - self.base_resonance) * 0.99
         
         self.to_transfer_function = ConvUpsample(
@@ -789,7 +813,7 @@ class STFTResonanceGenerator(nn.Module):
             else:
                 prev = frames[i - 1]
                 prev_spec = torch.fft.rfft(prev, dim=-1)
-                # prev_spec = advance_one_frame(prev_spec)
+                prev_spec = advance_one_frame(prev_spec)
                 
                 current_spec = torch.fft.rfft(windowed[:, :, i, :], dim=-1)
                 spec = current_spec + prev_spec

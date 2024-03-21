@@ -25,7 +25,8 @@
 # from .e_2024_3_9 import IterativeDecomposition3 as Current
 # from .e_2024_3_13 import IterativeDecomposition4 as Current
 # from .e_2024_3_16 import IterativeDecomposition5WithSTFTResonance as Current
-
 # from .e_2024_3_17 import IterativeDecomposition6LearnableResonances as Current
 
-from .e_2024_3_20 import IterativeDecomposition7NoDiscriminator as Current
+
+# from .e_2024_3_20 import IterativeDecomposition7NoDiscriminator as Current
+from .e_2024_3_21 import IterativeDecomposition8EventGenerator as Current
