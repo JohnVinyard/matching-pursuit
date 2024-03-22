@@ -383,7 +383,7 @@ class Model(nn.Module):
         
         # self.events = ConvUpsample(256, 128, start_size=8, end_size=exp.n_samples, mode='learned', out_channels=1, from_latent=True, batch_norm=True)
         
-        # total_atoms = 2048
+        # total_atoms = 4096
         # f0s = musical_scale_hz(start_midi=21, stop_midi=106, n_steps=total_atoms // 4)
         # waves = make_waves(resonance_size, f0s, int(samplerate))
         
@@ -570,7 +570,7 @@ def multiband_transform(x: torch.Tensor):
     d1 = {f'{k}_long': stft(v, 128, 64, pad=True) for k, v in bands.items()}
     d3 = {f'{k}_short': stft(v, 64, 32, pad=True) for k, v in bands.items()}
     d4 = {f'{k}_xs': stft(v, 16, 8, pad=True) for k, v in bands.items()}
-    return dict(**d1, **d3, **d4)
+    return dict(**d1, **d3, **d4, normal=stft(x, 2048, 256, pad=True))
 
 
 # def patches(spec: torch.Tensor, size: int = 9, step: int = 3):

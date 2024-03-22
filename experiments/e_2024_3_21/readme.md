@@ -2,7 +2,7 @@ Time to resolve the problems that are leaving me _just_ short of some really gor
 
 # Primary Issues
 
-- noise/impulse model doesn't have enough variability (think record noise)
+- ~~noise/impulse model doesn't have enough variability (think record noise)~~ This _should_ be answered by the more complex noise model
 - still not capturing vibrato for violins
 - losing transients
 
@@ -19,7 +19,8 @@ Time to resolve the problems that are leaving me _just_ short of some really gor
 
 ## Synthesis
 - try a return to original noise model
-- try original resonance model
+- more resonance choices
+- ~~try original resonance model~~
 - ~~try conv upsampling with batch norm~~
 - try increasing context dim
 - NERF-based generator
