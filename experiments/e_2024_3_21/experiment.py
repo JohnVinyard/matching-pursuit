@@ -409,7 +409,7 @@ class Model(nn.Module):
             n_frames=128, 
             total_samples=resonance_size, 
             mix_channels=8, 
-            channels=128, 
+            channels=64, 
             latent_dim=256,
             initial=waves,
             learnable_resonances=False)

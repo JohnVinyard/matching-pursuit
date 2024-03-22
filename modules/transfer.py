@@ -148,7 +148,7 @@ class TimeVaryingMix(nn.Module):
             latent_dim, 
             channels, 
             start_size=4, 
-            mode='learned',
+            mode='nearest',
             end_size=self.n_frames, 
             out_channels=n_mixer_channels, 
             from_latent=True,
@@ -161,6 +161,7 @@ class TimeVaryingMix(nn.Module):
         mix = self.to_time_varying_mix(x).view(-1, self.n_mixer_channels, self.n_frames)
         
         # TODO: is softmax the best choice for the time-varying mix?
+        # TODO: should softmax come before or after the upsampling
         mix = torch.softmax(mix, dim=1)
         mix = F.interpolate(mix, size=total_samples, mode='linear')
         

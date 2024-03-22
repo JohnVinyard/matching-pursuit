@@ -18,12 +18,16 @@ Time to resolve the problems that are leaving me _just_ short of some really gor
 - try original U-Net
 
 ## Synthesis
-- try a return to original noise model
+- **try a return to original noise model** - This is a winner!
 - more resonance choices
+- higher frame rate for time-varying mix
+- nearest rather than learned for time-varying mix
 - ~~try original resonance model~~
 - ~~try conv upsampling with batch norm~~
 - try increasing context dim
 - NERF-based generator
+- relu instead of softmax for time-varying mix
+- sigmoid instead of softmax for time-varying mix
 
 
 # Ideas
