@@ -8,7 +8,7 @@ from torch import nn
 from torch.nn import functional as F
 from config.experiment import Experiment
 from modules.anticausal import AntiCausalStack
-from modules.ddsp import AudioModel
+from modules.ddsp import AudioModel, NoiseModel
 from modules.decompose import fft_frequency_decompose
 
 from modules.overlap_add import overlap_add
@@ -275,6 +275,59 @@ class GenerateMix(nn.Module):
         x = torch.softmax(x, dim=-1)
         return x
 
+class GenerateImpulse(nn.Module):
+
+    def __init__(self, latent_dim, channels, n_samples, n_filter_bands, encoding_channels):
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.n_samples = n_samples
+        self.n_frames = n_samples // 256
+        self.n_filter_bands = n_filter_bands
+        self.channels = channels
+        self.filter_kernel_size = 16
+        self.encoding_channels = encoding_channels
+
+        self.to_frames = ConvUpsample(
+            latent_dim,
+            channels,
+            start_size=4,
+            mode='learned',
+            end_size=self.n_frames,
+            out_channels=channels,
+            # batch_norm=True
+            weight_norm=True
+        )
+
+        self.noise_model = NoiseModel(
+            channels,
+            self.n_frames,
+            self.n_frames * 4,
+            self.n_samples,
+            self.channels,
+            # batch_norm=True,
+            weight_norm=True,
+            squared=True,
+            activation=lambda x: torch.sigmoid(x),
+            mask_after=1
+        )
+        
+        self.to_env = nn.Linear(latent_dim, self.n_frames)
+
+    def forward(self, x):
+        batch_size = x.shape[0]
+        
+        env = self.to_env(x) ** 2
+        env = F.interpolate(env, mode='linear', size=self.n_samples)
+        
+        x = self.to_frames(x)
+        x = self.noise_model(x)
+        x = x.view(batch_size, -1, self.n_samples)
+        
+        x = x * env
+        return x
+
+
+
 class SimpleGenerateImpulse(nn.Module):
     
     def __init__(self, latent_dim, channels, n_samples, n_filter_bands, encoding_channels):
@@ -325,7 +378,10 @@ class Model(nn.Module):
         self.embed_latent = nn.Linear(1024, context_dim)
         
 
-        self.imp = SimpleGenerateImpulse(256, 128, impulse_size, 16, n_events)
+        # self.imp = SimpleGenerateImpulse(256, 128, impulse_size, 16, n_events)
+        self.imp = GenerateImpulse(256, 128, impulse_size, 16, n_events)
+        
+        # self.events = ConvUpsample(256, 128, start_size=8, end_size=exp.n_samples, mode='learned', out_channels=1, from_latent=True, batch_norm=True)
         
         # total_atoms = 2048
         # f0s = musical_scale_hz(start_midi=21, stop_midi=106, n_steps=total_atoms // 4)
@@ -336,7 +392,7 @@ class Model(nn.Module):
         #     128, 
         #     resonance_size, 
         #     n_atoms=total_atoms, 
-        #     n_piecewise=4, 
+        #     n_piecewise=8, 
         #     init_atoms=waves, 
         #     learnable_atoms=False, 
         #     mixture_over_time=True,
@@ -417,10 +473,12 @@ class Model(nn.Module):
         imp = self.imp.forward(embeddings)
         imp = unit_norm(imp)
 
-        # resonances
+        # # resonances
         mixed = self.res.forward(embeddings, imp)
         mixed = mixed.view(batch_size, -1, resonance_size)
         
+        # mixed = self.events(embeddings)
+        # imp = None
         
         mixed = unit_norm(mixed)
         
@@ -515,6 +573,16 @@ def multiband_transform(x: torch.Tensor):
     return dict(**d1, **d3, **d4)
 
 
+# def patches(spec: torch.Tensor, size: int = 9, step: int = 3):
+#     batch, channels, time = spec.shape
+    
+#     p = spec.unfold(1, size, step).unfold(2, size, step)
+#     last_dim = np.prod(p.shape[-2:])
+#     p = p.reshape(batch, -1, last_dim)
+#     norms = torch.norm(p, dim=-1, keepdim=True)
+#     normed = p / (norms + 1e-12)
+    
+#     return p, norms, normed
 
 def single_channel_loss_3(target: torch.Tensor, recon: torch.Tensor):
     
@@ -563,6 +631,11 @@ def train(batch, i):
     
     
     scl = single_channel_loss_3(batch, recon) * 1e-4
+    
+    # _, _, fake_patches = patches(stft(recon_summed, 2048, 256, pad=True).view(-1, 128, 1025), 9, 3)
+    # _, _, real_patches = patches(stft(batch, 2048, 256, pad=True).view(-1, 128, 1025), 9, 3)
+    
+    # patch_loss = F.mse_loss(fake_patches, real_patches) * 100
     
     
     loss = scl + sparsity_loss

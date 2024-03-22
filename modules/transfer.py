@@ -285,7 +285,16 @@ class ResonanceChain(nn.Module):
         self.initial = initial
         
         self.res = nn.ModuleList([
-            ResonanceBlock(n_atoms, window_size, n_frames, total_samples, mix_channels, channels, latent_dim, initial, learnable_resonances) 
+            ResonanceBlock(
+                n_atoms, 
+                window_size, 
+                n_frames, 
+                total_samples, 
+                mix_channels, 
+                channels, 
+                latent_dim, 
+                initial, 
+                learnable_resonances) 
             for _ in range(depth)
         ])
         

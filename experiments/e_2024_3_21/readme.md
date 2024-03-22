@@ -1,8 +1,28 @@
 Time to resolve the problems that are leaving me _just_ short of some really gorgeous reconstructions:
 
-- different frequencies need to decay at different rates
-- more frequency resolution
-- more time variability (more than 4 resonance choices)
+# Primary Issues
+
+- noise/impulse model doesn't have enough variability (think record noise)
+- still not capturing vibrato for violins
+- losing transients
+
+
+# Today
+
+## Losses
+- try pif loss
+- try patch info loss
+- try re-introducing the discriminator
+
+## Analysis
+- try original U-Net
+
+## Synthesis
+- try a return to original noise model
+- try original resonance model
+- ~~try conv upsampling with batch norm~~
+- try increasing context dim
+- NERF-based generator
 
 
 # Ideas
