@@ -1,22 +1,18 @@
 from base64 import b64encode
-from io import BytesIO
 import numpy as np
 import torch
 import torch.nn.functional as F
 from data.audioiter import AudioIterator
-from modules import pos_encode
 from modules.angle import windowed_audio
+from modules.decompose import fft_frequency_decompose
 from modules.normalization import max_norm
 from modules.overlap_add import overlap_add
 from modules.stft import stft
-from modules.transfer import STFTResonanceGenerator
-from util.playable import playable
-import zounds
 from torch import nn
 from torch.nn.utils.weight_norm import weight_norm
 from torch.optim import Adam
-from modules.pos_encode import pos_encoded
 from PIL import Image
+from matplotlib import pyplot as plt
 
 n_samples = 2**15
 
@@ -154,17 +150,33 @@ def l0_norm(x: torch.Tensor):
     return y.sum()
 
 if __name__ == '__main__':
-    z_dim = 16
+    stream = AudioIterator(
+        1, 
+        n_samples=2**15, 
+        samplerate=22050, 
+        normalize=True, 
+        overfit=False, 
+        step_size=1, 
+        pattern='*/1791.wav')
     
-    model = STFTResonanceGenerator(512, 2**15, z_dim, 128)
+    batch = next(iter(stream))
+    batch = batch.view(1, 1, stream.n_samples)
     
-    batch_size = 8
-    n_events = 16
-    impulse_size = 8192
+    # bands = fft_frequency_decompose(batch, 512)
     
-    z = torch.zeros(batch_size, n_events, z_dim)
-    impulse = torch.zeros(batch_size, n_events, impulse_size)
+    # spec = stft(bands[2**15], 512, 128, pad=True).view(-1, 257)
+    # plt.matshow(spec.data.cpu().numpy())
+    # plt.show()
     
-    print(z.shape, impulse.shape)
-    audio = model.forward(z, impulse)
-    print(audio.shape)
+    spec = stft(batch, 2048, 256, pad=True).view(1, 128, 1025).permute(0, 2, 1)
+    pooled = F.avg_pool1d(spec, 128, stride=1, padding=64)[..., :128]
+    
+    
+    residual = spec - pooled
+    residual = torch.relu(residual)
+    
+    plt.matshow(residual.data.cpu().numpy().reshape((1025, 128)))
+    plt.show()
+    
+    plt.matshow(pooled.data.cpu().numpy().reshape((1025, 128)))
+    plt.show()

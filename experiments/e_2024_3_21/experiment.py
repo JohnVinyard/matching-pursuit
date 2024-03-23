@@ -27,6 +27,7 @@ from util import device
 from util.music import musical_scale_hz
 from util.readmedocs import readme
 from torch.distributions import Normal
+from torch.nn.utils.weight_norm import weight_norm
 
 exp = Experiment(
     samplerate=22050,
@@ -369,6 +370,8 @@ class Model(nn.Module):
 
         self.encoder = AntiCausalStack(1024, kernel_size=2, dilations=[1, 2, 4, 8, 16, 32, 64, 1])
         
+        # self.encoder = UNet(1024, return_latent=False, is_disc=False)
+        
         self.to_event_vectors = nn.Conv1d(1024, context_dim, 1, 1, 0)
         self.to_event_switch = nn.Conv1d(1024, 1, 1, 1, 0)
         
@@ -548,17 +551,179 @@ class Model(nn.Module):
         else:
             return final, vecs, imp, scheduling, amps
     
-    
+
+class UNet(nn.Module):
+    def __init__(self, channels, return_latent=False, is_disc=False):
+        super().__init__()
+        self.channels = channels
+        self.is_disc = is_disc
+        
+        self.return_latent = return_latent
+        
+        if self.return_latent:
+            self.to_latent = nn.Linear(channels * 4, channels)
+        
+        
+        self.embed_spec = nn.Conv1d(1024, 1024, 1, 1, 0)
+        self.pos = nn.Parameter(torch.zeros(1, 1024, 128).uniform_(-0.01, 0.01))
+        
+
+        self.down = nn.Sequential(
+            # 64
+            nn.Sequential(
+                nn.Dropout(0.1),
+                weight_norm(nn.Conv1d(channels, channels, 3, 2, 1)),
+                nn.LeakyReLU(0.2),
+            ),
+
+            # 32
+            nn.Sequential(
+                nn.Dropout(0.1),
+                weight_norm(nn.Conv1d(channels, channels, 3, 2, 1)),
+                nn.LeakyReLU(0.2),
+            ),
+
+            # 16
+            nn.Sequential(
+                nn.Dropout(0.1),
+                weight_norm(nn.Conv1d(channels, channels, 3, 2, 1)),
+                nn.LeakyReLU(0.2),
+            ),
+
+            # 8
+            nn.Sequential(
+                nn.Dropout(0.1),
+                weight_norm(nn.Conv1d(channels, channels, 3, 2, 1)),
+                nn.LeakyReLU(0.2),
+            ),
+
+            # 4
+            nn.Sequential(
+                nn.Dropout(0.1),
+                weight_norm(nn.Conv1d(channels, channels, 3, 2, 1)),
+                nn.LeakyReLU(0.2),
+            ),
+        )
+        
+        if self.is_disc:
+            self.judge = nn.Linear(self.channels * 4, 1)
+
+        self.up = nn.Sequential(
+            # 8
+            nn.Sequential(
+                nn.Dropout(0.1),
+                weight_norm(nn.ConvTranspose1d(channels, channels, 4, 2, 1)),
+                nn.LeakyReLU(0.2),
+            ),
+            # 16
+            nn.Sequential(
+                nn.Dropout(0.1),
+                weight_norm(nn.ConvTranspose1d(channels, channels, 4, 2, 1)),
+                nn.LeakyReLU(0.2),
+            ),
+
+            # 32
+            nn.Sequential(
+                nn.Dropout(0.1),
+                weight_norm(nn.ConvTranspose1d(channels, channels, 4, 2, 1)),
+                nn.LeakyReLU(0.2),
+            ),
+
+            # 64
+            nn.Sequential(
+                nn.Dropout(0.1),
+                weight_norm(nn.ConvTranspose1d(channels, channels, 4, 2, 1)),
+                nn.LeakyReLU(0.2),
+            ),
+
+            # 128
+            nn.Sequential(
+                nn.Dropout(0.1),
+                weight_norm(nn.ConvTranspose1d(channels, channels, 4, 2, 1)),
+                nn.LeakyReLU(0.2),
+            ),
+        )
+        
+        self.bias = nn.Conv1d(1024, 1024, 1, 1, 0)
+        self.proj = nn.Conv1d(1024, 1024, 1, 1, 0)
+        
+        if self.is_disc:
+            self.apply(lambda x: exp.init_weights(x))
+        
+
+    def forward(self, x):
+        # Input will be (batch, 1024, 128)
+        context = {}
+        
+        batch_size = x.shape[0]
+        
+        if x.shape[1] == 1:
+            x = stft(x, 2048, 256, pad=True).view(
+                batch_size, 128, 1025)[..., :1024].permute(0, 2, 1)
+        
+        x = self.embed_spec(x)
+        x = x + self.pos
+        
+        batch_size = x.shape[0]
+
+        for layer in self.down:
+            x = layer(x)
+            context[x.shape[-1]] = x
+        
+        if self.return_latent:
+            z = self.to_latent(x.view(-1, self.channels * 4))
+        
+        if self.is_disc:
+            j = self.judge(x.view(-1, self.channels * 4))
+            return j
+
+        for layer in self.up:
+            x = layer(x)
+            size = x.shape[-1]
+            if size in context:
+                x = x + context[size]
+
+        b = self.bias(x)
+        x = self.proj(x)
+        x = x - b
+                
+        if self.return_latent:
+            return x, z
+        
+        return x
+
 
 model = Model().to(device)
 optim = optimizer(model, lr=1e-4)
 
 
+disc = UNet(1024, return_latent=False, is_disc=True).to(device)
+disc_optim = optimizer(disc)
+
+# import zounds
+# scale = zounds.LinearScale.from_sample_rate(zounds.SR22050(), 64)
+# fb = zounds.learn.FilterBank(zounds.SR22050(), 64, scale, scaling_factors=0.1, normalize_filters=True).to(device)
+
+
+# def multiscale_pif(x: torch.Tensor):
+    
+#     batch_size = x.shape[0]
+    
+#     bands = fft_frequency_decompose(x, 512)
+#     results = []
+#     for size, band in bands.items():
+#         spec = fb.forward(band, normalize=False)
+#         windowed = spec.unfold(-1, 64, 32)
+#         ws = torch.abs(torch.fft.rfft(windowed))
+#         results.append(ws.view(batch_size, -1))
+
+#     return torch.cat(results, dim=-1)
+                
 
 def transform(x: torch.Tensor):
     batch_size, channels, _ = x.shape
     bands = multiband_transform(x)
-    return torch.cat([b.view(batch_size, channels, -1) for b in bands.values()], dim=-1)
+    return torch.cat([b.reshape(batch_size, channels, -1) for b in bands.values()], dim=-1)
 
         
 def multiband_transform(x: torch.Tensor):
@@ -567,13 +732,25 @@ def multiband_transform(x: torch.Tensor):
     # this requires a window size of (n_samples // 256) * 2
     # and a window size of 512, 256
     
+    # window_size = 512
+    
+    
+    d1 = {f'{k}_xl': stft(v, 512, 64, pad=True) for k, v in bands.items()}
     d1 = {f'{k}_long': stft(v, 128, 64, pad=True) for k, v in bands.items()}
     d3 = {f'{k}_short': stft(v, 64, 32, pad=True) for k, v in bands.items()}
     d4 = {f'{k}_xs': stft(v, 16, 8, pad=True) for k, v in bands.items()}
-    return dict(**d1, **d3, **d4, normal=stft(x, 2048, 256, pad=True))
+    
+    normal = stft(x, 2048, 256, pad=True).reshape(-1, 128, 1025).permute(0, 2, 1)
+    # pooled = F.avg_pool1d(normal, kernel_size=128, stride=1, padding=64)[..., :128]
+    # residual = torch.relu(normal - pooled)
+    
+    return dict(**d1, **d3, **d4, normal=normal)
+    
+    # mbt = multiscale_pif(x)
+    # return dict(mbt=mbt)
 
 
-# def patches(spec: torch.Tensor, size: int = 9, step: int = 3):
+# def patches(spec: torch.Tensor, size: int = 27, step: int = 9):
 #     batch, channels, time = spec.shape
     
 #     p = spec.unfold(1, size, step).unfold(2, size, step)
@@ -586,7 +763,7 @@ def multiband_transform(x: torch.Tensor):
 
 def single_channel_loss_3(target: torch.Tensor, recon: torch.Tensor):
     
-    target = transform(target).view(target.shape[0], -1)
+    target = transform(target).reshape(target.shape[0], -1)
     
     # full = torch.sum(recon, dim=1, keepdim=True)
     # full = transform(full).view(*target.shape)
@@ -630,20 +807,29 @@ def train(batch, i):
     sparsity_loss = torch.abs(encoded).sum() * 1e-3
     
     
+    mask = torch.zeros(b, n_events, 1, device=batch.device).bernoulli_(p=0.5)
+    for_disc = torch.sum(recon * mask, dim=1, keepdim=True).clone().detach()    
+    
+    j = disc.forward(for_disc)
+    d_loss = torch.abs(1 - j).mean()
     scl = single_channel_loss_3(batch, recon) * 1e-4
     
-    # _, _, fake_patches = patches(stft(recon_summed, 2048, 256, pad=True).view(-1, 128, 1025), 9, 3)
-    # _, _, real_patches = patches(stft(batch, 2048, 256, pad=True).view(-1, 128, 1025), 9, 3)
-    
-    # patch_loss = F.mse_loss(fake_patches, real_patches) * 100
     
     
-    loss = scl + sparsity_loss
+    loss = scl + sparsity_loss + d_loss
         
     loss.backward()
     optim.step()
     
     
+    disc_optim.zero_grad()
+    
+    rj = disc.forward(batch)
+    fj = disc.forward(for_disc)
+    disc_loss = (torch.abs(1 - rj).mean() + torch.abs(0 - fj).mean()) * 0.5
+    disc_loss.backward()
+    disc_optim.step()
+    print('DISC', disc_loss.item())
     
     recon = max_norm(recon_summed)
     encoded = max_norm(encoded)
