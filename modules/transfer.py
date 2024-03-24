@@ -11,6 +11,7 @@ from modules.decompose import fft_frequency_decompose, fft_frequency_recompose
 from modules.hypernetwork import HyperNetworkLayer
 from modules.linear import LinearOutputStack
 from modules.pos_encode import pos_encoded
+from modules.softmax import sparse_softmax
 from modules.upsample import ConvUpsample
 from util import device
 import numpy as np
@@ -162,8 +163,9 @@ class TimeVaryingMix(nn.Module):
         
         # TODO: is softmax the best choice for the time-varying mix?
         # TODO: should softmax come before or after the upsampling
-        mix = torch.softmax(mix, dim=1)
         mix = F.interpolate(mix, size=total_samples, mode='linear')
+        mix = torch.softmax(mix, dim=1)
+        
         
         x = audio_channels * mix
         x = torch.sum(x, dim=1)
