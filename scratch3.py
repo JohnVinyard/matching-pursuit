@@ -13,6 +13,7 @@ from torch.nn.utils.weight_norm import weight_norm
 from torch.optim import Adam
 from PIL import Image
 from matplotlib import pyplot as plt
+from torch.distributions import Normal
 
 n_samples = 2**15
 
@@ -160,7 +161,24 @@ if __name__ == '__main__':
         pattern='*/1791.wav')
     
     batch = next(iter(stream))
-    batch = batch.view(1, 1, stream.n_samples)
+    batch = batch.view(1, 1, stream.n_samples).to('cpu')
+    
+    
+    bands = fft_frequency_decompose(batch, 512)
+    specs = {k: stft(b, 128, b.shape[-1] // 128, pad=True) for k, b in bands.items()}
+    spec = torch.cat(list(specs.values()), dim=-1).view(128, -1)
+    
+    plt.matshow(spec)
+    plt.show()
+    plt.clf()
+    
+    # plt.matshow(windows.data.cpu().numpy())
+    # # plt.plot(windows[1000])
+    # # plt.plot(windows[1010])
+    # # plt.plot(windows[1020])
+    # plt.show()
+    # plt.clf()
+    
     
     # bands = fft_frequency_decompose(batch, 512)
     
@@ -168,15 +186,15 @@ if __name__ == '__main__':
     # plt.matshow(spec.data.cpu().numpy())
     # plt.show()
     
-    spec = stft(batch, 2048, 256, pad=True).view(1, 128, 1025).permute(0, 2, 1)
-    pooled = F.avg_pool1d(spec, 128, stride=1, padding=64)[..., :128]
+    # spec = stft(batch, 2048, 256, pad=True).view(1, 128, 1025).permute(0, 2, 1)
+    # pooled = F.avg_pool1d(spec, 128, stride=1, padding=64)[..., :128]
     
     
-    residual = spec - pooled
-    residual = torch.relu(residual)
+    # residual = spec - pooled
+    # residual = torch.relu(residual)
     
-    plt.matshow(residual.data.cpu().numpy().reshape((1025, 128)))
-    plt.show()
+    # plt.matshow(residual.data.cpu().numpy().reshape((1025, 128)))
+    # plt.show()
     
-    plt.matshow(pooled.data.cpu().numpy().reshape((1025, 128)))
-    plt.show()
+    # plt.matshow(pooled.data.cpu().numpy().reshape((1025, 128)))
+    # plt.show()

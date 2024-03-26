@@ -1,7 +1,7 @@
 from io import BytesIO
 from typing import Callable, Iterable, List, Tuple
 from data.audioiter import AudioIterator
-from experiments.e_2024_3_13.inference import model
+from experiments.e_2024_3_21.inference import model
 import zounds
 import torch
 from modules.normalization import max_norm
@@ -14,7 +14,7 @@ import numpy as np
 
 n_samples = 2 ** 15
 samplerate = zounds.SR22050()
-total_examples = 7
+total_examples = 10
 
 
 def create_data_url(b: bytes, content_type: str):
