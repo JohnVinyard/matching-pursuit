@@ -166,11 +166,10 @@ class TimeVaryingMix(nn.Module):
         mix = F.interpolate(mix, size=total_samples, mode='linear')
         mix = torch.softmax(mix, dim=1)
         
-        
         x = audio_channels * mix
         x = torch.sum(x, dim=1)
         return x
-        
+
 
 class ResonanceBlock(nn.Module):
     def __init__(self, n_atoms, window_size, n_frames, total_samples, mix_channels, channels, latent_dim, initial, learnable_resonances):
@@ -193,9 +192,6 @@ class ResonanceBlock(nn.Module):
         self.res_choices = nn.ModuleList([
             nn.Sequential(
                 nn.Linear(latent_dim, n_atoms),
-                # LinearOutputStack(
-                #     channels, layers=3, out_channels=n_atoms, in_channels=latent_dim, norm=nn.LayerNorm((channels,))),
-                # nn.Softmax(dim=-1)
                 nn.ReLU()
             )
             for _ in range(mix_channels)
@@ -205,9 +201,6 @@ class ResonanceBlock(nn.Module):
         self.init_choices = nn.ModuleList([
             nn.Sequential(
                 nn.Linear(latent_dim, n_atoms) ,
-                # LinearOutputStack(
-                #     channels, layers=3, out_channels=n_atoms, in_channels=latent_dim, norm=nn.LayerNorm((channels,))),
-                # nn.Softmax(dim=-1)
                 nn.ReLU()
             )
             for _ in range(mix_channels)
@@ -217,9 +210,6 @@ class ResonanceBlock(nn.Module):
         self.filt_choice = nn.ModuleList([
             nn.Sequential(
                 nn.Linear(latent_dim, n_atoms) ,
-                # LinearOutputStack(
-                #     channels, layers=3, out_channels=n_atoms, in_channels=latent_dim, norm=nn.LayerNorm((channels,))),
-                # nn.Softmax(dim=-1)
                 nn.ReLU()
             )
             for _ in range(mix_channels)
@@ -228,6 +218,7 @@ class ResonanceBlock(nn.Module):
         self.final_mix = nn.Linear(latent_dim, 2)
     
     def forward(self, x, impulse):
+        
         impulse_samples = impulse.shape[-1]
         
         final_mix = self.final_mix(x)
@@ -246,6 +237,7 @@ class ResonanceBlock(nn.Module):
         # impulse = unit_norm(impulse)
         
         resonances = torch.cat(resonances, dim=1).view(-1, self.mix_channels, self.total_samples)
+        
         
         final = fft_convolve(resonances, impulse)
         
@@ -313,6 +305,7 @@ class ResonanceChain(nn.Module):
         
         outputs = torch.cat(outputs, dim=-1)
         mx = self.to_mix(latent).view(-1, 1, 1, self.depth)
+        
         
         outputs = outputs * mx
         outputs = torch.sum(outputs, dim=-1)

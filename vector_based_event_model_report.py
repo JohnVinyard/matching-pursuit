@@ -14,7 +14,7 @@ import numpy as np
 
 n_samples = 2 ** 15
 samplerate = zounds.SR22050()
-total_examples = 10
+total_examples = 3
 
 
 def create_data_url(b: bytes, content_type: str):
@@ -331,7 +331,7 @@ stream = AudioIterator(
     pattern='*.wav')
 
 
-def get_batch_statistics(batch_size=16):
+def get_batch_statistics(batch_size=4):
     stream = AudioIterator(
         batch_size,
         n_samples,
