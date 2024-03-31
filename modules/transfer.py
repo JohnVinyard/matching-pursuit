@@ -1,23 +1,27 @@
 from functools import reduce
-from typing import Any, Collection
+from typing import Collection
 import torch
 from torch import nn
 from modules.angle import windowed_audio
-from modules.atoms import unit_norm
-# import zounds
 
 from modules.ddsp import overlap_add
-from modules.decompose import fft_frequency_decompose, fft_frequency_recompose
-from modules.hypernetwork import HyperNetworkLayer
-from modules.linear import LinearOutputStack
+from modules.normal_pdf import pdf2
 from modules.pos_encode import pos_encoded
-from modules.softmax import sparse_softmax
 from modules.upsample import ConvUpsample
 from util import device
 import numpy as np
 from torch.nn import functional as F
 
 
+def gaussian_bandpass_filtered(means: torch.Tensor, stds: torch.Tensor, signals: int):
+    batch, _, samples = signals.shape
+    n_coeffs = samples // 2 + 1
+    gaussians = pdf2(means, stds, n_coeffs)
+    
+    spec = torch.fft.rfft(signals, dim=-1)
+    spec = spec * gaussians
+    filtered = torch.fft.irfft(spec)
+    return filtered
 
 
 def freq_domain_transfer_function_to_resonance(
