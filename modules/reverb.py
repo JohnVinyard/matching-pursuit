@@ -8,6 +8,7 @@ from config.dotenv import Config
 
 from modules.fft import simple_fft_convolve
 from modules.linear import LinearOutputStack
+from modules.softmax import sparse_softmax
 
 
 class NeuralReverb(nn.Module):
@@ -66,12 +67,13 @@ class NeuralReverb(nn.Module):
 
 
 class ReverbGenerator(nn.Module):
-    def __init__(self, channels, layers, samplerate, n_samples, norm=None):
+    def __init__(self, channels, layers, samplerate, n_samples, norm=None, hard_choice=False):
         super().__init__()
         self.channels = channels
         self.layeres = layers
         self.samplerate = samplerate
         self.n_samples = n_samples
+        self.hard_choice = hard_choice
 
         self.verb = NeuralReverb.from_directory(
             Config.impulse_response_path(), samplerate, n_samples)
@@ -93,7 +95,10 @@ class ReverbGenerator(nn.Module):
         
     
     def forward(self, context, dry):
-        rm = torch.softmax(self.to_room(context).view(-1, self.n_rooms), dim=-1)
+        if self.hard_choice:
+            rm = sparse_softmax(self.to_room(context).view(-1, self.n_rooms), dim=-1, normalize=True)
+        else:
+            rm = torch.softmax(self.to_room(context).view(-1, self.n_rooms), dim=-1)
         # mx = torch.sigmoid(self.to_mix(context).view(-1, 1, 1))
 
         mx = torch.softmax(self.to_mix(context), dim=-1).view(-1, 1, 1, 2)

@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from data.audioiter import AudioIterator
 from modules.angle import windowed_audio
 from modules.decompose import fft_frequency_decompose
+from modules.normal_pdf import pdf2
 from modules.normalization import max_norm
 from modules.overlap_add import overlap_add
 from modules.stft import stft
@@ -151,26 +152,48 @@ def l0_norm(x: torch.Tensor):
     return y.sum()
 
 if __name__ == '__main__':
-    stream = AudioIterator(
-        1, 
-        n_samples=2**15, 
-        samplerate=22050, 
-        normalize=True, 
-        overfit=False, 
-        step_size=1, 
-        pattern='*/1791.wav')
+    # stream = AudioIterator(
+    #     1, 
+    #     n_samples=2**15, 
+    #     samplerate=22050, 
+    #     normalize=True, 
+    #     overfit=False, 
+    #     step_size=1, 
+    #     pattern='*/1791.wav')
     
-    batch = next(iter(stream))
-    batch = batch.view(1, 1, stream.n_samples).to('cpu')
+    # batch = next(iter(stream))
+    # batch = batch.view(1, 1, stream.n_samples).to('cpu')
     
     
-    bands = fft_frequency_decompose(batch, 512)
-    specs = {k: stft(b, 128, b.shape[-1] // 128, pad=True) for k, b in bands.items()}
-    spec = torch.cat(list(specs.values()), dim=-1).view(128, -1)
+    # bands = fft_frequency_decompose(batch, 512)
+    # specs = {k: stft(b, 128, b.shape[-1] // 128, pad=True) for k, b in bands.items()}
+    # spec = torch.cat(list(specs.values()), dim=-1).view(128, -1)
     
-    plt.matshow(spec)
+    # plt.matshow(spec)
+    # plt.show()
+    # plt.clf()
+    
+    # dist = Normal(
+    #     torch.zeros(16).uniform_(0, 1)[:, None],
+    #     torch.zeros(16).uniform_(0.01, 0.06)[:, None]
+    # )
+    # prob = dist.log_prob(torch.linspace(0, 1, 2**15)[None, :])
+    # print(prob.shape)
+    # prob = torch.exp(prob)
+    # prob = prob / prob.max(dim=-1, keepdim=True)[0]
+    
+    
+    
+    
+    prob = pdf2(torch.zeros(8, 4).uniform_(0, 1), torch.zeros(8, 4).uniform_(0.01, 0.05), 2**15)
+    print(prob.shape)
+    prob = prob.view(-1, 2**15)
+    
+    for p in prob:
+        plt.plot(p.data.cpu().numpy())
+    
     plt.show()
-    plt.clf()
+    
     
     # plt.matshow(windows.data.cpu().numpy())
     # # plt.plot(windows[1000])

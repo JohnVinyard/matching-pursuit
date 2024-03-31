@@ -158,6 +158,8 @@ class TimeVaryingMix(nn.Module):
             weight_norm=True)
     
     def forward(self, x, audio_channels):
+        batch_size = x.shape[0]
+        
         total_samples = audio_channels.shape[-1]
         mix = self.to_time_varying_mix(x).view(-1, self.n_mixer_channels, self.n_frames)
         
@@ -166,8 +168,12 @@ class TimeVaryingMix(nn.Module):
         mix = F.interpolate(mix, size=total_samples, mode='linear')
         mix = torch.softmax(mix, dim=1)
         
+        # audio channels and mix will both be (batch * n_events, mix_channels, samples)
         x = audio_channels * mix
+        # the final result will be (batch * n_events, samples)
         x = torch.sum(x, dim=1)
+        # move back to (batch, n_events, samples)
+        x = x.view(batch_size, -1, total_samples)
         return x
 
 
@@ -218,12 +224,17 @@ class ResonanceBlock(nn.Module):
         self.final_mix = nn.Linear(latent_dim, 2)
     
     def forward(self, x, impulse):
+        print('------------------------------')
+        
+        batch_size = x.shape[0]
         
         impulse_samples = impulse.shape[-1]
         
         final_mix = self.final_mix(x)
+        print(f'\t BATCH_SIZE {batch_size} FINAL_MIX {final_mix.shape}')
+        
         final_mix = torch.softmax(final_mix, dim=-1)
-        final_mix = final_mix.view(-1, 1, 1, 2)
+        final_mix = final_mix.view(batch_size, -1, 1, 2)
         
         resonances = [res_choice(x)[:, None, ...] for res_choice in self.res_choices]
         inits = [init_choice(x)[:, None, ...] for init_choice in self.init_choices]
@@ -239,12 +250,14 @@ class ResonanceBlock(nn.Module):
         resonances = torch.cat(resonances, dim=1).view(-1, self.mix_channels, self.total_samples)
         
         
+        # final will be (batch * n_events, mix_channels, samples)
         final = fft_convolve(resonances, impulse)
         
         # this will generate a mix over time of the different convolutions
         # with a resonance function
-        mixed_down = self.generate_mix.forward(x, final).view(-1, 1, self.total_samples)
+        mixed_down = self.generate_mix.forward(x, final)
         
+        impulse = impulse.view(*mixed_down.shape)
         imp_and_res = torch.cat([impulse[..., None], mixed_down[..., None]], dim=-1)
         
         x = imp_and_res * final_mix
@@ -296,6 +309,8 @@ class ResonanceChain(nn.Module):
         self.to_mix = nn.Linear(latent_dim, depth)
     
     def forward(self, latent: torch.Tensor, impulse: torch.Tensor):
+        batch_size = latent.shape[0]
+        
         imp = impulse
         outputs = []
         
@@ -304,8 +319,10 @@ class ResonanceChain(nn.Module):
             outputs.append(imp[..., None])
         
         outputs = torch.cat(outputs, dim=-1)
-        mx = self.to_mix(latent).view(-1, 1, 1, self.depth)
+        mx = self.to_mix(latent).view(batch_size, -1, 1, self.depth)
         
+        
+        print(f'\t OUTPUTS {outputs.shape} {mx.shape}')
         
         outputs = outputs * mx
         outputs = torch.sum(outputs, dim=-1)
@@ -438,8 +455,6 @@ class FFTShifter(torch.autograd.Function):
     def backward(self, *grad_outputs):
         x, = grad_outputs
         items, positions = self.saved_tensors
-        # print(items.grad.shape)
-        # print(positions.grad.shape)
         return x
 
 differentiable_fft_shift = FFTShifter.apply

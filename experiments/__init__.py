@@ -10,7 +10,7 @@
 # from .e_2024_2_22 import WithDiscriminator as Current
 
 
-# from .e_2024_2_25 import SwitchEvents as Current
+from .e_2024_2_25 import SwitchEvents as Current
 
 # from .e_2024_2_29 import SwitchEventsWithSparsity as Current
 # from .e_2024_3_4 import UnsupervisedEventSeparation as Current
@@ -29,4 +29,7 @@
 
 
 # from .e_2024_3_20 import IterativeDecomposition7NoDiscriminator as Current
-from .e_2024_3_21 import IterativeDecomposition8EventGenerator as Current
+# from .e_2024_3_21 import IterativeDecomposition8EventGenerator as Current
+
+
+from .e_2024_3_29 import RelaxedSparsity as Current

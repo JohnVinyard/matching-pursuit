@@ -59,6 +59,10 @@ class Experiment(object):
             residual=self.residual_loss,
             norm_periodicities=norm_periodicities).to(device)
     
+    def apply_filter_bank(self, x):
+        x = self.fb.forward(x, normalize=False)
+        return x
+    
     def pooled_filter_bank(self, x):
         orig_shape = x.shape[-1]
         x = self.fb.forward(x, normalize=False)
