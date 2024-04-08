@@ -1,4 +1,4 @@
-from typing import Union
+from typing import List, Union
 from conjure import SupportedContentType, numpy_conjure
 import torch
 from torch import nn
@@ -39,8 +39,11 @@ class EnvelopeType(Enum):
     
 
 n_atoms = 64
-gaussian_envelope = True
-softmax_positioning = False
+envelope_dist = EnvelopeType.Gamma
+force_pos_adjustment = False
+# For gamma distributions, the center of gravity is always near zero,
+# so further adjustment is required
+softmax_positioning = envelope_dist == EnvelopeType.Gamma or force_pos_adjustment
 hard_resonance_choice = False
 loss_type = LossType.IterativeMultiband.value
 
@@ -184,25 +187,6 @@ class EvolvingFilteredResonance(nn.Module):
         
         return start_resonance, end_resonance, filt_crossfade_stacked
         
-'''
-# TODO: Use a gamma distribution here instead!
-        # https://pytorch.org/docs/stable/distributions.html#gamma
-        if gaussian_envelope:
-            envelopes = pdf2(
-                self.env[:, :, 0], 
-                torch.abs(self.env[:, :, 1] + 1e-12) * 0.1, 
-                exp.n_samples).view(1, n_atoms, exp.n_samples)
-        else:
-            envelopes = torch.relu(self.envelope_choice) @ torch.relu(self.envelopes)
-            envelopes = F.upsample(envelopes, size=self.envelope_samples, mode='linear')
-            envelopes = F.pad(envelopes, (0, exp.n_samples - self.envelope_samples))
-        
-        positioned_noise = filtered_noise * envelopes
-        
-        if softmax_positioning:
-            shifts = sparse_softmax(self.shifts, dim=-1, normalize=True)
-            positioned_noise = fft_convolve(positioned_noise, shifts)
-'''
 
 
 class EnvelopeAndPosition(nn.Module):
@@ -210,8 +194,17 @@ class EnvelopeAndPosition(nn.Module):
         super().__init__()
         self.n_samples = n_samples
         self.envelope_type = envelope_type
+        
+        self.gamma_ramp_size = 128
+        self.gamma_ramp_exponent = 2
     
-    def forward(self, signals: torch.Tensor, a: torch.Tensor, b: torch.Tensor, adjustment: Union[torch.Tensor, None]):
+    def forward(
+            self, 
+            signals: torch.Tensor, 
+            a: torch.Tensor, 
+            b: torch.Tensor, 
+            adjustment: Union[torch.Tensor, None]):
+        
         batch, n_events, n_samples = signals.shape
         assert n_samples == self.n_samples
         
@@ -221,7 +214,10 @@ class EnvelopeAndPosition(nn.Module):
         if self.envelope_type == EnvelopeType.Gaussian.value:
             envelopes = pdf2(a, (torch.abs(b) + 1e-12) * 0.1, self.n_samples)
         elif self.envelope_type == EnvelopeType.Gamma.value:
-            envelopes = gamma_pdf(torch.abs(a) + 1e-12, torch.abs(b) + 1e-12, self.n_samples)
+            envelopes = gamma_pdf((torch.abs(a) + 1e-12), (torch.abs(b) + 1e-12), self.n_samples)
+            ramp = torch.zeros_like(envelopes)
+            ramp[..., :self.gamma_ramp_size] = torch.linspace(0, 1, self.gamma_ramp_size)[None, None, :] ** self.gamma_ramp_exponent
+            envelopes = envelopes * ramp
         else:
             raise ValueError(f'{self.envelope_type.value} is not supported')
         
@@ -236,6 +232,30 @@ class EnvelopeAndPosition(nn.Module):
         return positioned_signals
 
 
+
+class Mixer(nn.Module):
+    def __init__(self):
+        super().__init__()
+    
+    def forward(self, signals: List[torch.Tensor], mix: torch.Tensor):
+        
+        stacked_signals = torch.cat([s[..., None] for s in signals], dim=-1)
+        batch, n_events, n_samples, n_channels = stacked_signals.shape
+        
+        assert n_channels == len(signals)
+        
+        # this is a mix that varies over time
+        is_time_series = mix.shape == (batch, n_events, n_samples, n_channels)
+        # this is a mix that is constant over time
+        is_global = mix.shape == (batch, n_events, 1, n_channels)
+        
+        assert is_time_series or is_global
+        
+        
+        result = torch.sum(stacked_signals * mix, dim=-1)
+        assert result.shape == (batch, n_events, n_samples)
+        return result
+    
 
 def single_channel_loss_3(target: torch.Tensor, recon: torch.Tensor):
     
@@ -282,16 +302,8 @@ class Model(nn.Module):
     def __init__(self):
         super().__init__()
         
-        # self.envelope_frames = 32
-        # self.envelope_samples = 4096
-        # self.n_envelopes = 128
-        
-        # self.envelopes = nn.Parameter(torch.zeros(1, self.n_envelopes, self.envelope_frames).uniform_(0, 1))
-        # self.envelope_choice = nn.Parameter(torch.zeros(1, n_atoms, self.n_envelopes).uniform_(-1, 1))
-        
-        
         # means and stds for envelope
-        self.env = nn.Parameter((torch.zeros(1, n_atoms, 2).uniform_(0, 1)))
+        self.env = nn.Parameter((torch.zeros(1, n_atoms, 2).uniform_(1e-8, 1)))
         
         self.shifts = nn.Parameter(torch.zeros(1, n_atoms, exp.n_samples).uniform_(0, 1))
         
@@ -318,7 +330,10 @@ class Model(nn.Module):
             n_samples=exp.n_samples)
         
         self.env_and_position = EnvelopeAndPosition(
-            n_samples=exp.n_samples, envelope_type=EnvelopeType.Gaussian.value)
+            n_samples=exp.n_samples, 
+            envelope_type=EnvelopeType.Gaussian.value)
+        
+        self.mixer = Mixer()
         
         
         # one-hot choice of resonance for each atom
@@ -365,23 +380,6 @@ class Model(nn.Module):
         decaying_resonance = filtered_resonance * decays
         decaying_resonance2 = filt_res_2 * decays
         
-        # TODO: Use a gamma distribution here instead!
-        # https://pytorch.org/docs/stable/distributions.html#gamma
-        # if gaussian_envelope:
-        #     envelopes = pdf2(
-        #         self.env[:, :, 0], 
-        #         torch.abs(self.env[:, :, 1] + 1e-12) * 0.1, 
-        #         exp.n_samples).view(1, n_atoms, exp.n_samples)
-        # else:
-        #     envelopes = torch.relu(self.envelope_choice) @ torch.relu(self.envelopes)
-        #     envelopes = F.upsample(envelopes, size=self.envelope_samples, mode='linear')
-        #     envelopes = F.pad(envelopes, (0, exp.n_samples - self.envelope_samples))
-        
-        # positioned_noise = filtered_noise * envelopes
-        
-        # if softmax_positioning:
-        #     shifts = sparse_softmax(self.shifts, dim=-1, normalize=True)
-        #     positioned_noise = fft_convolve(positioned_noise, shifts)
 
         positioned_noise = self.env_and_position.forward(
             signals=filtered_noise, 
@@ -397,16 +395,20 @@ class Model(nn.Module):
             positioned_noise,
             decaying_resonance2
         )
-        stacked = torch.cat([res[..., None], res2[..., None]], dim=-1)
-        mixed = torch.sum(filt_crossfade_stacked * stacked, dim=-1)
+        # stacked = torch.cat([res[..., None], res2[..., None]], dim=-1)
+        # mixed = torch.sum(filt_crossfade_stacked * stacked, dim=-1)
+        
+        mixed = self.mixer.forward([res, res2], filt_crossfade_stacked)
         
         
-        stacked = torch.cat([
-            positioned_noise[..., None], 
-            mixed[..., None]], dim=-1)
+        # stacked = torch.cat([
+        #     positioned_noise[..., None], 
+        #     mixed[..., None]], dim=-1)
         
         # # TODO: This is a dot product
-        final = torch.sum(stacked * overall_mix[:, :, None, :], dim=-1)
+        # final = torch.sum(stacked * overall_mix[:, :, None, :], dim=-1)
+        
+        final = self.mixer.forward([positioned_noise, mixed], overall_mix[:, :, None, :])
         assert final.shape == (1, n_atoms, exp.n_samples)
         
         final = final.view(1, n_atoms, exp.n_samples)
@@ -414,7 +416,6 @@ class Model(nn.Module):
         
         amps = torch.abs(self.amplitudes)
         final = final * amps
-        # final = torch.sum(final, dim=1, keepdim=True)
         
         final = self.verb.forward(self.verb_params, final)
         

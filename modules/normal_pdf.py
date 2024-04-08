@@ -26,8 +26,10 @@ def gamma_pdf(shape: torch.Tensor, rate: torch.Tensor, n_elements: int):
     Probability density function for a gamma distribution
     """
     dist = Gamma(shape[..., None], rate[..., None])
+    # KLUDGE: This range is arbitrarily based on the wikipedia graph here:
+    # https://en.wikipedia.org/wiki/Gamma_distribution#/media/File:Gamma_distribution_pdf.svg
     prob = dist.log_prob(
-        torch.linspace(0, 1, n_elements, device=shape.device).view(*([1] * len(rate.shape)), n_elements))
+        torch.linspace(1e-12, 20, n_elements, device=shape.device).view(*([1] * len(rate.shape)), n_elements))
     prob = torch.exp(prob)
     prob = prob / (prob.max(dim=-1, keepdim=True)[0] + 1e-8)
     return prob
