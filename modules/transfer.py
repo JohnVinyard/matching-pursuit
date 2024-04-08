@@ -1,5 +1,5 @@
 from functools import reduce
-from typing import Collection
+from typing import Collection, List
 import torch
 from torch import nn
 from modules.angle import windowed_audio
@@ -24,7 +24,12 @@ def gaussian_bandpass_filtered(means: torch.Tensor, stds: torch.Tensor, signals:
     filtered = torch.fft.irfft(spec)
     return filtered
 
-def make_waves(n_samples, f0s, samplerate):
+def make_waves(n_samples: int, f0s: List[float], samplerate: int):
+    """
+    Generate pure sines, sawtooth, triangle, and square waves
+    with the provided fundamental frequencies
+    """
+    
     sawtooths = []
     squares = []
     triangles = []
