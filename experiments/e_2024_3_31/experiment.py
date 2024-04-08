@@ -28,7 +28,10 @@ exp = Experiment(
     kernel_size=512)
 
 
-n_atoms = 128
+n_atoms = 64
+gaussian_envelope = True
+softmax_positioning = False
+hard_resonance_choice = False
 
 def transform(x: torch.Tensor):
     batch_size, channels, _ = x.shape
@@ -115,6 +118,14 @@ class Model(nn.Module):
     def __init__(self):
         super().__init__()
         
+        self.envelope_frames = 32
+        self.envelope_samples = 4096
+        self.n_envelopes = 128
+        
+        self.envelopes = nn.Parameter(torch.zeros(1, self.n_envelopes, self.envelope_frames).uniform_(0, 1))
+        self.envelope_choice = nn.Parameter(torch.zeros(1, n_atoms, self.n_envelopes).uniform_(-1, 1))
+        
+        
         # means and stds for envelope
         self.env = nn.Parameter((torch.zeros(1, n_atoms, 2).uniform_(0, 1)))
         
@@ -142,7 +153,7 @@ class Model(nn.Module):
         self.resonance_filter2 = nn.Parameter(torch.zeros(1, n_atoms, 2).uniform_(0, 1))
         
         # amplitudes
-        self.amplitudes = nn.Parameter(torch.zeros(1, n_atoms, 1).uniform_(0, 0.01))
+        self.amplitudes = nn.Parameter(torch.zeros(1, n_atoms, 1).uniform_(0, 1) ** 2)
         
         self.verb_params = nn.Parameter(torch.zeros(1, n_atoms, 4).uniform_(-1, 1))
         
@@ -151,7 +162,10 @@ class Model(nn.Module):
     def forward(self, x):
         overall_mix = torch.softmax(self.mix, dim=-1)
         
-        resonances = sparse_softmax(self.resonance_choice, normalize=True, dim=-1)
+        if hard_resonance_choice:
+            resonances = sparse_softmax(self.resonance_choice, normalize=True, dim=-1)
+        else:
+            resonances = torch.relu(self.resonance_choice)
         
         resonances = resonances @ self.waves
         assert resonances.shape == (1, n_atoms, exp.n_samples)
@@ -209,15 +223,23 @@ class Model(nn.Module):
         decaying_resonance = filtered_resonance * decays
         decaying_resonance2 = filt_res_2 * decays
         
-        envelopes = pdf2(
-            self.env[:, :, 0], 
-            torch.abs(self.env[:, :, 1] + 1e-12) * 0.1, 
-            exp.n_samples).view(1, n_atoms, exp.n_samples)
+        # TODO: Use a gamma distribution here instead!
+        # https://pytorch.org/docs/stable/distributions.html#gamma
+        if gaussian_envelope:
+            envelopes = pdf2(
+                self.env[:, :, 0], 
+                torch.abs(self.env[:, :, 1] + 1e-12) * 0.1, 
+                exp.n_samples).view(1, n_atoms, exp.n_samples)
+        else:
+            envelopes = torch.relu(self.envelope_choice) @ torch.relu(self.envelopes)
+            envelopes = F.upsample(envelopes, size=self.envelope_samples, mode='linear')
+            envelopes = F.pad(envelopes, (0, exp.n_samples - self.envelope_samples))
         
         positioned_noise = filtered_noise * envelopes
         
-        shifts = sparse_softmax(self.shifts, dim=-1, normalize=True)
-        positioned_noise = fft_convolve(positioned_noise, shifts)
+        if softmax_positioning:
+            shifts = sparse_softmax(self.shifts, dim=-1, normalize=True)
+            positioned_noise = fft_convolve(positioned_noise, shifts)
         
         
         res = fft_convolve(
@@ -261,17 +283,16 @@ def train(batch, i):
     
     # hinge loss to encourage a sparse solution
     mask = amps > 1e-6
-    sparsity = torch.abs(amps * mask).sum() * 1e-3
+    sparsity = torch.abs(amps * mask).sum() * 0.1
     
     nz = mask.sum() / amps.nelement()
-    print(f'{nz} percent sparsity')
+    print(f'{nz} percent sparsity with min {amps.min().item()} and max {amps.max().item()}')
     
-    # loss = exp.perceptual_loss(torch.sum(recon, dim=1, keepdim=True), batch) + sparsity
+    # loss = exp.perceptual_loss(torch.sum(recon, dim=1, keepdim=True), batch) #+ sparsity
     
-    # Does not work well
     # real = transform(batch)
     # fake = transform(torch.sum(recon, dim=1, keepdim=True))
-    # loss = F.mse_loss(fake, real) + sparsity
+    # loss = F.mse_loss(fake, real) #+ sparsity
     
     loss = single_channel_loss_3(batch, recon) + sparsity
     
