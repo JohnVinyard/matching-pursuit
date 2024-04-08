@@ -1,3 +1,4 @@
+from typing import Union
 from conjure import SupportedContentType, numpy_conjure
 import torch
 from torch import nn
@@ -6,7 +7,7 @@ from config.experiment import Experiment
 from modules import stft
 from modules.decompose import fft_frequency_decompose
 from modules.fft import fft_convolve, fft_shift
-from modules.normal_pdf import pdf2
+from modules.normal_pdf import gamma_pdf, pdf2
 from modules.normalization import max_norm, unit_norm
 from modules.reverb import ReverbGenerator
 from modules.softmax import sparse_softmax
@@ -31,6 +32,11 @@ class LossType(Enum):
     PhaseInvariantFeature = 'PIF'
     IterativeMultiband = 'IMB'
     AllAtOnceMultiband = 'AAOMB'
+    
+class EnvelopeType(Enum):
+    Gaussian = 'Gaussian'
+    Gamma = 'Gamma'
+    
 
 n_atoms = 64
 gaussian_envelope = True
@@ -133,37 +139,6 @@ class ExponentialDecayEnvelope(nn.Module):
             n_samples=self.n_samples)
         return envelopes
 
-'''
-# resonance 1
-resonance_spec = torch.fft.rfft(resonances, dim=-1)
-resonance_filter = pdf2(
-    # note: always low-pass
-    torch.zeros_like(self.resonance_filter[:, :, 0]),
-    torch.abs(self.resonance_filter[:, :, 1]) + 1e-12,
-    resonance_spec.shape[-1]
-)
-
-filtered_resonance = resonance_spec * resonance_filter
-filtered_resonance = torch.fft.irfft(filtered_resonance)
-
-
-# resonance 2
-res_filter_2 = pdf2(
-    # note: always low-pass
-    torch.zeros_like(self.resonance_filter2[:, :, 0]),
-    torch.abs(self.resonance_filter2[:, :, 1]) + 1e-12,
-    resonance_spec.shape[-1]
-)
-filt_res_2 = resonance_spec * res_filter_2
-filt_res_2 = torch.fft.irfft(filt_res_2)
-assert filt_res_2.shape == filtered_resonance.shape
-
-# filter crossfade
-filt_crossfade = exponential_decay(self.filter_decays, n_atoms, 128, 0.02, exp.n_samples)
-filt_crossfade_inverse = 1 - filt_crossfade
-filt_crossfade_stacked = torch.cat([filt_crossfade[..., None], filt_crossfade_inverse[..., None]], dim=-1)
-assert filt_crossfade_stacked.shape == (1, n_atoms, exp.n_samples, 2)
-'''
 
 class EvolvingFilteredResonance(nn.Module):
     def __init__(self, base_crossfade_resonance: float, crossfade_frames: int, n_samples: int):
@@ -197,15 +172,68 @@ class EvolvingFilteredResonance(nn.Module):
             decays, 
             n_atoms=n_events, 
             n_frames=self.crossfade_frames, 
-            base_resonance=self.base_crossfade_resonance)
+            base_resonance=self.base_crossfade_resonance,
+            n_samples=self.n_samples)
         filt_crossfade_inverse = 1 - filt_crossfade
         
         filt_crossfade_stacked = torch.cat([
             filt_crossfade[..., None], 
             filt_crossfade_inverse[..., None]], dim=-1)
         
+        assert filt_crossfade_stacked.shape == (batch, n_events, self.n_samples, 2)
+        
         return start_resonance, end_resonance, filt_crossfade_stacked
         
+'''
+# TODO: Use a gamma distribution here instead!
+        # https://pytorch.org/docs/stable/distributions.html#gamma
+        if gaussian_envelope:
+            envelopes = pdf2(
+                self.env[:, :, 0], 
+                torch.abs(self.env[:, :, 1] + 1e-12) * 0.1, 
+                exp.n_samples).view(1, n_atoms, exp.n_samples)
+        else:
+            envelopes = torch.relu(self.envelope_choice) @ torch.relu(self.envelopes)
+            envelopes = F.upsample(envelopes, size=self.envelope_samples, mode='linear')
+            envelopes = F.pad(envelopes, (0, exp.n_samples - self.envelope_samples))
+        
+        positioned_noise = filtered_noise * envelopes
+        
+        if softmax_positioning:
+            shifts = sparse_softmax(self.shifts, dim=-1, normalize=True)
+            positioned_noise = fft_convolve(positioned_noise, shifts)
+'''
+
+
+class EnvelopeAndPosition(nn.Module):
+    def __init__(self, n_samples: int, envelope_type: EnvelopeType):
+        super().__init__()
+        self.n_samples = n_samples
+        self.envelope_type = envelope_type
+    
+    def forward(self, signals: torch.Tensor, a: torch.Tensor, b: torch.Tensor, adjustment: Union[torch.Tensor, None]):
+        batch, n_events, n_samples = signals.shape
+        assert n_samples == self.n_samples
+        
+        batch, n_events = a.shape
+        assert a.shape == b.shape
+        
+        if self.envelope_type == EnvelopeType.Gaussian.value:
+            envelopes = pdf2(a, (torch.abs(b) + 1e-12) * 0.1, self.n_samples)
+        elif self.envelope_type == EnvelopeType.Gamma.value:
+            envelopes = gamma_pdf(torch.abs(a) + 1e-12, torch.abs(b) + 1e-12, self.n_samples)
+        else:
+            raise ValueError(f'{self.envelope_type.value} is not supported')
+        
+        assert envelopes.shape == (batch, n_events, self.n_samples)
+        
+        positioned_signals = signals * envelopes
+        
+        if adjustment is not None:
+            shifts = sparse_softmax(adjustment, dim=-1, normalize=True)
+            positioned_signals = fft_convolve(positioned_signals, shifts)
+        
+        return positioned_signals
 
 
 
@@ -254,12 +282,12 @@ class Model(nn.Module):
     def __init__(self):
         super().__init__()
         
-        self.envelope_frames = 32
-        self.envelope_samples = 4096
-        self.n_envelopes = 128
+        # self.envelope_frames = 32
+        # self.envelope_samples = 4096
+        # self.n_envelopes = 128
         
-        self.envelopes = nn.Parameter(torch.zeros(1, self.n_envelopes, self.envelope_frames).uniform_(0, 1))
-        self.envelope_choice = nn.Parameter(torch.zeros(1, n_atoms, self.n_envelopes).uniform_(-1, 1))
+        # self.envelopes = nn.Parameter(torch.zeros(1, self.n_envelopes, self.envelope_frames).uniform_(0, 1))
+        # self.envelope_choice = nn.Parameter(torch.zeros(1, n_atoms, self.n_envelopes).uniform_(-1, 1))
         
         
         # means and stds for envelope
@@ -284,6 +312,13 @@ class Model(nn.Module):
             base_resonance=0.02, 
             n_frames=128, 
             n_samples=exp.n_samples)
+        self.evolving_resonance = EvolvingFilteredResonance(
+            base_crossfade_resonance=0.02, 
+            crossfade_frames=128, 
+            n_samples=exp.n_samples)
+        
+        self.env_and_position = EnvelopeAndPosition(
+            n_samples=exp.n_samples, envelope_type=EnvelopeType.Gaussian.value)
         
         
         # one-hot choice of resonance for each atom
@@ -315,40 +350,16 @@ class Model(nn.Module):
             (torch.abs(self.noise_filter[:, :, 1]) + 1e-12))
         
         
-        
-        
-        # resonance 1
-        resonance_spec = torch.fft.rfft(resonances, dim=-1)
-        resonance_filter = pdf2(
-            # note: always low-pass
-            torch.zeros_like(self.resonance_filter[:, :, 0]),
-            torch.abs(self.resonance_filter[:, :, 1]) + 1e-12,
-            resonance_spec.shape[-1]
+        filtered_resonance, filt_res_2, filt_crossfade_stacked = self.evolving_resonance.forward(
+            resonances=resonances,
+            decays=self.filter_decays,
+            start_filter_means=torch.zeros_like(self.resonance_filter[:, :, 0]),
+            start_filter_stds=torch.abs(self.resonance_filter[:, :, 1]) + 1e-12,
+            end_filter_means=torch.zeros_like(self.resonance_filter2[:, :, 0]),
+            end_filter_stds=torch.abs(self.resonance_filter2[:, :, 1]) + 1e-12
         )
         
-        filtered_resonance = resonance_spec * resonance_filter
-        filtered_resonance = torch.fft.irfft(filtered_resonance)
         
-        
-        # resonance 2
-        res_filter_2 = pdf2(
-            # note: always low-pass
-            torch.zeros_like(self.resonance_filter2[:, :, 0]),
-            torch.abs(self.resonance_filter2[:, :, 1]) + 1e-12,
-            resonance_spec.shape[-1]
-        )
-        filt_res_2 = resonance_spec * res_filter_2
-        filt_res_2 = torch.fft.irfft(filt_res_2)
-        assert filt_res_2.shape == filtered_resonance.shape
-        
-        # filter crossfade
-        filt_crossfade = exponential_decay(self.filter_decays, n_atoms, 128, 0.02, exp.n_samples)
-        filt_crossfade_inverse = 1 - filt_crossfade
-        filt_crossfade_stacked = torch.cat([filt_crossfade[..., None], filt_crossfade_inverse[..., None]], dim=-1)
-        assert filt_crossfade_stacked.shape == (1, n_atoms, exp.n_samples, 2)
-        
-        
-        # decays = exponential_decay(self.decays, n_atoms, 128, 0.02, exp.n_samples)
         decays = self.amp_envelope_generator.forward(self.decays)
         
         decaying_resonance = filtered_resonance * decays
@@ -356,22 +367,27 @@ class Model(nn.Module):
         
         # TODO: Use a gamma distribution here instead!
         # https://pytorch.org/docs/stable/distributions.html#gamma
-        if gaussian_envelope:
-            envelopes = pdf2(
-                self.env[:, :, 0], 
-                torch.abs(self.env[:, :, 1] + 1e-12) * 0.1, 
-                exp.n_samples).view(1, n_atoms, exp.n_samples)
-        else:
-            envelopes = torch.relu(self.envelope_choice) @ torch.relu(self.envelopes)
-            envelopes = F.upsample(envelopes, size=self.envelope_samples, mode='linear')
-            envelopes = F.pad(envelopes, (0, exp.n_samples - self.envelope_samples))
+        # if gaussian_envelope:
+        #     envelopes = pdf2(
+        #         self.env[:, :, 0], 
+        #         torch.abs(self.env[:, :, 1] + 1e-12) * 0.1, 
+        #         exp.n_samples).view(1, n_atoms, exp.n_samples)
+        # else:
+        #     envelopes = torch.relu(self.envelope_choice) @ torch.relu(self.envelopes)
+        #     envelopes = F.upsample(envelopes, size=self.envelope_samples, mode='linear')
+        #     envelopes = F.pad(envelopes, (0, exp.n_samples - self.envelope_samples))
         
-        positioned_noise = filtered_noise * envelopes
+        # positioned_noise = filtered_noise * envelopes
         
-        if softmax_positioning:
-            shifts = sparse_softmax(self.shifts, dim=-1, normalize=True)
-            positioned_noise = fft_convolve(positioned_noise, shifts)
-        
+        # if softmax_positioning:
+        #     shifts = sparse_softmax(self.shifts, dim=-1, normalize=True)
+        #     positioned_noise = fft_convolve(positioned_noise, shifts)
+
+        positioned_noise = self.env_and_position.forward(
+            signals=filtered_noise, 
+            a=self.env[:, :, 0], 
+            b=self.env[:, :, 1], 
+            adjustment=self.shifts if softmax_positioning else None)        
         
         res = fft_convolve(
             positioned_noise, 
