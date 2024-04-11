@@ -1,4 +1,3 @@
 Try a variant of gaussian splatting for audio
 
-# Variations
-- "soft" resonance choice
+Surprisingly, f0 optimization works when unconstrained

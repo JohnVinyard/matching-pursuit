@@ -42,7 +42,7 @@ class EnvelopeType(Enum):
     
 
 n_atoms = 64
-envelope_dist = EnvelopeType.Gaussian
+envelope_dist = EnvelopeType.Gamma
 force_pos_adjustment = False
 # For gamma distributions, the center of gravity is always near zero,
 # so further adjustment is required
