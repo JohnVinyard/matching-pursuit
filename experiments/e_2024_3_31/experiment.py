@@ -9,6 +9,7 @@ from modules.decompose import fft_frequency_decompose
 from modules.fft import fft_convolve, fft_shift
 from modules.normal_pdf import gamma_pdf, pdf2
 from modules.normalization import max_norm, unit_norm
+from modules.quantize import QuantizedResonanceMixture
 from modules.reverb import ReverbGenerator
 from modules.softmax import sparse_softmax
 from modules.transfer import gaussian_bandpass_filtered, make_waves
@@ -19,6 +20,7 @@ from util.music import musical_scale_hz
 from util.readmedocs import readme
 from torch.nn import functional as F
 from enum import Enum
+import numpy as np
 
 
 exp = Experiment(
@@ -32,6 +34,7 @@ class LossType(Enum):
     PhaseInvariantFeature = 'PIF'
     IterativeMultiband = 'IMB'
     AllAtOnceMultiband = 'AAOMB'
+    FFT = 'FFT'
     
 class EnvelopeType(Enum):
     Gaussian = 'Gaussian'
@@ -39,13 +42,14 @@ class EnvelopeType(Enum):
     
 
 n_atoms = 64
-envelope_dist = EnvelopeType.Gamma
+envelope_dist = EnvelopeType.Gaussian
 force_pos_adjustment = False
 # For gamma distributions, the center of gravity is always near zero,
 # so further adjustment is required
 softmax_positioning = envelope_dist == EnvelopeType.Gamma or force_pos_adjustment
 hard_resonance_choice = False
-loss_type = LossType.IterativeMultiband.value
+loss_type = LossType.AllAtOnceMultiband.value
+optimize_f0 = False
 
 
 def exponential_decay(
@@ -95,6 +99,83 @@ class BandPassFilteredNoise(nn.Module):
         assert filtered_noise.shape == (batch, n_events, self.n_samples)
         return filtered_noise
         
+
+
+class F0Resonance(nn.Module):
+    """
+    TODO: Try the following:
+    
+    - wavetable with fft_shift
+    - wavetable with gaussian sampling kernel
+    """
+    def __init__(self, n_f0_elements: int, n_octaves: int, n_samples: int, min_hz: int = 20, max_hz: int = 3000):
+        super().__init__()
+        self.min_hz = min_hz
+        self.max_hz = max_hz
+        factors = torch.arange(1, 1 + n_octaves, 1)
+        self.n_octaves = n_octaves
+        self.n_samples = n_samples
+        self.n_f0_elements = n_f0_elements
+        
+        self.register_buffer('powers', 1 / 2 ** (torch.arange(1, 1 + n_f0_elements, 1)))
+        self.register_buffer('factors', factors)
+        
+        
+        self.min_freq = self.min_hz / (exp.samplerate // 2)
+        self.max_freq = self.max_hz / (exp.samplerate // 2)
+        self.freq_range = self.max_freq - self.min_freq
+    
+    def forward(self, f0: torch.Tensor, decay_coefficients: torch.Tensor, phase_offsets: torch.Tensor):
+        batch, n_events, n_elements = f0.shape
+        
+        # assert n_elements == self.n_f0_elements
+        
+        f0 = torch.abs(
+            f0 #@ self.powers
+        )
+        f0 = f0.view(batch, n_events, 1)
+        
+        assert decay_coefficients.shape == f0.shape
+        assert phase_offsets.shape == (batch, n_events, 1)
+        
+        phase_offsets = torch.sigmoid(phase_offsets) * np.pi
+        
+        exp_decays = exponential_decay(
+            torch.sigmoid(decay_coefficients), 
+            n_atoms=n_events, 
+            n_frames=self.n_octaves, 
+            base_resonance=0.01, 
+            n_samples=self.n_octaves)
+        assert exp_decays.shape == (batch, n_events, self.n_octaves)
+        
+        
+        # frequencies in radians
+        f0 = self.min_freq + (f0 * self.freq_range)
+        f0 = f0 * np.pi
+        
+        # octaves
+        f0s = f0 * self.factors[None, None, :]
+        assert f0s.shape == (batch, n_events, self.n_octaves)
+        
+        # filter out anything above nyquist
+        # mask = f0s < 1
+        # f0s = f0s * mask
+        
+        # generate sine waves
+        f0s = f0s.view(batch, n_events, self.n_octaves, 1).repeat(1, 1, 1, self.n_samples)
+        osc = torch.sin(
+            torch.cumsum(f0s, dim=-1) # + phase_offsets[..., None]
+        )
+        
+        assert osc.shape == (batch, n_events, self.n_octaves, self.n_samples)
+        
+        # apply decaying value
+        osc = osc * exp_decays[..., None]
+        osc = torch.sum(osc, dim=2)
+        osc = max_norm(osc, dim=-1)
+        
+        assert osc.shape == (batch, n_events, self.n_samples)
+        return osc
         
 
 
@@ -104,6 +185,7 @@ class Resonance(nn.Module):
         self.n_resonances = n_resonances
         self.n_samples = n_samples
         self.hard_choice = hard_choice
+        
         
         # we generate pure sines, triangle, sawtooth and square waves with these fundamental
         # frequencies, hence `n_resonances // 4`
@@ -313,11 +395,30 @@ class Model(nn.Module):
         self.decays = nn.Parameter(torch.zeros(1, n_atoms, 1).uniform_(-6, 6))
         self.filter_decays = nn.Parameter(torch.zeros(1, n_atoms, 1).uniform_(-6, 6))
         
-        total_resonances = 4096
-        self.resonance_generator = Resonance(
-            n_resonances=total_resonances, 
-            n_samples=exp.n_samples, 
-            hard_choice=hard_resonance_choice)
+        if optimize_f0:
+            n_f0_elements = 16
+            self.resonance_generator = F0Resonance(n_f0_elements=n_f0_elements, n_octaves=64, n_samples=exp.n_samples)
+            self.f0_choice = nn.Parameter(torch.zeros(1, n_atoms, 1).uniform_(0.001, 0.1))
+            self.decay_choice = nn.Parameter(torch.zeros(1, n_atoms, 1).uniform_(-6, -6))
+            self.phase_offsets = nn.Parameter(torch.zeros(1, n_atoms, 1).uniform_(-6, -6))
+        else:
+            total_resonances = 4096
+            quantize_dim = 4096
+            hard_func = lambda x: sparse_softmax(x, normalize=True, dim=-1)
+            
+            # self.resonance_generator = Resonance(
+            #     n_resonances=total_resonances, 
+            #     n_samples=exp.n_samples, 
+            #     hard_choice=hard_resonance_choice)
+            self.resonance_generator = QuantizedResonanceMixture(
+                n_resonances=total_resonances,
+                quantize_dim=quantize_dim,
+                n_samples=exp.n_samples,
+                samplerate=exp.samplerate,
+                hard_func=hard_func
+            )
+            # one-hot choice of resonance for each atom
+            self.resonance_choice = nn.Parameter(torch.zeros(1, n_atoms, total_resonances).uniform_(0, 1))
         
         self.noise_generator = BandPassFilteredNoise(exp.n_samples)
         self.amp_envelope_generator = ExponentialDecayEnvelope(
@@ -335,9 +436,6 @@ class Model(nn.Module):
         
         self.mixer = Mixer()
         
-        
-        # one-hot choice of resonance for each atom
-        self.resonance_choice = nn.Parameter(torch.zeros(1, n_atoms, total_resonances).uniform_(0, 1))
         
         # means and stds for bandpass noise filter
         self.noise_filter = nn.Parameter(torch.zeros(1, n_atoms, 2).uniform_(0, 1))
@@ -357,7 +455,11 @@ class Model(nn.Module):
         overall_mix = torch.softmax(self.mix, dim=-1)
         
         
-        resonances = self.resonance_generator.forward(self.resonance_choice)
+        if optimize_f0:
+            resonances = self.resonance_generator.forward(
+                self.f0_choice, self.decay_choice, self.phase_offsets)
+        else:
+            resonances = self.resonance_generator.forward(self.resonance_choice)
         
         
         filtered_noise = self.noise_generator.forward(
@@ -444,6 +546,10 @@ def train(batch, i):
         loss = F.mse_loss(fake, real) #+ sparsity
     elif loss_type == LossType.IterativeMultiband.value:
         loss = single_channel_loss_3(batch, recon) + sparsity
+    elif loss_type == LossType.FFT.value:
+        real = torch.fft.rfft(batch)
+        fake = torch.fft.rfft(torch.sum(recon, dim=1, keepdim=True))
+        loss = F.mse_loss(fake.real, real.real) + F.mse_loss(fake.imag, real.imag)
     else:
         raise ValueError(f'Unsupported loss {loss_type}')
     
