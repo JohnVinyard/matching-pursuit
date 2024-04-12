@@ -42,14 +42,32 @@ class EnvelopeType(Enum):
     
 
 n_atoms = 64
-envelope_dist = EnvelopeType.Gamma
+envelope_dist = EnvelopeType.Gaussian
 force_pos_adjustment = False
 # For gamma distributions, the center of gravity is always near zero,
 # so further adjustment is required
 softmax_positioning = envelope_dist == EnvelopeType.Gamma or force_pos_adjustment
-hard_resonance_choice = False
+# hard_resonance_choice = False
 loss_type = LossType.AllAtOnceMultiband.value
-optimize_f0 = False
+optimize_f0 = True
+
+
+
+
+def transform(x: torch.Tensor):
+    batch_size, channels, _ = x.shape
+    bands = multiband_transform(x)
+    return torch.cat([b.reshape(batch_size, channels, -1) for b in bands.values()], dim=-1)
+
+        
+def multiband_transform(x: torch.Tensor):
+    bands = fft_frequency_decompose(x, 512)
+    d1 = {f'{k}_xl': stft(v, 512, 64, pad=True) for k, v in bands.items()}
+    d1 = {f'{k}_long': stft(v, 128, 64, pad=True) for k, v in bands.items()}
+    d3 = {f'{k}_short': stft(v, 64, 32, pad=True) for k, v in bands.items()}
+    d4 = {f'{k}_xs': stft(v, 16, 8, pad=True) for k, v in bands.items()}
+    normal = stft(x, 2048, 256, pad=True).reshape(-1, 128, 1025).permute(0, 2, 1)
+    return dict(**d1, **d3, **d4, normal=normal)
 
 
 def exponential_decay(
@@ -66,23 +84,7 @@ def exponential_decay(
     decay = torch.cumsum(decay, dim=-1)
     decay = torch.exp(decay).view(-1, n_atoms, n_frames)
     amp = F.interpolate(decay, size=n_samples, mode='linear')
-    return amp
-
-def transform(x: torch.Tensor):
-    batch_size, channels, _ = x.shape
-    bands = multiband_transform(x)
-    return torch.cat([b.reshape(batch_size, channels, -1) for b in bands.values()], dim=-1)
-
-        
-def multiband_transform(x: torch.Tensor):
-    bands = fft_frequency_decompose(x, 512)
-    d1 = {f'{k}_xl': stft(v, 512, 64, pad=True) for k, v in bands.items()}
-    d1 = {f'{k}_long': stft(v, 128, 64, pad=True) for k, v in bands.items()}
-    d3 = {f'{k}_short': stft(v, 64, 32, pad=True) for k, v in bands.items()}
-    d4 = {f'{k}_xs': stft(v, 16, 8, pad=True) for k, v in bands.items()}
-    normal = stft(x, 2048, 256, pad=True).reshape(-1, 128, 1025).permute(0, 2, 1)
-    return dict(**d1, **d3, **d4, normal=normal)
-    
+    return amp    
 
 class BandPassFilteredNoise(nn.Module):
     def __init__(self, n_samples: int):

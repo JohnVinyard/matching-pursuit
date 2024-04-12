@@ -34,4 +34,5 @@
 
 # from .e_2024_3_29 import RelaxedSparsity as Current
 
-from .e_2024_3_31 import GaussianSplatting as Current
+# from .e_2024_3_31 import GaussianSplatting as Current
+from .e_2024_4_11 import SplatEncoder as Current

@@ -34,6 +34,7 @@ class QuantizedResonanceMixture(nn.Module):
         
         quantized = self.hard_func(x)
         choice = self.to_resonance_choice(quantized)
+        choice = torch.relu(choice)
         resonances = choice @ self.waves
 
         assert resonances.shape == (batch, n_events, self.n_samples)
