@@ -48,7 +48,7 @@ force_pos_adjustment = False
 # so further adjustment is required
 softmax_positioning = envelope_dist == EnvelopeType.Gamma or force_pos_adjustment
 # hard_resonance_choice = False
-loss_type = LossType.AllAtOnceMultiband.value
+loss_type = LossType.IterativeMultiband.value
 optimize_f0 = True
 
 
@@ -127,7 +127,13 @@ class F0Resonance(nn.Module):
         self.max_freq = self.max_hz / (exp.samplerate // 2)
         self.freq_range = self.max_freq - self.min_freq
     
-    def forward(self, f0: torch.Tensor, decay_coefficients: torch.Tensor, phase_offsets: torch.Tensor):
+    def forward(
+            self, 
+            f0: torch.Tensor, 
+            decay_coefficients: torch.Tensor, 
+            phase_offsets: torch.Tensor,
+            freq_spacing: torch.Tensor):
+        
         batch, n_events, n_elements = f0.shape
         
         # assert n_elements == self.n_f0_elements
@@ -156,7 +162,9 @@ class F0Resonance(nn.Module):
         f0 = f0 * np.pi
         
         # octaves
-        f0s = f0 * self.factors[None, None, :]
+        factors = freq_spacing.repeat(1, 1, self.n_octaves)
+        factors = torch.cumsum(factors, dim=-1)
+        f0s = f0 * factors
         assert f0s.shape == (batch, n_events, self.n_octaves)
         
         # filter out anything above nyquist
@@ -403,6 +411,7 @@ class Model(nn.Module):
             self.f0_choice = nn.Parameter(torch.zeros(1, n_atoms, 1).uniform_(0.001, 0.1))
             self.decay_choice = nn.Parameter(torch.zeros(1, n_atoms, 1).uniform_(-6, -6))
             self.phase_offsets = nn.Parameter(torch.zeros(1, n_atoms, 1).uniform_(-6, -6))
+            self.freq_spacing = nn.Parameter(torch.zeros(1, n_atoms, 1).uniform_(0.5, 2))
         else:
             total_resonances = 4096
             quantize_dim = 4096
@@ -459,7 +468,7 @@ class Model(nn.Module):
         
         if optimize_f0:
             resonances = self.resonance_generator.forward(
-                self.f0_choice, self.decay_choice, self.phase_offsets)
+                self.f0_choice, self.decay_choice, self.phase_offsets, self.freq_spacing)
         else:
             resonances = self.resonance_generator.forward(self.resonance_choice)
         

@@ -8,7 +8,7 @@ from config.experiment import Experiment
 from modules import stft
 from modules.anticausal import AntiCausalStack
 from modules.decompose import fft_frequency_decompose
-from modules.fft import fft_convolve
+from modules.fft import fft_convolve, fft_shift
 from modules.linear import LinearOutputStack
 from modules.normal_pdf import gamma_pdf, pdf2
 from modules.normalization import max_norm, unit_norm
@@ -42,7 +42,19 @@ force_pos_adjustment = True
 # For gamma distributions, the center of gravity is always near zero,
 # so further adjustment is required
 softmax_positioning = envelope_dist == EnvelopeType.Gamma or force_pos_adjustment
+# max_guassian_shift = 256 / exp.n_samples
 
+def experiment_spectrogram(x: torch.Tensor):
+    batch_size = x.shape[0]
+    
+    x = stft(x, 2048, 256, pad=True).view(
+            batch_size, 128, 1025)[..., :1024].permute(0, 2, 1)
+    return x
+
+
+def gaussian_std_epsilon(min_width: int, total_width: int):
+    epsilon = min_width / total_width
+    return epsilon
 
 def exponential_decay(
         decay_values: torch.Tensor, 
@@ -69,7 +81,7 @@ class BandPassFilteredNoise(nn.Module):
         batch, n_events = means.shape
         
         assert means.shape == stds.shape
-        noise = torch.zeros(1, n_atoms, self.n_samples, device=means.device).uniform_(-1, 1)
+        noise = torch.zeros(1, n_events, self.n_samples, device=means.device).uniform_(-1, 1)
         
         filtered_noise = gaussian_bandpass_filtered(means, stds, noise)
         assert filtered_noise.shape == (batch, n_events, self.n_samples)
@@ -186,7 +198,8 @@ class EnvelopeAndPosition(nn.Module):
             signals: torch.Tensor, 
             a: torch.Tensor, 
             b: torch.Tensor, 
-            adjustment: Union[torch.Tensor, None]):
+            adjustment: Union[torch.Tensor, None],
+            gaussian_mean_offset: Union[torch.Tensor, None]):
         
         batch, n_events, n_samples = signals.shape
         assert n_samples == self.n_samples
@@ -194,16 +207,29 @@ class EnvelopeAndPosition(nn.Module):
         batch, n_events = a.shape
         assert a.shape == b.shape
         
+        # print(a.shape, b.shape, gaussian_mean_offset.shape)
+        
+        
+        epsilon = gaussian_std_epsilon(64, exp.n_samples)
+        
         if self.envelope_type == EnvelopeType.Gaussian.value:
-            envelopes = pdf2(a, (torch.abs(b) + 1e-12) * 0.1, self.n_samples)
+            
+            
+            # if gaussian_mean_offset is not None:
+            #     envelopes = pdf2(a + gaussian_mean_offset.view(*a.shape), (torch.abs(b) + epsilon), self.n_samples)
+            # else:
+            envelopes = pdf2(torch.sigmoid(a) * 0.1, (torch.abs(b) + epsilon), self.n_samples)
+                
         elif self.envelope_type == EnvelopeType.Gamma.value:
-            envelopes = gamma_pdf((torch.abs(a) + 1e-12), (torch.abs(b) + 1e-12), self.n_samples)
+            envelopes = gamma_pdf((torch.abs(a) + epsilon), (torch.abs(b) + epsilon), self.n_samples)
             ramp = torch.zeros_like(envelopes)
             ramp[..., :self.gamma_ramp_size] = torch.linspace(0, 1, self.gamma_ramp_size)[None, None, :] ** self.gamma_ramp_exponent
             envelopes = envelopes * ramp
         else:
             raise ValueError(f'{self.envelope_type.value} is not supported')
-        
+
+        # print(envelopes.shape)
+                
         assert envelopes.shape == (batch, n_events, self.n_samples)
         
         positioned_signals = signals * envelopes
@@ -211,6 +237,9 @@ class EnvelopeAndPosition(nn.Module):
         if adjustment is not None:
             shifts = sparse_softmax(adjustment, dim=-1, normalize=True)
             positioned_signals = fft_convolve(positioned_signals, shifts)
+        
+        if gaussian_mean_offset is not None:
+            positioned_signals = fft_shift(positioned_signals, gaussian_mean_offset)[..., :exp.n_samples]
         
         return positioned_signals
 
@@ -248,7 +277,7 @@ class Model(nn.Module):
         self.encoder = AntiCausalStack(
             channels, 
             kernel_size=2, 
-            dilations=[1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 1])
+            dilations=[1, 2, 4, 8, 16, 32, 64, 1])
         self.attn = nn.Conv1d(self.channels, 1, 7, 1, 3)
         
         
@@ -295,66 +324,92 @@ class Model(nn.Module):
         self.generate_amplitudes = LinearOutputStack(channels, 3, out_channels=1, norm=nn.LayerNorm((channels,)))
         self.generate_verb_params = LinearOutputStack(channels, 3, out_channels=channels, norm=nn.LayerNorm((channels,)))
         
+        
+        # self.generate_mix_params = nn.Linear(channels, 2)
+        # self.generate_env = nn.Linear(channels, 2)
+        # self.generate_resonance_choice = nn.Linear(channels, total_resonances)
+        # self.generate_noise_filter = nn.Linear(channels, 2)
+        # self.generate_filter_decays = nn.Linear(channels, 1)
+        # self.generate_filter_1 = nn.Linear(channels, 2)
+        # self.generate_filter_2 = nn.Linear(channels, 2)
+        # self.generate_decays = nn.Linear(channels, 1)
+        # self.generate_amplitudes = nn.Linear(channels, 1)
+        # self.generate_verb_params = nn.Linear(channels, channels)
+        
         self.apply(lambda x: exp.init_weights(x))
     
     def forward(self, x: torch.Tensor):
         batch_size = x.shape[0]
         
         x = x.view(-1, 1, exp.n_samples)
-        x = self.to_channels(x)
-        x = self.encoder(x)
         
-        attn = self.attn(unit_norm(x, dim=1))
+        spec = experiment_spectrogram(x)
         
-        shifts = torch.zeros(x.shape[0], n_atoms, exp.n_samples, device=x.device)
+        full_decoded = torch.zeros(batch_size, n_atoms, exp.n_samples, device=x.device)
         
-        events, indices = sparsify_vectors(x, attn=attn, n_to_keep=n_atoms, normalize=False)
-        event_norms = torch.norm(events, dim=-1, keepdim=True)
+        for i in range(n_atoms):
+            
+            print(f'batch {i} spec norm {spec.norm().item()}')
         
-        for i in range(batch_size):
-            for j in range(n_atoms):
-                norm = event_norms[i, j]
-                index = indices[i, j]
-                shifts[i, j, index] = norm
+            x = self.encoder(spec)
         
-        # (batch, n_events, 2)
-        mx = self.generate_mix_params.forward(events)
+            attn = self.attn(x)
         
-        # (batch, n_events, 2)
-        env = self.generate_env(events)
-        # (batch, n_events, 4096) (one-hot)
-        res_choice = self.generate_resonance_choice.forward(events)
-        # (batch, n_events, 2)
-        noise_filt = self.generate_noise_filter(events)
-        # (batch, n_events, 1)
-        filt_decays = self.generate_filter_decays(events)
-        # (batch, n_events, 2)
-        res_filt_1 = self.generate_filter_1(events)
-        # (batch, n_events, 2)
-        res_filt_2 = self.generate_filter_2(events)
-        # (batch, n_events, 1)
-        decays = self.generate_decays.forward(events)
-        # (batch, n_events, 1)
-        amps = self.generate_amplitudes(events)
+            step_size = exp.n_samples // spec.shape[-1]
+            shifts = torch.zeros(x.shape[0], 1, exp.n_samples, device=x.device)
         
-        # (batch, n_events, 16)
-        verb = self.generate_verb_params(events)
+            events, indices = sparsify_vectors(x, attn=attn, n_to_keep=1, normalize=False)
+            event_norms = torch.norm(unit_norm(events), dim=-1, keepdim=True)
         
-        decoded, amps = self.decode(
-            mix=mx, 
-            env=env,
-            resonance_choice=res_choice, 
-            noise_filter=noise_filt, 
-            filter_decays=filt_decays, 
-            resonance_filter=res_filt_1, 
-            resonance_filter2=res_filt_2, 
-            decays=decays, 
-            shifts=shifts, 
-            amplitudes=amps, 
-            verb_params=verb
-        )
+            for b in range(batch_size):
+                for j in range(1):
+                    norm = event_norms[b, j]
+                    index = indices[b, j]
+                    shifts[b, j, index * step_size] = norm
         
-        return decoded
+            # (batch, n_events, 2)
+            mx = self.generate_mix_params.forward(events)
+            
+            # (batch, n_events, 2)
+            env = self.generate_env(events)
+            # (batch, n_events, 4096) (one-hot)
+            res_choice = self.generate_resonance_choice.forward(events)
+            # (batch, n_events, 2)
+            noise_filt = self.generate_noise_filter(events)
+            # (batch, n_events, 1)
+            filt_decays = self.generate_filter_decays(events)
+            # (batch, n_events, 2)
+            res_filt_1 = self.generate_filter_1(events)
+            # (batch, n_events, 2)
+            res_filt_2 = self.generate_filter_2(events)
+            # (batch, n_events, 1)
+            decays = self.generate_decays.forward(events)
+            # (batch, n_events, 1)
+            amps = self.generate_amplitudes(events)
+            
+            # (batch, n_events, 16)
+            verb = self.generate_verb_params(events)
+            
+            decoded, amps = self.decode(
+                mix=mx, 
+                env=env,
+                resonance_choice=res_choice, 
+                noise_filter=noise_filt, 
+                filter_decays=filt_decays, 
+                resonance_filter=res_filt_1, 
+                resonance_filter2=res_filt_2, 
+                decays=decays, 
+                shifts=shifts, 
+                amplitudes=amps, 
+                verb_params=verb,
+            )
+            
+            
+            decoded_spec = experiment_spectrogram(decoded)
+            spec = (spec - decoded_spec).clone().detach()
+            full_decoded[:, i: i + 1, :] = decoded
+            
+        return full_decoded
     
     def decode(
             self, 
@@ -370,7 +425,9 @@ class Model(nn.Module):
             amplitudes: torch.Tensor,
             verb_params: torch.Tensor):
         
-        batch_size = mix.shape[0]
+        batch_size, n_events, _ = mix.shape
+        
+        
         
         overall_mix = torch.softmax(mix, dim=-1)
         
@@ -380,16 +437,17 @@ class Model(nn.Module):
         
         filtered_noise = self.noise_generator.forward(
             noise_filter[:, :, 0], 
-            (torch.abs(noise_filter[:, :, 1]) + 1e-12))
+            (torch.abs(noise_filter[:, :, 1]) + 1e-4))
         
         
+        epsilon = gaussian_std_epsilon(10, exp.n_samples // 2 + 1)
         filtered_resonance, filt_res_2, filt_crossfade_stacked = self.evolving_resonance.forward(
             resonances=resonances,
             decays=filter_decays,
             start_filter_means=torch.zeros_like(resonance_filter[:, :, 0]),
-            start_filter_stds=torch.abs(resonance_filter[:, :, 1]) + 1e-12,
+            start_filter_stds=torch.abs(resonance_filter[:, :, 1]) + epsilon,
             end_filter_means=torch.zeros_like(resonance_filter2[:, :, 0]),
-            end_filter_stds=torch.abs(resonance_filter2[:, :, 1]) + 1e-12
+            end_filter_stds=torch.abs(resonance_filter2[:, :, 1]) + epsilon
         )
         
         
@@ -403,7 +461,8 @@ class Model(nn.Module):
             signals=filtered_noise, 
             a=env[:, :, 0], 
             b=env[:, :, 1], 
-            adjustment=shifts if softmax_positioning else None)        
+            adjustment=shifts,
+            gaussian_mean_offset=None)        
         
         res = fft_convolve(
             positioned_noise, 
@@ -417,10 +476,11 @@ class Model(nn.Module):
         mixed = self.mixer.forward([res, res2], filt_crossfade_stacked)
         
         
-        final = self.mixer.forward([positioned_noise, mixed], overall_mix[:, :, None, :])
-        assert final.shape == (batch_size, n_atoms, exp.n_samples)
         
-        final = final.view(batch_size, n_atoms, exp.n_samples)
+        final = self.mixer.forward([positioned_noise, mixed], overall_mix[:, :, None, :])
+        # assert final.shape == (batch_size, n_atoms, exp.n_samples)
+        
+        final = final.view(batch_size, n_events, exp.n_samples)
         final = unit_norm(final, dim=-1)
         
         amps = torch.abs(amplitudes)
@@ -433,10 +493,11 @@ class Model(nn.Module):
     
 
 model = Model(
-    channels=128, 
+    channels=1024, 
     total_resonances=4096, 
     quantize_dim=4096, 
-    hard_func=lambda x: sparse_softmax(x, normalize=True, dim=-1)
+    # hard_func=lambda x: sparse_softmax(x, normalize=True, dim=-1)
+    hard_func=lambda x: torch.relu(x)
 ).to(device)
 
 optim = optimizer(model, lr=1e-3)
@@ -494,10 +555,10 @@ def train(batch, i):
     
     summed = torch.sum(recon, dim=1, keepdim=True)
     
-    real = transform(batch)
-    fake = transform(summed)
-    loss = torch.abs(real - fake).sum() / batch.shape[0]
-    # loss = single_channel_loss_3(batch, recon)
+    # real = transform(batch)
+    # fake = transform(summed)
+    # loss = torch.abs(real - fake).sum() / batch.shape[0]
+    loss = single_channel_loss_3(batch, recon)
     loss.backward()
     optim.step()
     return loss, max_norm(summed, dim=-1)
