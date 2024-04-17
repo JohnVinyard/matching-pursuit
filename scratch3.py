@@ -155,24 +155,37 @@ def l0_norm(x: torch.Tensor):
 
 if __name__ == '__main__':
     
-    noise = torch.zeros(8, 4, 8192).uniform_(-1, 1)
+    # noise = torch.zeros(8, 4, 8192).uniform_(-1, 1)
     
-    filtered_noise = gaussian_bandpass_filtered(
-        torch.zeros(8, 4).uniform_(0, 1), 
-        torch.zeros(8, 4).uniform_(0.01, 0.2),
-        noise)
+    # filtered_noise = gaussian_bandpass_filtered(
+    #     torch.zeros(8, 4).uniform_(0, 1), 
+    #     torch.zeros(8, 4).uniform_(0.01, 0.2),
+    #     noise)
     
-    print(filtered_noise.shape)
+    # print(filtered_noise.shape)
     
-    filtered_noise = filtered_noise.view(-1, 8192)
+    # filtered_noise = filtered_noise.view(-1, 8192)
     
-    for n in filtered_noise:
-        n = n.view(1, 1, 8192)
-        n = stft(n, 512, 256, pad=True).squeeze()
-        print(n.shape)
-        plt.matshow(n.data.cpu().numpy())
-        plt.show()
-        plt.clf()
+    # for n in filtered_noise:
+    #     n = n.view(1, 1, 8192)
+    #     n = stft(n, 512, 256, pad=True).squeeze()
+    #     print(n.shape)
+    #     plt.matshow(n.data.cpu().numpy())
+    #     plt.show()
+    #     plt.clf()
+    
+    # 735dd2b01b7c1cb2d892580c8c0c9236c24ade7d
+    
+    import zounds
+    
+    synth = zounds.SineSynthesizer(zounds.SR22050())
+    samples: zounds.AudioSamples = synth.synthesize(zounds.Seconds(10), [220, 400])
+    samples /= (samples.max() + 1e-8)
+    
+    bio = samples.encode(fmt='OGG', subtype='VORBIS')
+    
+    data_url = create_data_url(bio.read(), 'audio/ogg')
+    print(data_url)
     
     
     

@@ -42,15 +42,18 @@ class EnvelopeType(Enum):
     
 
 n_atoms = 64
-envelope_dist = EnvelopeType.Gaussian
-force_pos_adjustment = False
+envelope_dist = EnvelopeType.Gamma
+
+# force_pos_adjustment = False
 # For gamma distributions, the center of gravity is always near zero,
 # so further adjustment is required
-softmax_positioning = envelope_dist == EnvelopeType.Gamma or force_pos_adjustment
+# softmax_positioning = envelope_dist == EnvelopeType.Gamma or force_pos_adjustment
+softmax_positioning = True
+
 # hard_resonance_choice = False
 loss_type = LossType.IterativeMultiband.value
-optimize_f0 = True
-
+optimize_f0 = False
+use_unit_shifts = False
 
 
 
@@ -78,7 +81,7 @@ def exponential_decay(
         n_samples: int):
     
     decay_values = torch.sigmoid(decay_values.view(-1, n_atoms, 1).repeat(1, 1, n_frames))
-    resonance_factor = (1 - base_resonance) * 0.95
+    resonance_factor = (1 - base_resonance) * 0.99
     decay = base_resonance + (decay_values * resonance_factor)
     decay = torch.log(decay + 1e-12)
     decay = torch.cumsum(decay, dim=-1)
@@ -295,7 +298,8 @@ class EnvelopeAndPosition(nn.Module):
             signals: torch.Tensor, 
             a: torch.Tensor, 
             b: torch.Tensor, 
-            adjustment: Union[torch.Tensor, None]):
+            adjustment: Union[torch.Tensor, None],
+            unit_shifts: Union[torch.Tensor, None]):
         
         batch, n_events, n_samples = signals.shape
         assert n_samples == self.n_samples
@@ -320,6 +324,9 @@ class EnvelopeAndPosition(nn.Module):
         if adjustment is not None:
             shifts = sparse_softmax(adjustment, dim=-1, normalize=True)
             positioned_signals = fft_convolve(positioned_signals, shifts)
+        
+        if unit_shifts is not None:
+            positioned_signals = fft_shift(positioned_signals, unit_shifts)
         
         return positioned_signals
 
@@ -405,9 +412,12 @@ class Model(nn.Module):
         self.decays = nn.Parameter(torch.zeros(1, n_atoms, 1).uniform_(-6, 6))
         self.filter_decays = nn.Parameter(torch.zeros(1, n_atoms, 1).uniform_(-6, 6))
         
+        if use_unit_shifts:
+            self.unit_shifts = nn.Parameter(torch.zeros(1, n_atoms, 1).uniform_(0, 1))
+        
         if optimize_f0:
             n_f0_elements = 16
-            self.resonance_generator = F0Resonance(n_f0_elements=n_f0_elements, n_octaves=64, n_samples=exp.n_samples)
+            self.resonance_generator = F0Resonance(n_f0_elements=n_f0_elements, n_octaves=256, n_samples=exp.n_samples)
             self.f0_choice = nn.Parameter(torch.zeros(1, n_atoms, 1).uniform_(0.001, 0.1))
             self.decay_choice = nn.Parameter(torch.zeros(1, n_atoms, 1).uniform_(-6, -6))
             self.phase_offsets = nn.Parameter(torch.zeros(1, n_atoms, 1).uniform_(-6, -6))
@@ -498,7 +508,8 @@ class Model(nn.Module):
             signals=filtered_noise, 
             a=self.env[:, :, 0], 
             b=self.env[:, :, 1], 
-            adjustment=self.shifts if softmax_positioning else None)        
+            adjustment=self.shifts if softmax_positioning else None,
+            unit_shifts=self.unit_shifts if use_unit_shifts else None)        
         
         res = fft_convolve(
             positioned_noise, 

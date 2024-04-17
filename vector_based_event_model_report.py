@@ -1,24 +1,28 @@
-from io import BytesIO
-from typing import Callable, Iterable, List, Tuple
+from typing import Iterable, Optional, Tuple
 from data.audioiter import AudioIterator
 from experiments.e_2024_3_21.inference import model
 import zounds
 import torch
 from modules.normalization import max_norm
-from modules.stft import stft
-from util.playable import playable
-from base64 import b64encode
 from uuid import uuid4
-from PIL import Image
-import numpy as np
+from util.reporting import Section, create_audio_data_url, html_doc
+import conjure
+
+
+collection = conjure.S3Collection(
+    'conjure-test', 
+    is_public=True, 
+    cors_enabled=True)
+
 
 n_samples = 2 ** 15
 samplerate = zounds.SR22050()
-total_examples = 10
+total_examples = 4
 
-
-def create_data_url(b: bytes, content_type: str):
-    return  f'data:{content_type};base64,{b64encode(b).decode()}'
+n_events = 16
+event_height = 50
+timeline_height = n_events * event_height
+year = 2024
 
 
 class AudioTimeline(object):
@@ -49,44 +53,45 @@ class AudioTimeline(object):
                 self.channels[0, index], 
                 self.events[0, index], 
                 self.relative_positions[index], 
-                self.max_norm) for index in range(self.channels.shape[1])])}
+                self.max_norm,
+                index) for index in range(self.channels.shape[1])])}
         </div>
         '''
 
 
-def spectrogram(audio: torch.Tensor, window_size: int = 512, step_size: int = 128):
-    audio = audio.view(1, 1, n_samples)
-    spec = stft(audio, window_size, step_size, pad=True)
-    n_coeffs = window_size // 2 + 1
-    spec = max_norm(spec.view(-1)).view(-1, n_coeffs)
-    spec = spec.data.cpu().numpy()
-    spec = np.rot90(spec)
+# def spectrogram(audio: torch.Tensor, window_size: int = 512, step_size: int = 128):
+#     audio = audio.view(1, 1, n_samples)
+#     spec = stft(audio, window_size, step_size, pad=True)
+#     n_coeffs = window_size // 2 + 1
+#     spec = max_norm(spec.view(-1)).view(-1, n_coeffs)
+#     spec = spec.data.cpu().numpy()
+#     spec = np.rot90(spec)
     
-    img_data = np.zeros((spec.shape[0], spec.shape[1], 4), dtype=np.uint8)
+#     img_data = np.zeros((spec.shape[0], spec.shape[1], 4), dtype=np.uint8)
     
-    # image opacity is determined by spectrogram intensity
-    img_data[:, :, 3:] = np.clip((spec[:, :, None] * 255).astype(np.uint8), 0, 255)
+#     # image opacity is determined by spectrogram intensity
+#     img_data[:, :, 3:] = np.clip((spec[:, :, None] * 255).astype(np.uint8), 0, 255)
     
-    # image color is entirely black
-    img_data[:, :, :3] = 0
+#     # image color is entirely black
+#     img_data[:, :, :3] = 0
     
     
-    img = Image.fromarray(img_data, mode='RGBA')
-    scale = 4
-    x, y = img.size
-    img.thumbnail((x * scale, y * scale), Image.LANCZOS)
+#     img = Image.fromarray(img_data, mode='RGBA')
+#     scale = 4
+#     x, y = img.size
+#     img.thumbnail((x * scale, y * scale), Image.LANCZOS)
     
-    bio = BytesIO()
-    img.save(bio, format='png')
-    bio.seek(0)
+#     bio = BytesIO()
+#     img.save(bio, format='png')
+#     bio.seek(0)
     
-    data_url = create_data_url(bio.read(), 'image/png')
+#     data_url = create_data_url(bio.read(), 'image/png')
     
-    return f'''
-        <div class="spectrogram-image">
-            <img height="{n_coeffs}px" width="128px" src="{data_url}"></img>
-        </div>
-    '''
+#     return f'''
+#         <div class="spectrogram-image">
+#             <img height="{n_coeffs}px" width="128px" src="{data_url}"></img>
+#         </div>
+#     '''
     
     
 
@@ -121,48 +126,34 @@ def hidden_audio_element(
         audio: torch.Tensor, 
         event_vector: torch.Tensor, 
         relative_position: float,
-        max_norm: torch.Tensor):
+        max_norm: torch.Tensor,
+        element_num: int):
     
-    orig_audio = audio
     
-    audio: zounds.AudioSamples = playable(audio, samplerate)
-    bio = audio.encode()
-    bio.seek(0)
-    data_url = f'data:audio/wav;base64,{b64encode(bio.read()).decode()}'
+    data_url = create_audio_data_url(audio, format='ogg', samplerate=samplerate)
     
     _id = uuid4().hex
     
     percentage_position = int(relative_position * 100)
     
+    vertical_position = int((element_num / n_events) * 100)
+    
     return f'''
-
-        <div class="event" id="{_id}" style="left:{percentage_position}%;">
-            <audio id="audio-{_id}" src="{data_url}"></audio>
-            {svg_vector(event_vector, 100, 15, max_norm, orig_audio)}
-        </div>
-        
-        <script type="text/javascript">
-            document.getElementById('{_id}').addEventListener('click', () => {{
-                const a = document.getElementById('audio-{_id}');
-                a.currentTime = 0;
-                a.play();   
-            }})
-        </script>
+        <div class="event" id="{_id}" style="left:{percentage_position}%; top:{vertical_position}%;">
+            <audio-view src="{data_url}" scale="1" height="{event_height}" samples="512"></audio-view>
+        </div>        
     '''
 
 
-def audio_element(audio: torch.Tensor, title: str, subtitle: str = None):
-    audio: zounds.AudioSamples = playable(audio, samplerate)
-    bio = audio.encode()
-    bio.seek(0)
+def audio_element(audio: torch.Tensor, title: str, subtitle: Optional[str] = None):
     
-    data_url = create_data_url(bio.read(), 'audio/wav')
+    data_url = create_audio_data_url(audio, format='ogg', samplerate=samplerate)
     
     return f'''
     <div class="audio-player">
         <h4>{title}</h4>
         {'' if subtitle is None else f'<p>{subtitle}</p>'}
-        <audio controls src="{data_url}" />
+        <audio-view src="{data_url}" scale="1" samples="512" height="100"></audio-view>
     </div>
     '''
 
@@ -175,7 +166,6 @@ def demo_example(
         timeline: AudioTimeline,
         positioned: torch.Tensor):
     
-    spec_elements = [spectrogram(x) for x in positioned.view(-1, n_samples)]
     
     return f'''
     <section class="demo-example">
@@ -184,141 +174,11 @@ def demo_example(
             {audio_element(recon, 'Recon')}
             {audio_element(random_events, 'With Random Event Vectors', '(based on mean and variance of event vectors for this sample)')}
             {audio_element(random_timings, 'With Random Timings')}
-            <div class="spectrogram-image-container">
-                {''.join(spec_elements)}
-            </div>
             <div>
                 {timeline.to_html()}
             </div>
         </div>
     </section>
-    '''
-
-def html_doc(elements: Iterable[str]):
-    return f'''
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <meta http-equiv="X-UA-Compatible" content="ie=edge">
-        <title>Sparse Interpretible Audio Model</title>
-        <style>
-        
-            body {{
-                font-family: 'Sans Serif';
-            }}
-            
-            .demo-example {{
-                border: solid 1px #eee;
-                margin: 10px;
-                padding: 10px;
-                box-shadow: 10px 10px 5px 0px rgba(0,0,0,0.75);
-            }}
-            
-            .timeline {{
-                margin: 10px;
-                padding: 10px;
-                height: 125px;
-                width: 100%;
-                border: solid 1px #eee;
-                position:relative;
-            }}
-            
-            .event {{
-                position: absolute;
-                top: 0;
-                height: 125px;
-                width: 125px;
-                cursor: pointer;
-            }}
-            
-            code {{
-                backgroun-color: #eee;
-            }}
-            
-            .spectrogram-image {{
-                position: absolute;
-                top: 0;
-                left: 0;
-            }}
-            
-            .spectrogram-image-container {{
-                position: relative;
-                height: 257px;
-                width: 128px;
-                display: block;
-            }}
-        </style>
-    </head>
-    <body>
-        <header>
-            <h2>
-                Sparse Interpretible Audio Model
-            </h2>
-            <p>
-                <h3>Table of Contents</h3>
-                <ul>
-                    <li><a href="#architecture">Architecture</a></li>
-                    <li><a href="#sound-samples">Sound Samples</a></li>
-                </ul>
-            </p>
-            <p>
-                <a id="architecture"></a>
-                <h3>Model Architecture</h3>
-                <p>
-                    This small model attempts to decompose audio featuring acoustic instruments into the 
-                    following components:
-                    
-                    <ul>
-                        <li>Some maximum number of small (16-dimensional) event vectors, representing individual audio events</li>
-                        <li><em>Times</em> at which each event occurs</li>
-                    </ul>
-                    
-                    While event data are encoded as real-valued vectors and not discrete values, the 
-                    representation learned still lend themselves to a sparse, interpretible, and hopefully easy-to-manipulate encoding.
-                    
-                    This first draft was trained using the amazing <a href="https://www.kaggle.com/datasets/imsparsh/musicnet-dataset">MusicNet dataset</a>.
-                </p>
-                <p>
-                    Each sound sample below includes the following elements:
-                    <ol>
-                        <li>The original recording</li>
-                        <li>The model's reconstruction</li>
-                        <li>New audio using the original timings, but <em>random event vectors</em></li>
-                        <li>New audio using the original event vectors, but with <em>random timings</em></li>
-                    </ol>
-                </p>
-                <h3>Future Directions</h3>
-                <p>
-                    There are several areas that could provide further gains in compression and interpretibility:
-                    <ul>
-                        <li>Imposing more severe sparsity constraints on the number of events produced.  You may notice that there are often many redundant events that could be merged into one.</li>
-                        <li>Performing vector quantization on the event vectors such that there is a discrete set of possible events</li>
-                    </ul>
-                </p>
-                <div>
-                    <img src="https://matching-pursuit-repo-media.s3.amazonaws.com/vector_siam.drawio2.png" />
-                </div>
-                <h4>Cite this Work</h4>
-                <pre>
-                    <code>
-@misc{{vinyard2023audio,
-    author = {{Vinyard, John}},
-    title = {{Sparse Interpetable Audio}},
-    url = {{https://JohnVinyard.github.io/machine-learning/2023/11/15/sparse-physical-model.html}},
-    year = {2024}
-}}
-                    </code>
-                </pre>
-            </p>
-        </header>
-        <a id="sound-samples"></a>
-        <h3>Sound Samples</h3>
-        {''.join(elements)}
-        <footer></footer>
-    </body>
-    </html>
     '''
 
 stream = AudioIterator(
@@ -331,7 +191,18 @@ stream = AudioIterator(
     pattern='*.wav')
 
 
+@conjure.conjure(
+    content_type='application/octet-stream', 
+    storage=collection, 
+    func_identifier=conjure.LiteralFunctionIdentifier('batchstats'),
+    param_identifier=conjure.LiteralParamsIdentifier(b'stats'),
+    serializer=conjure.PickleSerializer(),
+    deserializer=conjure.PickleDeserializer(),
+    prefer_cache=True,
+    read_from_cache_hook=lambda x: print('READING FROM CACHE'))
 def get_batch_statistics(batch_size=4):
+    print('Computing batch statistics')
+    
     stream = AudioIterator(
         batch_size,
         n_samples,
@@ -353,6 +224,7 @@ def get_batch_statistics(batch_size=4):
     
     return (embedding_means, embeddings_stds)
     
+
 
 def create_assets_for_single_item(
         audio: torch.Tensor, 
@@ -409,7 +281,100 @@ if __name__ == '__main__':
             if (i + 1) >= total_examples:
                 break
         
-        doc = html_doc(sections)
+        doc = html_doc(
+            styles=f'''
+                    <style>
+                
+                    body {{
+                        font-family: 'Sans Serif';
+                    }}
+                    
+                    .demo-example {{
+                        border: solid 1px #eee;
+                        margin: 10px;
+                        padding: 10px;
+                        box-shadow: 10px 10px 5px 0px rgba(0,0,0,0.75);
+                    }}
+                    
+                    .timeline {{
+                        margin: 10px;
+                        padding: 10px;
+                        height: {timeline_height}px;
+                        width: 100%;
+                        border: solid 1px #eee;
+                        position:relative;
+                    }}
+                    
+                    .event {{
+                        position: absolute;
+                    }}
+                    
+                    pre, code {{
+                        background-color: #eee;
+                    }}
+                    
+                </style>
+            ''',
+            title='Sparse Interpretible Audio Model',
+            citation_block=f'''
+                <pre>
+                    <code>
+    @misc{{vinyard{year}audio,
+        author = {{Vinyard, John}},
+        title = {{Sparse Interpetable Audio}},
+        url = {{https://JohnVinyard.github.io/machine-learning/2023/11/15/sparse-physical-model.html}},
+        year = {year}
+    }}
+                    </code>
+                </pre>
+            ''',
+            sections=[
+                Section(
+                    title='Architecture', 
+                    anchor='architecture',
+                    content=f'''
+                        <p>
+                        This small model attempts to decompose audio featuring acoustic instruments into the 
+                        following components:
+                        
+                        <ul>
+                            <li>Some maximum number of small (16-dimensional) event vectors, representing individual audio events</li>
+                            <li><em>Times</em> at which each event occurs</li>
+                        </ul>
+                        
+                        While event data are encoded as real-valued vectors and not discrete values, the 
+                        representation learned still lend themselves to a sparse, interpretible, and hopefully easy-to-manipulate encoding.
+                        
+                        This first draft was trained using the amazing <a href="https://www.kaggle.com/datasets/imsparsh/musicnet-dataset">MusicNet dataset</a>.
+                    </p>
+                    <p>
+                        Each sound sample below includes the following elements:
+                        <ol>
+                            <li>The original recording</li>
+                            <li>The model's reconstruction</li>
+                            <li>New audio using the original timings, but <em>random event vectors</em></li>
+                            <li>New audio using the original event vectors, but with <em>random timings</em></li>
+                        </ol>
+                    </p>
+                    <h3>Future Directions</h3>
+                    <p>
+                        There are several areas that could provide further gains in compression and interpretibility:
+                        <ul>
+                            <li>Imposing more severe sparsity constraints on the number of events produced.  You may notice that there are often many redundant events that could be merged into one.</li>
+                            <li>Performing vector quantization on the event vectors such that there is a discrete set of possible events</li>
+                        </ul>
+                    </p>
+                    <div>
+                        <img src="https://matching-pursuit-repo-media.s3.amazonaws.com/vector_siam.drawio2.png" />
+                    </div>
+                    '''
+                ),
+                Section(
+                    title='Sound Samples',
+                    anchor='sound-samples',
+                    content=''.join(sections))
+            ]
+        )
         with open('report.html', 'w') as f:
             f.write(doc)
         
