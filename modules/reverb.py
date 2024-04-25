@@ -94,11 +94,18 @@ class ReverbGenerator(nn.Module):
         return mixed
         
     
-    def forward(self, context, dry):
+    def forward(
+            self, 
+            context: torch.Tensor, 
+            dry: torch.Tensor, 
+            return_parameters: bool = False):
+        
+        
         if self.hard_choice:
             rm = sparse_softmax(self.to_room(context).view(-1, self.n_rooms), dim=-1, normalize=True)
         else:
             rm = torch.softmax(self.to_room(context).view(-1, self.n_rooms), dim=-1)
+        
         # mx = torch.sigmoid(self.to_mix(context).view(-1, 1, 1))
 
         mx = torch.softmax(self.to_mix(context), dim=-1).view(-1, 1, 1, 2)
@@ -112,7 +119,11 @@ class ReverbGenerator(nn.Module):
         mixed = stacked * mx
         mixed = torch.sum(mixed, dim=-1)
         # mixed = (dry * mx) + (wet * (1 - mx))
-        return mixed
+        
+        if return_parameters:
+            return mixed, rm, mx
+        else:
+            return mixed
 
 
 if __name__ == '__main__':

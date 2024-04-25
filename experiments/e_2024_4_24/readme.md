@@ -1,0 +1,1 @@
+Verify the audio segment embedding idea I have

@@ -1,5 +1,6 @@
 
 from collections import defaultdict
+from typing import List, Tuple
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -138,8 +139,11 @@ def to_original_dim(flat_indices, shape):
 #         return recon
 
 
+# (atom_index, batch, position, atom_samples)
+EventTuple = Tuple[int, int, int, torch.Tensor]
 
-def encode_events(events):
+def encode_events(events: List[EventTuple]):
+    
     batch_size = max(x[1] for x in events) + 1
     encoding_dim = d_size + 2
     encoded = torch.zeros(batch_size, iterations, encoding_dim, device=device)

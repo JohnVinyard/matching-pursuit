@@ -529,37 +529,37 @@ model = Model().to(device)
 optim = optimizer(model, lr=1e-4)
 
 
-def test_conv_spec():
+# def test_conv_spec():
     
-    frame = 32
+#     frame = 32
     
-    event = torch.hamming_window(512) * torch.zeros(512).uniform_(-1, 1)
-    
-    
-    signal = torch.zeros(1, 1, n_samples)
-    padding = torch.zeros_like(signal)
-    
-    signal[:, :, frame * 256: (frame * 256) + 512] = event
-    
-    padded_signal = torch.cat([padding, signal, padding])
-    spec = transform(padded_signal)
+#     event = torch.hamming_window(512) * torch.zeros(512).uniform_(-1, 1)
     
     
-    ch = torch.zeros_like(signal)
-    ch[:, :, :512] = event
-    padded_ch = torch.cat([ch, padding, padding])
-    ch_spec = transform(padded_ch)
+#     signal = torch.zeros(1, 1, n_samples)
+#     padding = torch.zeros_like(signal)
     
-    start_norm = torch.norm(spec).item()
+#     signal[:, :, frame * 256: (frame * 256) + 512] = event
     
-    amps, indices, residual = convolve_spectrograms(spec, ch_spec)
-    
-    residual_norm = torch.norm(residual).item()
-    
-    print(start_norm, residual_norm, indices)
+#     padded_signal = torch.cat([padding, signal, padding])
+#     spec = transform(padded_signal)
     
     
-    raise Exception('Done')
+#     ch = torch.zeros_like(signal)
+#     ch[:, :, :512] = event
+#     padded_ch = torch.cat([ch, padding, padding])
+#     ch_spec = transform(padded_ch)
+    
+#     start_norm = torch.norm(spec).item()
+    
+#     amps, indices, residual = convolve_spectrograms(spec, ch_spec)
+    
+#     residual_norm = torch.norm(residual).item()
+    
+#     print(start_norm, residual_norm, indices)
+    
+    
+#     raise Exception('Done')
     
 
 

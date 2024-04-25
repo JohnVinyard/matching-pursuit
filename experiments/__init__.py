@@ -29,10 +29,14 @@
 
 
 # from .e_2024_3_20 import IterativeDecomposition7NoDiscriminator as Current
+
+# BEST YET
 # from .e_2024_3_21 import IterativeDecomposition8EventGenerator as Current
 
 
 # from .e_2024_3_29 import RelaxedSparsity as Current
 
 # from .e_2024_3_31 import GaussianSplatting as Current
-from .e_2024_4_11 import SplatEncoder as Current
+# from .e_2024_4_11 import SplatEncoder as Current
+
+from .e_2024_4_24 import AudioSegmentEmbedding as Current

@@ -1,6 +1,7 @@
 import torch
 from torch import Tensor
 
+from modules.conv import fft_convolve
 from modules.normalization import unit_norm
 from modules.pos_encode import pos_encode_feature
 from modules.softmax import hard_softmax
@@ -14,69 +15,6 @@ from torch.nn import functional as F
 from torch import nn
 
 
-def torch_conv(signal, atom):
-    n_samples = signal.shape[-1]
-    n_atoms, atom_size = atom.shape
-    padded = F.pad(signal, (0, atom_size))
-    fm = F.conv1d(padded, atom.view(n_atoms, 1, atom_size))[..., :n_samples]
-    return fm
-
-
-def fft_convolve(signal, atoms, approx=None):
-    batch = signal.shape[0]
-    n_samples = signal.shape[-1]
-    n_atoms, atom_size = atoms.shape
-    diff = n_samples - atom_size
-    half_width = atom_size // 2
-
-    signal = F.pad(signal, (0, atom_size))
-    padded = F.pad(atoms, (0, signal.shape[-1] - atom_size))
-
-    sig = torch.fft.rfft(signal, dim=-1)
-    atom = torch.fft.rfft(torch.flip(padded, dims=(-1,)), dim=-1)[None, ...]
-
-    if isinstance(approx, slice):
-        slce = approx
-        fm_spec = torch.zeros(
-            batch, n_atoms, sig.shape[-1], device=signal.device, dtype=sig.dtype)
-        app = sig[..., slce] * atom[..., slce]
-        fm_spec[..., slce] = app
-    elif isinstance(approx, int) and approx < n_samples:
-        fm_spec = torch.zeros(
-            batch, n_atoms, sig.shape[-1], device=signal.device, dtype=sig.dtype)
-
-        # choose local peaks
-        mags = torch.abs(sig)
-        # window_size = atom_size // 64 + 1
-        # padding = window_size // 2
-        # avg = F.avg_pool1d(mags, window_size, 1, padding=padding)
-        # mags = mags / avg
-
-        values, indices = torch.topk(mags, k=approx, dim=-1)
-        sig = torch.gather(sig, dim=-1, index=indices)
-
-        # TODO: How can I use broadcasting rules to avoid this copy?
-        atom = torch.gather(atom.repeat(batch, 1, 1), dim=-1, index=indices)
-        sparse = sig * atom
-        fm_spec = torch.scatter(fm_spec, dim=-1, index=indices, src=sparse)
-    else:
-        fm_spec = sig * atom
-
-    fm = torch.fft.irfft(fm_spec, dim=-1)
-    fm = torch.roll(fm, 1, dims=(-1,))
-    return fm[..., :n_samples]
-
-
-def compare_conv():
-    # n_samples = 16
-    # atom_size = 4
-    # diff = 12
-    # half_width = 2
-    signal = torch.zeros(1, 1, 16).normal_(0, 1)
-    atoms = torch.zeros(8, 4).normal_(0, 1)
-    fm_fft = fft_convolve(signal, atoms)
-    fm_torch = torch_conv(signal, atoms)
-    return fm_fft, fm_torch
 
 
 def build_scatter_segments(n_samples, atom_size):
@@ -300,7 +238,8 @@ def sparse_code(
         return_residual=False,
         local_contrast_norm=False,
         return_sparse_feature_map=False,
-        compute_feature_map=None):
+        compute_feature_map=None,
+        fft_convolution=False):
     
     batch, channels, time = signal.shape
 
@@ -329,7 +268,7 @@ def sparse_code(
 
     for i in range(n_steps):
         
-        print('sparse coding step', i)
+        # print('sparse coding step', i)
         if compute_feature_map is not None:
             fm = compute_feature_map(residual, d)
         elif approx is None:
@@ -337,6 +276,7 @@ def sparse_code(
             fm = F.conv1d(padded, d.view(
                 n_atoms, channels, atom_size))[..., :n_samples]
         else:
+            # TODO: compare performance of fft implementation and torch
             fm = fft_convolve(residual, d, approx=approx)
         
         if extract_atom_embedding is not None:
@@ -412,7 +352,8 @@ def dictionary_learning_step(
         device=None,
         approx=None,
         local_constrast_norm: bool = False,
-        compute_feature_map=None):
+        compute_feature_map=None,
+        fft_convolution=False):
 
     batch, channels, time = signal.shape
     signal = signal.view(signal.shape[0], channels, -1)
@@ -443,7 +384,8 @@ def dictionary_learning_step(
         device=device, 
         approx=approx, 
         local_contrast_norm=local_constrast_norm, 
-        compute_feature_map=compute_feature_map)
+        compute_feature_map=compute_feature_map,
+        fft_convolution=fft_convolution)
 
 
     for index in instances.keys():

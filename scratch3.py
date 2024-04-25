@@ -15,6 +15,9 @@ from torch.optim import Adam
 from PIL import Image
 from matplotlib import pyplot as plt
 from torch.distributions import Normal
+from scipy.interpolate import interp1d
+from scipy.stats import norm
+
 
 from modules.transfer import gaussian_bandpass_filtered
 
@@ -155,65 +158,21 @@ def l0_norm(x: torch.Tensor):
 
 if __name__ == '__main__':
     
-    # noise = torch.zeros(8, 4, 8192).uniform_(-1, 1)
+    times = np.linspace(0, 1, num=100)
+    values = np.array([
+        [0, 0.01],
+        [0.02, 1],
+        [0.04, 0.01],
+        [1, 0],
+    ])
     
-    # filtered_noise = gaussian_bandpass_filtered(
-    #     torch.zeros(8, 4).uniform_(0, 1), 
-    #     torch.zeros(8, 4).uniform_(0.01, 0.2),
-    #     noise)
+    func = interp1d(values[:, 0], values[:, 1], kind='linear', assume_sorted=False)
     
-    # print(filtered_noise.shape)
+    values = func(times)
+    plt.plot(values.T)
+    plt.show()
     
-    # filtered_noise = filtered_noise.view(-1, 8192)
-    
-    # for n in filtered_noise:
-    #     n = n.view(1, 1, 8192)
-    #     n = stft(n, 512, 256, pad=True).squeeze()
-    #     print(n.shape)
-    #     plt.matshow(n.data.cpu().numpy())
-    #     plt.show()
-    #     plt.clf()
-    
-    # 735dd2b01b7c1cb2d892580c8c0c9236c24ade7d
-    
-    import zounds
-    
-    synth = zounds.SineSynthesizer(zounds.SR22050())
-    samples: zounds.AudioSamples = synth.synthesize(zounds.Seconds(10), [220, 400])
-    samples /= (samples.max() + 1e-8)
-    
-    bio = samples.encode(fmt='OGG', subtype='VORBIS')
-    
-    data_url = create_data_url(bio.read(), 'audio/ogg')
-    print(data_url)
-    
-    
-    
-    
-    
-    # plt.matshow(windows.data.cpu().numpy())
-    # # plt.plot(windows[1000])
-    # # plt.plot(windows[1010])
-    # # plt.plot(windows[1020])
-    # plt.show()
-    # plt.clf()
-    
-    
-    # bands = fft_frequency_decompose(batch, 512)
-    
-    # spec = stft(bands[2**15], 512, 128, pad=True).view(-1, 257)
-    # plt.matshow(spec.data.cpu().numpy())
-    # plt.show()
-    
-    # spec = stft(batch, 2048, 256, pad=True).view(1, 128, 1025).permute(0, 2, 1)
-    # pooled = F.avg_pool1d(spec, 128, stride=1, padding=64)[..., :128]
-    
-    
-    # residual = spec - pooled
-    # residual = torch.relu(residual)
-    
-    # plt.matshow(residual.data.cpu().numpy().reshape((1025, 128)))
-    # plt.show()
-    
-    # plt.matshow(pooled.data.cpu().numpy().reshape((1025, 128)))
+    # dist = norm(0.7, 0.01)
+    # pdf = dist.pdf(np.linspace(0, 1, 1000))
+    # plt.plot(pdf)
     # plt.show()

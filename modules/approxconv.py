@@ -1,6 +1,10 @@
 from torch.jit import ScriptModule, script_method
 import torch
 from torch.nn import functional as F
+from sklearn.decomposition import PCA
+import numpy as np
+
+
 
 
 class ApproximateConvolution(ScriptModule):

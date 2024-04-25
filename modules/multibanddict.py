@@ -1,46 +1,41 @@
-from typing import List, Tuple
-import numpy as np
-from config.experiment import Experiment
-from modules import stft
-from modules.decompose import fft_frequency_decompose, fft_frequency_recompose, fft_resample
-from modules.dilated import DilatedStack
-from modules.linear import LinearOutputStack
+from collections import defaultdict, namedtuple
+from typing import Callable, Dict, List, Optional, Tuple
+import zounds
+import torch
+from util import device
+from modules.decompose import fft_frequency_decompose, fft_frequency_recompose
 from modules.matchingpursuit import build_scatter_segments, dictionary_learning_step, sparse_code
 from modules.normalization import unit_norm
-from modules.pointcloud import decode_events, encode_events
-from train.experiment_runner import BaseExperimentRunner
-from torch import nn
-from util.readmedocs import readme
-import zounds
-from util import device, playable
-import torch
-from torch.nn import functional as F
 
+LocalEventTuple = Tuple[int, int, int, torch.Tensor]
+GlobalEventTuple = Tuple[int, int, float, float]
 
-exp = Experiment(
-    samplerate=22050,
-    n_samples=2**15,
-    weight_init=0.1,
-    model_dim=128,
-    kernel_size=512)
-
+Shape = Tuple
+BandEncodingPackage = Tuple[List[LocalEventTuple], Callable, Shape]
 
 class BandSpec(object):
     def __init__(
             self,
-            size,
-            n_atoms,
-            atom_size,
-            slce=None,
+            size: int,
+            n_atoms: int,
+            atom_size: int,
+            slce: Optional[slice]=None,
             device=None,
-            full_size=8192,
-            samplerate=zounds.SR22050(),
+            full_size: int=8192,
+            samplerate: zounds.SampleRate =zounds.SR22050(),
             local_contrast_norm: bool = False):
 
         super().__init__()
+        
+        # The length of the audio band being decomposed, in samples
         self.size = size
+        
+        # The number of atoms in this band's dictionary
         self.n_atoms = n_atoms
+        
+        # The length of each atom, in samples
         self.atom_size = atom_size
+        
         self.slce = slce
         self.device = device
 
@@ -148,7 +143,7 @@ class BandSpec(object):
     def scatter_func(self):
         return build_scatter_segments(self.size, self.atom_size)
 
-    def get_atom(self, index, norm):
+    def get_atom(self, index: int, norm: float):
         return self.d[index] * norm
 
     def load(self):
@@ -172,8 +167,57 @@ class BandSpec(object):
             local_constrast_norm=self.local_contrast_norm)
         self.d = unit_norm(d)
         return d
+    
+    def to_global_atom_index(self, index: int, offset: int) -> int:
+        return offset + index
+    
+    def to_local_atom_index(self, index: int, offset: int) -> int:
+        return index - offset
+    
+    def to_unit_time(self, sample_position: int) -> int:
+        return sample_position / self.size
+    
+    def to_sample_time(self, unit_time: float) -> int:
+        return int(unit_time * self.size)
+    
+    def to_amplitude(self, scaled_atom: torch.Tensor) -> int:
+        return torch.norm(scaled_atom)
+    
+    def to_global_tuple(self, event: LocalEventTuple, offset: int) -> GlobalEventTuple:
+        """
+        Take a local event tuple in the form:
+            (atom_index, batch, sample_pos, atom)
+        And transform it into:
+            (global_atom_index, unit_time, amplitude)
+        """
+        atom_index, batch, sample_pos, atom = event
+        
+        return (
+            self.to_global_atom_index(atom_index, offset), 
+            batch, 
+            self.to_unit_time(sample_pos), 
+            self.to_amplitude(atom))
+    
+    def to_local_tuple(self, event: GlobalEventTuple, offset: int) -> LocalEventTuple:
+        """
+        Take a global event tuple in the form:
+            (global_atom_index, unit_time, amplitude)
+        And transform it into:
+            (atom_index, batch, sample_pos, atom)
+        """
+        
+        global_index, batch, unit_time, amplitude = event
+        
+        local_index = self.to_local_atom_index(global_index, offset)
+        return (
+            local_index,
+            batch,
+            self.to_sample_time(unit_time),
+            self.get_atom(local_index, amplitude)
+        )
+    
 
-    def encode(self, batch, steps=16, extract_embeddings=None):
+    def encode(self, batch, steps=16, extract_embeddings=None) -> BandEncodingPackage:
         encoding = sparse_code(
             batch,
             self.d,
@@ -215,11 +259,17 @@ class BandSpec(object):
 
 
 class MultibandDictionaryLearning(object):
-    def __init__(self, specs: List[BandSpec]):
+    def __init__(self, specs: List[BandSpec], n_samples: int):
         super().__init__()
         self.bands = {spec.size: spec for spec in specs}
         self.min_size = min(map(lambda spec: spec.size, specs))
-        self.n_samples = exp.n_samples
+        self.n_samples = n_samples
+        
+        n_atoms = set([spec.n_atoms for spec in specs])
+        if len(n_atoms) > 1:
+            raise ValueError('Only specs with equal atom counts is currently allowed')
+        
+        self.n_atoms = list(n_atoms)[0]
 
         self._embeddings = None
 
@@ -300,9 +350,52 @@ class MultibandDictionaryLearning(object):
         for size, band in bands.items():
             self.bands[size].learn(band, steps)
 
-    def encode(self, batch, steps, extract_embeddings=None):
+    def encode(self, batch, steps, extract_embeddings=None) -> Dict[int, BandEncodingPackage]:
         bands = fft_frequency_decompose(batch, self.min_size)
-        return {size: band.encode(bands[size], steps, extract_embeddings) for size, band in self.bands.items()}
+        return {
+            size: band.encode(bands[size], steps, extract_embeddings) 
+            for size, band in self.bands.items()
+        }
+    
+    def get_band_from_global_atom_index(self, index: int) -> Tuple[int, BandSpec]:
+        band_index = index // self.n_atoms
+        return band_index, list(self.bands.values())[band_index]
+    
+    def flattened_event_tuples(self, encoding: Dict[int, BandEncodingPackage]) -> List[GlobalEventTuple]:
+        output = []
+        offset = 0
+        
+        for size, package in encoding.items():
+            events, scatter, shape = package
+            band = self.bands[size]
+            for event in events:
+                g = band.to_global_tuple(event, offset)
+                output.append(g)
+            offset += band.n_atoms
+        
+        return output
+    
+    def hierarchical_event_tuples(
+            self, 
+            encoding: List[GlobalEventTuple], 
+            original: Dict[int, BandEncodingPackage]) -> Dict[int, BandEncodingPackage]:
+        
+        hierarchical = defaultdict(list)
+        
+        for event in encoding:
+            global_index, batch, unit_time, amplitude = event
+            index, band = self.get_band_from_global_atom_index(global_index)
+            offset = index * self.n_atoms
+            local_event = band.to_local_tuple(event, offset)
+            hierarchical[band.size].append(local_event)
+        
+        final = dict()
+        for size, events in hierarchical.items():
+            _, scatter, shape = original[size]
+            final[size] = (events, scatter, shape)
+        
+        return final
+            
 
     def decode(self, d, shapes=None):
         output = {}
@@ -332,149 +425,3 @@ class MultibandDictionaryLearning(object):
 
         recon = fft_frequency_recompose(recon_bands, batch.shape[-1])
         return recon, events
-
-
-def to_slice(n_samples, percentage):
-    n_coeffs = n_samples // 2 + 1
-    start = n_coeffs // 2
-    total = n_coeffs - start
-    size = int(percentage * total)
-    end = start + size
-    return slice(start, end)
-
-
-n_atoms = 1024
-steps = 32
-# n_training_atoms = 8
-# dictionary_learning_iterations = 100
-
-model = MultibandDictionaryLearning([
-    BandSpec(512,   n_atoms, 128,  slce=None, device=device, full_size=8192),
-    BandSpec(1024,  n_atoms, 256,  slce=None, device=device, full_size=8192),
-    BandSpec(2048,  n_atoms, 512,  slce=None, device=device, full_size=8192),
-    BandSpec(4096,  n_atoms, 1024, slce=None, device=device, full_size=8192),
-    BandSpec(8192,  n_atoms, 2048, slce=None, device=device, full_size=8192),
-    BandSpec(16384, n_atoms, 4096, slce=None, device=device, full_size=8192),
-    BandSpec(32768, n_atoms, 8192, slce=None, device=device, full_size=8192),
-])
-
-# model.load()
-
-total_atoms = n_atoms * len(model.bands)
-
-
-
-def train():
-    pass
-
-
-@readme
-class BasicMatchingPursuit(BaseExperimentRunner):
-    def __init__(self, stream, port=None):
-        super().__init__(stream, train, exp, port=port)
-        self.encoded = None
-
-    def recon(self, steps=steps):
-        recon, events = model.recon(self.real[:1, ...], steps=steps)
-        return playable(recon, exp.samplerate)
-
-    # def generate(self, steps=total_atoms):
-
-    #     coding_steps = 64
-
-    #     with torch.no_grad():
-    #         encoded = self.encode_for_transformer(self.real[:1, ...], coding_steps)
-
-    #     f, s = predictor.generate(encoded, steps=steps)
-
-    #     fa = self.decode_to_audio(f, steps=coding_steps)
-    #     fs = self.decode_to_audio(s, steps=coding_steps)
-
-    #     n = zounds.AudioSamples.concat(fa, fs)
-    #     return zounds.AudioSamples(n, exp.samplerate)
-
-    # def encode_for_transformer(self, batch, steps):
-    #     # size -> (all_instances, scatter, shape)
-    #     encoding = model.encode(batch, steps=steps)
-    #     e = {k: v[0] for k, v in encoding.items()}  # size -> all_instances
-    #     events = encode_events(e, steps)  # tensor (batch, 4, N)
-    #     return events
-
-    # def decode_to_audio(self, events, steps):
-    #     with torch.no_grad():
-    #         encoding = model.partial_decoding_dict(self.real.shape[0])
-    #         d = decode_events(events, model.band_dicts, steps)  # size -> all_instances
-    #         # size -> (all_instances, scatter, shape)
-    #         d = {k: (d[k], *encoding[k]) for k in d.keys()}
-    #         recon = model.decode(d)
-    #         return playable(recon, exp.samplerate)
-
-    def round_trip(self, steps):
-        # size -> (all_instances, scatter, shape)
-        encoding = model.encode(self.real[:1, ...], steps=steps)
-        e = {k: v[0] for k, v in encoding.items()}  # size -> all_instances
-        events = encode_events(e, steps, n_atoms)  # tensor
-
-        d = decode_events(events, model.band_dicts, steps,
-                          n_atoms)  # size -> all_instances
-        # size -> (all_instances, scatter, shape)
-        d = {k: (d[k], *encoding[k][1:]) for k in d.keys()}
-        recon = model.decode(d)
-        return playable(recon, exp.samplerate)
-
-    def store(self):
-        model.store()
-
-    def spec(self, steps=steps):
-        return np.abs(zounds.spectral.stft(self.recon(steps)))
-
-    def run(self):
-        for i, item in enumerate(self.iter_items()):
-            self.real = item
-
-            
-            batch_size = item.shape[0]
-
-            print(i, total_atoms, '========================================')
-
-            with torch.no_grad():
-                self.fake = self.round_trip(steps=steps)
-
-                model.learn(item, steps=steps)
-                # print(i, 'sparse coding step')
-
-            loss = torch.zeros(1)
-            self.after_training_iteration(loss)
-
-            # transformer_encoded = self.encode_for_transformer(
-            #     item, steps=steps)
-            # transformer_encoded = transformer_encoded[:, :3, :]
-
-            # inputs = transformer_encoded[:, :, :-1]
-            # atom_targets = transformer_encoded[:, 0, -1:]
-            # rel_targets = torch.diff(transformer_encoded[:, 1:, -2:], dim=-1)
-
-            # pred_atoms, pred_pos_amp = predictor.forward(inputs)
-            # pred_atoms = pred_atoms.view(batch_size, -1)
-
-            # atom_loss = F.cross_entropy(
-            #     pred_atoms,
-            #     atom_targets.view(-1).long()
-            # )
-
-            # print(
-            #     torch.argmax(pred_atoms, dim=-1).view(-1),
-            #     atom_targets.view(-1).long())
-
-            # rel_loss = F.mse_loss(
-            #     pred_pos_amp.view(batch_size, 2),
-            #     rel_targets.view(batch_size, 2)
-            # )
-            # print(rel_loss.item())
-
-            # loss = atom_loss + rel_loss
-            # loss.backward()
-            # print(i, 'MODEL LOSS', loss.item())
-            # optim.step()
-
-            # self.generate()

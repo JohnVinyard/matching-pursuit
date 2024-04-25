@@ -1,4 +1,4 @@
-from typing import List, Union
+from typing import List, Optional, Union
 from conjure import SupportedContentType, numpy_conjure
 import torch
 from torch import nn
@@ -42,7 +42,7 @@ class EnvelopeType(Enum):
     
 
 n_atoms = 64
-envelope_dist = EnvelopeType.Gamma
+envelope_dist = EnvelopeType.Gaussian
 
 # force_pos_adjustment = False
 # For gamma distributions, the center of gravity is always near zero,
@@ -52,7 +52,7 @@ softmax_positioning = True
 
 # hard_resonance_choice = False
 loss_type = LossType.IterativeMultiband.value
-optimize_f0 = False
+optimize_f0 = True
 use_unit_shifts = False
 
 
@@ -418,6 +418,7 @@ class Model(nn.Module):
         if optimize_f0:
             n_f0_elements = 16
             self.resonance_generator = F0Resonance(n_f0_elements=n_f0_elements, n_octaves=256, n_samples=exp.n_samples)
+            
             self.f0_choice = nn.Parameter(torch.zeros(1, n_atoms, 1).uniform_(0.001, 0.1))
             self.decay_choice = nn.Parameter(torch.zeros(1, n_atoms, 1).uniform_(-6, -6))
             self.phase_offsets = nn.Parameter(torch.zeros(1, n_atoms, 1).uniform_(-6, -6))
@@ -470,7 +471,52 @@ class Model(nn.Module):
         
         self.verb_params = nn.Parameter(torch.zeros(1, n_atoms, 4).uniform_(-1, 1))
         
+        # reverb parameters
+        self.rm: Optional[torch.Tensor] = None
+        self.mx: Optional[torch.Tensor] = None
+        
         self.verb = ReverbGenerator(4, 2, exp.samplerate, exp.n_samples, norm=nn.LayerNorm(4,), hard_choice=True)
+    
+    def get_parameters(self):
+        
+        if self.rm is None:
+            raise ValueError('rm is not initialized')
+        
+        if self.mx is None:
+            raise ValueError('mx is not initialized')
+        
+        atoms = []
+        for i in range(n_atoms):
+            new_atom = [
+                self.env[0, i, 0].item(),
+                self.env[0, i, 1].item(),
+                
+                float(torch.argmax(self.shifts[0, i], dim=-1).item() / self.shifts.shape[-1]),
+                # since the mix is two-elements and passed through softmax, the other element
+                # can be derived
+                self.mix[0, i, 0].item(),
+                self.decays[0, i, 0].item(),
+                self.filter_decays[0, i, 0].item(),
+                self.f0_choice[0, i, 0].item(),
+                self.decay_choice[0, i, 0].item(),
+                self.freq_spacing[0, i, 0].item(),
+                
+                self.noise_filter[0, i, 0].item(),
+                self.noise_filter[0, i, 1].item(),
+                
+                self.resonance_filter[0, i, 0].item(),
+                self.resonance_filter[0, i, 1].item(),
+                
+                self.amplitudes[0, i, 0].item(),
+                
+                float(torch.argmax(self.rm[0, i], dim=-1).item() / self.verb.n_rooms),
+                # since the reverb mix is two elements passed through a softmax,
+                # the other value can be derived
+                self.mx[0, i, 0].item()
+                
+            ]
+            atoms.append(new_atom)
+        return atoms
     
     def forward(self, x):
         overall_mix = torch.softmax(self.mix, dim=-1)
@@ -541,7 +587,11 @@ class Model(nn.Module):
         amps = torch.abs(self.amplitudes)
         final = final * amps
         
-        final = self.verb.forward(self.verb_params, final)
+        # rm is a one-hot room choice
+        # mx is a two-element, softmax distribution
+        final, rm, mx = self.verb.forward(self.verb_params, final, return_parameters=True)
+        self.rm = rm
+        self.mx = mx
         
         return final, amps
         
@@ -574,6 +624,7 @@ def train(batch, i):
         loss = F.mse_loss(fake.real, real.real) + F.mse_loss(fake.imag, real.imag)
     else:
         raise ValueError(f'Unsupported loss {loss_type}')
+    
     
     
     loss.backward()

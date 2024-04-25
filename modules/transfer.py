@@ -14,7 +14,11 @@ from torch.nn import functional as F
 from scipy.signal import square, sawtooth
 
 
-def gaussian_bandpass_filtered(means: torch.Tensor, stds: torch.Tensor, signals: int):
+def gaussian_bandpass_filtered(
+        means: torch.Tensor, 
+        stds: torch.Tensor, 
+        signals: torch.Tensor):
+    
     batch, _, samples = signals.shape
     n_coeffs = samples // 2 + 1
     gaussians = pdf2(means, stds, n_coeffs)

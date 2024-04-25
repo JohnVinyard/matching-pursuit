@@ -1,6 +1,6 @@
 
 from enum import Enum
-from typing import Callable, List, Union
+from typing import Callable, List, Optional, Union
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -24,12 +24,12 @@ from util import device
 from util.music import musical_scale_hz
 from util.readmedocs import readme
 from torch.nn.utils.weight_norm import weight_norm
-
+import numpy as np
 
 exp = Experiment(
     samplerate=22050,
     n_samples=2**15,
-    weight_init=0.05,
+    weight_init=0.1,
     model_dim=128,
     kernel_size=512)
 
@@ -44,8 +44,6 @@ force_pos_adjustment = True
 # For gamma distributions, the center of gravity is always near zero,
 # so further adjustment is required
 softmax_positioning = envelope_dist == EnvelopeType.Gamma or force_pos_adjustment
-# max_guassian_shift = 256 / exp.n_samples
-learned_envelopes = True
 
 def experiment_spectrogram(x: torch.Tensor):
     batch_size = x.shape[0]
@@ -186,36 +184,11 @@ class EvolvingFilteredResonance(nn.Module):
         return start_resonance, end_resonance, filt_crossfade_stacked
         
 
-class LearnedEnvelopeAndPosition(nn.Module):
-    def __init__(self, n_samples: int, n_envelopes: int, env_frames: int, env_samples: int):
-        super().__init__()
-        self.n_samples = n_samples
-        self.n_envelopes = n_envelopes
-        self.env_frames = env_frames
-        self.env_samples = env_samples
-        
-        self.envelopes = nn.Parameter(torch.zeros(n_envelopes, env_frames).uniform_(0, 1))
-    
-    def forward(self, signals: torch.Tensor, choice: torch.Tensor, shift: torch.Tensor):
-        # choice = sparse_softmax(choice, dim=-1, normalize=True)
-        choice = torch.relu(choice)
-        env = torch.relu(choice @ self.envelopes)
-        env = F.interpolate(env, size=self.env_samples, mode='linear')
-        env = F.pad(env, (0, self.n_samples - self.env_samples))
-        
-        positioned_signals = signals * env
-        
-        shifts = sparse_softmax(shift, dim=-1, normalize=True)
-        # shifts = adjustment
-        positioned_signals = fft_convolve(positioned_signals, shifts)
-        
-        return positioned_signals
-        
-        
+
 
 
 class EnvelopeAndPosition(nn.Module):
-    def __init__(self, n_samples: int, envelope_type: EnvelopeType):
+    def __init__(self, n_samples: int, envelope_type: str):
         super().__init__()
         self.n_samples = n_samples
         self.envelope_type = envelope_type
@@ -255,8 +228,8 @@ class EnvelopeAndPosition(nn.Module):
                 
         elif self.envelope_type == EnvelopeType.Gamma.value:
             envelopes = gamma_pdf(
-                (torch.sigmoid(a) + epsilon), 
-                (torch.sigmoid(b) + epsilon), 
+                (torch.abs(a) + epsilon), 
+                (torch.abs(b) + epsilon), 
                 self.n_samples)
             
             # ramp = torch.zeros_like(envelopes)
@@ -323,6 +296,7 @@ class Model(nn.Module):
         self.attn = nn.Conv1d(self.channels, 1, 1, 1, 0)
         
         
+        
         self.resonance_generator = QuantizedResonanceMixture(
                 n_resonances=total_resonances,
                 quantize_dim=quantize_dim,
@@ -340,15 +314,13 @@ class Model(nn.Module):
             base_crossfade_resonance=0.02, 
             crossfade_frames=128, 
             n_samples=exp.n_samples)
+
+        self.n_envelopes = 256
         
-        if learned_envelopes:
-            self.n_envelopes = 256
-            self.env_and_position = LearnedEnvelopeAndPosition(
-                exp.n_samples, n_envelopes=self.n_envelopes, env_frames=64, env_samples=8192)
-        else:
-            self.env_and_position = EnvelopeAndPosition(
-                n_samples=exp.n_samples, 
-                envelope_type=EnvelopeType.Gaussian.value)
+        
+        self.env_and_position = EnvelopeAndPosition(
+            n_samples=exp.n_samples, 
+            envelope_type=envelope_dist.value)
         
         self.verb = ReverbGenerator(
             self.channels, 
@@ -396,7 +368,6 @@ class Model(nn.Module):
         spec = experiment_spectrogram(x)
         
         
-        
         full_decoded = torch.zeros(batch_size, n_atoms, exp.n_samples, device=x.device)
         
         # pos = pos_encoded(batch_size, time_dim=spec.shape[-1], n_freqs=16, device=spec.device).permute(0, 2, 1)
@@ -435,6 +406,10 @@ class Model(nn.Module):
             env = self.generate_env(events)
             # (batch, n_events, 4096) (one-hot)
             res_choice = self.generate_resonance_choice.forward(events)
+            
+            
+            
+            
             # (batch, n_events, 2)
             noise_filt = self.generate_noise_filter(events)
             # (batch, n_events, 1)
@@ -454,6 +429,7 @@ class Model(nn.Module):
             
             # (batch, n_events, 16)
             verb = self.generate_verb_params(events)
+            
             
             decoded, amps = self.decode(
                 mix=mx, 
@@ -480,7 +456,7 @@ class Model(nn.Module):
     def decode(
             self, 
             mix: torch.Tensor,
-            env: torch.Tensor,
+            env: Optional[torch.Tensor],
             resonance_choice: torch.Tensor,
             noise_filter: torch.Tensor,
             filter_decays: torch.Tensor,
@@ -495,9 +471,7 @@ class Model(nn.Module):
         batch_size, n_events, _ = mix.shape
         
         
-        
         overall_mix = torch.softmax(mix, dim=-1)
-        
         
         resonances = self.resonance_generator.forward(resonance_choice)
         
@@ -527,16 +501,13 @@ class Model(nn.Module):
         decaying_resonance2 = filt_res_2 * decays
         
 
-        if env is not None:
-            positioned_noise = self.env_and_position.forward(
-                signals=filtered_noise, choice=env_choice, shift=shifts)
-        else:
-            positioned_noise = self.env_and_position.forward(
-                signals=filtered_noise, 
-                a=env[:, :, 0], 
-                b=env[:, :, 1], 
-                adjustment=shifts,
-                gaussian_mean_offset=None)        
+        
+        positioned_noise = self.env_and_position.forward(
+            signals=filtered_noise, 
+            a=env[:, :, 0], 
+            b=env[:, :, 1], 
+            adjustment=shifts,
+            gaussian_mean_offset=None)        
         
         res = fft_convolve(
             positioned_noise, 
