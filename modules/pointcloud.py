@@ -17,6 +17,9 @@ import numpy as np
 from collections import defaultdict
 from torch import nn
 
+from modules.normalization import unit_norm
+from modules.random import RandomProjection
+
 
 
 class CanonicalOrdering(nn.Module):
@@ -41,8 +44,52 @@ class CanonicalOrdering(nn.Module):
         ordered = torch.take_along_dim(x, indices=indices, dim=1)
         return ordered
 
+'''
+n_events = ge.shape[1]
+    
+    ge = canonical_ordering.forward(ge)
+    
+    print(ge.shape)
+    
+    # get a self-similarity matrix
+    ssm = ge @ ge.permute(0, 2, 1)
+    print(ssm.shape)
+    
+    indices = torch.triu_indices(ssm.shape[-1], ssm.shape[-1], offset=1)
+    print(indices.shape)
+    
+    
+    ut = ssm[:, indices[0], indices[1]]
+    
+    print(upper_triangular, ut.shape, n_events)
+    
+    proj = random_proj.forward(ut)
+    proj = unit_norm(proj)
+    return proj
+'''
+
+class GraphEdgeEmbedding(nn.Module):
+    def __init__(self, n_items: int, embedding_dim: int, out_channels: int):
+        super().__init__()
+        self.ordering = CanonicalOrdering(embedding_dim)
+        self.embedding_dim = embedding_dim
+        self.out_channels = out_channels
+        
+        self.upper_triangular = n_items * (n_items - 1) // 2
+        self.graph_embedding = RandomProjection(
+            self.upper_triangular, self.out_channels, norm=lambda x: unit_norm(x))
         
 
+    def forward(self, embeddings: torch.Tensor) -> torch.Tensor:
+        ordered = self.ordering.forward(embeddings)
+        
+        ssm = ordered @ ordered.permute(0, 2, 1)
+        indices = torch.triu_indices(ssm.shape[-1], ssm.shape[-1], offset=1)
+        
+        ut = ssm[:, indices[0], indices[1]]
+        proj = self.graph_embedding.forward(ut)
+        proj = unit_norm(proj)
+        return proj
 
 class ProduceEdges(nn.Module):
     def __init__(self, threshold: float = None):
@@ -126,101 +173,101 @@ def greedy_set_alignment(
     return arranged
 
 
-def encode_events(
-        event_dict: 'dict[int, tuple[int, int, float, float]]', 
-        n_atoms: int, 
-        dict_size: int):
-    """
-    Take a dictionary encoding:
-        band_size -> [(index, batch, position, atom),]
-    And convert it to a tensor of shape
-        (batch, 3, n_events)
-    """
-    x = []
-    i = 0
+# def encode_events(
+#         event_dict: 'dict[int, tuple[int, int, float, float]]', 
+#         n_atoms: int, 
+#         dict_size: int):
+#     """
+#     Take a dictionary encoding:
+#         band_size -> [(index, batch, position, atom),]
+#     And convert it to a tensor of shape
+#         (batch, 3, n_events)
+#     """
+#     x = []
+#     i = 0
 
-    for size, events in event_dict.items():
-        atom_index, batch, position, amplitude = zip(*events)
-        batch_size = max(batch) + 1
+#     for size, events in event_dict.items():
+#         atom_index, batch, position, amplitude = zip(*events)
+#         batch_size = max(batch) + 1
 
-        # positions should be in the range 0-1
-        p = torch.cat(position).float().view(batch_size, 1, -1) / size
+#         # positions should be in the range 0-1
+#         p = torch.cat(position).float().view(batch_size, 1, -1) / size
 
-        a = torch.cat(amplitude).float().view(batch_size, -1, n_atoms)
-        a = torch.norm(a, dim=1, keepdim=True)
+#         a = torch.cat(amplitude).float().view(batch_size, -1, n_atoms)
+#         a = torch.norm(a, dim=1, keepdim=True)
 
-        at = torch.from_numpy(np.array(atom_index) + (i * dict_size)).long()
-        at = at.view(batch_size, 1, -1).to(a.device)
+#         at = torch.from_numpy(np.array(atom_index) + (i * dict_size)).long()
+#         at = at.view(batch_size, 1, -1).to(a.device)
 
-        s = torch.zeros_like(at).fill_(size)
+#         s = torch.zeros_like(at).fill_(size)
 
-        z = torch.cat([at, p, a, s], dim=1)
-        x.append(z)
-        i += 1
+#         z = torch.cat([at, p, a, s], dim=1)
+#         x.append(z)
+#         i += 1
 
-    x = torch.cat(x, dim=-1)
+#     x = torch.cat(x, dim=-1)
 
-    # sort all elements by ascending time
-    p = x[:, 1:2, :]
-    indices = torch.argsort(p, dim=-1).repeat(1, 4, 1)
-    x = torch.gather(x, dim=-1, index=indices)
+#     # sort all elements by ascending time
+#     p = x[:, 1:2, :]
+#     indices = torch.argsort(p, dim=-1).repeat(1, 4, 1)
+#     x = torch.gather(x, dim=-1, index=indices)
 
-    # take the amplitude and position difference between successive atoms
-    # pos_amp = x[:, 1:3, :]
-    # pos_amp = torch.cat([torch.zeros(pos_amp.shape[0], pos_amp.shape[1], 1, device=pos_amp.device), pos_amp], dim=-1)
-    # pos_amp = torch.diff(pos_amp, dim=-1)
-    # x[:, 1:3, :] = pos_amp
+#     # take the amplitude and position difference between successive atoms
+#     # pos_amp = x[:, 1:3, :]
+#     # pos_amp = torch.cat([torch.zeros(pos_amp.shape[0], pos_amp.shape[1], 1, device=pos_amp.device), pos_amp], dim=-1)
+#     # pos_amp = torch.diff(pos_amp, dim=-1)
+#     # x[:, 1:3, :] = pos_amp
 
-    return x
-
-
-def decode_events(events: torch.Tensor, band_dicts: 'dict[int, torch.Tensor]', n_atoms: int, dict_size: int):
-    """
-    Take a tensor of shape
-        (batch, 4, n_events) - channels being (atom_index, position, amplitude, band_size)
-    And conver it to a dictionary encoding:
-        band_size => [(index, batch, position, atom),]
-    """
-    batch, _, n_events = events.shape
-
-    # regain absolute positions and magnitudes
-    # pos_amp = events[:, 1:3, :]
-    # pos_amp = torch.cumsum(pos_amp, dim=-1)
-    # events[:, 1:3, :] = pos_amp
-
-    events = events.view(-1, 4, n_events).permute(2,
-                                                  0, 1)  # (n_events, batch, 4)
-    event_dict = defaultdict(list)
-
-    size_index = {size: i for i, size in enumerate(band_dicts.keys())}
-
-    for i, event in enumerate(events):
-        # (batch, 4)
-        for b, item in enumerate(event):
-            # (4,)
-            ai = int(item[0].item())
-            p = item[1].item()
-            a = item[2].item()
-            s = item[3].item()
-
-            # positions should be a number of samples
-            p *= s
-
-            i = size_index[int(s)]
-            ai = ai % dict_size
-
-            a = band_dicts[s][ai] * a
-
-            event_dict[s].append((ai, b, p, a))
-
-    return event_dict
+#     return x
 
 
-if __name__ == '__main__':
+# def decode_events(events: torch.Tensor, band_dicts: 'dict[int, torch.Tensor]', n_atoms: int, dict_size: int):
+#     """
+#     Take a tensor of shape
+#         (batch, 4, n_events) - channels being (atom_index, position, amplitude, band_size)
+#     And conver it to a dictionary encoding:
+#         band_size => [(index, batch, position, atom),]
+#     """
+#     batch, _, n_events = events.shape
 
-    while True:
-        x = torch.zeros(3, 128, 512).uniform_(-1, 1)
-        edges = extract_graph_edges(x, threshold=10)
-        print(edges.shape)
+#     # regain absolute positions and magnitudes
+#     # pos_amp = events[:, 1:3, :]
+#     # pos_amp = torch.cumsum(pos_amp, dim=-1)
+#     # events[:, 1:3, :] = pos_amp
+
+#     events = events.view(-1, 4, n_events).permute(2,
+#                                                   0, 1)  # (n_events, batch, 4)
+#     event_dict = defaultdict(list)
+
+#     size_index = {size: i for i, size in enumerate(band_dicts.keys())}
+
+#     for i, event in enumerate(events):
+#         # (batch, 4)
+#         for b, item in enumerate(event):
+#             # (4,)
+#             ai = int(item[0].item())
+#             p = item[1].item()
+#             a = item[2].item()
+#             s = item[3].item()
+
+#             # positions should be a number of samples
+#             p *= s
+
+#             i = size_index[int(s)]
+#             ai = ai % dict_size
+
+#             a = band_dicts[s][ai] * a
+
+#             event_dict[s].append((ai, b, p, a))
+
+#     return event_dict
+
+
+# if __name__ == '__main__':
+
+#     while True:
+#         x = torch.zeros(3, 128, 512).uniform_(-1, 1)
+#         edges = extract_graph_edges(x, threshold=10)
+#         print(edges.shape)
 
 

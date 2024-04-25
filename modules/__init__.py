@@ -32,7 +32,7 @@ from .matchingpursuit import \
     dictionary_learning_step, fft_convolve, \
     build_scatter_segments, flatten_atom_dict, sparse_feature_map, sparse_coding_loss, \
     SparseCodingLoss
-from .pointcloud import encode_events, decode_events, extract_graph_edges, CanonicalOrdering
+from .pointcloud import extract_graph_edges, CanonicalOrdering, GraphEdgeEmbedding
 from .activation import unit_sine
 from .floodfill import flood_fill_loss
 from .hypernetwork import HyperNetworkLayer

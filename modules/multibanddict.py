@@ -262,6 +262,9 @@ class MultibandDictionaryLearning(object):
     def __len__(self):
         return len(self.bands)
     
+    def event_count(self, iterations: int) -> int:
+        return len(self) * iterations
+    
     def atom_embeddings(self):
         return torch.cat([band.atom_embeddings() for size, band in self.bands.items()], dim=0)
     

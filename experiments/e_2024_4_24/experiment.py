@@ -4,7 +4,7 @@ import torch
 from config.experiment import Experiment
 from modules.multibanddict import BandSpec, GlobalEventTuple, MultibandDictionaryLearning
 from modules.normalization import unit_norm
-from modules.pointcloud import CanonicalOrdering
+from modules.pointcloud import CanonicalOrdering, GraphEdgeEmbedding
 from modules.random import RandomProjection
 from train.experiment_runner import BaseExperimentRunner, MonitoredValueDescriptor
 from util import device
@@ -38,20 +38,10 @@ model = MultibandDictionaryLearning([
 ], n_samples=exp.n_samples)
 
 
-n_events = sparse_coding_steps * len(model)
-
-
-
-upper_triangular = n_events * (n_events - 1) // 2
-
-
-# upper_triangular = 131328
-
-# random_proj = torch.zeros(upper_triangular, 128, device=device).uniform_(-1, 1)
-random_proj = RandomProjection(
-    upper_triangular, 128, norm=lambda x: unit_norm(x, dim=-1)).to(device)
-# canonical_ordering = torch.zeros(14, 1, device=random_proj.device).uniform_(-1, 1)
-canonical_ordering = CanonicalOrdering(14).to(device)
+edge_embedding = GraphEdgeEmbedding(
+    n_items=model.event_count(sparse_coding_steps), 
+    embedding_dim=14, 
+    out_channels=128).to(device)
 
 def build_graph_embedding(
     batch_size: int, 
@@ -61,27 +51,8 @@ def build_graph_embedding(
     # dimension and sorting
     ge = model.event_embeddings(batch_size, events)
     
-    n_events = ge.shape[1]
-    
-    ge = canonical_ordering.forward(ge)
-    
-    print(ge.shape)
-    
-    # get a self-similarity matrix
-    ssm = ge @ ge.permute(0, 2, 1)
-    print(ssm.shape)
-    
-    indices = torch.triu_indices(ssm.shape[-1], ssm.shape[-1], offset=1)
-    print(indices.shape)
-    
-    
-    ut = ssm[:, indices[0], indices[1]]
-    
-    print(upper_triangular, ut.shape, n_events)
-    
-    proj = random_proj.forward(ut)
-    proj = unit_norm(proj)
-    return proj
+    edges = edge_embedding.forward(ge)
+    return edges
         
         
 
