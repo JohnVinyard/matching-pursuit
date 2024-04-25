@@ -5,6 +5,7 @@ from config.experiment import Experiment
 from modules.multibanddict import BandSpec, GlobalEventTuple, MultibandDictionaryLearning
 from modules.normalization import unit_norm
 from modules.pointcloud import CanonicalOrdering
+from modules.random import RandomProjection
 from train.experiment_runner import BaseExperimentRunner, MonitoredValueDescriptor
 from util import device
 from util.playable import playable
@@ -36,61 +37,49 @@ model = MultibandDictionaryLearning([
     BandSpec(32768, n_atoms, 128, device=device, signal_samples=exp.n_samples),
 ], n_samples=exp.n_samples)
 
+
 n_events = sparse_coding_steps * len(model)
 
-# upper_triangular = (n_events * ((n_events + 1) // 2))
-upper_triangular = 131328
 
-random_proj = torch.zeros(upper_triangular, 128, device=device).uniform_(-1, 1)
+
+upper_triangular = n_events * (n_events - 1) // 2
+
+
+# upper_triangular = 131328
+
+# random_proj = torch.zeros(upper_triangular, 128, device=device).uniform_(-1, 1)
+random_proj = RandomProjection(
+    upper_triangular, 128, norm=lambda x: unit_norm(x, dim=-1)).to(device)
 # canonical_ordering = torch.zeros(14, 1, device=random_proj.device).uniform_(-1, 1)
 canonical_ordering = CanonicalOrdering(14).to(device)
 
 def build_graph_embedding(
     batch_size: int, 
-    events: List[GlobalEventTuple], 
-    projection_matrix: torch.Tensor):
+    events: List[GlobalEventTuple]):
     
-    
-    # with torch.no_grad():
-    
-        # sort the events by unit time, ascending
-        # events = sorted(events, key=lambda item: item[2], reverse=False)
-        
-        # n_elements = len(events) // len(model)
-        
-        # atom_embeddings = model.atom_embeddings()
-        # base_shape = atom_embeddings.shape[-1]
-        
-        # ge = torch.zeros(batch_size, n_elements, 2 + base_shape, device=device)
-        # item_counter = Counter()
-        
-        # for i, event in enumerate(events):
-        #     global_index, batch, unit_time, amplitude = event
-        #     band_index, band = model.get_band_from_global_atom_index(global_index)
-            
-        #     current_index = item_counter[band_index]
-        #     item_counter[band_index] += 1
-            
-        #     ae = atom_embeddings[global_index]
-        #     ge[batch, current_index, 0] = unit_time
-        #     ge[batch, current_index, 1] = amplitude
-        #     ge[batch, current_index, 2:] = ae
-        
-        
     # get a canonical ordering by projecting to a single
     # dimension and sorting
     ge = model.event_embeddings(batch_size, events)
-    # order = ge @ canonical_ordering
-    # indices = torch.argsort(order, dim=1)
-    # ge = torch.take_along_dim(ge, indices, dim=1)
+    
+    n_events = ge.shape[1]
+    
     ge = canonical_ordering.forward(ge)
     
+    print(ge.shape)
     
+    # get a self-similarity matrix
     ssm = ge @ ge.permute(0, 2, 1)
+    print(ssm.shape)
     
-    indices = torch.triu_indices(ssm.shape[-1], ssm.shape[-1])
+    indices = torch.triu_indices(ssm.shape[-1], ssm.shape[-1], offset=1)
+    print(indices.shape)
+    
+    
     ut = ssm[:, indices[0], indices[1]]
-    proj = ut @ projection_matrix
+    
+    print(upper_triangular, ut.shape, n_events)
+    
+    proj = random_proj.forward(ut)
     proj = unit_norm(proj)
     return proj
         
@@ -99,9 +88,15 @@ def build_graph_embedding(
 def round_trip(batch: torch.Tensor, steps: int) -> Tuple[zounds.AudioSamples, torch.Tensor]:
     # size -> (all_instances, scatter, shape)
     encoding = model.encode(batch, steps=steps)
-    flat = model.flattened_event_tuples(encoding)
     
-    embeddings = build_graph_embedding(batch.shape[0], flat, random_proj)
+    total_events = sum(len(t[0]) for size, t in encoding.items())
+    print('TOTAL EVENTS', total_events // batch.shape[0])
+    
+    flat = model.flattened_event_tuples(encoding)
+    print('FLAT TOTAL EVENTS', len(flat) // batch.shape[0])
+    
+    embeddings = build_graph_embedding(batch.shape[0], flat)
+    print('EMBEDDINGS', embeddings.shape)
     
     recon_encoding = model.hierarchical_event_tuples(flat, encoding)
     recon = model.decode(recon_encoding)

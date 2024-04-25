@@ -267,22 +267,26 @@ class MultibandDictionaryLearning(object):
     
     def event_embeddings(self, batch_size: int, events: List[GlobalEventTuple]) -> torch.Tensor:
         with torch.no_grad():
-            n_elements = len(events) // len(self)
+            n_elements = len(events) // batch_size
+            
             
             atom_embeddings = self.atom_embeddings()
             base_shape = atom_embeddings.shape[-1]
             
             ge = torch.zeros(batch_size, n_elements, 2 + base_shape, device=device)
-            item_counter = Counter()
+            
+            event_index_counter = defaultdict(Counter)
             
             for event in events:
                 global_index, batch, unit_time, amplitude = event
                 band_index, band = self.get_band_from_global_atom_index(global_index)
                 
-                current_index = item_counter[band_index]
-                item_counter[band_index] += 1
+                counter = event_index_counter[batch]
+                current_index = counter[band_index]
+                counter[band_index] += 1
                 
                 ae = atom_embeddings[global_index]
+                
                 ge[batch, current_index, 0] = unit_time
                 ge[batch, current_index, 1] = amplitude
                 ge[batch, current_index, 2:] = ae
