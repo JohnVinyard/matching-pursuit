@@ -1,13 +1,16 @@
 
+from typing import List, Tuple
 import torch
 from config.experiment import Experiment
-from modules.multibanddict import BandSpec, MultibandDictionaryLearning
+from modules.multibanddict import BandSpec, GlobalEventTuple, MultibandDictionaryLearning
+from modules.normalization import unit_norm
 from train.experiment_runner import BaseExperimentRunner, MonitoredValueDescriptor
 from util import device
 from util.playable import playable
 from util.readmedocs import readme
 import zounds
 from conjure import numpy_conjure, SupportedContentType, audio_conjure
+from collections import Counter
 
 exp = Experiment(
     samplerate=22050,
@@ -32,13 +35,74 @@ model = MultibandDictionaryLearning([
     BandSpec(32768, n_atoms, 128, device=device, signal_samples=exp.n_samples),
 ], n_samples=exp.n_samples)
 
-def round_trip(batch: torch.Tensor, steps: int) -> zounds.AudioSamples:
+n_events = sparse_coding_steps * len(model)
+
+# upper_triangular = (n_events * ((n_events + 1) // 2))
+upper_triangular = 131328
+
+random_proj = torch.zeros(upper_triangular, 128, device=device).uniform_(-1, 1)
+canonical_ordering = torch.zeros(14, 1, device=random_proj.device).uniform_(-1, 1)
+
+def build_graph_embedding(
+    batch_size: int, 
+    events: List[GlobalEventTuple], 
+    projection_matrix: torch.Tensor):
+    
+    # with torch.no_grad():
+    
+        # sort the events by unit time, ascending
+        # events = sorted(events, key=lambda item: item[2], reverse=False)
+        
+        # n_elements = len(events) // len(model)
+        
+        # atom_embeddings = model.atom_embeddings()
+        # base_shape = atom_embeddings.shape[-1]
+        
+        # ge = torch.zeros(batch_size, n_elements, 2 + base_shape, device=device)
+        # item_counter = Counter()
+        
+        # for i, event in enumerate(events):
+        #     global_index, batch, unit_time, amplitude = event
+        #     band_index, band = model.get_band_from_global_atom_index(global_index)
+            
+        #     current_index = item_counter[band_index]
+        #     item_counter[band_index] += 1
+            
+        #     ae = atom_embeddings[global_index]
+        #     ge[batch, current_index, 0] = unit_time
+        #     ge[batch, current_index, 1] = amplitude
+        #     ge[batch, current_index, 2:] = ae
+        
+        
+    # get a canonical ordering by projecting to a single
+    # dimension and sorting
+    
+    ge = model.event_embeddings(batch_size, events)
+    
+    order = ge @ canonical_ordering
+    indices = torch.argsort(order, dim=1)
+    ge = torch.take_along_dim(ge, indices, dim=1)
+    
+    ssm = ge @ ge.permute(0, 2, 1)
+    
+    indices = torch.triu_indices(ssm.shape[-1], ssm.shape[-1])
+    ut = ssm[:, indices[0], indices[1]]
+    proj = ut @ projection_matrix
+    proj = unit_norm(proj)
+    return proj
+        
+        
+
+def round_trip(batch: torch.Tensor, steps: int) -> Tuple[zounds.AudioSamples, torch.Tensor]:
     # size -> (all_instances, scatter, shape)
     encoding = model.encode(batch, steps=steps)
     flat = model.flattened_event_tuples(encoding)
+    
+    embeddings = build_graph_embedding(batch.shape[0], flat, random_proj)
+    
     recon_encoding = model.hierarchical_event_tuples(flat, encoding)
     recon = model.decode(recon_encoding)
-    return playable(recon, zounds.audio_sample_rate(exp.samplerate))
+    return playable(recon, zounds.audio_sample_rate(exp.samplerate)), embeddings
 
 
 # NOTE: 2023-12-18 has relevant code for the "approximate" portion of this 
@@ -47,7 +111,7 @@ def train(batch, i):
     
     # TODO: Support different sparse coding iterations for each band
     with torch.no_grad():
-        rt = round_trip(batch, steps=sparse_coding_steps)
+        rt, embeddings = round_trip(batch, steps=sparse_coding_steps)
         recon, events = model.recon(batch, steps=sparse_coding_steps)
         model.learn(batch, steps=sparse_coding_steps)
         # print(i, 'sparse coding step')
@@ -82,7 +146,7 @@ def train(batch, i):
     
     loss = torch.zeros(1, device=device)
     
-    return loss, recon, fm, rt
+    return loss, recon, fm, rt, embeddings
 
 def make_conjure(experiment: BaseExperimentRunner):
     @numpy_conjure(experiment.collection, content_type=SupportedContentType.Spectrogram.value)
@@ -97,7 +161,6 @@ def make_conjure_embeddings(experiment: BaseExperimentRunner):
     @numpy_conjure(experiment.collection, content_type=SupportedContentType.Spectrogram.value)
     def encoded_atom_embeddings(x: torch.Tensor):
         x = x.data.cpu().numpy()
-        print(x.dtype)
         return x
 
     return (encoded_atom_embeddings,)
@@ -124,13 +187,13 @@ class AudioSegmentEmbedding(BaseExperimentRunner):
     def run(self):
         for i, batch in enumerate(self.stream):
             batch = batch.view(-1, 1, exp.n_samples)
-            l, r, fm, rt = train(batch, i)
+            l, r, fm, rt, embeddings = train(batch, i)
             
             self.rt = rt
             self.real = batch
             self.fake = r
             self.feature_map = fm
-            self.embeddings = model.atom_embeddings()
+            self.embeddings = embeddings
             
             print(l.item())
             self.after_training_iteration(l, i)

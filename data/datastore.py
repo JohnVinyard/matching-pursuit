@@ -10,7 +10,6 @@ from data.conjure import LmdbCollection, cache
 
 collection = LmdbCollection('audio')
 
-
 def iter_files(base_path, pattern):
     for dirpath, _, filenames in os.walk(base_path):
         audio_files = filter(

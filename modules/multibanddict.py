@@ -1,4 +1,4 @@
-from collections import defaultdict, namedtuple
+from collections import Counter, defaultdict, namedtuple
 from typing import Callable, Dict, List, Optional, Tuple
 import zounds
 import torch
@@ -206,6 +206,7 @@ class BandSpec(object):
             steps,
             device=self.device,
             approx=self.slce,
+            flatten=True,
             extract_atom_embedding=extract_embeddings,
             local_contrast_norm=self.local_contrast_norm)
         
@@ -218,10 +219,12 @@ class BandSpec(object):
 
         # this is just flattening into [(atom_index, batch, position, atom)]
         # TODO: use the flatten=True keyword instead
-        all_instances = []
-        for k, v in instances.items():
-            all_instances.extend(v)
-        return all_instances, scatter, batch.shape
+        # all_instances = []
+        # for k, v in instances.items():
+        #     all_instances.extend(v)
+        
+        
+        return instances, scatter, batch.shape
 
     def decode(self, shape, all_instances, scatter):
         return scatter(shape, all_instances)
@@ -255,8 +258,36 @@ class MultibandDictionaryLearning(object):
 
         self._embeddings = None
     
+    
+    def __len__(self):
+        return len(self.bands)
+    
     def atom_embeddings(self):
         return torch.cat([band.atom_embeddings() for size, band in self.bands.items()], dim=0)
+    
+    def event_embeddings(self, batch_size: int, events: List[GlobalEventTuple]) -> torch.Tensor:
+        with torch.no_grad():
+            n_elements = len(events) // len(self)
+            
+            atom_embeddings = self.atom_embeddings()
+            base_shape = atom_embeddings.shape[-1]
+            
+            ge = torch.zeros(batch_size, n_elements, 2 + base_shape, device=device)
+            item_counter = Counter()
+            
+            for event in events:
+                global_index, batch, unit_time, amplitude = event
+                band_index, band = self.get_band_from_global_atom_index(global_index)
+                
+                current_index = item_counter[band_index]
+                item_counter[band_index] += 1
+                
+                ae = atom_embeddings[global_index]
+                ge[batch, current_index, 0] = unit_time
+                ge[batch, current_index, 1] = amplitude
+                ge[batch, current_index, 2:] = ae
+            
+            return ge
     
     def get_atom(self, size, index, norm):
         return self.bands[size].get_atom(index, norm)
