@@ -24,38 +24,24 @@ class CanonicalOrdering(nn.Module):
     Project embeddings into a single dimension and order them
     """
 
-    def __init__(self, embedding_dim, dim=None, no_op=False):
+    def __init__(self, embedding_dim):
         super().__init__()
         self.embedding_dim = embedding_dim
-        self.no_op = no_op
 
-        if dim is None:
-            self.register_buffer(
-                'projection', 
-                torch.zeros(embedding_dim, 1).uniform_(-1, 1))
-        else:
-            x = torch.zeros(embedding_dim, 1)
-            x[dim] = 1
-            self.register_buffer('projection', x)
-
+        self.register_buffer(
+            'projection', 
+            torch.zeros(embedding_dim, 1).uniform_(-1, 1))
     
-    def forward(self, x):
-        if self.no_op:
-            return x
-    
-        batch, t, dim = x.shape
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # project to one dimension
         z = x @ self.projection
         indices = torch.argsort(z, dim=1)
+        
+        # order based on the projection
+        ordered = torch.take_along_dim(x, indices=indices, dim=1)
+        return ordered
 
-        # values = torch.zeros_like(x)
-        # for b in range(batch):
-        #     for p in range(t):
-        #         index = indices[b, p]
-        #         values[b, p, :] = x[b, indices[b, p], :]
-
-        values = torch.gather(x, dim=1, index=indices.repeat(1, 1, dim))
-        return values.view(batch, t, dim)
-        # return values
+        
 
 
 class ProduceEdges(nn.Module):

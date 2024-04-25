@@ -4,6 +4,7 @@ import torch
 from config.experiment import Experiment
 from modules.multibanddict import BandSpec, GlobalEventTuple, MultibandDictionaryLearning
 from modules.normalization import unit_norm
+from modules.pointcloud import CanonicalOrdering
 from train.experiment_runner import BaseExperimentRunner, MonitoredValueDescriptor
 from util import device
 from util.playable import playable
@@ -41,12 +42,14 @@ n_events = sparse_coding_steps * len(model)
 upper_triangular = 131328
 
 random_proj = torch.zeros(upper_triangular, 128, device=device).uniform_(-1, 1)
-canonical_ordering = torch.zeros(14, 1, device=random_proj.device).uniform_(-1, 1)
+# canonical_ordering = torch.zeros(14, 1, device=random_proj.device).uniform_(-1, 1)
+canonical_ordering = CanonicalOrdering(14).to(device)
 
 def build_graph_embedding(
     batch_size: int, 
     events: List[GlobalEventTuple], 
     projection_matrix: torch.Tensor):
+    
     
     # with torch.no_grad():
     
@@ -76,12 +79,12 @@ def build_graph_embedding(
         
     # get a canonical ordering by projecting to a single
     # dimension and sorting
-    
     ge = model.event_embeddings(batch_size, events)
+    # order = ge @ canonical_ordering
+    # indices = torch.argsort(order, dim=1)
+    # ge = torch.take_along_dim(ge, indices, dim=1)
+    ge = canonical_ordering.forward(ge)
     
-    order = ge @ canonical_ordering
-    indices = torch.argsort(order, dim=1)
-    ge = torch.take_along_dim(ge, indices, dim=1)
     
     ssm = ge @ ge.permute(0, 2, 1)
     
