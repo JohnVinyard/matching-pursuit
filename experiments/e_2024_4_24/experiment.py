@@ -21,15 +21,15 @@ n_atoms = 512
 sparse_coding_steps = 64
 
 
-# TODO: full_size is not necessary and should be removed
+# TODO: signal_samples is not necessary and should be removed
 model = MultibandDictionaryLearning([
-    BandSpec(512,   n_atoms, 128, device=device, full_size=8192),
-    BandSpec(1024,  n_atoms, 128, device=device, full_size=8192),
-    BandSpec(2048,  n_atoms, 128, device=device, full_size=8192),
-    BandSpec(4096,  n_atoms, 128, device=device, full_size=8192),
-    BandSpec(8192,  n_atoms, 128, device=device, full_size=8192),
-    BandSpec(16384, n_atoms, 128, device=device, full_size=8192),
-    BandSpec(32768, n_atoms, 128, device=device, full_size=8192),
+    BandSpec(512,   n_atoms, 128, device=device, signal_samples=exp.n_samples, is_lowest_band=True),
+    BandSpec(1024,  n_atoms, 128, device=device, signal_samples=exp.n_samples),
+    BandSpec(2048,  n_atoms, 128, device=device, signal_samples=exp.n_samples),
+    BandSpec(4096,  n_atoms, 128, device=device, signal_samples=exp.n_samples),
+    BandSpec(8192,  n_atoms, 128, device=device, signal_samples=exp.n_samples),
+    BandSpec(16384, n_atoms, 128, device=device, signal_samples=exp.n_samples),
+    BandSpec(32768, n_atoms, 128, device=device, signal_samples=exp.n_samples),
 ], n_samples=exp.n_samples)
 
 def round_trip(batch: torch.Tensor, steps: int) -> zounds.AudioSamples:
@@ -92,6 +92,16 @@ def make_conjure(experiment: BaseExperimentRunner):
 
     return (encoded,)
 
+
+def make_conjure_embeddings(experiment: BaseExperimentRunner):
+    @numpy_conjure(experiment.collection, content_type=SupportedContentType.Spectrogram.value)
+    def encoded_atom_embeddings(x: torch.Tensor):
+        x = x.data.cpu().numpy()
+        print(x.dtype)
+        return x
+
+    return (encoded_atom_embeddings,)
+
 def make_conjure_rt(experiment: BaseExperimentRunner):
     @audio_conjure(experiment.collection, identifier='roundtrip')
     def encoded_audio(x: zounds.AudioSamples):
@@ -106,6 +116,7 @@ class AudioSegmentEmbedding(BaseExperimentRunner):
     
     feature_map = MonitoredValueDescriptor(make_conjure)
     rt = MonitoredValueDescriptor(make_conjure_rt)
+    embeddings = MonitoredValueDescriptor(make_conjure_embeddings)
     
     def __init__(self, stream, port=None, save_weights=False, load_weights=False):
         super().__init__(stream, train, exp, port=port, save_weights=save_weights, load_weights=load_weights)
@@ -119,6 +130,7 @@ class AudioSegmentEmbedding(BaseExperimentRunner):
             self.real = batch
             self.fake = r
             self.feature_map = fm
+            self.embeddings = model.atom_embeddings()
             
             print(l.item())
             self.after_training_iteration(l, i)

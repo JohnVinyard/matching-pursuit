@@ -2,10 +2,13 @@ from collections import defaultdict, namedtuple
 from typing import Callable, Dict, List, Optional, Tuple
 import zounds
 import torch
+from modules.stft import stft
 from util import device
-from modules.decompose import fft_frequency_decompose, fft_frequency_recompose
+from modules.decompose import fft_frequency_decompose, fft_frequency_recompose, fft_resample
 from modules.matchingpursuit import build_scatter_segments, dictionary_learning_step, sparse_code
 from modules.normalization import unit_norm
+from torch.nn import functional as F
+from librosa.filters import mel
 
 LocalEventTuple = Tuple[int, int, int, torch.Tensor]
 GlobalEventTuple = Tuple[int, int, float, float]
@@ -21,11 +24,18 @@ class BandSpec(object):
             atom_size: int,
             slce: Optional[slice]=None,
             device=None,
-            full_size: int=8192,
+            signal_samples: int = 0,
             samplerate: zounds.SampleRate =zounds.SR22050(),
-            local_contrast_norm: bool = False):
+            local_contrast_norm: bool = False,
+            is_lowest_band: bool = False):
 
         super().__init__()
+        
+        self.is_lowest_band = is_lowest_band
+        
+        # The length of the audio being decomposed, in samples,
+        # at the "native" samplerate
+        self.signal_samples = signal_samples
         
         # The length of the audio band being decomposed, in samples
         self.size = size
@@ -39,9 +49,6 @@ class BandSpec(object):
         self.slce = slce
         self.device = device
 
-        self.full_size = full_size
-        self.ratio = full_size // self.atom_size
-        self.atom_full_size = int(self.atom_size * self.ratio)
         self.samplerate = samplerate
         self.local_contrast_norm = local_contrast_norm
 
@@ -52,88 +59,63 @@ class BandSpec(object):
         self._embeddings = None
     
     @property
+    def n_samples_at_native_rate(self):
+        """
+        Return the length of the _atoms_, in samples, 
+        at the native samplerate (specified by self.samplerate)
+        """
+        ratio = self.signal_samples // self.size
+        return self.atom_size * ratio
+    
+    def resampled_atoms(self) -> torch.Tensor:
+        desired_size = self.n_samples_at_native_rate
+        
+        return fft_resample(
+            self.d.view(self.n_atoms, 1, self.atom_size), 
+            desired_size, 
+            self.is_lowest_band)
+    
+    def atom_embeddings(self, window_size: int=512, step_size: int=256) -> torch.Tensor:
+        with torch.no_grad():
+            n_samples = self.n_samples_at_native_rate
+            rs = self.resampled_atoms().view(self.n_atoms, 1, n_samples)
+            
+            padding = window_size - n_samples
+            if padding > 0:
+                rs = F.pad(rs, (0, padding))
+            
+            n_coeffs = window_size // 2 + 1
+            
+            n_mels = 128
+            
+            mel_matrix = torch.from_numpy(mel(int(self.samplerate), window_size, n_mels)).to(rs.device)
+            
+            spec = stft(rs, ws=window_size, step=step_size, pad=True).view(self.n_atoms, -1, n_coeffs)
+            
+            
+            # print(spec.shape, mel_matrix.shape)
+            
+            mel_spec = spec @ mel_matrix.T
+            mel_spec = mel_spec.view(self.n_atoms, -1, n_mels)
+            # mel_spec = torch.log(mel_spec)
+            
+            # embedding = torch.mean(mel_spec, dim=1)
+            # embedding = unit_norm(embedding, dim=-1)
+            # return embedding
+        
+            mfcc = torch.abs(torch.fft.rfft(spec, dim=-1, norm='ortho'))
+            mfcc = mfcc[..., 1:13]
+            mfcc = unit_norm(mfcc, dim=-1).view(self.n_atoms, -1, 12)
+            mfcc = torch.mean(mfcc, dim=1).view(self.n_atoms, 12)
+            mfcc = unit_norm(mfcc, dim=-1)
+            return mfcc
+    
+    @property
     def embedding_dim(self):
         return self.embeddings.shape[-1]
-
+    
     def shape(self, batch_size):
         return (batch_size, 1, self.size)
-
-    def to_embeddings(self, indices):
-        return self.embeddings[indices]
-
-    def to_indices(self, embeddings):
-        diff = torch.cdist(self.embeddings, embeddings, p=2)
-        indices = torch.argmin(diff, dim=0)
-        return indices
-
-    @property
-    def embeddings(self):
-        if self._embeddings is not None:
-            return self._embeddings
-        
-
-        self._embeddings = torch.eye(self.n_atoms, device=device)
-        # self._embeddings = torch.zeros(self.n_atoms, 40, device=device).uniform_(-1, 1)
-        return self._embeddings
-    
-    
-        # compute embeddings for each element in the dictionary
-        """
-        1. resample to canonical size/sampling rate
-        1. compute spectrogram
-        1. compute MFCCs
-        1. compute chroma
-        1. global pooling operation(s)
-        """
-
-
-        with torch.no_grad():
-            n_bands = 128
-            kernel_size = 256
-            summary_bands = 16
-            spec_win_size = n_bands // summary_bands
-
-            samplerate = zounds.SR22050()
-            band = zounds.FrequencyBand(20, samplerate.nyquist - 100)
-            scale = zounds.MelScale(band, n_bands)
-            chroma = zounds.ChromaScale(band)
-            chroma_basis = chroma._basis(
-                scale, zounds.OggVorbisWindowingFunc())
-            chroma_basis = torch.from_numpy(
-                chroma_basis).to(self.d.device).float()
-
-            filters = zounds.learn.FilterBank(
-                samplerate, kernel_size, scale, 0.1, normalize_filters=True).to(device)
-            upsampled = fft_resample(
-                self.d.view(self.n_atoms, 1, self.atom_size),
-                self.atom_full_size,
-                is_lowest_band=True)
-
-            spec = filters.forward(upsampled, normalize=False)
-
-            summary = F.avg_pool1d(spec.permute(
-                0, 2, 1), spec_win_size, spec_win_size)
-            summary = unit_norm(summary.permute(0, 2, 1), dim=1)
-            summary = torch.mean(summary, dim=-1)
-
-            n_frames = self.full_size // 256
-            spec = F.avg_pool1d(spec, 512, 256, padding=256)[..., :n_frames]
-
-            mfcc = torch.fft.rfft(spec, dim=1, norm='ortho')
-            mfcc = torch.abs(mfcc)
-            mfcc = unit_norm(mfcc[:, 1:13, :], dim=1)
-            mfcc = torch.mean(mfcc, dim=-1)
-
-            chroma = spec.permute(0, 2, 1) @ chroma_basis.T
-            chroma = chroma.permute(0, 2, 1)
-            chroma = unit_norm(chroma, dim=1)
-            chroma = torch.mean(chroma, dim=-1)
-
-            final = torch.cat([mfcc, chroma, summary], dim=-1)
-
-            self._embeddings = final
-
-            return self._embeddings
 
     @property
     def filename(self):
@@ -174,7 +156,7 @@ class BandSpec(object):
     def to_local_atom_index(self, index: int, offset: int) -> int:
         return index - offset
     
-    def to_unit_time(self, sample_position: int) -> int:
+    def to_unit_time(self, sample_position: int) -> float:
         return sample_position / self.size
     
     def to_sample_time(self, unit_time: float) -> int:
@@ -272,7 +254,10 @@ class MultibandDictionaryLearning(object):
         self.n_atoms = list(n_atoms)[0]
 
         self._embeddings = None
-
+    
+    def atom_embeddings(self):
+        return torch.cat([band.atom_embeddings() for size, band in self.bands.items()], dim=0)
+    
     def get_atom(self, size, index, norm):
         return self.bands[size].get_atom(index, norm)
 
@@ -313,29 +298,6 @@ class MultibandDictionaryLearning(object):
                 size, self.bands[size].atom_size), (batch_size, 1, size))
             for size in self.bands.keys()
         }
-
-    @property
-    def embeddings(self):
-        if self._embeddings is not None:
-            return self._embeddings
-        
-        # self._embeddings = torch.cat(
-        #     [band.embeddings for band in self.bands.values()])
-
-        self._embeddings = torch.eye(self.total_atoms).to(device)
-        return self._embeddings
-
-    @property
-    def embedding_dim(self):
-        return self.embeddings.shape[-1]
-
-    def to_embeddings(self, indices):
-        return self.embeddings[indices]
-
-    def to_indices(self, embeddings):
-        diff = torch.cdist(self.embeddings, embeddings, p=2)
-        indices = torch.argmin(diff, dim=0)
-        return indices
 
     def store(self):
         for band in self.bands.values():
