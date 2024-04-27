@@ -168,6 +168,7 @@ class AudioSegmentEmbedding(BaseExperimentRunner):
         super().__init__(stream, train, exp, port=port, save_weights=save_weights, load_weights=load_weights)
     
     def run(self):
+        from subprocess import Popen
         
         def filepath_from_key(key: str) -> str:
             _id, start, end = key.split('_')
@@ -204,12 +205,16 @@ class AudioSegmentEmbedding(BaseExperimentRunner):
                     fp = filepath_from_key(key)
                     slce = slice_from_key(key)
                     chunk = load_audio_chunk(fp, slce, device=embeddings.device)
-                    p = playable(chunk, exp.samplerate, normalize=True)
-                    print(fp, p)                    
+                    p: zounds.AudioSamples = playable(chunk, exp.samplerate, normalize=True)
+                    print(fp, p)    
+                    
+                    Popen(f'aplay', shell=True, stdin=p.encode())       
+                    input('Next')         
             
             return
-        except IOError:
-            pass
+        except IOError as e:
+            print(e)
+            return
         
         # TODO: use conjure to simplify this
         
