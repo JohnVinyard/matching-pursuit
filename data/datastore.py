@@ -32,6 +32,8 @@ def audio(path):
 def load_audio_chunk(path: str, slce: slice, device = None) -> torch.Tensor:
     data = audio(path)[:]
     data = torch.from_numpy(data).float()
+    data = data[slce]
+    
     if device is not None:
         data = data.to(device)
     

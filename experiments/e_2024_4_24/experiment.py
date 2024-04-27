@@ -168,7 +168,7 @@ class AudioSegmentEmbedding(BaseExperimentRunner):
         super().__init__(stream, train, exp, port=port, save_weights=save_weights, load_weights=load_weights)
     
     def run(self):
-        from subprocess import Popen
+        from subprocess import Popen, PIPE
         
         def filepath_from_key(key: str) -> str:
             _id, start, end = key.split('_')
@@ -197,6 +197,8 @@ class AudioSegmentEmbedding(BaseExperimentRunner):
             search = BruteForceSearch(embeddings, keys, n_results=5)
             
             for i in range(n_examples):
+                print('==============================================')
+                
                 query_index = np.random.randint(0, total_items)
                 query = embeddings[query_index]
                 keys, e = search.search(query)
@@ -208,7 +210,9 @@ class AudioSegmentEmbedding(BaseExperimentRunner):
                     p: zounds.AudioSamples = playable(chunk, exp.samplerate, normalize=True)
                     print(fp, p)    
                     
-                    Popen(f'aplay', shell=True, stdin=p.encode())       
+                    proc = Popen(f'aplay', shell=True, stdin=PIPE)
+                    proc.stdin.write(p.encode().read())
+                    proc.communicate()
                     input('Next')         
             
             return
