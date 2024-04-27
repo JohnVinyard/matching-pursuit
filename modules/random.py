@@ -1,6 +1,7 @@
 from typing import Callable, Optional, Union
 import torch
 from torch import nn
+from torch.nn.init import orthogonal_
 
 TensorTransform = Callable[[torch.Tensor], torch.Tensor]
 
@@ -12,9 +13,10 @@ class RandomProjection(nn.Module):
         self.out_channels = out_channels
         self.norm = norm
         
-        self.register_buffer(
-            'projection_matrix', 
-            torch.zeros(in_channels, out_channels).uniform_(-1, 1))
+        pm = torch.zeros(in_channels, out_channels)
+        orthogonal_(pm)
+        
+        self.register_buffer('projection_matrix', pm)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         result = x @ self.projection_matrix

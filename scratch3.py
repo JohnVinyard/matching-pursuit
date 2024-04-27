@@ -156,21 +156,41 @@ def l0_norm(x: torch.Tensor):
     y = backward + (forward - backward).detach()
     return y.sum()
 
+
+import torch
+
+def k_nearest(query: torch.Tensor, embeddings: torch.Tensor, n_results: int = 16):
+    
+    n_items, dim = embeddings.shape
+    query = query.view(1, dim)
+    
+    dist = torch.cdist(query, embeddings)
+    dist = dist.view(n_items)
+    indices = torch.argsort(dist)
+    return indices[:n_results]
+
 if __name__ == '__main__':
+    embeddings = torch.zeros(128, 16).uniform_(-1, 1)
+    query = embeddings[10]
     
-    times = np.linspace(0, 1, num=100)
-    values = np.array([
-        [0, 0.01],
-        [0.02, 1],
-        [0.04, 0.01],
-        [1, 0],
-    ])
+    results = k_nearest(query, embeddings)
+    print(results)
+
+# if __name__ == '__main__':
     
-    func = interp1d(values[:, 0], values[:, 1], kind='linear', assume_sorted=False)
+    # times = np.linspace(0, 1, num=100)
+    # values = np.array([
+    #     [0, 0.01],
+    #     [0.02, 1],
+    #     [0.04, 0.01],
+    #     [1, 0],
+    # ])
     
-    values = func(times)
-    plt.plot(values.T)
-    plt.show()
+    # func = interp1d(values[:, 0], values[:, 1], kind='linear', assume_sorted=False)
+    
+    # values = func(times)
+    # plt.plot(values.T)
+    # plt.show()
     
     # dist = norm(0.7, 0.01)
     # pdf = dist.pdf(np.linspace(0, 1, 1000))

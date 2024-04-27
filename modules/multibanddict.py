@@ -8,7 +8,7 @@ from modules.decompose import fft_frequency_decompose, fft_frequency_recompose, 
 from modules.matchingpursuit import build_scatter_segments, dictionary_learning_step, sparse_code
 from modules.normalization import unit_norm
 from torch.nn import functional as F
-from librosa.filters import mel
+from librosa.filters import mel, chroma
 
 LocalEventTuple = Tuple[int, int, int, torch.Tensor]
 GlobalEventTuple = Tuple[int, int, float, float]
@@ -99,9 +99,9 @@ class BandSpec(object):
             mel_spec = mel_spec.view(self.n_atoms, -1, n_mels)
             # mel_spec = torch.log(mel_spec)
             
-            # embedding = torch.mean(mel_spec, dim=1)
-            # embedding = unit_norm(embedding, dim=-1)
-            # return embedding
+            embedding = torch.mean(mel_spec, dim=1)
+            embedding = unit_norm(embedding, dim=-1)
+            return embedding
         
             mfcc = torch.abs(torch.fft.rfft(spec, dim=-1, norm='ortho'))
             mfcc = mfcc[..., 1:13]
@@ -290,8 +290,8 @@ class MultibandDictionaryLearning(object):
                 
                 ae = atom_embeddings[global_index]
                 
-                ge[batch, current_index, 0] = unit_time
-                ge[batch, current_index, 1] = amplitude
+                ge[batch, current_index, 0] = unit_time * 0.01
+                ge[batch, current_index, 1] = amplitude * 0.01
                 ge[batch, current_index, 2:] = ae
             
             return ge

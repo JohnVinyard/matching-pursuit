@@ -1,9 +1,12 @@
 
+from typing import Iterable, Tuple
 from librosa import load, to_mono
 from fnmatch import fnmatch
 import os
 import numpy as np
 from random import choice
+
+import torch
 
 #  TODO: Switch to using conjure for this
 from data.conjure import LmdbCollection, cache
@@ -26,6 +29,14 @@ def audio(path):
     return x
 
 
+def load_audio_chunk(path: str, slce: slice, device = None) -> torch.Tensor:
+    data = audio(path)[:]
+    data = torch.from_numpy(data).float()
+    if device is not None:
+        data = data.to(device)
+    
+    return data
+
 def iter_chunks(path, pattern, chunksize):
     """
     Return an iterable of tuples of (filepath, start_sample, end_sample)
@@ -38,6 +49,46 @@ def iter_chunks(path, pattern, chunksize):
             stop = i + chunksize
             yield fp, start, stop
 
+
+def iter_audio_segments(
+        path: str, 
+        pattern: str, 
+        chunksize: int, 
+        make_key = lambda fp, start, stop: f'{fp}_{start}_{stop}',
+        device = None) -> Iterable[Tuple[str, torch.Tensor]]:
+    
+    for fp in iter_files(path, pattern):
+        data = audio(fp)
+        data = torch.from_numpy(data[:]).float().to(device).view(1, 1, -1)
+        total_samples = data.shape[-1]
+        
+        for i in range(0, total_samples - chunksize, chunksize):
+            start = i
+            stop = i + chunksize
+            key = make_key(fp, start, stop)
+            chunk = data[:, :, start: stop]
+            chunk = chunk / (chunk.max() + 1e-8)
+            yield key, chunk
+
+# def iter_audio_segment_batches(
+#         batch_size: int, 
+#         path: str, 
+#         pattern: str, 
+#         chunksize: int, 
+#         make_key = lambda fp, start, stop: f'{fp}_{start}_{stop}', 
+#         device = None):
+    
+#     current_batch = torch.zeros(batch_size, 1, chunksize, device=device)
+#     batch_index = 0
+    
+#     for key, segment in iter_audio_segments(path, pattern, chunksize, make_key, device):
+#         current_batch[batch_index: batch_index + 1, :, :] = segment
+#         batch_index += 1
+        
+#         if batch_index == batch_size:
+#             yield current_batch
+#             current_batch = torch.zeros(batch_size, 1, chunksize, device=device)
+#             batch_index = 0
 
 def batch_stream(
         path, 
