@@ -13,12 +13,13 @@ class RandomProjection(nn.Module):
         self.out_channels = out_channels
         self.norm = norm
         
-        pm = torch.zeros(in_channels, out_channels)
-        orthogonal_(pm)
+        pm = torch.zeros(in_channels, out_channels).uniform_(-1, 1)
         
         self.register_buffer('projection_matrix', pm)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        print(x.shape, self.projection_matrix.shape)
+        
         result = x @ self.projection_matrix
         if self.norm is not None:
             result = self.norm(result)

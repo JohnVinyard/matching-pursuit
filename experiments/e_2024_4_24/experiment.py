@@ -7,18 +7,15 @@ from config.experiment import Experiment
 from data.datastore import iter_audio_segments, load_audio_chunk
 from modules.multibanddict import BandSpec, GlobalEventTuple, MultibandDictionaryLearning
 from modules.normalization import unit_norm
-from modules.pointcloud import CanonicalOrdering, GraphEdgeEmbedding
-from modules.random import RandomProjection
+from modules.pointcloud import GraphEdgeEmbedding
 from modules.search import BruteForceSearch
 from train.experiment_runner import BaseExperimentRunner, MonitoredValueDescriptor
 from util import device
 from util.playable import playable
 from util.readmedocs import readme
 import zounds
-from conjure import numpy_conjure, SupportedContentType, audio_conjure
-from collections import Counter
+from conjure import numpy_conjure, SupportedContentType, audio_conjure, pickle_conjure
 import numpy as np
-import pickle
 
 exp = Experiment(
     samplerate=22050,
@@ -45,28 +42,35 @@ model = MultibandDictionaryLearning([
 
 atom_embeddings = model.atom_embeddings()
 
-edge_embedding = GraphEdgeEmbedding(
-    n_items=model.event_count(sparse_coding_steps), 
-    embedding_dim=atom_embeddings.shape[-1] + 2, 
-    out_channels=128).to(device)
+embedding_dim = int((model.total_atoms * (model.total_atoms - 1)) / 2)
+
+
+# edge_embedding = GraphEdgeEmbedding(
+#     n_items=model.event_count(sparse_coding_steps), 
+#     embedding_dim=embedding_dim, 
+#     out_channels=512).to(device)
 
 def build_graph_embedding(
+    model: MultibandDictionaryLearning,
     batch_size: int, 
-    events: List[GlobalEventTuple]):
+    events: List[GlobalEventTuple],
+    atom_embeddings):
     
     # get embeddings for each event
-    ge = model.event_embeddings(batch_size, events)
-    
+    ge = model.event_embeddings(batch_size, events, atom_embeddings)
+    ge = torch.sum(ge, dim=1).view(batch_size, -1)
+    return ge
+
     # get an embedding for the entire graph
-    edges = edge_embedding.forward(ge)
-    return edges
+    # edges = edge_embedding.forward(ge)
+    # return edges
         
 
-def compute_embedding(batch: torch.Tensor, steps: int) -> torch.Tensor:
+def compute_embedding(model: MultibandDictionaryLearning, batch: torch.Tensor, steps: int, atom_embeddings) -> torch.Tensor:
     # size -> (all_instances, scatter, shape)
     encoding = model.encode(batch, steps=steps)
     flat = model.flattened_event_tuples(encoding)
-    embeddings = build_graph_embedding(batch.shape[0], flat)
+    embeddings = build_graph_embedding(model, batch.shape[0], flat, atom_embeddings)
     return embeddings
 
 
@@ -157,6 +161,8 @@ def make_conjure_rt(experiment: BaseExperimentRunner):
 
     return (encoded_audio,)
 
+
+
 @readme
 class AudioSegmentEmbedding(BaseExperimentRunner):
     
@@ -166,8 +172,105 @@ class AudioSegmentEmbedding(BaseExperimentRunner):
     
     def __init__(self, stream, port=None, save_weights=False, load_weights=False):
         super().__init__(stream, train, exp, port=port, save_weights=save_weights, load_weights=load_weights)
+        
+        self.search = self.make_conjure_collection('search')
+        
+        
+        @pickle_conjure(self.search, read_hook=lambda x: print('reading train_model() from cache'))
+        def train_model(training_steps: int) -> MultibandDictionaryLearning:
+        
+            for i, batch in enumerate(self.stream):
+                batch = batch.view(-1, 1, exp.n_samples)
+                l, r, fm, rt, embeddings = train(batch, i)
+                
+                self.rt = rt
+                self.real = batch
+                self.fake = r
+                self.feature_map = fm
+                self.embeddings = embeddings
+                
+                print(l.item())
+                self.after_training_iteration(l, i)
+                
+                if i >= training_steps:
+                    break
+            
+            return model
+        
+        self.train_model = train_model
+        
+        @pickle_conjure(self.search, read_hook=lambda x: print('reading build_index() from cache'))
+        def build_index(model: MultibandDictionaryLearning, index_size_limit: int) -> dict:
+            
+            atom_embeddings = model.atom_embeddings()
+            
+            def make_key(full_path: str, start: int, stop: int) -> str:
+                path, filename = os.path.split(full_path)
+                fn, ext = os.path.splitext(filename)
+                return f'{fn}_{start}_{stop}'
+            
+            keys = []
+            embeddings = []
+            
+            for key, chunk in iter_audio_segments(
+                    Config.audio_path(), 
+                    '*.wav', 
+                    exp.n_samples, 
+                    device=device, 
+                    make_key=make_key):
+                
+                embedding = compute_embedding(model, chunk, steps=sparse_coding_steps, atom_embeddings=atom_embeddings)
+                embedding = embedding.data.cpu().numpy().reshape(1, -1)
+                
+                print('\t', key, chunk.shape, embedding.shape)
+                
+                keys.append(key)
+                embeddings.append(embedding)
+                
+                if len(keys) > index_size_limit:
+                    break
+            
+            embeddings = np.concatenate(embeddings, axis=0)
+            
+            print(f'all done with {len(keys)} keys, {embeddings.shape} embeddings')
+            
+            db = dict(embeddings=embeddings, keys=keys)
+            return db
+        
+        self.build_index = build_index
+    
     
     def run(self):
+        
+        
+        # TODO: use conjure to simplify this
+        
+        # training_steps = 128
+        
+        # for i, batch in enumerate(self.stream):
+        #     batch = batch.view(-1, 1, exp.n_samples)
+        #     l, r, fm, rt, embeddings = train(batch, i)
+            
+        #     self.rt = rt
+        #     self.real = batch
+        #     self.fake = r
+        #     self.feature_map = fm
+        #     self.embeddings = embeddings
+            
+        #     print(l.item())
+        #     self.after_training_iteration(l, i)
+            
+        #     if i >= training_steps:
+        #         break
+        
+        
+        
+        training_steps = 128
+        chunks_to_idndex = 8192
+        
+        trained_model = self.train_model(training_steps=training_steps)
+        db = self.build_index(trained_model, chunks_to_idndex)
+        
         from subprocess import Popen, PIPE
         
         def filepath_from_key(key: str) -> str:
@@ -179,108 +282,77 @@ class AudioSegmentEmbedding(BaseExperimentRunner):
             _id, start, end = key.split('_')
             return slice(int(start), int(end))
         
-        try:
-            with open('embeddings.dat', 'rb') as f:
-                db = pickle.load(f)
-            print(f'loaded from disk with {len(db["keys"])} keys and embeddings: {db["embeddings"].shape}')
             
-            keys = db['keys']
-            embeddings = db['embeddings']
+        keys = db['keys']
+        embeddings = db['embeddings']
+        
+        total_items = len(keys)
+        n_examples = 10
+        
+        embeddings = torch.from_numpy(embeddings).float()
+        embeddings = unit_norm(embeddings)
+        
+        
+        search = BruteForceSearch(embeddings, keys, n_results=5)
+        
+        for i in range(n_examples):
+            print('==============================================')
             
-            total_items = len(keys)
-            n_examples = 10
+            query_index = np.random.randint(0, total_items)
+            query = embeddings[query_index]
+            keys, e = search.search(query)
             
-            embeddings = torch.from_numpy(embeddings).float()
-            embeddings = unit_norm(embeddings)
-            
-            
-            search = BruteForceSearch(embeddings, keys, n_results=5)
-            
-            for i in range(n_examples):
-                print('==============================================')
+            for key, embedding in zip(keys, e):
+                fp = filepath_from_key(key)
+                slce = slice_from_key(key)
+                chunk = load_audio_chunk(fp, slce, device=embeddings.device)
                 
-                query_index = np.random.randint(0, total_items)
-                query = embeddings[query_index]
-                keys, e = search.search(query)
-                
-                for key, embedding in zip(keys, e):
-                    fp = filepath_from_key(key)
-                    slce = slice_from_key(key)
-                    chunk = load_audio_chunk(fp, slce, device=embeddings.device)
-                    p: zounds.AudioSamples = playable(chunk, exp.samplerate, normalize=True)
-                    print(fp, p)    
-                    
-                    proc = Popen(f'aplay', shell=True, stdin=PIPE)
-                    proc.stdin.write(p.encode().read())
-                    proc.communicate()
-                    input('Next')         
+                # TODO: this is a nice little function to package app, maybe in zounds?                    
+                p: zounds.AudioSamples = playable(chunk, exp.samplerate, normalize=True)
+                print(fp, p)    
+                proc = Popen(f'aplay', shell=True, stdin=PIPE)
+                proc.stdin.write(p.encode().read())
+                proc.communicate()
+                input('Next')         
             
-            return
-        except IOError as e:
-            print(e)
-            return
         
-        # TODO: use conjure to simplify this
         
-        training_steps = 128
+        # keys = []
+        # embeddings = []
+        # chunks_to_index = 2 ** 14
         
-        for i, batch in enumerate(self.stream):
-            batch = batch.view(-1, 1, exp.n_samples)
-            l, r, fm, rt, embeddings = train(batch, i)
+        # for key, chunk in iter_audio_segments(
+        #         Config.audio_path(), 
+        #         '*.wav', 
+        #         exp.n_samples, 
+        #         device=device, 
+        #         make_key=make_key):
             
-            self.rt = rt
-            self.real = batch
-            self.fake = r
-            self.feature_map = fm
-            self.embeddings = embeddings
+        #     embedding = compute_embedding(chunk, steps=sparse_coding_steps)
+        #     embedding = embedding.data.cpu().numpy().reshape(1, -1)
             
-            print(l.item())
-            self.after_training_iteration(l, i)
+        #     print('\t', key, chunk.shape, embedding.shape)
             
-            if i >= training_steps:
-                break
-        
-        def make_key(full_path: str, start: int, stop: int) -> str:
-            path, filename = os.path.split(full_path)
-            fn, ext = os.path.splitext(filename)
-            return f'{fn}_{start}_{stop}'
-        
-        keys = []
-        embeddings = []
-        chunks_to_index = 2 ** 14
-        
-        for key, chunk in iter_audio_segments(
-                Config.audio_path(), 
-                '*.wav', 
-                exp.n_samples, 
-                device=device, 
-                make_key=make_key):
+        #     keys.append(key)
+        #     embeddings.append(embedding)
             
-            embedding = compute_embedding(chunk, steps=sparse_coding_steps)
-            embedding = embedding.data.cpu().numpy().reshape(1, -1)
-            
-            print('\t', key, chunk.shape, embedding.shape)
-            
-            keys.append(key)
-            embeddings.append(embedding)
-            
-            if len(keys) > chunks_to_index:
-                break
+        #     if len(keys) > chunks_to_index:
+        #         break
         
-        embeddings = np.concatenate(embeddings, axis=0)
+        # embeddings = np.concatenate(embeddings, axis=0)
         
-        print(f'all done with {len(keys)} keys, {embeddings.shape} embeddings')
+        # print(f'all done with {len(keys)} keys, {embeddings.shape} embeddings')
         
-        db = dict(embeddings=embeddings, keys=keys)
+        # db = dict(embeddings=embeddings, keys=keys)
         
-        with open('embeddings.dat', 'wb') as f:
-            pickle.dump(db, f, pickle.HIGHEST_PROTOCOL)
+        # with open('embeddings.dat', 'wb') as f:
+        #     pickle.dump(db, f, pickle.HIGHEST_PROTOCOL)
         
-        print(f'saved all embeddings')
+        # print(f'saved all embeddings')
         
-        with open('embeddings.dat', 'rb') as f:
-            db = pickle.load(f)
+        # with open('embeddings.dat', 'rb') as f:
+        #     db = pickle.load(f)
         
-        print(f'loaded from disk with {len(db["keys"])} keys and embeddings: {db["embeddings"].shape}')
+        # print(f'loaded from disk with {len(db["keys"])} keys and embeddings: {db["embeddings"].shape}')
         
         

@@ -40,33 +40,11 @@ class CanonicalOrdering(nn.Module):
         z = x @ self.projection
         indices = torch.argsort(z, dim=1)
         
+        
         # order based on the projection
         ordered = torch.take_along_dim(x, indices=indices, dim=1)
         return ordered
 
-'''
-n_events = ge.shape[1]
-    
-    ge = canonical_ordering.forward(ge)
-    
-    print(ge.shape)
-    
-    # get a self-similarity matrix
-    ssm = ge @ ge.permute(0, 2, 1)
-    print(ssm.shape)
-    
-    indices = torch.triu_indices(ssm.shape[-1], ssm.shape[-1], offset=1)
-    print(indices.shape)
-    
-    
-    ut = ssm[:, indices[0], indices[1]]
-    
-    print(upper_triangular, ut.shape, n_events)
-    
-    proj = random_proj.forward(ut)
-    proj = unit_norm(proj)
-    return proj
-'''
 
 class GraphEdgeEmbedding(nn.Module):
     def __init__(self, n_items: int, embedding_dim: int, out_channels: int):
@@ -77,10 +55,11 @@ class GraphEdgeEmbedding(nn.Module):
         
         self.upper_triangular = n_items * (n_items - 1) // 2
         self.graph_embedding = RandomProjection(
-            self.upper_triangular, self.out_channels, norm=lambda x: unit_norm(x))
+            self.embedding_dim, self.out_channels, norm=lambda x: unit_norm(x))
         
 
     def forward(self, embeddings: torch.Tensor) -> torch.Tensor:
+        
         ordered = self.ordering.forward(embeddings)
         
         ssm = ordered @ ordered.permute(0, 2, 1)
@@ -90,6 +69,7 @@ class GraphEdgeEmbedding(nn.Module):
         proj = self.graph_embedding.forward(ut)
         proj = unit_norm(proj)
         return proj
+        
 
 class ProduceEdges(nn.Module):
     def __init__(self, threshold: float = None):

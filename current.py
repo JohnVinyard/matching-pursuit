@@ -141,6 +141,8 @@ if __name__ == '__main__':
         exp, date, _ = path.split('.')
         base_path = os.path.join(exp, date)
         
+        # TODO: This should probably be a method on the base 
+        # experiment class
         if args.clean:
             try:
                 data_path = Path(base_path) / Path('experiment_data/data.mdb')

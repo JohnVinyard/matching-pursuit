@@ -1,5 +1,6 @@
 from collections import Counter, defaultdict, namedtuple
 from typing import Callable, Dict, List, Optional, Tuple
+import numpy as np
 import zounds
 import torch
 from modules.stft import stft
@@ -9,6 +10,7 @@ from modules.matchingpursuit import build_scatter_segments, dictionary_learning_
 from modules.normalization import unit_norm
 from torch.nn import functional as F
 from librosa.filters import mel, chroma
+import librosa
 
 LocalEventTuple = Tuple[int, int, int, torch.Tensor]
 GlobalEventTuple = Tuple[int, int, float, float]
@@ -75,44 +77,41 @@ class BandSpec(object):
             desired_size, 
             self.is_lowest_band)
     
-    def atom_embeddings(self, window_size: int=512, step_size: int=256) -> torch.Tensor:
-        with torch.no_grad():
-            n_samples = self.n_samples_at_native_rate
-            rs = self.resampled_atoms().view(self.n_atoms, 1, n_samples)
-            
-            padding = window_size - n_samples
-            if padding > 0:
-                rs = F.pad(rs, (0, padding))
-            
-            n_coeffs = window_size // 2 + 1
-            
-            n_mels = 128
-            
-            mel_matrix = torch.from_numpy(mel(int(self.samplerate), window_size, n_mels)).to(rs.device)
-            
-            spec = stft(rs, ws=window_size, step=step_size, pad=True).view(self.n_atoms, -1, n_coeffs)
-            
-            
-            # print(spec.shape, mel_matrix.shape)
-            
-            mel_spec = spec @ mel_matrix.T
-            mel_spec = mel_spec.view(self.n_atoms, -1, n_mels)
-            # mel_spec = torch.log(mel_spec)
-            
-            embedding = torch.mean(mel_spec, dim=1)
-            embedding = unit_norm(embedding, dim=-1)
-            return embedding
+    # def atom_embeddings(self, window_size=2048) -> torch.Tensor:
         
-            mfcc = torch.abs(torch.fft.rfft(spec, dim=-1, norm='ortho'))
-            mfcc = mfcc[..., 1:13]
-            mfcc = unit_norm(mfcc, dim=-1).view(self.n_atoms, -1, 12)
-            mfcc = torch.mean(mfcc, dim=1).view(self.n_atoms, 12)
-            mfcc = unit_norm(mfcc, dim=-1)
-            return mfcc
     
-    @property
-    def embedding_dim(self):
-        return self.embeddings.shape[-1]
+    #     with torch.no_grad():
+    #         n_samples = self.n_samples_at_native_rate
+    #         rs = self.resampled_atoms().view(self.n_atoms, 1, n_samples)
+            
+    #         padding = window_size - n_samples
+    #         if padding > 0:
+    #             rs = F.pad(rs, (0, padding))
+            
+    #         rs = rs.data.cpu().numpy().reshape((self.n_atoms, -1))
+            
+    #         output_features = np.zeros((rs.shape[0], 35)) # ?
+            
+    #         for i, atom in enumerate(rs):
+    #             # TODO: concatenate these.  They are in the shape
+    #             # (n_features, n_frames)
+            
+    #             centroid = librosa.feature.spectral_centroid(atom).mean(axis=-1)
+    #             flatness = librosa.feature.spectral_flatness(atom).mean(axis=-1)
+    #             chroma = librosa.feature.chroma_stft(atom).mean(axis=-1)
+    #             mfcc = librosa.feature.mfcc(atom).mean(axis=-1)
+    #             zcr = librosa.feature.zero_crossing_rate(atom).mean(axis=-1)
+    #             feature = np.concatenate([centroid, flatness, chroma, mfcc, zcr])
+    #             output_features[i] = feature
+            
+    #         output_features = torch.from_numpy(output_features).float().to(self.d.device)
+            
+    #         return output_features
+                
+    
+    # @property
+    # def embedding_dim(self):
+    #     return self.embeddings.shape[-1]
     
     def shape(self, batch_size):
         return (batch_size, 1, self.size)
@@ -265,18 +264,24 @@ class MultibandDictionaryLearning(object):
     def event_count(self, iterations: int) -> int:
         return len(self) * iterations
     
-    def atom_embeddings(self):
-        return torch.cat([band.atom_embeddings() for size, band in self.bands.items()], dim=0)
+    # @property
+    # def total_atoms(self):
+    #     pass
     
-    def event_embeddings(self, batch_size: int, events: List[GlobalEventTuple]) -> torch.Tensor:
+    def atom_embeddings(self):
+        return torch.eye(self.total_atoms, device=device)
+        # return torch.cat([band.atom_embeddings() for size, band in self.bands.items()], dim=0)
+    
+    
+    def event_embeddings(self, batch_size: int, events: List[GlobalEventTuple], atom_embeddings) -> torch.Tensor:
         with torch.no_grad():
             n_elements = len(events) // batch_size
             
             
-            atom_embeddings = self.atom_embeddings()
+            # atom_embeddings = self.atom_embeddings()
             base_shape = atom_embeddings.shape[-1]
             
-            ge = torch.zeros(batch_size, n_elements, 2 + base_shape, device=device)
+            ge = torch.zeros(batch_size, n_elements, base_shape, device=device)
             
             event_index_counter = defaultdict(Counter)
             
@@ -290,9 +295,10 @@ class MultibandDictionaryLearning(object):
                 
                 ae = atom_embeddings[global_index]
                 
-                ge[batch, current_index, 0] = unit_time * 0.01
-                ge[batch, current_index, 1] = amplitude * 0.01
-                ge[batch, current_index, 2:] = ae
+                # ge[batch, current_index, 0] = unit_time
+                # ge[batch, current_index, 1] = amplitude
+                
+                ge[batch, current_index, :] = ae * amplitude.view(1)
             
             return ge
     

@@ -9,7 +9,8 @@ import zounds
 from conjure import LmdbCollection
 
 from pathlib import Path
-from conjure import time_series_conjure, audio_conjure, numpy_conjure, SupportedContentType
+from conjure import time_series_conjure, audio_conjure, numpy_conjure, \
+    SupportedContentType, LmdbCollection
 import os.path
 
 def build_funcs(prefix):
@@ -148,17 +149,21 @@ class   BaseExperimentRunner(object):
         funcs.extend([loss_func])
 
         return funcs
+    
+    def make_conjure_collection(self, name: str):
+        path = os.path.join(self.experiment_path, name)
+        return LmdbCollection(path)
 
     @property
     def experiment_dir_name(self):
         return self.__module__.split('.')[1]
 
     @property
-    def experiment_path(self):
+    def experiment_path(self) -> Path:
         return Path('experiments') / Path(self.experiment_dir_name) / Path('experiment_data')
     
     @property
-    def trained_weights_path(self):
+    def trained_weights_path(self) -> Path:
         return Path('experiments') / Path(self.experiment_dir_name) / Path('trained_weights')
     
     @property

@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from data.audioiter import AudioIterator
 from modules.angle import windowed_audio
 from modules.decompose import fft_frequency_decompose
+from modules.multibanddict import BandSpec, MultibandDictionaryLearning
 from modules.normal_pdf import pdf2
 from modules.normalization import max_norm
 from modules.overlap_add import overlap_add
@@ -17,6 +18,8 @@ from matplotlib import pyplot as plt
 from torch.distributions import Normal
 from scipy.interpolate import interp1d
 from scipy.stats import norm
+from util import device
+import pickle
 
 
 from modules.transfer import gaussian_bandpass_filtered
@@ -157,24 +160,31 @@ def l0_norm(x: torch.Tensor):
     return y.sum()
 
 
-import torch
+n_atoms = 512
+n_samples = 2**15
 
-def k_nearest(query: torch.Tensor, embeddings: torch.Tensor, n_results: int = 16):
-    
-    n_items, dim = embeddings.shape
-    query = query.view(1, dim)
-    
-    dist = torch.cdist(query, embeddings)
-    dist = dist.view(n_items)
-    indices = torch.argsort(dist)
-    return indices[:n_results]
+model = MultibandDictionaryLearning([
+    BandSpec(512,   n_atoms, 128, device=device, signal_samples=n_samples, is_lowest_band=True),
+    BandSpec(1024,  n_atoms, 128, device=device, signal_samples=n_samples),
+    BandSpec(2048,  n_atoms, 128, device=device, signal_samples=n_samples),
+    BandSpec(4096,  n_atoms, 128, device=device, signal_samples=n_samples),
+    BandSpec(8192,  n_atoms, 128, device=device, signal_samples=n_samples),
+    BandSpec(16384, n_atoms, 128, device=device, signal_samples=n_samples),
+    BandSpec(32768, n_atoms, 128, device=device, signal_samples=n_samples),
+], n_samples=n_samples)
+
 
 if __name__ == '__main__':
-    embeddings = torch.zeros(128, 16).uniform_(-1, 1)
-    query = embeddings[10]
+    p = pickle.dumps(model, pickle.HIGHEST_PROTOCOL)
     
-    results = k_nearest(query, embeddings)
-    print(results)
+    rehyrdrated: MultibandDictionaryLearning = pickle.loads(p)
+    print(rehyrdrated.bands[512].d.shape)
+
+    # embeddings = torch.zeros(128, 16).uniform_(-1, 1)
+    # query = embeddings[10]
+    
+    # results = k_nearest(query, embeddings)
+    # print(results)
 
 # if __name__ == '__main__':
     

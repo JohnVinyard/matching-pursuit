@@ -20,6 +20,11 @@ def iter_files(base_path, pattern):
             (os.path.join(dirpath, fn) for fn in filenames))
         yield from audio_files
 
+def iter_files_in_random_order(base_path, pattern):
+    filenames = list(iter_files(base_path, pattern))
+    perm = np.random.permutation(len(filenames))
+    yield from [filenames[index] for index in perm]
+
 # TODO: Switch to using conjure for this
 @cache(collection)
 def audio(path):
@@ -59,7 +64,7 @@ def iter_audio_segments(
         make_key = lambda fp, start, stop: f'{fp}_{start}_{stop}',
         device = None) -> Iterable[Tuple[str, torch.Tensor]]:
     
-    for fp in iter_files(path, pattern):
+    for fp in iter_files_in_random_order(path, pattern):
         data = audio(fp)
         data = torch.from_numpy(data[:]).float().to(device).view(1, 1, -1)
         total_samples = data.shape[-1]
