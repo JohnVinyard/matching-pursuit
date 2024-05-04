@@ -11,6 +11,7 @@ from modules.normalization import unit_norm
 from torch.nn import functional as F
 from librosa.filters import mel, chroma
 import librosa
+from hashlib import sha256
 
 LocalEventTuple = Tuple[int, int, int, torch.Tensor]
 GlobalEventTuple = Tuple[int, int, float, float]
@@ -59,6 +60,11 @@ class BandSpec(object):
         self.d = unit_norm(d)
 
         self._embeddings = None
+    
+    def __hash__(self):
+        h = sha256(self.d.data.cpu().numpy()).hexdigest()
+        return hash(h)
+        
     
     @property
     def n_samples_at_native_rate(self):
@@ -257,6 +263,9 @@ class MultibandDictionaryLearning(object):
 
         self._embeddings = None
     
+    
+    def __hash__(self):
+        return hash([hash(b) for b in self.bands.values()])
     
     def __len__(self):
         return len(self.bands)

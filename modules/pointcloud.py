@@ -21,6 +21,20 @@ from modules.normalization import unit_norm
 from modules.random import RandomProjection
 
 
+def pairwise_differences(features: torch.Tensor) -> torch.Tensor:
+    batch, n_points, n_features = features.shape
+    diff = features[:, None, :, :] - features[:, :, None, :]
+    return diff.permute(0, 3, 1, 2)
+
+def flattened_upper_triangular(x: torch.Tensor) -> torch.Tensor:
+    batch, dim, a, b = x.shape
+    assert a == b
+    indices = torch.triu_indices(a, a, offset=1)
+        
+    ut = x[:, :, indices[0], indices[1]]
+    return ut
+    
+
 
 class CanonicalOrdering(nn.Module):
     """
