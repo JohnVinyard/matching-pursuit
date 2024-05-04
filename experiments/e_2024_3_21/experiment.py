@@ -479,7 +479,7 @@ class Model(nn.Module):
 
         # # resonances
         mixed = self.res.forward(embeddings, imp)
-        print(f'\t {imp.shape} {embeddings.shape} {mixed.shape}')
+        # print(f'\t {imp.shape} {embeddings.shape} {mixed.shape}')
         mixed = mixed.view(batch_size, -1, resonance_size)
         
         # mixed = self.events(embeddings)
@@ -495,14 +495,14 @@ class Model(nn.Module):
         up = torch.zeros(final.shape[0], final.shape[1], n_samples, device=final.device)
         up[:, :, ::256] = scheduling
         
-        print(f'\t FINAL {final.shape} {up.shape}')
+        # print(f'\t FINAL {final.shape} {up.shape}')
         
         final = fft_convolve(final, up)[..., :n_samples]
         
-        print(f'\t FINAL 2 {final.shape}')
+        # print(f'\t FINAL 2 {final.shape}')
 
         final = self.verb.forward(unit_norm(vecs, dim=-1), final)
-        print(f'\t WITH_VERB {final.shape}')
+        # print(f'\t WITH_VERB {final.shape}')
         
 
         return final, imp, amps, mixed
@@ -518,7 +518,7 @@ class Model(nn.Module):
             v, sched = self.encode(spec, n_events=1)
             vecs.append(v)
             schedules.append(sched)
-            print(f'In iterate {i}, calling generate() with {v.shape} and {sched.shape}')
+            # print(f'In iterate {i}, calling generate() with {v.shape} and {sched.shape}')
             ch, _, _, _ = self.generate(v, sched)
             current = experiment_spectrogram(ch)
             spec = (spec - current).clone().detach()

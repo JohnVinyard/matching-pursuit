@@ -35,7 +35,6 @@ def flattened_upper_triangular(x: torch.Tensor) -> torch.Tensor:
     return ut
     
 
-
 class CanonicalOrdering(nn.Module):
     """
     Project embeddings into a single dimension and order them
@@ -50,6 +49,10 @@ class CanonicalOrdering(nn.Module):
             torch.zeros(embedding_dim, 1).uniform_(-1, 1))
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch, n_points, dim = x.shape
+        
+        assert dim == self.embedding_dim
+        
         # project to one dimension
         z = x @ self.projection
         indices = torch.argsort(z, dim=1)
@@ -68,103 +71,111 @@ class GraphEdgeEmbedding(nn.Module):
         self.out_channels = out_channels
         
         self.upper_triangular = n_items * (n_items - 1) // 2
+        
+        self.total_edge_dim = self.upper_triangular * self.embedding_dim
+        
         self.graph_embedding = RandomProjection(
-            self.embedding_dim, self.out_channels, norm=lambda x: unit_norm(x))
+            self.total_edge_dim, 
+            self.out_channels, 
+            norm=lambda x: unit_norm(x))
         
 
     def forward(self, embeddings: torch.Tensor) -> torch.Tensor:
+        batch, n_points, dim = embeddings.shape
         
         ordered = self.ordering.forward(embeddings)
         
-        ssm = ordered @ ordered.permute(0, 2, 1)
-        indices = torch.triu_indices(ssm.shape[-1], ssm.shape[-1], offset=1)
+        diff = pairwise_differences(ordered)
         
-        ut = ssm[:, indices[0], indices[1]]
-        proj = self.graph_embedding.forward(ut)
-        proj = unit_norm(proj)
+        fut = flattened_upper_triangular(diff)
+        assert fut.shape == (batch, dim, self.upper_triangular)
+        fut = fut.view(batch, self.total_edge_dim)
+        
+        
+        proj = self.graph_embedding.forward(fut)
         return proj
         
 
-class ProduceEdges(nn.Module):
-    def __init__(self, threshold: float = None):
-        super().__init__()
-        self.threshold = threshold
+# class ProduceEdges(nn.Module):
+#     def __init__(self, threshold: float = None):
+#         super().__init__()
+#         self.threshold = threshold
     
-    def forward(self, embeddings: torch.Tensor):
-        edges = extract_graph_edges(embeddings, threshold=self.threshold)
-        return edges
+#     def forward(self, embeddings: torch.Tensor):
+#         edges = extract_graph_edges(embeddings, threshold=self.threshold)
+#         return edges
 
 
-def extract_graph_edges(inp: torch.Tensor, threshold: float):
-    batch, elements, dim = inp.shape
+# def extract_graph_edges(inp: torch.Tensor, threshold: float):
+#     batch, elements, dim = inp.shape
 
-    # compute the distance matrix
-    dist = torch.cdist(inp, inp)
+#     # compute the distance matrix
+#     dist = torch.cdist(inp, inp)
 
-    # only consider the upper diagonal matrix
-    upper = torch.triu(dist)
-    mask = upper == 0
-    upper[mask] = np.inf
+#     # only consider the upper diagonal matrix
+#     upper = torch.triu(dist)
+#     mask = upper == 0
+#     upper[mask] = np.inf
 
 
-    # find indices that are below a given threshold
-    b, x, y = torch.where(upper <= threshold)
-    n_edges = len(b)
+#     # find indices that are below a given threshold
+#     b, x, y = torch.where(upper <= threshold)
+#     n_edges = len(b)
 
-    output = torch.zeros(batch, n_edges, dim, device=inp.device)
-    for item in range(n_edges):
+#     output = torch.zeros(batch, n_edges, dim, device=inp.device)
+#     for item in range(n_edges):
 
-        first = inp[b[item], x[item]]
-        second = inp[b[item], y[item]]
-        edge = first - second
+#         first = inp[b[item], x[item]]
+#         second = inp[b[item], y[item]]
+#         edge = first - second
 
-        output[b[item], item, :] = edge
+#         output[b[item], item, :] = edge
     
-    return output
+#     return output
 
 
 
 # TODO: probably remove, this is not generally useful as it
 # doesn't have a stable-ish alignment between elements
-def greedy_set_alignment(
-        a: torch.Tensor,
-        z: torch.Tensor,
-        return_indices=False,
-        full_feature_count=None):
+# def greedy_set_alignment(
+#         a: torch.Tensor,
+#         z: torch.Tensor,
+#         return_indices=False,
+#         full_feature_count=None):
 
-    batch, n_elements, n_features = a.shape
-    diff = torch.cdist(a, z)
-    indices = torch.argsort(diff, dim=-1)
+#     batch, n_elements, n_features = a.shape
+#     diff = torch.cdist(a, z)
+#     indices = torch.argsort(diff, dim=-1)
 
-    output_indices = []
+#     output_indices = []
 
-    for b in range(batch):
-        seen = set()
-        sort_indices = []
+#     for b in range(batch):
+#         seen = set()
+#         sort_indices = []
 
-        for e in range(n_elements):
-            fits = indices[b, e, :]
-            i = 0
+#         for e in range(n_elements):
+#             fits = indices[b, e, :]
+#             i = 0
 
-            while fits[i].item() in seen:
-                i += 1
+#             while fits[i].item() in seen:
+#                 i += 1
 
-            sort_indices.append(fits[i].item())
-            seen.add(fits[i].item())
+#             sort_indices.append(fits[i].item())
+#             seen.add(fits[i].item())
 
-        sort_indices = torch.from_numpy(np.array(sort_indices))[
-            None, ...].to(a.device)
-        output_indices.append(sort_indices)
+#         sort_indices = torch.from_numpy(np.array(sort_indices))[
+#             None, ...].to(a.device)
+#         output_indices.append(sort_indices)
 
-    output_indices = torch.cat(output_indices, dim=0)
-    output_indices = output_indices[..., None].repeat(
-        1, 1, full_feature_count or n_features)
+#     output_indices = torch.cat(output_indices, dim=0)
+#     output_indices = output_indices[..., None].repeat(
+#         1, 1, full_feature_count or n_features)
 
-    if return_indices:
-        return output_indices
+#     if return_indices:
+#         return output_indices
     
-    arranged = torch.gather(z, dim=1, index=output_indices)
-    return arranged
+#     arranged = torch.gather(z, dim=1, index=output_indices)
+#     return arranged
 
 
 # def encode_events(

@@ -1,7 +1,7 @@
 from unittest import TestCase
 import torch
 from modules.conv import correct_fft_convolve, torch_conv
-from modules.pointcloud import flattened_upper_triangular, pairwise_differences
+from modules.pointcloud import GraphEdgeEmbedding, flattened_upper_triangular, pairwise_differences
 
 class SmokeTests(TestCase):
     
@@ -20,6 +20,7 @@ class SmokeTests(TestCase):
         features = torch.zeros(batch, n_points, dim).uniform_(-1, 1)
         diff = pairwise_differences(features)
         
+        # element-wise different between every pair of point embeddings
         self.assertEqual(diff.shape, (batch, dim, n_points, n_points))
     
     def test_check_upper_triangular(self):
@@ -27,7 +28,22 @@ class SmokeTests(TestCase):
         
         features = torch.zeros(batch, n_points, dim).uniform_(-1, 1)
         diff = pairwise_differences(features)
+        
+        # Note: this is just the same assertion as above
+        self.assertEqual(diff.shape, (batch, dim, n_points, n_points))
+        
         ut = flattened_upper_triangular(diff)
         expected_dim = (n_points * (n_points - 1)) / 2
         self.assertEqual(ut.shape, (batch, dim, expected_dim))
-        self.fail()
+    
+    def test_check_graph_edge_embedding(self):
+        batch, n_points, dim = 8, 16, 16
+        
+        features = torch.zeros(batch, n_points, dim).uniform_(-1, 1)
+        
+        embedding_dim = 32
+        gee = GraphEdgeEmbedding(n_points, dim, out_channels=embedding_dim)
+        
+        result = gee.forward(features)
+        
+        self.assertEqual(result.shape, (batch, embedding_dim))

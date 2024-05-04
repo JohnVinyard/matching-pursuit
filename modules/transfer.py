@@ -263,14 +263,14 @@ class ResonanceBlock(nn.Module):
         self.final_mix = nn.Linear(latent_dim, 2)
     
     def forward(self, x, impulse):
-        print('------------------------------')
+        # print('------------------------------')
         
         batch_size = x.shape[0]
         
         impulse_samples = impulse.shape[-1]
         
         final_mix = self.final_mix(x)
-        print(f'\t BATCH_SIZE {batch_size} FINAL_MIX {final_mix.shape}')
+        # print(f'\t BATCH_SIZE {batch_size} FINAL_MIX {final_mix.shape}')
         
         final_mix = torch.softmax(final_mix, dim=-1)
         final_mix = final_mix.view(batch_size, -1, 1, 2)
@@ -361,7 +361,7 @@ class ResonanceChain(nn.Module):
         mx = self.to_mix(latent).view(batch_size, -1, 1, self.depth)
         
         
-        print(f'\t OUTPUTS {outputs.shape} {mx.shape}')
+        # print(f'\t OUTPUTS {outputs.shape} {mx.shape}')
         
         outputs = outputs * mx
         outputs = torch.sum(outputs, dim=-1)
