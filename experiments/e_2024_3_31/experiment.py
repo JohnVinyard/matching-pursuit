@@ -53,7 +53,8 @@ softmax_positioning = True
 
 # hard_resonance_choice = False
 loss_type = LossType.IterativeMultiband.value
-optimize_f0 = False
+optimize_f0 = True
+
 use_unit_shifts = False
 
 
@@ -135,7 +136,7 @@ class F0Resonance(nn.Module):
             self, 
             f0: torch.Tensor, 
             decay_coefficients: torch.Tensor, 
-            phase_offsets: torch.Tensor,
+            _: torch.Tensor,
             freq_spacing: torch.Tensor):
         
         batch, n_events, n_elements = f0.shape
@@ -148,9 +149,9 @@ class F0Resonance(nn.Module):
         f0 = f0.view(batch, n_events, 1)
         
         assert decay_coefficients.shape == f0.shape
-        assert phase_offsets.shape == (batch, n_events, 1)
+        # assert phase_offsets.shape == (batch, n_events, 1)
         
-        phase_offsets = torch.sigmoid(phase_offsets) * np.pi
+        # phase_offsets = torch.sigmoid(phase_offsets) * np.pi
         
         exp_decays = exponential_decay(
             torch.sigmoid(decay_coefficients), 
@@ -172,8 +173,8 @@ class F0Resonance(nn.Module):
         assert f0s.shape == (batch, n_events, self.n_octaves)
         
         # filter out anything above nyquist
-        # mask = f0s < 1
-        # f0s = f0s * mask
+        mask = f0s < 1
+        f0s = f0s * mask
         
         # generate sine waves
         f0s = f0s.view(batch, n_events, self.n_octaves, 1).repeat(1, 1, 1, self.n_samples)
@@ -418,7 +419,9 @@ class Model(nn.Module):
         
         if optimize_f0:
             n_f0_elements = 16
-            self.resonance_generator = F0Resonance(n_f0_elements=n_f0_elements, n_octaves=256, n_samples=exp.n_samples)
+            n_octaves = 64
+            self.resonance_generator = F0Resonance(
+                n_f0_elements=n_f0_elements, n_octaves=n_octaves, n_samples=exp.n_samples)
             
             self.f0_choice = nn.Parameter(torch.zeros(1, n_atoms, 1).uniform_(0.001, 0.1))
             self.decay_choice = nn.Parameter(torch.zeros(1, n_atoms, 1).uniform_(-6, -6))
@@ -428,6 +431,7 @@ class Model(nn.Module):
             total_resonances = 4096
             quantize_dim = 4096
             hard_func = lambda x: sparse_softmax(x, normalize=True, dim=-1)
+            # hard_func = lambda x: x
             
             # self.resonance_generator = Resonance(
             #     n_resonances=total_resonances, 
@@ -654,7 +658,7 @@ def train(batch, i):
         fake = transform(torch.sum(recon, dim=1, keepdim=True))
         loss = F.mse_loss(fake, real) #+ sparsity
     elif loss_type == LossType.IterativeMultiband.value:
-        loss = single_channel_loss_3(batch, recon) + sparsity
+        loss = single_channel_loss_3(batch, recon) #+ sparsity
     elif loss_type == LossType.FFT.value:
         real = torch.fft.rfft(batch)
         fake = torch.fft.rfft(torch.sum(recon, dim=1, keepdim=True))
@@ -701,7 +705,7 @@ class GaussianSplatting(BaseExperimentRunner):
             print(i, l.item())
             self.after_training_iteration(l, i)
             
-            if i % 100 == 0:
-                print('SAVING!')
-                path = os.path.join(self.trained_weights_path, 'splat_2.dat')
-                torch.save(model.state_dict(), path)
+            # if i % 100 == 0:
+            #     print('SAVING!')
+            #     path = os.path.join(self.trained_weights_path, 'splat_4.dat')
+            #     torch.save(model.state_dict(), path)
