@@ -1,3 +1,4 @@
+import os
 from typing import List, Optional, Union
 from conjure import SupportedContentType, numpy_conjure
 import torch
@@ -52,7 +53,7 @@ softmax_positioning = True
 
 # hard_resonance_choice = False
 loss_type = LossType.IterativeMultiband.value
-optimize_f0 = True
+optimize_f0 = False
 use_unit_shifts = False
 
 
@@ -477,48 +478,75 @@ class Model(nn.Module):
         
         self.verb = ReverbGenerator(4, 2, exp.samplerate, exp.n_samples, norm=nn.LayerNorm(4,), hard_choice=True)
     
-    def get_parameters(self):
+    def get_parameters(self) -> torch.Tensor:
         
-        if self.rm is None:
-            raise ValueError('rm is not initialized')
         
-        if self.mx is None:
-            raise ValueError('mx is not initialized')
+        if self.rm is None or self.mx is None:
+            standin = torch.zeros((1, n_atoms, exp.n_samples), device=self.amplitudes.device)
+            _, rm, mx = self.verb.forward(self.verb_params, standin, return_parameters=True)
+            self.rm = rm
+            self.mx = mx
+            
         
         atoms = []
         for i in range(n_atoms):
             new_atom = [
+                
+                # mean and std for the envelope
                 self.env[0, i, 0].item(),
                 self.env[0, i, 1].item(),
                 
+                # unit value for shift
                 float(torch.argmax(self.shifts[0, i], dim=-1).item() / self.shifts.shape[-1]),
+                
                 # since the mix is two-elements and passed through softmax, the other element
                 # can be derived
                 self.mix[0, i, 0].item(),
-                self.decays[0, i, 0].item(),
-                self.filter_decays[0, i, 0].item(),
-                self.f0_choice[0, i, 0].item(),
-                self.decay_choice[0, i, 0].item(),
-                self.freq_spacing[0, i, 0].item(),
                 
+                # decay value for this atom
+                self.decays[0, i, 0].item(),
+                
+                # decay value that determines how we crossfade from one filter
+                # to another
+                self.filter_decays[0, i, 0].item(),
+                
+                
+                # self.f0_choice[0, i, 0].item(),
+                # self.decay_choice[0, i, 0].item(),
+                # self.freq_spacing[0, i, 0].item(),
+                
+                # unit value for resonance choice
+                float(torch.argmax(self.resonance_choice[0, i], dim=-1).item() / self.resonance_choice.shape[-1]),
+                
+                # mean for noise filter
                 self.noise_filter[0, i, 0].item(),
+                # std for noise filter
                 self.noise_filter[0, i, 1].item(),
                 
+                # mean for resonance_filter
                 self.resonance_filter[0, i, 0].item(),
+                # std for resonance filter
                 self.resonance_filter[0, i, 1].item(),
                 
+                # atom amplitude
                 self.amplitudes[0, i, 0].item(),
                 
-                float(torch.argmax(self.rm[0, i], dim=-1).item() / self.verb.n_rooms),
+                # unit value for reverb choice
+                float(torch.argmax(self.rm[i], dim=-1).item() / self.verb.n_rooms),
+                
                 # since the reverb mix is two elements passed through a softmax,
                 # the other value can be derived
-                self.mx[0, i, 0].item()
+                self.mx[0, i, 0, 0].item()
                 
             ]
-            atoms.append(new_atom)
+            new_atom = np.array(new_atom)
+            new_atom = torch.from_numpy(new_atom)
+            atoms.append(new_atom[None, ...])
+        
+        atoms = torch.cat(atoms, dim=0)
         return atoms
     
-    def forward(self, x):
+    def forward(self, x, return_unpositioned_atoms: bool = False):
         overall_mix = torch.softmax(self.mix, dim=-1)
         
         
@@ -550,13 +578,21 @@ class Model(nn.Module):
         decaying_resonance2 = filt_res_2 * decays
         
 
-        positioned_noise = self.env_and_position.forward(
-            signals=filtered_noise, 
-            a=self.env[:, :, 0], 
-            b=self.env[:, :, 1], 
-            adjustment=self.shifts if softmax_positioning else None,
-            unit_shifts=self.unit_shifts if use_unit_shifts else None)        
-        
+        if return_unpositioned_atoms:
+            positioned_noise = self.env_and_position.forward(
+                signals=filtered_noise, 
+                a=self.env[:, :, 0], 
+                b=self.env[:, :, 1], 
+                adjustment=None,
+                unit_shifts=None)
+        else:
+            positioned_noise = self.env_and_position.forward(
+                signals=filtered_noise, 
+                a=self.env[:, :, 0], 
+                b=self.env[:, :, 1], 
+                adjustment=self.shifts if softmax_positioning else None,
+                unit_shifts=self.unit_shifts if use_unit_shifts else None)        
+            
         res = fft_convolve(
             positioned_noise, 
             decaying_resonance)
@@ -590,6 +626,7 @@ class Model(nn.Module):
         # rm is a one-hot room choice
         # mx is a two-element, softmax distribution
         final, rm, mx = self.verb.forward(self.verb_params, final, return_parameters=True)
+        
         self.rm = rm
         self.mx = mx
         
@@ -663,3 +700,8 @@ class GaussianSplatting(BaseExperimentRunner):
             
             print(i, l.item())
             self.after_training_iteration(l, i)
+            
+            if i % 100 == 0:
+                print('SAVING!')
+                path = os.path.join(self.trained_weights_path, 'splat_2.dat')
+                torch.save(model.state_dict(), path)

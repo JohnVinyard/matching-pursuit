@@ -10,6 +10,7 @@ def load_trained_weights_for_inference(
     module_init_path: str, 
     model_constructor: Callable[[], nn.Module], 
     device: str = 'cpu', 
+    weights_filename = 'weights.dat',
     s3_bucket: str = None):
     
     """
@@ -21,7 +22,7 @@ def load_trained_weights_for_inference(
     model = model_constructor()
     
     directory, filename = os.path.split(module_init_path)
-    weights_path = Path(directory) / Path('trained_weights/weights.dat')
+    weights_path = Path(directory) / Path('trained_weights') / Path(weights_filename)
     model = model.to(device)
     
     if not os.path.exists(weights_path) and s3_bucket:
