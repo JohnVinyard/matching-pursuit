@@ -55,8 +55,10 @@ softmax_positioning = True
 loss_type = LossType.IterativeMultiband.value
 optimize_f0 = True
 
-use_unit_shifts = False
+# For iterative multiband loss, determine if channels are first sorted by descending norm
+sort_by_norm = True
 
+use_unit_shifts = False
 
 
 def transform(x: torch.Tensor):
@@ -106,7 +108,6 @@ class BandPassFilteredNoise(nn.Module):
         assert filtered_noise.shape == (batch, n_events, self.n_samples)
         return filtered_noise
         
-
 
 class F0Resonance(nn.Module):
     """
@@ -192,7 +193,6 @@ class F0Resonance(nn.Module):
         assert osc.shape == (batch, n_events, self.n_samples)
         return osc
         
-
 
 class Resonance(nn.Module):
     def __init__(self, n_resonances: int, n_samples: int, hard_choice: bool):
@@ -358,7 +358,7 @@ class Mixer(nn.Module):
         return result
     
 
-def single_channel_loss_3(target: torch.Tensor, recon: torch.Tensor):
+def single_channel_loss_3(target: torch.Tensor, recon: torch.Tensor, sort_by_norm: bool = True):
     
     target = transform(target).reshape(target.shape[0], -1)
     
@@ -370,11 +370,14 @@ def single_channel_loss_3(target: torch.Tensor, recon: torch.Tensor):
     # Try L1 norm instead of L@
     # Try choosing based on loudest patch/segment
     
-    # sort channels from loudest to softest
-    diff = torch.norm(channels, dim=(-1), p = 1)
-    indices = torch.argsort(diff, dim=-1, descending=True)
+    if sort_by_norm:
+        # sort channels from loudest to softest
+        diff = torch.norm(channels, dim=(-1), p = 1)
+        indices = torch.argsort(diff, dim=-1, descending=True)
+        srt = torch.take_along_dim(channels, indices[:, :, None], dim=1)
+    else:
+        srt = channels
     
-    srt = torch.take_along_dim(channels, indices[:, :, None], dim=1)
     
     loss = 0
     for i in range(n_atoms):
@@ -429,6 +432,8 @@ class Model(nn.Module):
             self.freq_spacing = nn.Parameter(torch.zeros(1, n_atoms, 1).uniform_(0.5, 2))
         else:
             total_resonances = 4096
+            hard_resonance_choice = True
+            
             quantize_dim = 4096
             hard_func = lambda x: sparse_softmax(x, normalize=True, dim=-1)
             # hard_func = lambda x: x
@@ -437,6 +442,7 @@ class Model(nn.Module):
             #     n_resonances=total_resonances, 
             #     n_samples=exp.n_samples, 
             #     hard_choice=hard_resonance_choice)
+            
             self.resonance_generator = QuantizedResonanceMixture(
                 n_resonances=total_resonances,
                 quantize_dim=quantize_dim,
@@ -658,7 +664,7 @@ def train(batch, i):
         fake = transform(torch.sum(recon, dim=1, keepdim=True))
         loss = F.mse_loss(fake, real) #+ sparsity
     elif loss_type == LossType.IterativeMultiband.value:
-        loss = single_channel_loss_3(batch, recon) #+ sparsity
+        loss = single_channel_loss_3(batch, recon, sort_by_norm=sort_by_norm) #+ sparsity
     elif loss_type == LossType.FFT.value:
         real = torch.fft.rfft(batch)
         fake = torch.fft.rfft(torch.sum(recon, dim=1, keepdim=True))
