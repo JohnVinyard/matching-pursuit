@@ -43,7 +43,7 @@ class EnvelopeType(Enum):
     
 
 n_atoms = 64
-envelope_dist = EnvelopeType.Gaussian
+envelope_dist = EnvelopeType.Gamma
 
 # force_pos_adjustment = False
 # For gamma distributions, the center of gravity is always near zero,
@@ -422,7 +422,7 @@ class Model(nn.Module):
         
         if optimize_f0:
             n_f0_elements = 16
-            n_octaves = 64
+            n_octaves = 256
             self.resonance_generator = F0Resonance(
                 n_f0_elements=n_f0_elements, n_octaves=n_octaves, n_samples=exp.n_samples)
             
@@ -521,12 +521,12 @@ class Model(nn.Module):
                 self.filter_decays[0, i, 0].item(),
                 
                 
-                # self.f0_choice[0, i, 0].item(),
-                # self.decay_choice[0, i, 0].item(),
-                # self.freq_spacing[0, i, 0].item(),
+                self.f0_choice[0, i, 0].item(),
+                self.decay_choice[0, i, 0].item(),
+                self.freq_spacing[0, i, 0].item(),
                 
                 # unit value for resonance choice
-                float(torch.argmax(self.resonance_choice[0, i], dim=-1).item() / self.resonance_choice.shape[-1]),
+                # float(torch.argmax(self.resonance_choice[0, i], dim=-1).item() / self.resonance_choice.shape[-1]),
                 
                 # mean for noise filter
                 self.noise_filter[0, i, 0].item(),

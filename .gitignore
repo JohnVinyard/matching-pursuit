@@ -39,3 +39,6 @@ model-demo/*
 search/*
 
 report.html
+
+splatting/*
+splatting_backup/*
