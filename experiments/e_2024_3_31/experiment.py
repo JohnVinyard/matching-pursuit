@@ -32,10 +32,10 @@ exp = Experiment(
     kernel_size=512)
 
 class LossType(Enum):
-    PhaseInvariantFeature = 'PIF'
+    # PhaseInvariantFeature = 'PIF'
     IterativeMultiband = 'IMB'
-    AllAtOnceMultiband = 'AAOMB'
-    FFT = 'FFT'
+    # AllAtOnceMultiband = 'AAOMB'
+    # FFT = 'FFT'
     
 class EnvelopeType(Enum):
     Gaussian = 'Gaussian'
@@ -43,7 +43,7 @@ class EnvelopeType(Enum):
     
 
 n_atoms = 64
-envelope_dist = EnvelopeType.Gaussian
+envelope_dist = EnvelopeType.Gamma
 
 # force_pos_adjustment = False
 # For gamma distributions, the center of gravity is always near zero,
@@ -56,7 +56,7 @@ loss_type = LossType.IterativeMultiband.value
 optimize_f0 = True
 
 # For iterative multiband loss, determine if channels are first sorted by descending norm
-sort_by_norm = True
+sort_by_norm = False
 
 use_unit_shifts = False
 
@@ -669,18 +669,18 @@ def train(batch, i):
     nz = mask.sum() / amps.nelement()
     print(f'{nz} percent sparsity with min {amps.min().item()} and max {amps.max().item()}')
     
-    if loss_type == LossType.PhaseInvariantFeature.value:
-        loss = exp.perceptual_loss(torch.sum(recon, dim=1, keepdim=True), batch) #+ sparsity
-    elif loss_type == LossType.AllAtOnceMultiband.value:
-        real = transform(batch)
-        fake = transform(torch.sum(recon, dim=1, keepdim=True))
-        loss = F.mse_loss(fake, real) #+ sparsity
-    elif loss_type == LossType.IterativeMultiband.value:
+    # if loss_type == LossType.PhaseInvariantFeature.value:
+    #     loss = exp.perceptual_loss(torch.sum(recon, dim=1, keepdim=True), batch) #+ sparsity
+    # if loss_type == LossType.AllAtOnceMultiband.value:
+    #     real = transform(batch)
+    #     fake = transform(torch.sum(recon, dim=1, keepdim=True))
+    #     loss = F.mse_loss(fake, real) #+ sparsity
+    if loss_type == LossType.IterativeMultiband.value:
         loss = single_channel_loss_3(batch, recon, sort_by_norm=sort_by_norm) + sparsity
-    elif loss_type == LossType.FFT.value:
-        real = torch.fft.rfft(batch)
-        fake = torch.fft.rfft(torch.sum(recon, dim=1, keepdim=True))
-        loss = F.mse_loss(fake.real, real.real) + F.mse_loss(fake.imag, real.imag)
+    # elif loss_type == LossType.FFT.value:
+    #     real = torch.fft.rfft(batch)
+    #     fake = torch.fft.rfft(torch.sum(recon, dim=1, keepdim=True))
+    #     loss = F.mse_loss(fake.real, real.real) + F.mse_loss(fake.imag, real.imag)
     else:
         raise ValueError(f'Unsupported loss {loss_type}')
     
