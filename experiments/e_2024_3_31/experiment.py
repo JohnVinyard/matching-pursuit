@@ -60,6 +60,18 @@ sort_by_norm = False
 
 use_unit_shifts = False
 
+static_learning_rate = 1e-3
+schedule_learning_rate = True
+learning_rates = torch.linspace(1e-3, 1e-4, steps=2000)
+
+nyquist_cutoff = False
+
+hard_reverb_choice = lambda x: sparse_softmax(x, normalize=True, dim=-1)
+hard_shift_choice = lambda x: sparse_softmax(x, normalize=True, dim=-1)
+
+# hard_reverb_choice = lambda x: F.gumbel_softmax(x, dim=-1, tau=0.01, hard=True)
+# hard_shift_choice = lambda x: F.gumbel_softmax(x, dim=-1, tau=0.01, hard=True)
+
 
 def transform(x: torch.Tensor):
     batch_size, channels, _ = x.shape
@@ -173,9 +185,10 @@ class F0Resonance(nn.Module):
         f0s = f0 * factors
         assert f0s.shape == (batch, n_events, self.n_octaves)
         
-        # filter out anything above nyquist
-        # mask = f0s < 1
-        # f0s = f0s * mask
+        if nyquist_cutoff:
+            # filter out anything above nyquist
+            mask = f0s < 1
+            f0s = f0s * mask
         
         # generate sine waves
         f0s = f0s.view(batch, n_events, self.n_octaves, 1).repeat(1, 1, 1, self.n_samples)
@@ -324,7 +337,8 @@ class EnvelopeAndPosition(nn.Module):
         positioned_signals = signals * envelopes
         
         if adjustment is not None:
-            shifts = sparse_softmax(adjustment, dim=-1, normalize=True)
+            # shifts = sparse_softmax(adjustment, dim=-1, normalize=True)
+            shifts = hard_shift_choice(adjustment)
             positioned_signals = fft_convolve(positioned_signals, shifts)
         
         if unit_shifts is not None:
@@ -488,7 +502,8 @@ class Model(nn.Module):
         self.rm: Optional[torch.Tensor] = None
         self.mx: Optional[torch.Tensor] = None
         
-        self.verb = ReverbGenerator(4, 2, exp.samplerate, exp.n_samples, norm=nn.LayerNorm(4,), hard_choice=True)
+        self.verb = ReverbGenerator(
+            4, 2, exp.samplerate, exp.n_samples, norm=nn.LayerNorm(4,), hard_choice=hard_reverb_choice)
     
     def get_parameters(self) -> torch.Tensor:
         
@@ -646,7 +661,7 @@ class Model(nn.Module):
         
 
 model = Model().to(device)
-optim = optimizer(model, lr=1e-3)
+optim = optimizer(model, lr=static_learning_rate)
 
 def perceptual_loss(recon: torch.Tensor, orig: torch.Tensor):
     loss = exp.perceptual_loss(torch.sum(recon, dim=1, keepdim=True), orig) #+ sparsity
@@ -684,7 +699,14 @@ def train(batch, i):
     else:
         raise ValueError(f'Unsupported loss {loss_type}')
     
-    
+    if schedule_learning_rate:
+        try:
+            new_learning_rate = learning_rates[i]
+            print(f'new learning rate is {new_learning_rate.item()}')
+            for g in optim.param_groups:
+                g['lr'] = new_learning_rate
+        except IndexError:
+            pass
     
     loss.backward()
     optim.step()

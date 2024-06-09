@@ -101,8 +101,10 @@ class ReverbGenerator(nn.Module):
             return_parameters: bool = False):
         
         
-        if self.hard_choice:
+        if self.hard_choice and isinstance(self.hard_choice, bool):
             rm = sparse_softmax(self.to_room(context).view(-1, self.n_rooms), dim=-1, normalize=True)
+        elif self.hard_choice and callable(self.hard_choice):
+            rm = self.hard_choice(self.to_room(context).view(-1, self.n_rooms))
         else:
             rm = torch.softmax(self.to_room(context).view(-1, self.n_rooms), dim=-1)
         
