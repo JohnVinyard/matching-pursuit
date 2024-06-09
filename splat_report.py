@@ -1,5 +1,6 @@
 from typing import Tuple
-from experiments.e_2024_3_31.experiment import Model, single_channel_loss_3
+from experiments.e_2024_3_31.experiment import \
+    Model, single_channel_loss_3, perceptual_loss, multiband_loss
 import numpy as np
 import json
 import torch
@@ -61,13 +62,14 @@ def train_splatting_model(
     
     target = torch.from_numpy(samples).to(device).view(1, 1, duration_samples)
     
-    model = Model().to(device)
+    model = Model(n_resonance_octaves=256).to(device)
     optim = optimizer(model, lr=learning_rate)
     
     for i in range(training_iterations):
         optim.zero_grad()
         recon, amps = model.forward(None)
-        loss = single_channel_loss_3(target, recon, sort_by_norm=False)
+        loss = single_channel_loss_3(target, recon, sort_by_norm=True)
+        # loss = multiband_loss(recon, target)
         loss.backward()
         optim.step()
         print(f'Iteration {i}: Loss: {loss.item()}')
@@ -92,7 +94,7 @@ def train_and_run_inference(
         learning_rate, 
         training_iterations)
     
-    model = Model().to(device)
+    model = Model(n_resonance_octaves=256).to(device)
     model.load_state_dict(state_dict)
     
     return samples, model
@@ -184,6 +186,7 @@ def create_report_section(
                 samplerate=zounds.SR22050()),
     } for i, vec in enumerate(two_d)]
     
+    
     return Section(
         title=title,
         anchor=anchor,
@@ -215,6 +218,24 @@ def create_report_section(
                     <div class="recon-panel">
                         <h2>{embedding_dim}-Dimensional Atom Parameters</h2>
                         <tensor-view src="{numpy_data_url}" type="2D" height="200" width="200" />        
+                        <p>
+                            Each atom consists of the following parameters:
+                            <ul>
+                                <li>Mean and variance for the gaussian gain envelope applied to the entire "atom"</li>
+                                <li>A scalar, unit value for the position in time of the atom</li>
+                                <li>A scalar, unit value representing the mix between the noise impulse and resonance</li>
+                                <li>A scalar, unit decay value which is used gto produce a cumulative product, representing the decay of the resonance</li>
+                                <li>A scalar, unit value that describes how we cross-fade from starting filter to ending filter</li>
+                                <li>A scalar, unit value representing the fundamental frequency (f0) of the resonance</li>
+                                <li>A scalar, unit value which represents the decay of the resonance</li>
+                                <li>A scalar, unit value which represents the spacing between harmonics (multiples of f0)</li>
+                                <li>Mean and variance in the frequency domain for the filter applied to the noise impulse</li>
+                                <li>A scalar value representing the overall amplitude/gain of the atom</li>
+                                <li>A scalar value representing the choice of reverb impulse responses</li>
+                                <li>A scalar value representing the dry/wet mix between the atom and the reverb impulse response</li>
+                                <li></li>
+                            </ul>
+                        </p>
                     </div>
                     
                 </div>
@@ -223,6 +244,8 @@ def create_report_section(
     )       
 
 if __name__ == '__main__':
+    
+    training_iterations = 5000
     
     
     html_content = html_doc(
@@ -273,10 +296,10 @@ if __name__ == '__main__':
                 title='Reconstruction # 1',
                 anchor='reconstruction-1',
                 url='https://music-net.s3.amazonaws.com/1728',
-                start_sample=2**15,
+                start_sample=2**15 * 14,
                 duration_samples=2**15,
                 learning_rate=1e-3,
-                training_iterations=1000,
+                training_iterations=training_iterations,
             )
         ]
     )

@@ -43,7 +43,7 @@ class EnvelopeType(Enum):
     
 
 n_atoms = 64
-envelope_dist = EnvelopeType.Gamma
+envelope_dist = EnvelopeType.Gaussian
 
 # force_pos_adjustment = False
 # For gamma distributions, the center of gravity is always near zero,
@@ -174,8 +174,8 @@ class F0Resonance(nn.Module):
         assert f0s.shape == (batch, n_events, self.n_octaves)
         
         # filter out anything above nyquist
-        mask = f0s < 1
-        f0s = f0s * mask
+        # mask = f0s < 1
+        # f0s = f0s * mask
         
         # generate sine waves
         f0s = f0s.view(batch, n_events, self.n_octaves, 1).repeat(1, 1, 1, self.n_samples)
@@ -358,7 +358,7 @@ class Mixer(nn.Module):
         return result
     
 
-def single_channel_loss_3(target: torch.Tensor, recon: torch.Tensor, sort_by_norm: bool = True):
+def single_channel_loss_3(target: torch.Tensor, recon: torch.Tensor, sort_by_norm: bool = True) -> torch.Tensor:
     
     target = transform(target).reshape(target.shape[0], -1)
     
@@ -403,8 +403,10 @@ class Model(nn.Module):
     n_atoms * 16
     """
     
-    def __init__(self):
+    def __init__(self, n_resonance_octaves=256):
         super().__init__()
+        
+        self.n_resonance_octaves = n_resonance_octaves
         
         # means and stds for envelope
         self.env = nn.Parameter((torch.zeros(1, n_atoms, 2).uniform_(1e-8, 1)))
@@ -422,7 +424,7 @@ class Model(nn.Module):
         
         if optimize_f0:
             n_f0_elements = 16
-            n_octaves = 256
+            n_octaves = self.n_resonance_octaves
             self.resonance_generator = F0Resonance(
                 n_f0_elements=n_f0_elements, n_octaves=n_octaves, n_samples=exp.n_samples)
             
@@ -521,12 +523,12 @@ class Model(nn.Module):
                 self.filter_decays[0, i, 0].item(),
                 
                 
-                self.f0_choice[0, i, 0].item(),
-                self.decay_choice[0, i, 0].item(),
-                self.freq_spacing[0, i, 0].item(),
+                # self.f0_choice[0, i, 0].item(),
+                # self.decay_choice[0, i, 0].item(),
+                # self.freq_spacing[0, i, 0].item(),
                 
                 # unit value for resonance choice
-                # float(torch.argmax(self.resonance_choice[0, i], dim=-1).item() / self.resonance_choice.shape[-1]),
+                float(torch.argmax(self.resonance_choice[0, i], dim=-1).item() / self.resonance_choice.shape[-1]),
                 
                 # mean for noise filter
                 self.noise_filter[0, i, 0].item(),
@@ -646,6 +648,16 @@ class Model(nn.Module):
 model = Model().to(device)
 optim = optimizer(model, lr=1e-3)
 
+def perceptual_loss(recon: torch.Tensor, orig: torch.Tensor):
+    loss = exp.perceptual_loss(torch.sum(recon, dim=1, keepdim=True), orig) #+ sparsity
+    return loss
+
+def multiband_loss(recon: torch.Tensor, orig: torch.Tensor):
+    real = transform(orig)
+    fake = transform(torch.sum(recon, dim=1, keepdim=True))
+    loss = F.mse_loss(fake, real) #+ sparsity
+    return loss
+
 def train(batch, i):
     optim.zero_grad()
     recon, amps = model.forward(None)
@@ -664,7 +676,7 @@ def train(batch, i):
         fake = transform(torch.sum(recon, dim=1, keepdim=True))
         loss = F.mse_loss(fake, real) #+ sparsity
     elif loss_type == LossType.IterativeMultiband.value:
-        loss = single_channel_loss_3(batch, recon, sort_by_norm=sort_by_norm) #+ sparsity
+        loss = single_channel_loss_3(batch, recon, sort_by_norm=sort_by_norm) + sparsity
     elif loss_type == LossType.FFT.value:
         real = torch.fft.rfft(batch)
         fake = torch.fft.rfft(torch.sum(recon, dim=1, keepdim=True))
