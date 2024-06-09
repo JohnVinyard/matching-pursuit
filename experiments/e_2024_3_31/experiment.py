@@ -49,28 +49,25 @@ envelope_dist = EnvelopeType.Gamma
 # For gamma distributions, the center of gravity is always near zero,
 # so further adjustment is required
 # softmax_positioning = envelope_dist == EnvelopeType.Gamma or force_pos_adjustment
-softmax_positioning = True
+softmax_positioning = True # locked
 
 # hard_resonance_choice = False
-loss_type = LossType.IterativeMultiband.value
-optimize_f0 = True
+loss_type = LossType.IterativeMultiband.value # locked
+optimize_f0 = True # locked
 
 # For iterative multiband loss, determine if channels are first sorted by descending norm
-sort_by_norm = False
+sort_by_norm = False # locked
 
-use_unit_shifts = False
+use_unit_shifts = False # locked
 
 static_learning_rate = 1e-3
 schedule_learning_rate = True
 learning_rates = torch.linspace(1e-3, 1e-4, steps=2000)
 
-nyquist_cutoff = False
+nyquist_cutoff = False # locked
 
-hard_reverb_choice = lambda x: sparse_softmax(x, normalize=True, dim=-1)
-hard_shift_choice = lambda x: sparse_softmax(x, normalize=True, dim=-1)
-
-# hard_reverb_choice = lambda x: F.gumbel_softmax(x, dim=-1, tau=0.01, hard=True)
-# hard_shift_choice = lambda x: F.gumbel_softmax(x, dim=-1, tau=0.01, hard=True)
+hard_reverb_choice = lambda x: sparse_softmax(x, normalize=True, dim=-1) # locked
+hard_shift_choice = lambda x: sparse_softmax(x, normalize=True, dim=-1) # locked
 
 
 def transform(x: torch.Tensor):
@@ -749,3 +746,6 @@ class GaussianSplatting(BaseExperimentRunner):
             #     print('SAVING!')
             #     path = os.path.join(self.trained_weights_path, 'splat_4.dat')
             #     torch.save(model.state_dict(), path)
+            
+            if i == 3000:
+                break
