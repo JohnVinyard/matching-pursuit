@@ -48,23 +48,26 @@ envelope_dist = EnvelopeType.Gaussian
 # For gamma distributions, the center of gravity is always near zero,
 # so further adjustment is required
 # softmax_positioning = envelope_dist == EnvelopeType.Gamma or force_pos_adjustment
-softmax_positioning = True # locked
+softmax_positioning = False # locked
+use_unit_shifts = False # locked
+
 
 # hard_resonance_choice = False
 loss_type = LossType.AllAtOnceMultiband.value # locked
+
 optimize_f0 = True # locked
+nyquist_cutoff = False # locked
+
 
 # For iterative multiband loss, determine if channels are first sorted by descending norm
 sort_by_norm = True # locked
 
-use_unit_shifts = False # locked
 
 static_learning_rate = 1e-3
 
 schedule_learning_rate = False
 learning_rates = torch.linspace(1e-1, 1e-3, steps=2000)
 
-nyquist_cutoff = False # locked
 
 gsm = lambda x: F.gumbel_softmax(x, tau=0.1, hard=True, dim=-1)
 hsm = lambda x: sparse_softmax(x, normalize=True, dim=-1)
@@ -87,14 +90,13 @@ def transform(x: torch.Tensor):
 
         
 def multiband_transform(x: torch.Tensor):
-    # bands = fft_frequency_decompose(x, 512)
-    # d1 = {f'{k}_xl': stft(v, 512, 64, pad=True) for k, v in bands.items()}
-    # d1 = {f'{k}_long': stft(v, 128, 64, pad=True) for k, v in bands.items()}
-    # d3 = {f'{k}_short': stft(v, 64, 32, pad=True) for k, v in bands.items()}
-    # d4 = {f'{k}_xs': stft(v, 16, 8, pad=True) for k, v in bands.items()}
+    bands = fft_frequency_decompose(x, 512)
+    d1 = {f'{k}_xl': stft(v, 512, 64, pad=True) for k, v in bands.items()}
+    d1 = {f'{k}_long': stft(v, 128, 64, pad=True) for k, v in bands.items()}
+    d3 = {f'{k}_short': stft(v, 64, 32, pad=True) for k, v in bands.items()}
+    d4 = {f'{k}_xs': stft(v, 16, 8, pad=True) for k, v in bands.items()}
     normal = stft(x, 2048, 256, pad=True).reshape(-1, 128, 1025).permute(0, 2, 1)
-    return dict(normal=normal)
-    # return dict(**d1, **d3, **d4, normal=normal)
+    return dict(**d1, **d3, **d4, normal=normal)
 
 
 def exponential_decay(
@@ -684,6 +686,8 @@ def multiband_loss(recon: torch.Tensor, orig: torch.Tensor):
     loss = F.mse_loss(fake, real) #+ sparsity
     return loss
 
+scaler = torch.cuda.amp.GradScaler()
+
 def train(batch, i):
     optim.zero_grad()
     recon, amps = model.forward(None)
@@ -698,11 +702,12 @@ def train(batch, i):
     if loss_type == LossType.PhaseInvariantFeature.value:
         loss = exp.perceptual_loss(torch.sum(recon, dim=1, keepdim=True), batch) #+ sparsity
     elif loss_type == LossType.AllAtOnceMultiband.value:
-        real = transform(batch)
-        fake = transform(torch.sum(recon, dim=1, keepdim=True))
-        loss = F.mse_loss(fake, real) #+ sparsity
+        with torch.cuda.amp.autocast():
+            real = transform(batch)
+            fake = transform(torch.sum(recon, dim=1, keepdim=True))
+            loss = F.mse_loss(fake, real) + sparsity
     elif loss_type == LossType.IterativeMultiband.value:
-        loss = single_channel_loss_3(batch, recon, sort_by_norm=sort_by_norm) + sparsity
+        loss = single_channel_loss_3(batch, recon, sort_by_norm=sort_by_norm) #+ sparsity
     else:
         raise ValueError(f'Unsupported loss {loss_type}')
     
@@ -715,8 +720,11 @@ def train(batch, i):
         except IndexError:
             pass
     
-    loss.backward()
-    optim.step()
+    scaler.scale(loss).backward()
+    scaler.step(optim)
+    scaler.update()
+    # loss.backward()
+    # optim.step()
     
     recon = max_norm(recon.sum(dim=1, keepdim=True), dim=-1)
     return loss, recon, amps
@@ -726,7 +734,7 @@ def make_conjure(experiment: BaseExperimentRunner):
     @numpy_conjure(experiment.collection, content_type=SupportedContentType.Spectrogram.value)
     def amps(x: torch.Tensor):
         x = x.data.cpu().numpy()[0].reshape(1, n_atoms)
-        return x
+        return x / (x.max() + 1e-8)
 
     return (amps,)
 
