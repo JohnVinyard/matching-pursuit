@@ -32,10 +32,9 @@ exp = Experiment(
     kernel_size=512)
 
 class LossType(Enum):
-    # PhaseInvariantFeature = 'PIF'
+    PhaseInvariantFeature = 'PIF'
     IterativeMultiband = 'IMB'
-    # AllAtOnceMultiband = 'AAOMB'
-    # FFT = 'FFT'
+    AllAtOnceMultiband = 'AAOMB'
     
 class EnvelopeType(Enum):
     Gaussian = 'Gaussian'
@@ -52,8 +51,8 @@ envelope_dist = EnvelopeType.Gaussian
 softmax_positioning = True # locked
 
 # hard_resonance_choice = False
-loss_type = LossType.IterativeMultiband.value # locked
-optimize_f0 = False # locked
+loss_type = LossType.AllAtOnceMultiband.value # locked
+optimize_f0 = True # locked
 
 # For iterative multiband loss, determine if channels are first sorted by descending norm
 sort_by_norm = True # locked
@@ -61,13 +60,15 @@ sort_by_norm = True # locked
 use_unit_shifts = False # locked
 
 static_learning_rate = 1e-3
+
 schedule_learning_rate = False
-learning_rates = torch.linspace(1e-3, 1e-4, steps=2000)
+learning_rates = torch.linspace(1e-1, 1e-3, steps=2000)
 
 nyquist_cutoff = False # locked
 
 gsm = lambda x: F.gumbel_softmax(x, tau=0.1, hard=True, dim=-1)
 hsm = lambda x: sparse_softmax(x, normalize=True, dim=-1)
+sm = lambda x: torch.softmax(x, dim=-1)
 sparse_choice = hsm
 
 # hard_reverb_choice = lambda x: sparse_softmax(x, normalize=True, dim=-1) # locked
@@ -86,13 +87,14 @@ def transform(x: torch.Tensor):
 
         
 def multiband_transform(x: torch.Tensor):
-    bands = fft_frequency_decompose(x, 512)
-    d1 = {f'{k}_xl': stft(v, 512, 64, pad=True) for k, v in bands.items()}
-    d1 = {f'{k}_long': stft(v, 128, 64, pad=True) for k, v in bands.items()}
-    d3 = {f'{k}_short': stft(v, 64, 32, pad=True) for k, v in bands.items()}
-    d4 = {f'{k}_xs': stft(v, 16, 8, pad=True) for k, v in bands.items()}
+    # bands = fft_frequency_decompose(x, 512)
+    # d1 = {f'{k}_xl': stft(v, 512, 64, pad=True) for k, v in bands.items()}
+    # d1 = {f'{k}_long': stft(v, 128, 64, pad=True) for k, v in bands.items()}
+    # d3 = {f'{k}_short': stft(v, 64, 32, pad=True) for k, v in bands.items()}
+    # d4 = {f'{k}_xs': stft(v, 16, 8, pad=True) for k, v in bands.items()}
     normal = stft(x, 2048, 256, pad=True).reshape(-1, 128, 1025).permute(0, 2, 1)
-    return dict(**d1, **d3, **d4, normal=normal)
+    return dict(normal=normal)
+    # return dict(**d1, **d3, **d4, normal=normal)
 
 
 def exponential_decay(
@@ -426,7 +428,7 @@ class Model(nn.Module):
     n_atoms * 16
     """
     
-    def __init__(self, n_resonance_octaves=256):
+    def __init__(self, n_resonance_octaves=64):
         super().__init__()
         
         self.n_resonance_octaves = n_resonance_octaves
@@ -693,18 +695,14 @@ def train(batch, i):
     nz = mask.sum() / amps.nelement()
     print(f'{nz} percent sparsity with min {amps.min().item()} and max {amps.max().item()}')
     
-    # if loss_type == LossType.PhaseInvariantFeature.value:
-    #     loss = exp.perceptual_loss(torch.sum(recon, dim=1, keepdim=True), batch) #+ sparsity
-    # if loss_type == LossType.AllAtOnceMultiband.value:
-    #     real = transform(batch)
-    #     fake = transform(torch.sum(recon, dim=1, keepdim=True))
-    #     loss = F.mse_loss(fake, real) #+ sparsity
-    if loss_type == LossType.IterativeMultiband.value:
+    if loss_type == LossType.PhaseInvariantFeature.value:
+        loss = exp.perceptual_loss(torch.sum(recon, dim=1, keepdim=True), batch) #+ sparsity
+    elif loss_type == LossType.AllAtOnceMultiband.value:
+        real = transform(batch)
+        fake = transform(torch.sum(recon, dim=1, keepdim=True))
+        loss = F.mse_loss(fake, real) #+ sparsity
+    elif loss_type == LossType.IterativeMultiband.value:
         loss = single_channel_loss_3(batch, recon, sort_by_norm=sort_by_norm) + sparsity
-    # elif loss_type == LossType.FFT.value:
-    #     real = torch.fft.rfft(batch)
-    #     fake = torch.fft.rfft(torch.sum(recon, dim=1, keepdim=True))
-    #     loss = F.mse_loss(fake.real, real.real) + F.mse_loss(fake.imag, real.imag)
     else:
         raise ValueError(f'Unsupported loss {loss_type}')
     
