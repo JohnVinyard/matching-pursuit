@@ -1,5 +1,5 @@
 import os
-from typing import List, Optional, Union
+from typing import Callable, List, Optional, Union
 from conjure import SupportedContentType, numpy_conjure
 import torch
 from torch import nn
@@ -43,7 +43,7 @@ class EnvelopeType(Enum):
     
 
 n_atoms = 64
-envelope_dist = EnvelopeType.Gamma
+envelope_dist = EnvelopeType.Gaussian
 
 # force_pos_adjustment = False
 # For gamma distributions, the center of gravity is always near zero,
@@ -53,21 +53,30 @@ softmax_positioning = True # locked
 
 # hard_resonance_choice = False
 loss_type = LossType.IterativeMultiband.value # locked
-optimize_f0 = True # locked
+optimize_f0 = False # locked
 
 # For iterative multiband loss, determine if channels are first sorted by descending norm
-sort_by_norm = False # locked
+sort_by_norm = True # locked
 
 use_unit_shifts = False # locked
 
 static_learning_rate = 1e-3
-schedule_learning_rate = True
+schedule_learning_rate = False
 learning_rates = torch.linspace(1e-3, 1e-4, steps=2000)
 
 nyquist_cutoff = False # locked
 
-hard_reverb_choice = lambda x: sparse_softmax(x, normalize=True, dim=-1) # locked
-hard_shift_choice = lambda x: sparse_softmax(x, normalize=True, dim=-1) # locked
+gsm = lambda x: F.gumbel_softmax(x, tau=0.1, hard=True, dim=-1)
+hsm = lambda x: sparse_softmax(x, normalize=True, dim=-1)
+sparse_choice = hsm
+
+# hard_reverb_choice = lambda x: sparse_softmax(x, normalize=True, dim=-1) # locked
+# hard_shift_choice = lambda x: sparse_softmax(x, normalize=True, dim=-1) # locked
+# hard_resonance_choice = lambda x: sparse_softmax(x, normalize=True, dim=-1) # locked
+
+hard_reverb_choice = sparse_choice
+hard_shift_choice = sparse_choice
+hard_resonance_choice = sparse_choice
 
 
 def transform(x: torch.Tensor):
@@ -205,7 +214,7 @@ class F0Resonance(nn.Module):
         
 
 class Resonance(nn.Module):
-    def __init__(self, n_resonances: int, n_samples: int, hard_choice: bool):
+    def __init__(self, n_resonances: int, n_samples: int, hard_choice: Union[bool, Callable]):
         super().__init__()
         self.n_resonances = n_resonances
         self.n_samples = n_samples
@@ -223,7 +232,10 @@ class Resonance(nn.Module):
         assert n_resonances == self.n_resonances
         
         if self.hard_choice:
-            resonances = sparse_softmax(choice, normalize=True, dim=-1)
+            if isinstance(self.hard_choice, bool):
+                resonances = sparse_softmax(choice, normalize=True, dim=-1)
+            else:
+                resonances = self.hard_choice(choice)
         else:
             resonances = torch.relu(choice)
         
@@ -445,24 +457,24 @@ class Model(nn.Module):
             self.freq_spacing = nn.Parameter(torch.zeros(1, n_atoms, 1).uniform_(0.5, 2))
         else:
             total_resonances = 4096
-            hard_resonance_choice = True
+            # hard_resonance_choice = True
             
-            quantize_dim = 4096
-            hard_func = lambda x: sparse_softmax(x, normalize=True, dim=-1)
+            # quantize_dim = 4096
+            # hard_func = lambda x: sparse_softmax(x, normalize=True, dim=-1)
             # hard_func = lambda x: x
             
-            # self.resonance_generator = Resonance(
-            #     n_resonances=total_resonances, 
-            #     n_samples=exp.n_samples, 
-            #     hard_choice=hard_resonance_choice)
+            self.resonance_generator = Resonance(
+                n_resonances=total_resonances, 
+                n_samples=exp.n_samples, 
+                hard_choice=hard_resonance_choice)
             
-            self.resonance_generator = QuantizedResonanceMixture(
-                n_resonances=total_resonances,
-                quantize_dim=quantize_dim,
-                n_samples=exp.n_samples,
-                samplerate=exp.samplerate,
-                hard_func=hard_func
-            )
+            # self.resonance_generator = QuantizedResonanceMixture(
+            #     n_resonances=total_resonances,
+            #     quantize_dim=quantize_dim,
+            #     n_samples=exp.n_samples,
+            #     samplerate=exp.samplerate,
+            #     hard_func=hard_func
+            # )
             # one-hot choice of resonance for each atom
             self.resonance_choice = nn.Parameter(torch.zeros(1, n_atoms, total_resonances).uniform_(0, 1))
         
@@ -487,11 +499,11 @@ class Model(nn.Module):
         self.noise_filter = nn.Parameter(torch.zeros(1, n_atoms, 2).uniform_(0, 1))
         
         # means and stds for bandpass resonance filter
-        self.resonance_filter = nn.Parameter(torch.zeros(1, n_atoms, 2).uniform_(0, 1))
-        self.resonance_filter2 = nn.Parameter(torch.zeros(1, n_atoms, 2).uniform_(0, 1))
+        self.resonance_filter = nn.Parameter(torch.zeros(1, n_atoms, 2).uniform_(0, 0.1))
+        self.resonance_filter2 = nn.Parameter(torch.zeros(1, n_atoms, 2).uniform_(0, 0.1))
         
         # amplitudes
-        self.amplitudes = nn.Parameter(torch.zeros(1, n_atoms, 1).uniform_(0, 1) ** 2)
+        self.amplitudes = nn.Parameter(torch.zeros(1, n_atoms, 1).uniform_(0, 0.1) ** 2)
         
         self.verb_params = nn.Parameter(torch.zeros(1, n_atoms, 4).uniform_(-1, 1))
         
