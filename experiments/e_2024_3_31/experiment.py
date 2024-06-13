@@ -63,7 +63,7 @@ nyquist_cutoff = False # locked
 static_learning_rate = 1e-4
 
 schedule_learning_rate = True
-learning_rates = torch.linspace(1e-1, 1e-3, steps=2000)
+learning_rates = torch.linspace(1e-2, 1e-3, steps=2000)
 
 gaussian_envelope_factor = 0.1
 
