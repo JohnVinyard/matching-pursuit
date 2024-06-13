@@ -48,8 +48,8 @@ envelope_dist = EnvelopeType.Gamma
 # For gamma distributions, the center of gravity is always near zero,
 # so further adjustment is required
 # softmax_positioning = envelope_dist == EnvelopeType.Gamma or force_pos_adjustment
-softmax_positioning = True # locked
-use_unit_shifts = False # locked
+softmax_positioning = False # locked
+use_unit_shifts = True # locked
 
 
 # hard_resonance_choice = False
@@ -63,7 +63,7 @@ nyquist_cutoff = False # locked
 static_learning_rate = 1e-4
 
 schedule_learning_rate = True
-learning_rates = torch.linspace(1e-2, 1e-3, steps=2000)
+learning_rates = torch.linspace(1e-2, 1e-4, steps=3000)
 
 gaussian_envelope_factor = 0.1
 
