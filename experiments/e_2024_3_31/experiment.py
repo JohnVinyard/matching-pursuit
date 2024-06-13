@@ -53,7 +53,7 @@ use_unit_shifts = False # locked
 
 
 # hard_resonance_choice = False
-loss_type = LossType.AllAtOnceMultiband.value # locked
+loss_type = LossType.PhaseInvariantFeature.value # locked
 # For iterative multiband loss, determine if channels are first sorted by descending norm
 sort_by_norm = False # locked
 
