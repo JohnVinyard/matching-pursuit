@@ -48,8 +48,8 @@ envelope_dist = EnvelopeType.Gamma
 # For gamma distributions, the center of gravity is always near zero,
 # so further adjustment is required
 # softmax_positioning = envelope_dist == EnvelopeType.Gamma or force_pos_adjustment
-softmax_positioning = False # locked
-use_unit_shifts = True # locked
+softmax_positioning = True # locked
+use_unit_shifts = False # locked
 
 
 # hard_resonance_choice = False
@@ -61,9 +61,9 @@ optimize_f0 = False # locked
 nyquist_cutoff = False # locked
 
 static_learning_rate = 1e-4
-
+total_iterations = 4000
 schedule_learning_rate = True
-learning_rates = torch.linspace(1e-2, 1e-4, steps=3000)
+learning_rates = torch.linspace(1e-2, 1e-4, steps=total_iterations)
 
 gaussian_envelope_factor = 0.1
 
@@ -763,5 +763,5 @@ class GaussianSplatting(BaseExperimentRunner):
             #     path = os.path.join(self.trained_weights_path, 'splat_4.dat')
             #     torch.save(model.state_dict(), path)
             
-            if i == 3000:
+            if i == total_iterations:
                 break
