@@ -10,7 +10,7 @@ from modules.decompose import fft_frequency_decompose
 from modules.fft import fft_convolve, fft_shift
 from modules.normal_pdf import gamma_pdf, pdf2
 from modules.normalization import max_norm, unit_norm
-from modules.quantize import QuantizedResonanceMixture
+# from modules.quantize import QuantizedResonanceMixture
 from modules.reverb import ReverbGenerator
 from modules.softmax import sparse_softmax
 from modules.transfer import gaussian_bandpass_filtered, make_waves
@@ -60,7 +60,7 @@ sort_by_norm = False # locked
 optimize_f0 = False # locked
 nyquist_cutoff = False # locked
 
-static_learning_rate = 1e-4
+static_learning_rate = 1e-3
 total_iterations = 4000
 schedule_learning_rate = True
 learning_rates = torch.linspace(1e-2, 1e-4, steps=total_iterations)
