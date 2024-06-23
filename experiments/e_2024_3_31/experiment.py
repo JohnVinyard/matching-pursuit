@@ -100,7 +100,12 @@ def multiband_transform(x: torch.Tensor):
     d3 = {f'{k}_short': stft(v, 64, 32, pad=True) for k, v in bands.items()}
     d4 = {f'{k}_xs': stft(v, 16, 8, pad=True) for k, v in bands.items()}
     normal = stft(x, 2048, 256, pad=True).reshape(-1, 128, 1025).permute(0, 2, 1)
-    return dict(**d1, **d3, **d4, normal=normal)
+    return dict(
+        **d1, 
+        **d3, 
+        **d4, 
+        normal=normal
+    )
 
 
 def exponential_decay(
