@@ -11,6 +11,7 @@ from modules.fft import fft_convolve, fft_shift
 from modules.normal_pdf import gamma_pdf, pdf2
 from modules.normalization import max_norm, unit_norm
 # from modules.quantize import QuantizedResonanceMixture
+from modules.quantize import QuantizedResonanceMixture
 from modules.reverb import ReverbGenerator
 from modules.softmax import sparse_softmax
 from modules.transfer import gaussian_bandpass_filtered, make_waves
@@ -53,17 +54,20 @@ use_unit_shifts = False # locked
 
 
 # hard_resonance_choice = False
-loss_type = LossType.PhaseInvariantFeature.value # locked
+loss_type = LossType.IterativeMultiband.value # locked
 # For iterative multiband loss, determine if channels are first sorted by descending norm
-sort_by_norm = False # locked
+sort_by_norm = True # locked
 
-optimize_f0 = False # locked
-nyquist_cutoff = False # locked
+optimize_f0 = True # locked
+nyquist_cutoff = True # locked
+fixed_f0_spacing = True
+n_resonance_octaves = 128
 
-static_learning_rate = 1e-3
+
+static_learning_rate = 1e-2
 total_iterations = 4000
 schedule_learning_rate = True
-learning_rates = torch.linspace(1e-2, 1e-4, steps=total_iterations)
+learning_rates = torch.linspace(1e-2, 1e-3, steps=total_iterations)
 
 gaussian_envelope_factor = 0.1
 
@@ -78,7 +82,9 @@ sparse_choice = hsm
 
 hard_reverb_choice = sparse_choice
 hard_shift_choice = sparse_choice
-hard_resonance_choice = sparse_choice
+hard_resonance_choice = sm
+
+
 
 
 def transform(x: torch.Tensor):
@@ -148,7 +154,6 @@ class F0Resonance(nn.Module):
         self.register_buffer('powers', 1 / 2 ** (torch.arange(1, 1 + n_f0_elements, 1)))
         self.register_buffer('factors', factors)
         
-        
         self.min_freq = self.min_hz / (exp.samplerate // 2)
         self.max_freq = self.max_hz / (exp.samplerate // 2)
         self.freq_range = self.max_freq - self.min_freq
@@ -158,7 +163,8 @@ class F0Resonance(nn.Module):
             f0: torch.Tensor, 
             decay_coefficients: torch.Tensor, 
             _: torch.Tensor,
-            freq_spacing: torch.Tensor):
+            freq_spacing: torch.Tensor,
+            sigmoid_decay: bool = True):
         
         batch, n_events, n_elements = f0.shape
         
@@ -169,13 +175,15 @@ class F0Resonance(nn.Module):
         )
         f0 = f0.view(batch, n_events, 1)
         
+        print(decay_coefficients.shape, f0.shape)
+        
         assert decay_coefficients.shape == f0.shape
         # assert phase_offsets.shape == (batch, n_events, 1)
         
         # phase_offsets = torch.sigmoid(phase_offsets) * np.pi
         
         exp_decays = exponential_decay(
-            torch.sigmoid(decay_coefficients), 
+            torch.sigmoid(decay_coefficients) if sigmoid_decay else decay_coefficients, 
             n_atoms=n_events, 
             n_frames=self.n_octaves, 
             base_resonance=0.01, 
@@ -189,6 +197,10 @@ class F0Resonance(nn.Module):
         
         # octaves
         factors = freq_spacing.repeat(1, 1, self.n_octaves)
+        
+        if fixed_f0_spacing:
+            factors.fill_(1)
+        
         factors = torch.cumsum(factors, dim=-1)
         f0s = f0 * factors
         assert f0s.shape == (batch, n_events, self.n_octaves)
@@ -461,22 +473,22 @@ class Model(nn.Module):
             total_resonances = 4096
             # hard_resonance_choice = True
             
-            # quantize_dim = 4096
+            quantize_dim = n_atoms
             # hard_func = lambda x: sparse_softmax(x, normalize=True, dim=-1)
             # hard_func = lambda x: x
             
-            self.resonance_generator = Resonance(
-                n_resonances=total_resonances, 
-                n_samples=exp.n_samples, 
-                hard_choice=hard_resonance_choice)
+            # self.resonance_generator = Resonance(
+            #     n_resonances=total_resonances, 
+            #     n_samples=exp.n_samples, 
+            #     hard_choice=hard_resonance_choice)
             
-            # self.resonance_generator = QuantizedResonanceMixture(
-            #     n_resonances=total_resonances,
-            #     quantize_dim=quantize_dim,
-            #     n_samples=exp.n_samples,
-            #     samplerate=exp.samplerate,
-            #     hard_func=hard_func
-            # )
+            self.resonance_generator = QuantizedResonanceMixture(
+                n_resonances=total_resonances,
+                quantize_dim=quantize_dim,
+                n_samples=exp.n_samples,
+                samplerate=exp.samplerate,
+                hard_func=lambda x: sparse_softmax(x, normalize=True, dim=-1)
+            )
             # one-hot choice of resonance for each atom
             self.resonance_choice = nn.Parameter(torch.zeros(1, n_atoms, total_resonances).uniform_(0, 1))
         
@@ -671,7 +683,7 @@ class Model(nn.Module):
         return final, amps
         
 
-model = Model(n_resonance_octaves=64).to(device)
+model = Model(n_resonance_octaves=n_resonance_octaves).to(device)
 optim = optimizer(model, lr=static_learning_rate)
 
 def perceptual_loss(recon: torch.Tensor, orig: torch.Tensor):
@@ -692,7 +704,7 @@ def train(batch, i):
     
     # hinge loss to encourage a sparse solution
     mask = amps > 1e-6
-    # sparsity = torch.abs(amps * mask).sum() * 0.1
+    sparsity = torch.abs(amps * mask).sum() * 0.1
     
     nz = mask.sum() / amps.nelement()
     print(f'{nz} percent sparsity with min {amps.min().item()} and max {amps.max().item()}')
@@ -705,7 +717,7 @@ def train(batch, i):
             fake = transform(torch.sum(recon, dim=1, keepdim=True))
             loss = F.mse_loss(fake, real) #+ sparsity
     elif loss_type == LossType.IterativeMultiband.value:
-        loss = single_channel_loss_3(batch, recon, sort_by_norm=sort_by_norm) #+ sparsity
+        loss = single_channel_loss_3(batch, recon, sort_by_norm=sort_by_norm) + sparsity
     else:
         raise ValueError(f'Unsupported loss {loss_type}')
     

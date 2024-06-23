@@ -12,7 +12,7 @@ class QuantizedResonanceMixture(nn.Module):
         quantize_dim: int, 
         n_samples: int, 
         samplerate: int,
-        hard_func: lambda x: sparse_softmax(x, normalize=True, dim=-1)):
+        hard_func = lambda x: sparse_softmax(x, normalize=True, dim=-1)):
         
         super().__init__()
         self.n_resonances = n_resonances
@@ -21,6 +21,7 @@ class QuantizedResonanceMixture(nn.Module):
         self.samplerate = samplerate
         self.hard_func = hard_func
         
+        self.to_quantized_dim = nn.Linear(self.n_resonances, self.quantize_dim)
         self.to_resonance_choice = nn.Linear(self.quantize_dim, self.n_resonances)
         
         f0s = musical_scale_hz(start_midi=21, stop_midi=106, n_steps=n_resonances // 4)
@@ -30,8 +31,9 @@ class QuantizedResonanceMixture(nn.Module):
     
     def forward(self, x: torch.Tensor, return_code: bool =False):
         batch, n_events, dim = x.shape
-        assert dim == self.quantize_dim
+        # assert dim == self.quantize_dim
         
+        x = self.to_quantized_dim.forward(x)
         quantized = self.hard_func(x)
         choice = self.to_resonance_choice(quantized)
         choice = torch.relu(choice)
