@@ -36,6 +36,7 @@ class LossType(Enum):
     PhaseInvariantFeature = 'PIF'
     IterativeMultiband = 'IMB'
     AllAtOnceMultiband = 'AAOMB'
+    Hybrid = 'HYBRID'
     
 class EnvelopeType(Enum):
     Gaussian = 'Gaussian'
@@ -54,20 +55,20 @@ use_unit_shifts = False # locked
 
 
 # hard_resonance_choice = False
-loss_type = LossType.IterativeMultiband.value # locked
+loss_type = LossType.Hybrid.value # locked
 # For iterative multiband loss, determine if channels are first sorted by descending norm
 sort_by_norm = True # locked
 
 optimize_f0 = True # locked
 nyquist_cutoff = True # locked
-fixed_f0_spacing = True
+fixed_f0_spacing = False
 n_resonance_octaves = 128
 
 
-static_learning_rate = 1e-2
+static_learning_rate = 1e-3
 total_iterations = 4000
 schedule_learning_rate = True
-learning_rates = torch.linspace(1e-2, 1e-3, steps=total_iterations)
+learning_rates = torch.linspace(1e-2, 1e-4, steps=total_iterations)
 
 gaussian_envelope_factor = 0.1
 
@@ -400,7 +401,12 @@ class Mixer(nn.Module):
         return result
     
 
-def single_channel_loss_3(target: torch.Tensor, recon: torch.Tensor, sort_by_norm: bool = True) -> torch.Tensor:
+def single_channel_loss_3(
+        target: torch.Tensor, 
+        recon: torch.Tensor, 
+        sort_by_norm: bool = True,
+        coarse_loss: bool = False) -> torch.Tensor:
+    
     
     target = transform(target).reshape(target.shape[0], -1)
     
@@ -422,6 +428,11 @@ def single_channel_loss_3(target: torch.Tensor, recon: torch.Tensor, sort_by_nor
     
     
     loss = 0
+    
+    if coarse_loss:
+        summed = torch.sum(channels, dim=1, keepdim=True)
+        loss = loss + F.mse_loss(summed.view(*target.shape), target)
+    
     for i in range(n_atoms):
         current = srt[:, i, :]
         start_norm = torch.norm(residual, dim=-1, p=1)
@@ -566,12 +577,12 @@ class Model(nn.Module):
                 self.filter_decays[0, i, 0].item(),
                 
                 
-                # self.f0_choice[0, i, 0].item(),
-                # self.decay_choice[0, i, 0].item(),
-                # self.freq_spacing[0, i, 0].item(),
+                self.f0_choice[0, i, 0].item(),
+                self.decay_choice[0, i, 0].item(),
+                self.freq_spacing[0, i, 0].item(),
                 
                 # unit value for resonance choice
-                float(torch.argmax(self.resonance_choice[0, i], dim=-1).item() / self.resonance_choice.shape[-1]),
+                # float(torch.argmax(self.resonance_choice[0, i], dim=-1).item() / self.resonance_choice.shape[-1]),
                 
                 # mean for noise filter
                 self.noise_filter[0, i, 0].item(),
@@ -723,6 +734,8 @@ def train(batch, i):
             loss = F.mse_loss(fake, real) #+ sparsity
     elif loss_type == LossType.IterativeMultiband.value:
         loss = single_channel_loss_3(batch, recon, sort_by_norm=sort_by_norm) + sparsity
+    elif loss_type == LossType.Hybrid.value:
+        loss = single_channel_loss_3(batch, recon, sort_by_norm=sort_by_norm, coarse_loss=True) + sparsity
     else:
         raise ValueError(f'Unsupported loss {loss_type}')
     

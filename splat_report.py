@@ -61,18 +61,31 @@ def train_splatting_model(
     print(f'Got audio segment from url {url}')
     
     target = torch.from_numpy(samples).to(device).view(1, 1, duration_samples)
+    target = max_norm(target)
     
-    model = Model(n_resonance_octaves=256).to(device)
+    model = Model(n_resonance_octaves=128).to(device)
     optim = optimizer(model, lr=learning_rate)
+    
+    learning_rates = torch.linspace(1e-2, 1e-4, steps=training_iterations)
     
     for i in range(training_iterations):
         optim.zero_grad()
         recon, amps = model.forward(None)
-        loss = single_channel_loss_3(target, recon, sort_by_norm=True)
+        mask = amps > 1e-6
+        sparsity = torch.abs(amps * mask).sum() * 0.1
+        loss = single_channel_loss_3(target, recon, sort_by_norm=True, coarse_loss=False) + sparsity
         # loss = multiband_loss(recon, target)
         loss.backward()
         optim.step()
         print(f'Iteration {i}: Loss: {loss.item()}')
+        
+        try:
+            new_learning_rate = learning_rates[i]
+            print(f'new learning rate is {new_learning_rate.item()}')
+            for g in optim.param_groups:
+                g['lr'] = new_learning_rate
+        except IndexError:
+            pass
     
     params = model.state_dict()
     return samples, params
@@ -94,7 +107,8 @@ def train_and_run_inference(
         learning_rate, 
         training_iterations)
     
-    model = Model(n_resonance_octaves=256).to(device)
+    model = Model(n_resonance_octaves=128).to(device)
+    print(model.get_parameters().shape)
     model.load_state_dict(state_dict)
     
     return samples, model
@@ -135,7 +149,7 @@ def create_report_section(
     tsne = TSNE(n_components=2, verbose=10)
     two_d = tsne.fit_transform(raw_params)
     
-    registered, amps = model.forward(None, return_unpositioned_atoms=True)
+    registered, amps = model.forward(None, return_unpositioned_atoms=False)
     
     recon = torch.sum(registered, dim=1, keepdim=True)
     
@@ -199,14 +213,14 @@ def create_report_section(
                         <audio-view src="{orig_element}" height="50" scale="1" samples="256"></audio-view>  
                     </div>
                     <div class="recon-panel">
-                        <h2>Full Reconstruction (Sum of Segments)</h2>
+                        <h2>Full Reconstruction (Sum of Segments) after {training_iterations} iterations</h2>
                         <audio-view src="{recon_element}" height="50" scale="1" samples="256"></audio-view>  
                         <h2>Independent Atoms</h2>
                         {''.join([f'<audio-view src="{p}" height="15" scale="1" samples="256"></audio-view>' for p in ps])}
                     </div>
                     
                     <div class="recon-panel">
-                        <h2>2D Projection of {embedding_dim}-Dimensional Atom Parameters</h2>
+                        <h2>2D Projection of {embedding_dim}-Dimensional Atom Parameters using T-SNE</h2>
                         <scatter-plot 
                             width="450" 
                             height="450" 
@@ -233,19 +247,20 @@ def create_report_section(
                                 <li>A scalar value representing the overall amplitude/gain of the atom</li>
                                 <li>A scalar value representing the choice of reverb impulse responses</li>
                                 <li>A scalar value representing the dry/wet mix between the atom and the reverb impulse response</li>
-                                <li></li>
                             </ul>
                         </p>
                     </div>
                     
                 </div>
+                <hr />
             </div>
         '''
     )       
 
 if __name__ == '__main__':
     
-    training_iterations = 5000
+    training_iterations = 3000
+    start_second = 17
     
     
     html_content = html_doc(
@@ -281,7 +296,7 @@ if __name__ == '__main__':
                     width: 450px;
                     margin: 5px;
                     padding: 5px;
-                    border: solid 1px black;
+                    border: solid 1px #aaa;
                 }}
                 
                 .audio-view-container {{
@@ -289,14 +304,72 @@ if __name__ == '__main__':
                 }}
             </style>
         ''',
-        title='Gamma/Gaussian Audio Splatting',
-        citation_block='',
+        title='Gaussian/Gamma Audio Splatting',
+        citation_block=f'''
+<pre>
+    <code>
+        @misc{{vinyard2024audio,
+            author = {{Vinyard, John}},
+            title = {{Gaussian/Gamma Audio Splatting}},
+            url = {{https://JohnVinyard.github.io/machine-learning/2024/6/24/gamma-audio-splat.html}},
+            year = 2024
+        }}
+    </code>
+</pre>
+        ''',
         sections=[
+            Section(
+                title='Abstract',
+                anchor='#abstract',
+                content=f'''
+                <p>
+                    In this work, we apply a <a href="https://arxiv.org/abs/2308.04079">Gaussian Splatting</a>-like approach to audio to produce 
+                    a lossy, sparse, interpretable, and manipulatable representation of audio.  We use a source-excitation model for each audio "atom" 
+                    implemented by convolving a burst of band-limited noise with a variable-length "resonance", which is built using a number of
+                    exponentially decaying harmonics, meant to mimic the resonance of physical objects.  Envelopes are built in both the time and
+                    frequency domain using gamma and/or gaussian distributions.  Sixty-four atoms are randomly initialized and then fitted ({training_iterations} iterations) to a short segment of audio 
+                    via a loss using multiple STFT resolutions.  A sparse solution, with few active atoms is encouraged by a second, weighted loss term.  Complete code for the experiment can be found 
+                    on <a href="https://github.com/JohnVinyard/matching-pursuit/blob/main/experiments/e_2024_3_31/experiment.py">github</a>.  Trained segments come from
+                    the <a href="https://www.kaggle.com/datasets/imsparsh/musicnet-dataset">MusicNet dataset</a>.
+                </p>
+                '''
+            ),
+            
             create_report_section(
                 title='Reconstruction # 1',
                 anchor='reconstruction-1',
                 url='https://music-net.s3.amazonaws.com/1728',
-                start_sample=2**15 * 14,
+                start_sample=2**15 * start_second,
+                duration_samples=2**15,
+                learning_rate=1e-3,
+                training_iterations=training_iterations,
+            ),
+            
+            create_report_section(
+                title='Reconstruction # 2',
+                anchor='reconstruction-2',
+                url='https://music-net.s3.amazonaws.com/2379',
+                start_sample=2**15 * start_second,
+                duration_samples=2**15,
+                learning_rate=1e-3,
+                training_iterations=training_iterations,
+            ),
+            
+            create_report_section(
+                title='Reconstruction # 3',
+                anchor='reconstruction-3',
+                url='https://music-net.s3.amazonaws.com/2550',
+                start_sample=2**15 * start_second,
+                duration_samples=2**15,
+                learning_rate=1e-3,
+                training_iterations=training_iterations,
+            ),
+            
+            create_report_section(
+                title='Reconstruction # 4',
+                anchor='reconstruction-4',
+                url='https://music-net.s3.amazonaws.com/1790',
+                start_sample=2**15 * start_second,
                 duration_samples=2**15,
                 learning_rate=1e-3,
                 training_iterations=training_iterations,
