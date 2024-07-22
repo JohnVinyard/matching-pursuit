@@ -12,6 +12,7 @@ Tasks:
 - batch HPSS algorithm
 - set autoencoder, using alignment loss
 '''
+from typing import Union
 import torch
 import numpy as np
 from collections import defaultdict
@@ -40,15 +41,21 @@ class CanonicalOrdering(nn.Module):
     Project embeddings into a single dimension and order them
     """
 
-    def __init__(self, embedding_dim):
+    def __init__(self, embedding_dim, transform: Union[torch.Tensor, None] = None):
         super().__init__()
         self.embedding_dim = embedding_dim
 
-        self.register_buffer(
-            'projection', 
-            torch.zeros(embedding_dim, 1).uniform_(-1, 1))
+        if transform is not None:
+            self.register_buffer(
+                'projection', 
+                transform.view(embedding_dim, 1))
+        else:
+            self.register_buffer(
+                'projection', 
+                torch.zeros(embedding_dim, 1).uniform_(-1, 1))
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        
         batch, n_points, dim = x.shape
         
         assert dim == self.embedding_dim
@@ -56,6 +63,7 @@ class CanonicalOrdering(nn.Module):
         # project to one dimension
         z = x @ self.projection
         indices = torch.argsort(z, dim=1)
+        print(indices.squeeze())
         
         
         # order based on the projection

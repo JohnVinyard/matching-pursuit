@@ -63,8 +63,8 @@ def new_experiment(class_name=None, postfix=''):
 
     if os.path.exists(exp_path):
         print(
-            f'Experiment {exp_path} already exists.  Remove it if you want to create a new one.')
-        return
+            f'Experiment {exp_path} already exists.  Appending to dirname.')
+        exp_path += 'b'    
 
     os.mkdir(exp_path)
 
@@ -95,6 +95,7 @@ if __name__ == '__main__':
     parser.add_argument('--save-weights', action='store_true')
     parser.add_argument('--load-weights', action='store_true')
     parser.add_argument('--clean', action='store_true')
+    parser.add_argument('--indices', action='store_true')
     
 
     args = parser.parse_args()
@@ -118,7 +119,8 @@ if __name__ == '__main__':
             args.normalize,
             args.overfit,
             step_size=args.step,
-            pattern=args.pattern)
+            pattern=args.pattern,
+            return_indices=args.indices)
         
         exp: BaseExperimentRunner = Current(
             stream, 

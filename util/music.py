@@ -27,7 +27,7 @@ def musical_scale(start_midi=1, stop_midi=129):
         yield FrequencyBand(freq - 1, freq + 1)
 
 
-def musical_scale_hz(start_midi=21, stop_midi=106, n_steps=512):
+def musical_scale_hz(start_midi=21, stop_midi=106, n_steps=512) -> np.ndarray:
     return midi_to_hz(np.linspace(start_midi, stop_midi, n_steps))
 
 # class MusicalScale(FrequencyScale):

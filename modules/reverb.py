@@ -92,6 +92,22 @@ class ReverbGenerator(nn.Module):
         mixed = torch.sum(mixed, dim=-1)
         # mixed = (dry * mx) + (wet * (1 - mx))
         return mixed
+    
+    def direct(
+            self, 
+            dry: torch.Tensor, 
+            room_mix: torch.Tensor, 
+            dry_wet_mix: torch.Tensor) -> torch.Tensor:
+        
+        rm = torch.softmax(room_mix, dim=-1)
+        wet = self.verb.forward(dry, rm)
+        dwm = torch.softmax(dry_wet_mix, dim=-1)
+        stacked = torch.stack([dry, wet], dim=-1)
+        mx = dwm.view(stacked.shape[0], stacked.shape[1], 1, 2)
+        mixed = stacked * mx
+        mixed = torch.sum(mixed, dim=-1)
+        return mixed
+        
         
     
     def forward(

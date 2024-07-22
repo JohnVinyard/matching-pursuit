@@ -1,0 +1,1 @@
+Can I compress an entire song/piece into a single NERF network?

@@ -104,7 +104,8 @@ def batch_stream(
         n_samples, 
         overfit=False, 
         normalize=False, 
-        step_size=1):
+        step_size=1,
+        return_indices=False):
     
     paths = list(iter_files(path, pattern))
 
@@ -112,6 +113,8 @@ def batch_stream(
 
     while True:
         batch = np.zeros((batch_size, n_samples), dtype=np.float32)
+        indices = []
+        
         for i in range(batch_size):
             path = choice(paths)
             data = audio(path)
@@ -122,11 +125,18 @@ def batch_stream(
             # choose one of the start positions, snapped to step size
             start = np.random.randint(0, positions) * step_size
 
-            batch[i, :] = data[start: start + n_samples]
+            end = start + n_samples
+            indices.append((start, end))
+            
+            batch[i, :] = data[start: end]
 
         if normalize:
             batch = batch / (np.abs(batch.max(axis=-1, keepdims=True)) + 1e-12)
-        yield batch
+        
+        if return_indices:
+            yield batch, indices
+        else:
+            yield batch
 
         if overfit:
             while True:

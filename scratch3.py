@@ -3,13 +3,13 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from data.audioiter import AudioIterator
-from modules.angle import windowed_audio
-from modules.decompose import fft_frequency_decompose
-from modules.multibanddict import BandSpec, MultibandDictionaryLearning
-from modules.normal_pdf import pdf2
-from modules.normalization import max_norm
-from modules.overlap_add import overlap_add
-from modules.stft import stft
+# from modules.angle import windowed_audio
+# from modules.decompose import fft_frequency_decompose
+# from modules.multibanddict import BandSpec, MultibandDictionaryLearning
+# from modules.normal_pdf import pdf2
+# from modules.normalization import max_norm
+# from modules.overlap_add import overlap_add
+# from modules.stft import stft
 from torch import nn
 from torch.nn.utils.weight_norm import weight_norm
 from torch.optim import Adam
@@ -163,22 +163,36 @@ def l0_norm(x: torch.Tensor):
 n_atoms = 512
 n_samples = 2**15
 
-model = MultibandDictionaryLearning([
-    BandSpec(512,   n_atoms, 128, device=device, signal_samples=n_samples, is_lowest_band=True),
-    BandSpec(1024,  n_atoms, 128, device=device, signal_samples=n_samples),
-    BandSpec(2048,  n_atoms, 128, device=device, signal_samples=n_samples),
-    BandSpec(4096,  n_atoms, 128, device=device, signal_samples=n_samples),
-    BandSpec(8192,  n_atoms, 128, device=device, signal_samples=n_samples),
-    BandSpec(16384, n_atoms, 128, device=device, signal_samples=n_samples),
-    BandSpec(32768, n_atoms, 128, device=device, signal_samples=n_samples),
-], n_samples=n_samples)
+def pos_encoding_experiment():
+    
+    pow = 15
+    
+    indices = torch.arange(8192, 8200, step=1)
+    
+    resolutions = 2 ** torch.arange(1, pow + 1, step=1)
+    enc = (indices[:, None] % resolutions[None, :]) / resolutions[None, :]
+    enc = enc.data.cpu().numpy()
+    plt.matshow(enc)
+    plt.show()
+
+# model = MultibandDictionaryLearning([
+#     BandSpec(512,   n_atoms, 128, device=device, signal_samples=n_samples, is_lowest_band=True),
+#     BandSpec(1024,  n_atoms, 128, device=device, signal_samples=n_samples),
+#     BandSpec(2048,  n_atoms, 128, device=device, signal_samples=n_samples),
+#     BandSpec(4096,  n_atoms, 128, device=device, signal_samples=n_samples),
+#     BandSpec(8192,  n_atoms, 128, device=device, signal_samples=n_samples),
+#     BandSpec(16384, n_atoms, 128, device=device, signal_samples=n_samples),
+#     BandSpec(32768, n_atoms, 128, device=device, signal_samples=n_samples),
+# ], n_samples=n_samples)
 
 
 if __name__ == '__main__':
-    p = pickle.dumps(model, pickle.HIGHEST_PROTOCOL)
+    pos_encoding_experiment()
     
-    rehyrdrated: MultibandDictionaryLearning = pickle.loads(p)
-    print(rehyrdrated.bands[512].d.shape)
+    # p = pickle.dumps(model, pickle.HIGHEST_PROTOCOL)
+    
+    # rehyrdrated: MultibandDictionaryLearning = pickle.loads(p)
+    # print(rehyrdrated.bands[512].d.shape)
 
     # embeddings = torch.zeros(128, 16).uniform_(-1, 1)
     # query = embeddings[10]

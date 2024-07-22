@@ -1,0 +1,1 @@
+Try the "best-yet" experiment with no discriminator, no sparsity loss, and with twice as many atoms

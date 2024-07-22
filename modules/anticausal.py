@@ -20,11 +20,13 @@ class AntiCausalConv(nn.Module):
 
 
 class AntiCausalBlock(nn.Module):
-    def __init__(self, channels, kernel_size, dilation):
+    def __init__(self, channels, kernel_size, dilation, do_norm: bool = False):
         super().__init__()
         self.dilation = dilation
         self.conv = AntiCausalConv(channels, channels, kernel_size, dilation)
         self.gate = AntiCausalConv(channels, channels, kernel_size, dilation)
+        self.norm = nn.BatchNorm1d(channels)
+        self.do_norm = do_norm
     
     def forward(self, x):
         skip = x
@@ -32,13 +34,16 @@ class AntiCausalBlock(nn.Module):
         b = torch.sigmoid(self.gate(x))
         x = a * b
         x = x + skip
+        
+        if self.do_norm:
+            x = self.norm(x)
         return x
 
 
 class AntiCausalStack(nn.Module):
-    def __init__(self, channels, kernel_size, dilations):
+    def __init__(self, channels, kernel_size, dilations, do_norm: bool = False):
         super().__init__()
-        self.blocks = nn.ModuleList([AntiCausalBlock(channels, kernel_size, d) for d in dilations])
+        self.blocks = nn.ModuleList([AntiCausalBlock(channels, kernel_size, d, do_norm=do_norm) for d in dilations])
         self.ff = nn.Conv1d(channels, channels, 1, 1, 0)
     
     def forward(self, x):

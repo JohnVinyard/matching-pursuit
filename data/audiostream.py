@@ -13,7 +13,8 @@ def audio_stream(
         normalize=False,
         as_torch=True,
         step_size=1,
-        pattern='*.wav'):
+        pattern='*.wav',
+        return_indices=False):
 
     stream = batch_stream(
         Config.audio_path(),
@@ -22,10 +23,19 @@ def audio_stream(
         n_samples,
         overfit,
         normalize,
-        step_size=step_size)
+        step_size=step_size,
+        return_indices=return_indices)
 
     for item in stream:
-        if not as_torch:
-            yield item.astype(np.float32)
+        if return_indices:
+            item, indices = item
+            
+            if not as_torch:
+                yield indices, item.astype(np.float32)
+            else:
+                yield indices, torch.from_numpy(item).float().to(device)
         else:
-            yield torch.from_numpy(item).float().to(device)
+            if not as_torch:
+                yield item.astype(np.float32)
+            else:
+                yield torch.from_numpy(item).float().to(device)
