@@ -1,0 +1,1 @@
+Can a NERF model learn to reproduce scheduled events from a synthesizer?
