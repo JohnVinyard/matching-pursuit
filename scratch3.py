@@ -130,20 +130,16 @@ def fft_shift(a: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
     n_samples = a.shape[-1]
     orig_coeffs = n_samples // 2 + 1
     
-    
-    shift_samples = (shift * n_samples) / 3
+    shift_samples = (shift * n_samples)  * (1/3)
     
     a = F.pad(a, (0, n_samples * 2))
-    
-    # a = a * torch.hamming_window(n_samples * 3)
     
     
     spec = torch.fft.rfft(a, dim=-1)
 
     n_coeffs = spec.shape[-1]
-    # shift = (torch.arange(0, n_coeffs, device=a.device) * 2j * np.pi) / n_coeffs
-    shift = torch.linspace(0, 1, steps=n_coeffs) * 2j * np.pi
-
+    shift = (torch.arange(0, n_coeffs, device=a.device) * 2j * np.pi) / n_coeffs
+    # shift = torch.linspace(0, 1, steps=n_coeffs) * 2j * np.pi
     
     shift = torch.exp(-shift * shift_samples)
 
@@ -181,20 +177,28 @@ def damped(
     time_matrix1 = dumb_shifted_time_matrix(n_t, n_frames)
     time_matrix2 = another_shifted_time_matrix(n_t, n_frames)
     
+    print(time_matrix1.shape)
+    print(time_matrix2.shape)
+    
     plt.matshow(time_matrix1)
     plt.show()
     plt.matshow(time_matrix2)
     plt.show()
     
     time_matrix = time_matrix2
-    # plt.matshow(time_matrix)
-    # plt.show()
     
-    mask = time_matrix > 0
+    
+    mask = np.zeros((n_frames, time_matrix.shape[-1]))
+    row, col = torch.triu_indices(*mask.shape).data.cpu().numpy()
+    mask[row, col] = 1
+    plt.matshow(mask)
+    plt.show()
+    
+    # mask = time_matrix > 0
+    
     
     x = amplitude[:, None] * (np.e **((-friction / (2 * mass) * time_matrix)))
     x = x * mask
-    
     
     plt.matshow(x)
     plt.show()
@@ -267,6 +271,8 @@ def test_shift():
     shifted = fft_shift(signal, torch.zeros(1).fill_(0.5))
     plt.plot(shifted)
     plt.show()
+
+
 
 
 if __name__ == '__main__':
