@@ -33,7 +33,7 @@ def simple_fft_convolve(a, b):
     return output
 
 
-def fft_shift(a, shift):
+def fft_shift(a: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
     n_samples = a.shape[-1]
     shift_samples = shift * n_samples * (1/3)
     a = F.pad(a, (0, n_samples * 2))

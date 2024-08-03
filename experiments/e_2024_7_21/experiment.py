@@ -16,9 +16,9 @@ from modules.angle import windowed_audio
 from modules.fft import fft_convolve
 from modules.linear import LinearOutputStack
 from modules.normalization import max_norm, unit_norm
+from modules.phase import morlet_filter_bank
 from modules.reverb import ReverbGenerator
 from modules.sparse import sparsify, sparsify_vectors
-from modules.stft import stft
 from modules.transfer import ResonanceChain
 from modules.upsample import ConvUpsample
 from train.experiment_runner import BaseExperimentRunner, MonitoredValueDescriptor
@@ -27,7 +27,6 @@ from util import device
 from util.music import musical_scale_hz
 from util.readmedocs import readme
 from torch.distributions import Normal
-from torch.nn.utils.weight_norm import weight_norm
 
 exp = Experiment(
     samplerate=22050,
@@ -36,199 +35,41 @@ exp = Experiment(
     model_dim=256,
     kernel_size=512)
 
-n_events = 32
+
+import zounds
+band = zounds.FrequencyBand(20, 10000)
+scale = zounds.MelScale(band, 128)
+
+fb = morlet_filter_bank(exp.samplerate, 256, scale, 0.1, normalize=True).real
+fb = torch.from_numpy(fb).to(device)
+fb = fb.view(1, 128, 256)
+fb = F.pad(fb, (0, exp.n_samples - 256))
+
+
+
+def pif(signal: torch.Tensor):
+    signal = signal.view(-1, 1, exp.n_samples)
+    spec = fft_convolve(signal, fb)
+    spec = spec.view(signal.shape[0], -1, exp.n_samples)
+    spec = F.pad(spec, (0, 256))
+    windowed = spec.unfold(-1, 512, 256)
+    ws = torch.abs(torch.fft.rfft(windowed))
+    return ws
+    
+
+def transform(signal: torch.Tensor):
+    return pif(signal)                
+
+
+def experiment_spectrogram(signal: torch.Tensor):
+    return pif(signal)
+
+n_events = 16
 context_dim = 16
 impulse_size = 16384
 resonance_size = 32768
 samplerate = 22050
 n_samples = 32768
-
-
-def experiment_spectrogram(x: torch.Tensor):
-    batch_size = x.shape[0]
-    
-    x = stft(x, 2048, 256, pad=True).view(
-            batch_size, 128, 1025)[..., :1024].permute(0, 2, 1)
-    return x
-
-# class ResonanceModel2(nn.Module):
-#     def __init__(
-#         self, 
-#         latent_dim, 
-#         channels, 
-#         resonance_size, 
-#         n_atoms, 
-#         n_piecewise, 
-#         init_atoms=None, 
-#         learnable_atoms=False,
-#         mixture_over_time=False,
-#         n_frames = 128):
-        
-#         super().__init__()
-        
-#         self.n_frames = n_frames
-#         self.latent_dim = latent_dim
-#         self.channels = channels
-#         self.resonance_size = resonance_size
-#         self.n_atoms = n_atoms
-#         self.n_piecewise = n_piecewise
-#         self.init_atoms = init_atoms
-#         self.learnable_atoms = learnable_atoms
-#         self.mixture_over_time = mixture_over_time
-        
-#         self.n_coeffs = (self.resonance_size // 2) + 1
-#         self.coarse_coeffs = 257
-        
-#         self.base_resonance = 0.02
-#         self.res_factor = (1 - self.base_resonance) * 0.99
-        
-#         low_hz = 40
-#         high_hz = 4000
-        
-#         low_samples = int(samplerate) // low_hz
-#         high_samples = int(samplerate) // high_hz
-#         spacings = torch.linspace(low_samples, high_samples, self.n_atoms)
-#         print('SMALLEST SPACING', low_samples, 'HIGHEST SPACING', high_samples)
-#         oversample_rate = 8
-        
-#         if init_atoms is None:
-#             atoms = torch.zeros(self.n_atoms, self.resonance_size * oversample_rate)
-#             for i, spacing in enumerate(spacings):
-#                 sp = int(spacing * oversample_rate)
-#                 atoms[i, ::(sp + 1)] = 1
-            
-#             atoms = F.avg_pool1d(atoms.view(1, 1, -1), kernel_size=oversample_rate, stride=oversample_rate).view(self.n_atoms, self.resonance_size)
-#             if learnable_atoms:
-#                 self.atoms = nn.Parameter(atoms)
-#             else:
-#                 self.register_buffer('atoms', atoms)
-#         else:
-#             if learnable_atoms:
-#                 self.atoms = nn.Parameter(init_atoms)
-#             else:
-#                 self.register_buffer('atoms', init_atoms)
-        
-#         self.selections = nn.ModuleList([
-#             nn.Linear(latent_dim, self.n_atoms) 
-#             for _ in range(self.n_piecewise)
-#         ])
-        
-#         self.decay = nn.Linear(latent_dim, self.n_frames)
-        
-        
-        
-#         self.to_filter = ConvUpsample(
-#             latent_dim,
-#             channels,
-#             start_size=8,
-#             end_size=self.n_frames,
-#             mode='nearest',
-#             out_channels=self.coarse_coeffs,
-#             from_latent=True,
-#             layer_norm=False,
-#             weight_norm=True
-#         )
-        
-#         self.to_mixture = ConvUpsample(
-#             latent_dim, 
-#             channels, 
-#             start_size=8, 
-#             end_size=self.n_frames, 
-#             mode='nearest', 
-#             out_channels=n_piecewise, 
-#             from_latent=True, 
-#             layer_norm=False,
-#             weight_norm=True
-#         )
-        
-        
-#         self.final_mix = nn.Linear(latent_dim, 2)
-        
-        
-    
-#     def forward(self, latent, impulse):
-#         """
-#         Generate:
-#             - n selections
-#             - n decay exponents
-#             - n filters
-#             - time-based mixture
-#         """
-        
-#         batch_size = latent.shape[0]
-        
-        
-#         # TODO: There should be another collection for just resonances
-#         convs = []
-        
-#         imp = F.pad(impulse, (0, self.resonance_size - impulse.shape[-1]))
-        
-        
-#         decay = torch.sigmoid(self.decay(latent))
-#         decay = self.base_resonance + (decay * self.res_factor)
-#         decay = torch.log(1e-12 + decay)
-#         decay = torch.cumsum(decay, dim=-1)
-#         decay = torch.exp(decay)
-#         decay = F.interpolate(decay, size=self.resonance_size, mode='linear')
-        
-
-#         # produce time-varying, frequency-domain filter coefficients        
-#         filt = self.to_filter(latent).view(-1, self.coarse_coeffs, self.n_frames).permute(0, 2, 1)
-#         filt = torch.sigmoid(filt)
-#         filt = F.interpolate(filt, size=257, mode='linear')
-#         filt = filt.view(batch_size, -1, self.n_frames, 257)
-        
-        
-#         for i in range(self.n_piecewise):
-#             # choose a linear combination of resonances
-#             # and convolve the impulse with each
-            
-#             sel = self.selections[i].forward(latent)
-#             sel = torch.relu(sel)
-#             res = sel @ self.atoms
-#             res = res * decay
-#             conv = fft_convolve(res, imp)
-#             convs.append(conv[:, None, :, :])
-            
-        
-#         # TODO: Concatenate both the pure resonances and the convolved audio
-#         convs = torch.cat(convs, dim=1)
-        
-#         # produce a linear mixture-over time
-#         mx = self.to_mixture(latent)
-#         mx = F.interpolate(mx, size=self.resonance_size, mode='linear')
-#         # mx = F.avg_pool1d(mx, 9, 1, 4)
-#         mx = torch.softmax(mx, dim=1)
-#         mx = mx.view(batch_size, -1, self.n_piecewise, self.resonance_size).permute(0, 2, 1, 3)
-        
-#         final_convs = (mx * convs).sum(dim=1)
-        
-#         # apply time-varying filter
-#         # TODO: To avoid windowing artifacts, this is really just the 
-#         # same process again:  Convole the entire signal with N different
-#         # filters and the produce a smooth mixture over time
-#         windowed = windowed_audio(final_convs, 512, 256)
-#         windowed = unit_norm(windowed, dim=-1)
-#         windowed = torch.fft.rfft(windowed, dim=-1)
-#         windowed = windowed * filt
-#         windowed = torch.fft.irfft(windowed)
-#         final_convs = overlap_add(windowed, apply_window=False)[..., :self.resonance_size]\
-#             .view(batch_size, -1, self.resonance_size)
-#         final_convs = unit_norm(final_convs)
-        
-#         final_mx = self.final_mix(latent)
-#         final_mx = torch.softmax(final_mx, dim=-1)
-        
-#         # final_convs = unit_norm(final_convs)
-#         # imp = unit_norm(imp)
-        
-#         stacked = torch.cat([final_convs[..., None], imp[..., None]], dim=-1)
-        
-#         final = stacked @ final_mx[..., None]
-#         final = final.view(batch_size, -1, self.resonance_size)
-        
-    
-#         return final
 
 
 
@@ -368,9 +209,9 @@ class Model(nn.Module):
     def __init__(self):
         super().__init__()
 
+        self.embed_periodicity = nn.Linear(257, 8)
         self.encoder = AntiCausalStack(1024, kernel_size=2, dilations=[1, 2, 4, 8, 16, 32, 64, 1], do_norm=True)
         
-        # self.encoder = UNet(1024, return_latent=False, is_disc=False)
         
         self.to_event_vectors = nn.Conv1d(1024, context_dim, 1, 1, 0)
         self.to_event_switch = nn.Conv1d(1024, 1, 1, 1, 0)
@@ -381,23 +222,8 @@ class Model(nn.Module):
         self.embed_latent = nn.Linear(1024, context_dim)
         
 
-        # self.imp = SimpleGenerateImpulse(256, 128, impulse_size, 16, n_events)
         self.imp = GenerateImpulse(256, 128, impulse_size, 16, n_events)
         
-        # total_atoms = 4096
-        # f0s = musical_scale_hz(start_midi=21, stop_midi=106, n_steps=total_atoms // 4)
-        # waves = make_waves(resonance_size, f0s, int(samplerate))
-        
-        # self.res = ResonanceModel2(
-        #     256, 
-        #     128, 
-        #     resonance_size, 
-        #     n_atoms=total_atoms, 
-        #     n_piecewise=16, 
-        #     init_atoms=waves, 
-        #     learnable_atoms=False, 
-        #     mixture_over_time=True,
-        #     n_frames=128)
         
         total_atoms = 4096
         f0s = musical_scale_hz(start_midi=21, stop_midi=106, n_steps=total_atoms // 4)
@@ -432,6 +258,10 @@ class Model(nn.Module):
 
         if x.shape[1] == 1:
             x = experiment_spectrogram(x)
+            print(x.shape)
+        
+        x = self.embed_periodicity(x)
+        x = x.permute(0, 1, 3, 2).reshape(batch_size, 1024, -1)
 
         
         encoded = self.encoder.forward(x)
@@ -515,6 +345,7 @@ class Model(nn.Module):
         spec = experiment_spectrogram(x)
         
         for i in range(n_events):
+            print(i, spec.shape)
             v, sched = self.encode(spec, n_events=1)
             vecs.append(v)
             schedules.append(sched)
@@ -566,223 +397,18 @@ class Model(nn.Module):
             raise NotImplementedError('This code path is no longer supported')
     
 
-# class UNet(nn.Module):
-#     def __init__(self, channels, return_latent=False, is_disc=False):
-#         super().__init__()
-#         self.channels = channels
-#         self.is_disc = is_disc
-        
-#         self.return_latent = return_latent
-        
-#         if self.return_latent:
-#             self.to_latent = nn.Linear(channels * 4, channels)
-        
-        
-#         self.embed_spec = nn.Conv1d(1024, 1024, 1, 1, 0)
-#         self.pos = nn.Parameter(torch.zeros(1, 1024, 128).uniform_(-0.01, 0.01))
-        
-
-#         self.down = nn.Sequential(
-#             # 64
-#             nn.Sequential(
-#                 nn.Dropout(0.1),
-#                 weight_norm(nn.Conv1d(channels, channels, 3, 2, 1)),
-#                 nn.LeakyReLU(0.2),
-#             ),
-
-#             # 32
-#             nn.Sequential(
-#                 nn.Dropout(0.1),
-#                 weight_norm(nn.Conv1d(channels, channels, 3, 2, 1)),
-#                 nn.LeakyReLU(0.2),
-#             ),
-
-#             # 16
-#             nn.Sequential(
-#                 nn.Dropout(0.1),
-#                 weight_norm(nn.Conv1d(channels, channels, 3, 2, 1)),
-#                 nn.LeakyReLU(0.2),
-#             ),
-
-#             # 8
-#             nn.Sequential(
-#                 nn.Dropout(0.1),
-#                 weight_norm(nn.Conv1d(channels, channels, 3, 2, 1)),
-#                 nn.LeakyReLU(0.2),
-#             ),
-
-#             # 4
-#             nn.Sequential(
-#                 nn.Dropout(0.1),
-#                 weight_norm(nn.Conv1d(channels, channels, 3, 2, 1)),
-#                 nn.LeakyReLU(0.2),
-#             ),
-#         )
-        
-#         if self.is_disc:
-#             self.judge = nn.Linear(self.channels * 4, 1)
-
-#         self.up = nn.Sequential(
-#             # 8
-#             nn.Sequential(
-#                 nn.Dropout(0.1),
-#                 weight_norm(nn.ConvTranspose1d(channels, channels, 4, 2, 1)),
-#                 nn.LeakyReLU(0.2),
-#             ),
-#             # 16
-#             nn.Sequential(
-#                 nn.Dropout(0.1),
-#                 weight_norm(nn.ConvTranspose1d(channels, channels, 4, 2, 1)),
-#                 nn.LeakyReLU(0.2),
-#             ),
-
-#             # 32
-#             nn.Sequential(
-#                 nn.Dropout(0.1),
-#                 weight_norm(nn.ConvTranspose1d(channels, channels, 4, 2, 1)),
-#                 nn.LeakyReLU(0.2),
-#             ),
-
-#             # 64
-#             nn.Sequential(
-#                 nn.Dropout(0.1),
-#                 weight_norm(nn.ConvTranspose1d(channels, channels, 4, 2, 1)),
-#                 nn.LeakyReLU(0.2),
-#             ),
-
-#             # 128
-#             nn.Sequential(
-#                 nn.Dropout(0.1),
-#                 weight_norm(nn.ConvTranspose1d(channels, channels, 4, 2, 1)),
-#                 nn.LeakyReLU(0.2),
-#             ),
-#         )
-        
-#         self.bias = nn.Conv1d(1024, 1024, 1, 1, 0)
-#         self.proj = nn.Conv1d(1024, 1024, 1, 1, 0)
-        
-#         if self.is_disc:
-#             self.apply(lambda x: exp.init_weights(x))
-        
-
-#     def forward(self, x):
-#         # Input will be (batch, 1024, 128)
-#         context = {}
-        
-#         batch_size = x.shape[0]
-        
-#         if x.shape[1] == 1:
-#             x = stft(x, 2048, 256, pad=True).view(
-#                 batch_size, 128, 1025)[..., :1024].permute(0, 2, 1)
-        
-#         x = self.embed_spec(x)
-#         x = x + self.pos
-        
-#         batch_size = x.shape[0]
-
-#         for layer in self.down:
-#             x = layer(x)
-#             context[x.shape[-1]] = x
-        
-#         if self.return_latent:
-#             z = self.to_latent(x.view(-1, self.channels * 4))
-        
-#         if self.is_disc:
-#             j = self.judge(x.view(-1, self.channels * 4))
-#             return j
-
-#         for layer in self.up:
-#             x = layer(x)
-#             size = x.shape[-1]
-#             if size in context:
-#                 x = x + context[size]
-
-#         b = self.bias(x)
-#         x = self.proj(x)
-#         x = x - b
-                
-#         if self.return_latent:
-#             return x, z
-        
-#         return x
-
 
 model = Model().to(device)
 optim = optimizer(model, lr=1e-3)
 
 
-# disc = UNet(1024, return_latent=False, is_disc=True).to(device)
-# disc_optim = optimizer(disc)
 
-# import zounds
-# scale = zounds.LinearScale.from_sample_rate(zounds.SR22050(), 64)
-# fb = zounds.learn.FilterBank(zounds.SR22050(), 64, scale, scaling_factors=0.1, normalize_filters=True).to(device)
-
-
-# def multiscale_pif(x: torch.Tensor):
-    
-#     batch_size = x.shape[0]
-    
-#     bands = fft_frequency_decompose(x, 512)
-#     results = []
-#     for size, band in bands.items():
-#         spec = fb.forward(band, normalize=False)
-#         windowed = spec.unfold(-1, 64, 32)
-#         ws = torch.abs(torch.fft.rfft(windowed))
-#         results.append(ws.view(batch_size, -1))
-
-#     return torch.cat(results, dim=-1)
-                
-
-def transform(x: torch.Tensor):
-    batch_size, channels, _ = x.shape
-    bands = multiband_transform(x)
-    return torch.cat([b.reshape(batch_size, channels, -1) for b in bands.values()], dim=-1)
-
-        
-def multiband_transform(x: torch.Tensor):
-    bands = fft_frequency_decompose(x, 512)
-    # TODO: each band should have 256 frequency bins and also 256 time bins
-    # this requires a window size of (n_samples // 256) * 2
-    # and a window size of 512, 256
-    
-    # window_size = 512
-    
-    
-    d1 = {f'{k}_xl': stft(v, 512, 64, pad=True) for k, v in bands.items()}
-    d1 = {f'{k}_long': stft(v, 128, 64, pad=True) for k, v in bands.items()}
-    d3 = {f'{k}_short': stft(v, 64, 32, pad=True) for k, v in bands.items()}
-    d4 = {f'{k}_xs': stft(v, 16, 8, pad=True) for k, v in bands.items()}
-    
-    normal = stft(x, 2048, 256, pad=True).reshape(-1, 128, 1025).permute(0, 2, 1)
-    # pooled = F.avg_pool1d(normal, kernel_size=128, stride=1, padding=64)[..., :128]
-    # residual = torch.relu(normal - pooled)
-    
-    return dict(**d1, **d3, **d4, normal=normal)
-    
-    # mbt = multiscale_pif(x)
-    # return dict(mbt=mbt)
-
-
-# def patches(spec: torch.Tensor, size: int = 27, step: int = 9):
-#     batch, channels, time = spec.shape
-    
-#     p = spec.unfold(1, size, step).unfold(2, size, step)
-#     last_dim = np.prod(p.shape[-2:])
-#     p = p.reshape(batch, -1, last_dim)
-#     norms = torch.norm(p, dim=-1, keepdim=True)
-#     normed = p / (norms + 1e-12)
-    
-#     return p, norms, normed
 
 def single_channel_loss_3(target: torch.Tensor, recon: torch.Tensor):
     
     target = transform(target).reshape(target.shape[0], -1)
     
-    # full = torch.sum(recon, dim=1, keepdim=True)
-    # full = transform(full).view(*target.shape)
-    
-    channels = transform(recon)
+    channels = transform(recon.view(-1, 1, exp.n_samples)).reshape(target.shape[0], n_events, -1)
     
     residual = target
     
@@ -821,10 +447,6 @@ def train(batch, i):
     sparsity_loss = torch.abs(encoded).sum() * 1e-3
     
     
-    # mask = torch.zeros(b, n_events, 1, device=batch.device).bernoulli_(p=0.5)
-    # for_disc = torch.sum(recon * mask, dim=1, keepdim=True).clone().detach()    
-    # j = disc.forward(for_disc)
-    # d_loss = torch.abs(1 - j).mean()
     scl = single_channel_loss_3(batch, recon) * 1e-4
     
     
@@ -833,15 +455,6 @@ def train(batch, i):
     loss.backward()
     optim.step()
     
-    
-    # disc_optim.zero_grad()
-    
-    # rj = disc.forward(batch)
-    # fj = disc.forward(for_disc)
-    # disc_loss = (torch.abs(1 - rj).mean() + torch.abs(0 - fj).mean()) * 0.5
-    # disc_loss.backward()
-    # disc_optim.step()
-    # print('DISC', disc_loss.item())
     
     recon = max_norm(recon_summed)
     encoded = max_norm(encoded)

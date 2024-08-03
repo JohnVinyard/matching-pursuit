@@ -2,29 +2,11 @@ from base64 import b64encode
 import numpy as np
 import torch
 import torch.nn.functional as F
-from data.audioiter import AudioIterator
-# from modules.angle import windowed_audio
-# from modules.decompose import fft_frequency_decompose
-# from modules.multibanddict import BandSpec, MultibandDictionaryLearning
-# from modules.normal_pdf import pdf2
-# from modules.normalization import max_norm
-# from modules.overlap_add import overlap_add
-# from modules.stft import stft
 from torch import nn
-from torch.nn.utils.weight_norm import weight_norm
-from torch.optim import Adam
 from PIL import Image
 from matplotlib import pyplot as plt
-from torch.distributions import Normal
-from scipy.interpolate import interp1d
-from scipy.stats import norm
-from util import device
-import pickle
 
 
-from modules.transfer import gaussian_bandpass_filtered
-
-n_samples = 2**15
 
 def create_data_url(b: bytes, content_type: str):
     return  f'data:{content_type};base64,{b64encode(b).decode()}'
@@ -112,111 +94,253 @@ def test():
     return audio
 
 
-class Layer(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super().__init__()
-        self.ln = weight_norm(nn.Linear(in_channels, out_channels))
+def dumb_shifted_time_matrix(samples: int, frames: int) -> np.ndarray:
+    t = np.linspace(-1, 2, num=samples * 3)
+    accum = []
     
-    def forward(self, x):
-        x = self.ln(x)
-        x = torch.relu(x)
-        return x
-
-
-class Nerf(nn.Module):
-    def __init__(self, n_layers = 8, channels=128, pos_encoding_channels=33):
-        super().__init__()
-        self.n_layers = n_layers
-        self.pos_encoding_channels = pos_encoding_channels
-        self.from_pos = weight_norm(nn.Linear(pos_encoding_channels, channels))
-        self.stack = nn.Sequential(
-            *[Layer(channels, channels) for _ in range(n_layers)],
-        )
-        self.to_samples = weight_norm(nn.Linear(channels, 1))
+    frame_rate = samples // frames
     
-    def forward(self, times):
-        x = self.from_pos(times)
-        
-        intermediates = []
-        
-        for layer in self.stack:   
-            x = layer(x)
-            intermediates.append(x)
-        
-        x = self.to_samples(x)
-        intermediates = torch.cat(intermediates, dim=-1)
-        
-        return x, intermediates
-        
-
-model = Nerf()
-optim = Adam(model.parameters(), lr=1e-3)
-
-def l0_norm(x: torch.Tensor):
-    mask = (x > 0).float()
-    forward = mask
-    backward = x
-    y = backward + (forward - backward).detach()
-    return y.sum()
-
-
-n_atoms = 512
-n_samples = 2**15
-
-def pos_encoding_experiment():
+    for i in range(frames):
+        shifted = np.roll(t, shift=i * frame_rate)
+        shifted[:i * frame_rate] = 0
+        accum.append(shifted[None, :])
     
-    pow = 15
+    # TODO: How do I make a rectangular mask?
+    accum = np.concatenate(accum, axis=0)
+    return accum
+
+
+
+def another_shifted_time_matrix(samples: int, frames: int) -> np.ndarray:
+    t1 = np.linspace(-1, 2, num=samples * 3)
+    shifts = np.linspace(0, 1, num=frames)
     
-    indices = torch.arange(8192, 8200, step=1)
+    shifted = fft_shift(
+        torch.from_numpy(t1[None, :]), 
+        torch.from_numpy(shifts[:, None])
+    ).data.cpu().numpy()
     
-    resolutions = 2 ** torch.arange(1, pow + 1, step=1)
-    enc = (indices[:, None] % resolutions[None, :]) / resolutions[None, :]
-    enc = enc.data.cpu().numpy()
-    plt.matshow(enc)
+    # TODO: figure out how to mask this and/or pad/window to avoid
+    # FFT artifacts
+    
+    return shifted
+
+
+def fft_shift(a: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
+    n_samples = a.shape[-1]
+    orig_coeffs = n_samples // 2 + 1
+    
+    
+    shift_samples = (shift * n_samples) / 3
+    
+    a = F.pad(a, (0, n_samples * 2))
+    
+    # a = a * torch.hamming_window(n_samples * 3)
+    
+    
+    spec = torch.fft.rfft(a, dim=-1)
+
+    n_coeffs = spec.shape[-1]
+    # shift = (torch.arange(0, n_coeffs, device=a.device) * 2j * np.pi) / n_coeffs
+    shift = torch.linspace(0, 1, steps=n_coeffs) * 2j * np.pi
+
+    
+    shift = torch.exp(-shift * shift_samples)
+
+    spec = spec * shift
+    
+    spec[..., orig_coeffs:] = 0
+    
+    samples = torch.fft.irfft(spec, dim=-1)
+    samples = samples[..., :n_samples]
+    return samples
+
+# def fft_shift(a: torch.Tensor, shift: torch.Tensor):
+#     n_samples = a.shape[-1]
+#     shift_samples = shift * n_samples
+#     spec = torch.fft.rfft(a, dim=-1, norm='ortho')
+#     n_coeffs = spec.shape[-1]
+#     shift = (torch.arange(0, n_coeffs) * 2j * np.pi).to(a.device) / n_coeffs
+#     shift = torch.exp(-shift * shift_samples)
+#     spec = spec * shift
+#     samples = torch.fft.irfft(spec, dim=-1, norm='ortho')
+#     samples = samples[..., :n_samples]
+#     return samples
+
+
+def damped(
+        n_t: int, 
+        n_frames: int,
+        amplitude: np.ndarray, 
+        friction: float, 
+        mass: float):
+    
+    """Implementation of a damped harmonic oscillator
+    """
+    
+    time_matrix1 = dumb_shifted_time_matrix(n_t, n_frames)
+    time_matrix2 = another_shifted_time_matrix(n_t, n_frames)
+    
+    plt.matshow(time_matrix1)
+    plt.show()
+    plt.matshow(time_matrix2)
+    plt.show()
+    
+    time_matrix = time_matrix2
+    # plt.matshow(time_matrix)
+    # plt.show()
+    
+    mask = time_matrix > 0
+    
+    x = amplitude[:, None] * (np.e **((-friction / (2 * mass) * time_matrix)))
+    x = x * mask
+    
+    
+    plt.matshow(x)
+    plt.show()
+    
+    x = np.sum(x, axis=0)
+    return x
+
+
+# Note, eventually, we'll be adding batch and n_events dimensions
+
+
+def instrument(
+        t: torch.Tensor, 
+        shift: torch.Tensor, 
+        energy: torch.Tensor, 
+        shape: torch.Tensor,
+        properties: torch.Tensor):
+    
+    
+    batch, n_events, time = t.shape
+    
+    
+    # right out of the gate, we apply the shift for each event
+    for i in range(n_events):
+        pass
+    
+    _, _, cp, n_frames = energy.shape
+    assert energy.shape == shape.shape
+    
+    assert properties.shape == (batch, n_events, cp, 2)
+    
+    mass = properties[..., :1]
+    friction = properties[..., 1:]
+    
+    # TODO: This is currently unused, but would be used by
+    # fft_shift
+    frame_shifts = torch.linspace(0, 1, steps=n_frames)
+    
+    frame_rate = time // n_frames
+    
+    expanded_t = t.view(batch, n_events, 1, time).repeat(1, 1, n_frames, 1)
+    
+    # TODO: This is where FFT shift comes in
+    
+    # This is the beginning, default positional encoding
+    for i in range(n_frames):
+        shift = frame_rate * i
+        # shift and mask
+        expanded_t[:, :, i, :] = torch.roll(expanded_t[:, :, i, :], shift, dims=-1)
+        expanded_t[:, :, i, :shift] = 0
+    
+    
+    print(expanded_t.shape)
+    
+    plt.matshow(expanded_t[0, 0, :, :].data.cpu().numpy())
     plt.show()
 
-# model = MultibandDictionaryLearning([
-#     BandSpec(512,   n_atoms, 128, device=device, signal_samples=n_samples, is_lowest_band=True),
-#     BandSpec(1024,  n_atoms, 128, device=device, signal_samples=n_samples),
-#     BandSpec(2048,  n_atoms, 128, device=device, signal_samples=n_samples),
-#     BandSpec(4096,  n_atoms, 128, device=device, signal_samples=n_samples),
-#     BandSpec(8192,  n_atoms, 128, device=device, signal_samples=n_samples),
-#     BandSpec(16384, n_atoms, 128, device=device, signal_samples=n_samples),
-#     BandSpec(32768, n_atoms, 128, device=device, signal_samples=n_samples),
-# ], n_samples=n_samples)
+
+
+def test_shift():
+    n_samples = 8192
+    noise_size = 128
+    
+    signal = torch.zeros(n_samples)
+    signal[:noise_size] = torch.zeros(noise_size).uniform_(-1, 1) * torch.hamming_window(noise_size)
+    plt.plot(signal)
+    plt.show()
+    
+    
+    shifted = fft_shift(signal, torch.zeros(1).fill_(0.5))
+    plt.plot(shifted)
+    plt.show()
 
 
 if __name__ == '__main__':
-    pos_encoding_experiment()
     
-    # p = pickle.dumps(model, pickle.HIGHEST_PROTOCOL)
+    # test_shift()
     
-    # rehyrdrated: MultibandDictionaryLearning = pickle.loads(p)
-    # print(rehyrdrated.bands[512].d.shape)
-
-    # embeddings = torch.zeros(128, 16).uniform_(-1, 1)
-    # query = embeddings[10]
+    # n_samples = 1024
+    # n_frames = 64
+    # batch_size = 2
+    # n_events = 4
+    # control_plane = 32
     
-    # results = k_nearest(query, embeddings)
-    # print(results)
-
-# if __name__ == '__main__':
+    # t = torch.linspace(0, 1, steps=n_samples)\
+    #     .view(1, 1, n_samples)\
+    #     .repeat(batch_size, n_events, 1)
     
-    # times = np.linspace(0, 1, num=100)
-    # values = np.array([
-    #     [0, 0.01],
-    #     [0.02, 1],
-    #     [0.04, 0.01],
-    #     [1, 0],
-    # ])
+    # shifts = torch.zeros(batch_size, n_events, 1).uniform_(0, 0.5)
     
-    # func = interp1d(values[:, 0], values[:, 1], kind='linear', assume_sorted=False)
+    # energy = torch.zeros(
+    #     batch_size, n_events, control_plane, n_frames).bernoulli_(p=0.01)
     
-    # values = func(times)
-    # plt.plot(values.T)
+    # shape = torch.zeros(
+    #     batch_size, n_events, control_plane, n_frames).uniform_(-1, 1)
+    
+    # properties = torch.zeros(
+    #     batch_size, n_events, control_plane, 2).uniform_(0.01, 1)
+    
+    # result = instrument(t, shifts, energy, shape, properties)
+    
+    
+    n_t = 128
+    n_frames = 128
+    
+    # m1 = dumb_shifted_time_matrix(n_t, n_frames)
+    # m2 = another_shifted_time_matrix(n_t, n_frames)
+    
+    # plt.matshow(m1)
     # plt.show()
     
-    # dist = norm(0.7, 0.01)
-    # pdf = dist.pdf(np.linspace(0, 1, 1000))
-    # plt.plot(pdf)
+    # plt.matshow(m2)
     # plt.show()
+    
+    # diff = np.abs(m1 - m2)
+    # print(diff.min(), diff.max(), diff.mean(), diff.std)
+    # plt.matshow(diff)
+    # plt.show() 
+    
+    
+    amplitude = np.zeros(n_frames)
+    amplitude[0] = 8
+    amplitude[10] = 20
+    amplitude[73] = 2
+    
+    # amplitude = np.cumsum(amplitude)
+    friction = 1
+    mass = 0.1
+    
+    x = damped(n_t, n_frames, amplitude, friction, mass)        
+    
+    plt.plot(x)
+    plt.show()
+    
+    # t = np.linspace(1, 0, num=100)
+    # shifts = np.linspace(0, 1, num=100)
+    
+    # m = fft_shift(
+    #     torch.from_numpy(t[None, :]), 
+    #     torch.from_numpy(shifts[:, None])
+    # ).data.cpu().numpy()
+    
+    # plt.matshow(m)
+    # plt.show()
+    
+    
+    
+    
+    
