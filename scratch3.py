@@ -95,14 +95,19 @@ def test():
 
 
 def dumb_shifted_time_matrix(samples: int, frames: int) -> np.ndarray:
-    t = np.linspace(-1, 2, num=samples * 3)
+    t = np.linspace(0, 1, num=samples)
     accum = []
     
-    frame_rate = samples // frames
+    
+    # TODO: This just happens to work because frames and samples
+    # are equal here
+    
+    # frame_rate = samples // frames
+    # print(samples, frames, frame_rate)
     
     for i in range(frames):
-        shifted = np.roll(t, shift=i * frame_rate)
-        shifted[:i * frame_rate] = 0
+        shifted = np.roll(t, shift=i)
+        shifted[:i] = 0
         accum.append(shifted[None, :])
     
     # TODO: How do I make a rectangular mask?
@@ -112,7 +117,7 @@ def dumb_shifted_time_matrix(samples: int, frames: int) -> np.ndarray:
 
 
 def another_shifted_time_matrix(samples: int, frames: int) -> np.ndarray:
-    t1 = np.linspace(-1, 2, num=samples * 3)
+    t1 = np.linspace(0, 1, num=samples)
     shifts = np.linspace(0, 1, num=frames)
     
     shifted = fft_shift(
@@ -130,12 +135,11 @@ def fft_shift(a: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
     n_samples = a.shape[-1]
     orig_coeffs = n_samples // 2 + 1
     
-    shift_samples = (shift * n_samples)  * (1/3)
+    shift_samples = (shift * n_samples) * (1/3)
     
     a = F.pad(a, (0, n_samples * 2))
     
-    
-    spec = torch.fft.rfft(a, dim=-1)
+    spec = torch.fft.rfft(a, dim=-1, norm='ortho')
 
     n_coeffs = spec.shape[-1]
     shift = (torch.arange(0, n_coeffs, device=a.device) * 2j * np.pi) / n_coeffs
@@ -145,9 +149,10 @@ def fft_shift(a: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
 
     spec = spec * shift
     
-    spec[..., orig_coeffs:] = 0
+    diff = spec.shape[-1] - orig_coeffs
+    # spec[..., orig_coeffs:] *= np.linspace(1, 0, diff) ** 2
     
-    samples = torch.fft.irfft(spec, dim=-1)
+    samples = torch.fft.irfft(spec, dim=-1, norm='ortho')
     samples = samples[..., :n_samples]
     return samples
 
@@ -169,7 +174,8 @@ def damped(
         n_frames: int,
         amplitude: np.ndarray, 
         friction: float, 
-        mass: float):
+        mass: float,
+        use_fft: bool = False):
     
     """Implementation of a damped harmonic oscillator
     """
@@ -185,16 +191,15 @@ def damped(
     plt.matshow(time_matrix2)
     plt.show()
     
-    time_matrix = time_matrix2
     
-    
-    mask = np.zeros((n_frames, time_matrix.shape[-1]))
-    row, col = torch.triu_indices(*mask.shape).data.cpu().numpy()
-    mask[row, col] = 1
-    plt.matshow(mask)
-    plt.show()
-    
-    # mask = time_matrix > 0
+    if use_fft:
+        time_matrix = time_matrix2
+        mask = np.zeros((n_frames, time_matrix.shape[-1]))
+        row, col = torch.triu_indices(*mask.shape, offset=2).data.cpu().numpy()
+        mask[row, col] = 1
+    else:
+        time_matrix = time_matrix1
+        mask = time_matrix > 0
     
     
     x = amplitude[:, None] * (np.e **((-friction / (2 * mass) * time_matrix)))
@@ -220,10 +225,14 @@ def instrument(
     
     batch, n_events, time = t.shape
     
+    print(t.shape, shift.shape)
+    # right away, we apply the time shifts to each
+    # positional encoding
+    t = fft_shift(t, shift)
+    plt.matshow(t[0])
+    plt.show()
+    raise NotImplementedError()
     
-    # right out of the gate, we apply the shift for each event
-    for i in range(n_events):
-        pass
     
     _, _, cp, n_frames = energy.shape
     assert energy.shape == shape.shape
@@ -259,11 +268,10 @@ def instrument(
 
 
 def test_shift():
-    n_samples = 8192
-    noise_size = 128
+    n_samples = 128
     
     signal = torch.zeros(n_samples)
-    signal[:noise_size] = torch.zeros(noise_size).uniform_(-1, 1) * torch.hamming_window(noise_size)
+    signal[0] = 1
     plt.plot(signal)
     plt.show()
     
@@ -272,78 +280,57 @@ def test_shift():
     plt.plot(shifted)
     plt.show()
 
+    index = torch.argmax(shifted, dim=-1)
+    assert index.item() == 64
 
 
 
 if __name__ == '__main__':
     
-    # test_shift()
+    n_samples = 128
+    n_frames = 64
+    batch_size = 2
+    n_events = 8
+    control_plane = 32
     
-    # n_samples = 1024
-    # n_frames = 64
-    # batch_size = 2
-    # n_events = 4
-    # control_plane = 32
+    # time encoding, a linear ramp from 0 to 1 for
+    # each event 
+    t = torch.linspace(0, 1, steps=n_samples)\
+        .view(1, 1, n_samples)\
+        .repeat(batch_size, n_events, 1)
     
-    # t = torch.linspace(0, 1, steps=n_samples)\
-    #     .view(1, 1, n_samples)\
-    #     .repeat(batch_size, n_events, 1)
+    # random time shifts for each event
+    shifts = torch.zeros(batch_size, n_events, 1).uniform_(0, 0.5)
     
-    # shifts = torch.zeros(batch_size, n_events, 1).uniform_(0, 0.5)
+    energy = torch.zeros(
+        batch_size, n_events, control_plane, n_frames).bernoulli_(p=0.01)
     
-    # energy = torch.zeros(
-    #     batch_size, n_events, control_plane, n_frames).bernoulli_(p=0.01)
+    shape = torch.zeros(
+        batch_size, n_events, control_plane, n_frames).uniform_(-1, 1)
     
-    # shape = torch.zeros(
-    #     batch_size, n_events, control_plane, n_frames).uniform_(-1, 1)
+    properties = torch.zeros(
+        batch_size, n_events, control_plane, 2).uniform_(0.01, 1)
     
-    # properties = torch.zeros(
-    #     batch_size, n_events, control_plane, 2).uniform_(0.01, 1)
-    
-    # result = instrument(t, shifts, energy, shape, properties)
-    
-    
-    n_t = 128
-    n_frames = 128
-    
-    # m1 = dumb_shifted_time_matrix(n_t, n_frames)
-    # m2 = another_shifted_time_matrix(n_t, n_frames)
-    
-    # plt.matshow(m1)
-    # plt.show()
-    
-    # plt.matshow(m2)
-    # plt.show()
-    
-    # diff = np.abs(m1 - m2)
-    # print(diff.min(), diff.max(), diff.mean(), diff.std)
-    # plt.matshow(diff)
-    # plt.show() 
+    result = instrument(t, shifts, energy, shape, properties)
     
     
-    amplitude = np.zeros(n_frames)
-    amplitude[0] = 8
-    amplitude[10] = 20
-    amplitude[73] = 2
+    # n_t = 128
+    # n_frames = 128
     
-    # amplitude = np.cumsum(amplitude)
-    friction = 1
-    mass = 0.1
     
-    x = damped(n_t, n_frames, amplitude, friction, mass)        
+    # amplitude = np.zeros(n_frames)
+    # amplitude[0] = 8
+    # amplitude[10] = 20
+    # amplitude[73] = 2
     
-    plt.plot(x)
-    plt.show()
+    # friction = 1
+    # mass = 0.1
     
-    # t = np.linspace(1, 0, num=100)
-    # shifts = np.linspace(0, 1, num=100)
+    # x1 = damped(n_t, n_frames, amplitude, friction, mass, use_fft=False)        
+    # x2 = damped(n_t, n_frames, amplitude, friction, mass, use_fft=True)        
     
-    # m = fft_shift(
-    #     torch.from_numpy(t[None, :]), 
-    #     torch.from_numpy(shifts[:, None])
-    # ).data.cpu().numpy()
-    
-    # plt.matshow(m)
+    # plt.plot(x1)
+    # plt.plot(x2)
     # plt.show()
     
     
