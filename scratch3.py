@@ -229,10 +229,6 @@ def instrument(
     # right away, we apply the time shifts to each
     # positional encoding
     t = fft_shift(t, shift)
-    plt.matshow(t[0])
-    plt.show()
-    raise NotImplementedError()
-    
     
     _, _, cp, n_frames = energy.shape
     assert energy.shape == shape.shape
@@ -248,22 +244,16 @@ def instrument(
     
     frame_rate = time // n_frames
     
+    # now we expand the time encoding, and apply constant, monotonically-increasing
+    # shifts for each frame
     expanded_t = t.view(batch, n_events, 1, time).repeat(1, 1, n_frames, 1)
     
-    # TODO: This is where FFT shift comes in
+    expanded_t = fft_shift(expanded_t, frame_shifts[None, None, :, None])
     
-    # This is the beginning, default positional encoding
-    for i in range(n_frames):
-        shift = frame_rate * i
-        # shift and mask
-        expanded_t[:, :, i, :] = torch.roll(expanded_t[:, :, i, :], shift, dims=-1)
-        expanded_t[:, :, i, :shift] = 0
+    # print(expanded_t.shape)
     
-    
-    print(expanded_t.shape)
-    
-    plt.matshow(expanded_t[0, 0, :, :].data.cpu().numpy())
-    plt.show()
+    # plt.matshow(expanded_t[0, 0, :, :].data.cpu().numpy())
+    # plt.show()
 
 
 
