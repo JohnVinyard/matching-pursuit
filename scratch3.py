@@ -8,6 +8,8 @@ from PIL import Image
 from matplotlib import pyplot as plt
 from io import BytesIO
 from soundfile import SoundFile
+from scipy.signal import stft
+
 
 """
 The NERF-like network is familiar, but still requires a scan, meaning
@@ -179,7 +181,6 @@ def instrument(
         t: torch.Tensor, 
         shift: torch.Tensor, 
         energy: torch.Tensor, 
-        # shape: torch.Tensor,
         properties: torch.Tensor):
     
     
@@ -219,7 +220,6 @@ def instrument(
     x = x * mask[:, :, None, :, :]
     
     x = torch.sum(x, dim=-2)
-    
     
     return x
     
@@ -269,16 +269,33 @@ class Instrument2(nn.Module):
         self.n_layers = n_layers
         self.n_frames = n_frames
         self.n_samples = n_samples
+        
         self.embed_pos = nn.Linear(encoding_channels, channels)
+        
         self.shape_network = NERF(channels, n_layers)
+        self.deformation_network = NERF(channels, n_layers)
+        
+        def init_weights(p):
+            with torch.no_grad():
+                try:
+                    p.weight.uniform_(-0.05, 0.05)
+                except AttributeError:
+                    pass
+
+                try:
+                    p.bias.fill_(0)
+                except AttributeError:
+                    pass
+        self.apply(lambda x: init_weights(x))
         
     def _pos_encoding(self, n_samples: int):
         """Returns a filterbank with periodic functions
         """
-        freqs = torch.linspace(0.00001, 0.5, steps=self.encoding_channels)
+        freqs = torch.linspace(0.00001, 0.49, steps=self.encoding_channels) ** 2
         t = torch.linspace(0, n_samples, steps=n_samples)
         p = torch.sin(t[None, :] * freqs[:, None] * np.pi)
         p = p.T
+        
         p = p.view(1, 1, self.n_samples, self.encoding_channels)
         return p
 
@@ -295,27 +312,22 @@ class Instrument2(nn.Module):
         pos = self._pos_encoding(self.n_samples)
         
         pos = self.embed_pos(pos)
-        
-        pos = pos.permute(0, 1, 3, 2).view(1, 1, self.channels, self.n_samples)
+        pos = pos.permute(0, 1, 3, 2)
         
         envelopes = instrument(time, shifts, energy, properties)
-        
         envelopes = envelopes.view(batch * n_events, cp, -1)
         envelopes = F.interpolate(envelopes, size=self.n_samples, mode='linear')
         envelopes = envelopes.view(batch, n_events, cp, self.n_samples)
-        envelopes = torch.relu(envelopes)
         
-        # TODO: maybe the shape network should just be a single encoding channels
-        # matrix per control plane
         shape = shape.permute(0, 1, 3, 2)
         shape = self.shape_network.forward(shape)
-        shape = torch.relu(shape)
         shape = shape.permute(0, 1, 3, 2).view(-1, self.channels, self.n_frames)
         shape = F.interpolate(shape, size=self.n_samples, mode='linear')
         shape = shape.view(batch, n_events, self.channels, self.n_samples)
+
+        shape = self.deformation_network.forward((shape + pos).permute(0, 1, 3, 2)).permute(0, 1, 3, 2)
         
-        x = (pos * shape) * envelopes
-        
+        x = shape * envelopes
         x = torch.sum(x, dim=2)
         return x
 
@@ -341,7 +353,7 @@ def test_shift():
 
 if __name__ == '__main__':
     
-    n_samples = 512
+    n_samples = 128
     n_frames = 128
     batch_size = 2
     n_events = 4
@@ -357,20 +369,21 @@ if __name__ == '__main__':
     shifts = torch.zeros(batch_size, n_events, 1).uniform_(0, 0.5)
     
     energy = torch.zeros(
-        batch_size, n_events, control_plane, n_frames).bernoulli_(p=0.001)
+        batch_size, n_events, control_plane, n_frames).bernoulli_(p=0.01)
+    energy = energy * torch.zeros_like(energy).uniform_(0, 2)
     
     shape = torch.zeros(
         batch_size, n_events, control_plane, n_frames).uniform_(-1, 1)
     
     mass = torch.zeros(
-        batch_size, n_events, control_plane, 1).uniform_(0.01, 1)
+        batch_size, n_events, control_plane, 1).uniform_(0.01, 5)
     friction = torch.zeros(
-        batch_size, n_events, control_plane, 1).uniform_(0.01, 1)
+        batch_size, n_events, control_plane, 1).uniform_(1, 100)
     
     properties = torch.cat([mass, friction], dim=-1)
     
     instr = Instrument2(
-        encoding_channels=256,
+        encoding_channels=128,
         channels=control_plane,
         n_layers=4,
         n_frames=n_frames,
@@ -384,8 +397,6 @@ if __name__ == '__main__':
         shape=shape,
         properties=properties
     )
-    
-    
     
     # instr = Instrument(
     #     encoding_channels=32,
@@ -402,8 +413,15 @@ if __name__ == '__main__':
     # audio = playable(audio.view(-1, 1, n_samples), zounds.SR22050())
     # print(audio.shape)
     
+    audio = audio.data.cpu().numpy()[0, 0]
+    _, _, spec = stft(audio)
+    spec = np.abs(spec)
+    
+    plt.matshow(spec)
+    plt.show()
+    
     listen_to_sound(
-        audio.data.cpu().numpy()[0, 0], 
+        audio, 
         22050, 
         wait_for_user_input=True)
         
