@@ -1,11 +1,48 @@
 from base64 import b64encode
+from subprocess import PIPE, Popen
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
 from PIL import Image
 from matplotlib import pyplot as plt
+from io import BytesIO
+from soundfile import SoundFile
 
+"""
+The NERF-like network is familiar, but still requires a scan, meaning
+it would be impossible to render an individual sample of an event.
+
+Path forward:
+    - filterbank that doesn't use zounds so I can plot energy
+    - view energy to understand static behavior of NERF network
+    - finish `instrument()` implementation
+    - unify NERF network and `instrument()`
+    - fft_shift experiment - consider a straight-through-estimator
+"""
+
+def listen_to_sound(samples: np.ndarray, samplerate: int, wait_for_user_input: bool = True) -> None:
+    proc = Popen(f'aplay', shell=True, stdin=PIPE)
+    
+    bio = BytesIO()
+    with SoundFile(
+            bio, 
+            mode='w',
+            channels=1,
+            samplerate=samplerate, 
+            format='WAV', 
+            subtype='PCM_16') as sf:
+        
+        sf.write(samples)
+    
+    bio.seek(0)
+    
+    if proc.stdin is not None:
+        proc.stdin.write(bio.read())
+        proc.communicate()
+    
+    if wait_for_user_input:
+        input('Next')
 
 
 def create_data_url(b: bytes, content_type: str):
@@ -44,54 +81,6 @@ def advance_one_frame(x):
     x = to_complex(mag, phase)
     return x
 
-
-def test():
-
-    n_samples = 2 ** 15
-    window_size = 1024
-    step_size = window_size // 2
-    n_coeffs = window_size // 2 + 1
-    
-    impulse = torch.zeros(1, 1, 2048).uniform_(-1, 1)
-    impulse = F.pad(impulse, (0, n_samples - 2048))
-    windowed = windowed_audio(impulse, window_size, step_size)
-    
-    n_frames = windowed.shape[-2]
-    
-    transfer_func = torch.zeros(1, n_coeffs).uniform_(0, 0.99)
-    print(torch.norm(transfer_func).item())
-    transfer_warp = torch.eye(n_coeffs)
-    transfer_warp = torch.roll(transfer_warp, (0, 4), dims=(0, 1))
-    
-    
-    frames = []
-    
-    for i in range(n_frames):
-        
-        transfer_func = transfer_func @ transfer_warp
-        print(torch.norm(transfer_func).item())
-        
-        if i == 0:
-            spec = torch.fft.rfft(windowed[:, :, i, :], dim=-1)
-            spec = spec * transfer_func
-            audio = torch.fft.irfft(spec, dim=-1)
-            frames.append(audio)
-        else:
-            prev = frames[i - 1]
-            prev_spec = torch.fft.rfft(prev, dim=-1)
-            prev_spec = advance_one_frame(prev_spec)
-            
-            current_spec = torch.fft.rfft(windowed[:, :, i, :], dim=-1)
-            spec = current_spec + prev_spec
-            spec = spec * transfer_func
-            audio = torch.fft.irfft(spec, dim=-1)
-            frames.append(audio)
-    
-    
-    frames = torch.cat([f[:, :, None, :] for f in frames], dim=2)
-    audio = overlap_add(frames, apply_window=True)[..., :n_samples]
-    
-    return audio
 
 
 def dumb_shifted_time_matrix(samples: int, frames: int) -> np.ndarray:
@@ -133,7 +122,7 @@ def another_shifted_time_matrix(samples: int, frames: int) -> np.ndarray:
 
 def fft_shift(a: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
     n_samples = a.shape[-1]
-    orig_coeffs = n_samples // 2 + 1
+    # orig_coeffs = n_samples // 2 + 1
     
     shift_samples = (shift * n_samples) * (1/3)
     
@@ -149,24 +138,13 @@ def fft_shift(a: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
 
     spec = spec * shift
     
-    diff = spec.shape[-1] - orig_coeffs
+    # diff = spec.shape[-1] - orig_coeffs
     # spec[..., orig_coeffs:] *= np.linspace(1, 0, diff) ** 2
     
     samples = torch.fft.irfft(spec, dim=-1, norm='ortho')
     samples = samples[..., :n_samples]
     return samples
 
-# def fft_shift(a: torch.Tensor, shift: torch.Tensor):
-#     n_samples = a.shape[-1]
-#     shift_samples = shift * n_samples
-#     spec = torch.fft.rfft(a, dim=-1, norm='ortho')
-#     n_coeffs = spec.shape[-1]
-#     shift = (torch.arange(0, n_coeffs) * 2j * np.pi).to(a.device) / n_coeffs
-#     shift = torch.exp(-shift * shift_samples)
-#     spec = spec * shift
-#     samples = torch.fft.irfft(spec, dim=-1, norm='ortho')
-#     samples = samples[..., :n_samples]
-#     return samples
 
 
 def damped(
@@ -175,29 +153,19 @@ def damped(
         amplitude: np.ndarray, 
         friction: float, 
         mass: float,
-        use_fft: bool = False):
+        use_fft: bool = True):
     
     """Implementation of a damped harmonic oscillator
     """
     
-    time_matrix1 = dumb_shifted_time_matrix(n_t, n_frames)
-    time_matrix2 = another_shifted_time_matrix(n_t, n_frames)
-    
-    print(time_matrix1.shape)
-    print(time_matrix2.shape)
-    
-    plt.matshow(time_matrix1)
-    plt.show()
-    plt.matshow(time_matrix2)
-    plt.show()
-    
-    
     if use_fft:
+        time_matrix2 = another_shifted_time_matrix(n_t, n_frames)
         time_matrix = time_matrix2
         mask = np.zeros((n_frames, time_matrix.shape[-1]))
         row, col = torch.triu_indices(*mask.shape, offset=2).data.cpu().numpy()
         mask[row, col] = 1
     else:
+        time_matrix1 = dumb_shifted_time_matrix(n_t, n_frames)
         time_matrix = time_matrix1
         mask = time_matrix > 0
     
@@ -212,9 +180,10 @@ def damped(
     return x
 
 
-# Note, eventually, we'll be adding batch and n_events dimensions
 
 
+# TODO: Is it actually possible to evaluate this for a single, isolated sample,
+# or is some kind of scan operation stil required?
 def instrument(
         t: torch.Tensor, 
         shift: torch.Tensor, 
@@ -222,10 +191,11 @@ def instrument(
         shape: torch.Tensor,
         properties: torch.Tensor):
     
+    # TODO: look into using named tensors for this
+    
     
     batch, n_events, time = t.shape
     
-    print(t.shape, shift.shape)
     # right away, we apply the time shifts to each
     # positional encoding
     t = fft_shift(t, shift)
@@ -235,27 +205,152 @@ def instrument(
     
     assert properties.shape == (batch, n_events, cp, 2)
     
-    mass = properties[..., :1]
-    friction = properties[..., 1:]
-    
-    # TODO: This is currently unused, but would be used by
-    # fft_shift
     frame_shifts = torch.linspace(0, 1, steps=n_frames)
-    
-    frame_rate = time // n_frames
     
     # now we expand the time encoding, and apply constant, monotonically-increasing
     # shifts for each frame
     expanded_t = t.view(batch, n_events, 1, time).repeat(1, 1, n_frames, 1)
-    
     expanded_t = fft_shift(expanded_t, frame_shifts[None, None, :, None])
     
-    # print(expanded_t.shape)
     
-    # plt.matshow(expanded_t[0, 0, :, :].data.cpu().numpy())
-    # plt.show()
+    # we introduce a new dimension for the control plane
+    expanded_t = expanded_t.view(batch, n_events, 1, n_frames, time)
+    
+    # next we need to spread the energy across frames
+    # frame_rate = time // n_frames
+    
+    # create a mask to apply to pre t0 elements
+    mask = torch.zeros((n_frames, time))
+    row, col = torch.triu_indices(*mask.shape, offset=2)
+    mask[row, col] = 1
+    
+    # shift the mask
+    mask = fft_shift(mask[None, None, :, :], shift[:, :, None, :])
+    
+    mass = properties[..., :1]
+    friction = properties[..., 1:]
+
+    print('energy', energy.shape)
+    print('friction', friction.shape)
+    print('mass', mass.shape)
+    print('time', expanded_t.shape)
+    print('mask', mask.shape)
+
+    # x = amplitude[:, None] * (np.e **((-friction / (2 * mass) * time_matrix)))
+    
+    x = energy[..., None] * (np.e **((-friction[..., None] / (2 * mass[..., None]) * expanded_t)))
+    x = x * mask[:, :, None, :, :]
+    
+    x = torch.sum(x, dim=-2)
+    
+    # TODO: upsample to sampling rate
+    return x
+    
+    
 
 
+class Layer(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        
+        self.l1 = nn.Linear(in_channels, out_channels)
+        self.l2 = nn.Linear(in_channels, out_channels)
+        self.norm = nn.LayerNorm([out_channels,])
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        skip = x
+        x = torch.relu(x)
+        x = self.l2(x)
+        x = x + skip
+        # x = self.norm(x)
+        return x
+
+class NERF(nn.Module):
+    def __init__(self, channels, layers):
+        super().__init__()
+        self.channels = channels
+        self.layers = layers
+        
+        self.layers = nn.ModuleList([Layer(channels, channels) for _ in range(layers)])
+        
+        
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        for layer in self.layers:
+            x = layer(x)
+        return x
+
+
+class Instrument(nn.Module):
+    def __init__(self, encoding_channels: int, channels: int, n_layers: int, n_frames: int, n_samples: int):
+        super().__init__()
+        self.encoding_channels = encoding_channels
+        self.channels = channels
+        self.n_layers = n_layers
+        self.n_frames = n_frames
+        self.n_samples = n_samples
+        
+        self.embed_pos = nn.Linear(encoding_channels, channels)
+        
+        
+        self.shape_network = NERF(channels, n_layers)
+        self.decay_network = NERF(channels, n_layers)
+        self.deformation = NERF(channels, n_layers)
+        self.apply_shape = NERF(channels, n_layers)
+        
+        self.base_resonance = 0.02
+    
+    
+    def _pos_encoding(self, n_samples: int):
+        """Returns a filterbank with periodic functions
+        """
+        freqs = torch.linspace(0.00001, 0.5, steps=self.encoding_channels) ** 2
+        t = torch.linspace(0, n_samples, steps=n_samples)
+        p = torch.sin(t[None, :] * freqs[:, None] * np.pi)
+        p = p.T
+        plt.matshow(p[:512, :])
+        plt.show()
+        p = p.view(1, 1, n_samples, self.encoding_channels)
+        return p
+
+    def forward(self, energy: torch.Tensor, deformation: torch.Tensor):
+        batch, n_events, cp, frames = energy.shape
+        assert energy.shape == deformation.shape
+        
+        pos = self._pos_encoding(self.n_samples)
+        pos = self.embed_pos(pos)
+        
+        df = deformation.permute(0, 1, 3, 2)
+        df = self.deformation.forward(df)
+        
+        shape = self.shape_network.forward(df)
+        shape = shape.permute(0, 1, 3, 2).view(-1, self.channels, self.n_frames)
+        shape = F.interpolate(shape, size=self.n_samples, mode='linear')
+        shape = shape.view(batch, n_events, self.channels, self.n_samples)
+        
+        shape = shape.permute(0, 1, 3, 2)
+        shape = self.apply_shape.forward(pos * shape)
+        shape = shape.permute(0, 1, 3, 2)        
+        
+        # compute the resonance values at frame rate and then upsample
+        energy = energy.permute(0, 1, 3, 2)
+        decay = self.decay_network.forward(energy)
+        decay = torch.sigmoid(decay)
+        resonance_factor = (1 - self.base_resonance) * 0.9999
+        decay = self.base_resonance + (decay * resonance_factor)
+        decay = torch.log(decay + 1e-12)
+        decay = torch.cumsum(decay, dim=-1)
+        decay = torch.exp(decay).view(-1, n_events, frames)
+        amp = F.interpolate(decay, size=self.n_samples, mode='linear')
+        amp = amp.view(batch, n_events, self.channels, self.n_samples)
+        
+        print(shape.shape, amp.shape)
+        x = shape * amp
+        x = torch.sum(x, dim=2)
+        return x
+        
+        
+        
 
 def test_shift():
     n_samples = 128
@@ -277,11 +372,11 @@ def test_shift():
 
 if __name__ == '__main__':
     
-    n_samples = 128
-    n_frames = 64
+    n_samples = 512
+    n_frames = 128
     batch_size = 2
-    n_events = 8
-    control_plane = 32
+    n_events = 4
+    control_plane = 16
     
     # time encoding, a linear ramp from 0 to 1 for
     # each event 
@@ -303,27 +398,26 @@ if __name__ == '__main__':
     
     result = instrument(t, shifts, energy, shape, properties)
     
-    
-    # n_t = 128
-    # n_frames = 128
-    
-    
-    # amplitude = np.zeros(n_frames)
-    # amplitude[0] = 8
-    # amplitude[10] = 20
-    # amplitude[73] = 2
-    
-    # friction = 1
-    # mass = 0.1
-    
-    # x1 = damped(n_t, n_frames, amplitude, friction, mass, use_fft=False)        
-    # x2 = damped(n_t, n_frames, amplitude, friction, mass, use_fft=True)        
-    
-    # plt.plot(x1)
-    # plt.plot(x2)
-    # plt.show()
+    plt.plot(result[0, 0, 0, :])
+    plt.show()
     
     
+    # instr = Instrument(
+    #     encoding_channels=32,
+    #     channels=control_plane,
+    #     n_layers=3,
+    #     n_frames=n_frames,
+    #     n_samples=n_samples
+    # )
+    
+    # audio = instr.forward(energy, shape)
+    # audio = audio / audio.max()
+    
+    
+    # audio = playable(audio.view(-1, 1, n_samples), zounds.SR22050())
+    # print(audio.shape)
+    # listen_to_sound(audio.data.cpu().numpy()[0, 0], 22050, wait_for_user_input=True)
+        
     
     
     
