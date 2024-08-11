@@ -39,7 +39,6 @@ def hierarchical_dirac(elements: torch.Tensor):
         if i == 0:
             signal = chosen[i]
         else:
-            # step = 2 ** i
             new_size = signal.shape[-1] * 2
             
             # first, upsample
@@ -54,6 +53,26 @@ def hierarchical_dirac(elements: torch.Tensor):
             signal = fft_convolve(new_signal, current)
     
     return signal
+
+def hiearchical_fft_shift(elements: torch.Tensor):
+    log2, = elements.shape
+    
+    signal = dirac_impulse(2, 0)
+    
+    for i in range(log2):
+        shift_factor = 1 / (2 ** i)
+        
+        if i == 0:
+            signal = fft_shift(signal, elements[i] * shift_factor)
+        else:
+            new_size = signal.shape[-1] * 2
+            # first, upsample
+            new_signal = torch.zeros(new_size)
+            new_signal[::2] = signal
+            signal = fft_shift(new_signal, elements[i] * shift_factor)
+    
+    return signal
+    
 
 def fft_shift(a: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
     
@@ -114,7 +133,6 @@ def look_at_gradients():
 
 
 class HierarchicalDiracModel(nn.Module):
-    
     def __init__(self, signal_size: int):
         super().__init__()
         self.signal_size = signal_size
@@ -124,7 +142,18 @@ class HierarchicalDiracModel(nn.Module):
     def forward(self):
         x = hierarchical_dirac(self.elements)
         return x
+
+class HiearchicalFFTShiftModel(nn.Module):
+    def __init__(self, signal_size: int):
+        super().__init__()
+        self.signal_size = signal_size
+        n_elements = int(np.log2(signal_size))
+        self.elements = nn.Parameter(torch.zeros(n_elements).uniform_(-1, 1))
     
+    def forward(self):
+        x = hiearchical_fft_shift(self.elements)
+        return x
+
 
 class Model(nn.Module):
     def __init__(self, multiscale: bool = False):
@@ -155,6 +184,33 @@ class Model(nn.Module):
 
 
         return imp
+
+def experiment_hieararchical_fft_shift():
+    raster_size = 1024
+    
+    model = HiearchicalFFTShiftModel(raster_size)
+    optim = Adam(model.parameters(), lr=1e-3)
+    target = dirac_impulse(raster_size, 768)
+    
+    i = 0
+    
+    while True:
+        optim.zero_grad()
+        recon = model.forward()
+        index = torch.argmax(recon, dim=-1)
+        loss = torch.abs(recon - target).sum()
+        loss.backward()
+        optim.step()
+        print(i, loss.item(), index.item())
+        
+        # if i % 1000 == 0:
+        #     plt.plot(recon.data.cpu().numpy())
+        #     plt.show()
+            
+        #     plt.matshow(model.elements.data.cpu().numpy())
+        #     plt.show()
+        
+        i += 1
 
 def experiment_hierarchical_dirac():
     
@@ -207,17 +263,6 @@ if __name__ == '__main__':
     # look_at_gradients()
     
     experiment_hierarchical_dirac()
+    # experiment_hieararchical_fft_shift()
     
-    # n_elements = int(np.log2(1024))
     
-    # x = torch.zeros(n_elements, 2)
-    # x[0, 1] = 1
-    # x[1, 1] = 1
-    # x[-1, 1] = 1
-    
-    # x = hierarchical_dirac(x)
-    # index = torch.argmax(x, dim=-1)
-    # print(index)
-    
-    # plt.plot(x.data.cpu().numpy())
-    # plt.show()
