@@ -21,6 +21,10 @@ class BinaryModel(nn.Module):
         return x
 
 def fft_shift(a: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
+    
+    # this is here to make the shift value interpretable
+    shift = (1 - shift)
+    
     n_samples = a.shape[-1]
     
     shift_samples = (shift * n_samples * 0.5)
@@ -89,7 +93,7 @@ class Model(nn.Module):
         if self.multiscale:
             self.position = BinaryModel(16)
         else:
-            self.position = nn.Parameter(torch.zeros(1).fill_(0.9))
+            self.position = nn.Parameter(torch.zeros(1).fill_(0.1))
     
     @property
     def pos(self):
