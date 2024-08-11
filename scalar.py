@@ -106,7 +106,7 @@ class Model(nn.Module):
             pos = self.position.forward()
             imp = fft_shift(imp, pos)
         else:        
-            pos = self.position % 1
+            pos = self.position
             
             # backward pass representation
             index = int((pos * size).item())
