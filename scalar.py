@@ -7,6 +7,9 @@ from modules.activation import unit_sine
 from modules.decompose import fft_frequency_decompose
 from matplotlib import pyplot as plt
 
+from modules.fft import fft_convolve
+from modules.softmax import sparse_softmax
+
 class BinaryModel(nn.Module):
     def __init__(self, n_elements):
         super().__init__()
@@ -19,6 +22,38 @@ class BinaryModel(nn.Module):
     def forward(self):
         x = torch.sigmoid(self.p) @ self.factors
         return x
+
+
+def hierarchical_dirac(elements: torch.Tensor):
+    log2, _ = elements.shape
+    total_size = 2 ** log2
+    
+    chosen = torch.softmax(elements, dim=-1)
+    # chosen = sparse_softmax(elements, normalize=True, dim=-1)
+    # chosen = F.gumbel_softmax(elements, tau=0.01, hard=True, dim=-1)
+    
+    signal = torch.zeros(1)
+    
+    for i in range(log2):
+        
+        if i == 0:
+            signal = chosen[i]
+        else:
+            # step = 2 ** i
+            new_size = signal.shape[-1] * 2
+            
+            # first, upsample
+            new_signal = torch.zeros(new_size)
+            new_signal[::2] = signal
+            
+            diff = new_size - 2
+            
+            # pad the selection
+            current = torch.cat([chosen[i], torch.zeros(diff)])
+            
+            signal = fft_convolve(new_signal, current)
+    
+    return signal
 
 def fft_shift(a: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
     
@@ -76,7 +111,19 @@ def look_at_gradients():
     plt.plot(g.data.cpu().numpy().squeeze())
     plt.show()
     
+
+
+class HierarchicalDiracModel(nn.Module):
     
+    def __init__(self, signal_size: int):
+        super().__init__()
+        self.signal_size = signal_size
+        n_elements = int(np.log2(signal_size))
+        self.elements = nn.Parameter(torch.zeros(n_elements, 2).uniform_(-1, 1))
+    
+    def forward(self):
+        x = hierarchical_dirac(self.elements)
+        return x
     
 
 class Model(nn.Module):
@@ -109,6 +156,33 @@ class Model(nn.Module):
 
         return imp
 
+def experiment_hierarchical_dirac():
+    
+    raster_size = 1024
+    
+    model = HierarchicalDiracModel(raster_size)
+    optim = Adam(model.parameters(), lr=1e-3)
+    target = dirac_impulse(raster_size, 768)
+    
+    i = 0
+    
+    while True:
+        optim.zero_grad()
+        recon = model.forward()
+        index = torch.argmax(recon, dim=-1)
+        loss = torch.abs(recon - target).sum()
+        loss.backward()
+        optim.step()
+        print(loss.item(), index.item())
+        
+        if i % 1000 == 0:
+            plt.plot(recon.data.cpu().numpy())
+            plt.show()
+            
+            plt.matshow(model.elements.data.cpu().numpy())
+            plt.show()
+        
+        i += 1
 
 def experiment():
     model = Model(
@@ -129,5 +203,21 @@ def experiment():
         print(loss.item(), model.pos, index.item())
 
 if __name__ == '__main__':
-    experiment()
+    # experiment()
     # look_at_gradients()
+    
+    experiment_hierarchical_dirac()
+    
+    # n_elements = int(np.log2(1024))
+    
+    # x = torch.zeros(n_elements, 2)
+    # x[0, 1] = 1
+    # x[1, 1] = 1
+    # x[-1, 1] = 1
+    
+    # x = hierarchical_dirac(x)
+    # index = torch.argmax(x, dim=-1)
+    # print(index)
+    
+    # plt.plot(x.data.cpu().numpy())
+    # plt.show()
