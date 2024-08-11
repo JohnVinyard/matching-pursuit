@@ -366,14 +366,14 @@ if __name__ == '__main__':
         .repeat(batch_size, n_events, 1)
     
     # random time shifts for each event
-    shifts = torch.zeros(batch_size, n_events, 1).uniform_(0, 0.5)
+    shifts = torch.zeros(batch_size, n_events, 1).uniform_(0, 0.99)
     
     energy = torch.zeros(
         batch_size, n_events, control_plane, n_frames).bernoulli_(p=0.01)
     energy = energy * torch.zeros_like(energy).uniform_(0, 2)
     
     shape = torch.zeros(
-        batch_size, n_events, control_plane, n_frames).uniform_(-1, 1)
+        batch_size, n_events, control_plane, 1).uniform_(-1, 1).repeat(1, 1, 1, n_frames)
     
     mass = torch.zeros(
         batch_size, n_events, control_plane, 1).uniform_(0.01, 5)
@@ -414,11 +414,6 @@ if __name__ == '__main__':
     # print(audio.shape)
     
     audio = audio.data.cpu().numpy()[0, 0]
-    _, _, spec = stft(audio)
-    spec = np.abs(spec)
-    
-    plt.matshow(spec)
-    plt.show()
     
     listen_to_sound(
         audio, 
