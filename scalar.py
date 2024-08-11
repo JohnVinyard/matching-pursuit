@@ -52,11 +52,6 @@ def dirac_impulse(size, position, device=None):
     return x
 
 
-def straight_through_estimator(f: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    y = b + (f - b).detach()
-    return y
-
-
 def look_at_gradients():
     n_points = 1024
     
@@ -85,10 +80,9 @@ def look_at_gradients():
     
 
 class Model(nn.Module):
-    def __init__(self, multiscale: bool = False, straight_through: bool = False):
+    def __init__(self, multiscale: bool = False):
         super().__init__()
         self.multiscale = multiscale
-        self.straight_through = straight_through
         
         if self.multiscale:
             self.position = BinaryModel(16)
@@ -110,29 +104,15 @@ class Model(nn.Module):
             pos = self.position.forward()
             imp = fft_shift(imp, pos)
         else:        
-            pos = self.position
-            
-            # backward pass representation
-            index = int((pos * size).item())
-            
-            # mask any wrapped-around values
-            fwd = torch.roll(imp, shifts=index, dims=-1)
-            # fwd[:index] = 0
-            
-            bwd = fft_shift(imp, pos)
-            
-            if self.straight_through:
-                imp = straight_through_estimator(fwd, bwd)
-            else:
-                imp = bwd
-        
+            imp = fft_shift(imp, self.position)
+
+
         return imp
 
 
 def experiment():
     model = Model(
         multiscale=False, 
-        straight_through=False
     )
     optim = Adam(model.parameters(), lr=1e-3)
     
