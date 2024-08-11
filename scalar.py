@@ -117,7 +117,7 @@ class Model(nn.Module):
             
             # mask any wrapped-around values
             fwd = torch.roll(imp, shifts=index, dims=-1)
-            fwd[:index] = 0
+            # fwd[:index] = 0
             
             bwd = fft_shift(imp, pos)
             
@@ -128,20 +128,6 @@ class Model(nn.Module):
         
         return imp
 
-def multiband_loss(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    a = fft_frequency_decompose(a.view(1, 1, -1), min_size=1)
-    b = fft_frequency_decompose(b.view(1, 1, -1), min_size=1)
-    loss = 0
-    for k in a.keys():
-        loss = loss + torch.abs(a[k] - b[k]).sum()
-    return loss
-
-
-def self_sim_loss(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    self_diff = b[None, :] - b[:, None]
-    other_diff = b[None, :] - a[:, None]
-    x = torch.abs(self_diff - other_diff).sum()
-    return x
 
 def experiment():
     model = Model(
@@ -157,11 +143,7 @@ def experiment():
         optim.zero_grad()
         recon = model.forward(raster_size)
         index = torch.argmax(recon, dim=-1)
-        
-        # loss = multiband_loss(recon, target)
         loss = torch.abs(recon - target).sum()
-        # loss = self_sim_loss(recon, target)
-        
         loss.backward()
         optim.step()
         print(loss.item(), model.pos, index.item())
