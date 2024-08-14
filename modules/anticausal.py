@@ -1,10 +1,6 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
-from torch.nn.utils.weight_norm import weight_norm
-
-from util import device
-
 
 class AntiCausalConv(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, dilation):

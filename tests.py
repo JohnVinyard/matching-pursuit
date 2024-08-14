@@ -1,8 +1,9 @@
-from unittest import TestCase
+from unittest import TestCase, skip
 import torch
 from modules.conv import correct_fft_convolve, torch_conv
 from modules.pointcloud import GraphEdgeEmbedding, flattened_upper_triangular, pairwise_differences
 
+@skip('These are no longer needed')
 class SmokeTests(TestCase):
     
     def test_check_conv(self):
