@@ -16,7 +16,7 @@ def build_template(page_title: str, content: str):
                 <meta name="viewport" content="width=device-width, initial-scale=1.0">
                 <meta http-equiv="X-UA-Compatible" content="ie=edge">
                 <title>{page_title}</title>
-                <script src="https://cdn.jsdelivr.net/gh/JohnVinyard/web-components@v0.0.9/build/components/bundle.js"></script>
+                <script src="https://cdn.jsdelivr.net/gh/JohnVinyard/web-components@v0.0.11/build/components/bundle.js"></script>
                 <style>
                     body {{
                         font-family: Arial;
