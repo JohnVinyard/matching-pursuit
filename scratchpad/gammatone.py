@@ -2,7 +2,7 @@ import numpy as np
 from scipy.signal import gammatone
 from matplotlib import pyplot as plt
 
-from modules.normalization import max_norm
+# from modules.normalization import max_norm
 
 
 def make_filterbank(n_filters, kernel_size):
@@ -19,9 +19,8 @@ def make_filterbank(n_filters, kernel_size):
 if __name__ == '__main__':
     bank = make_filterbank(64, 512)
     bank = bank / (bank.max(axis=1, keepdims=True) + 1e-8)
-    spec = np.abs(np.fft.rfft(bank, axis=-1, norm='ortho'))
+    # spec = np.abs(np.fft.rfft(bank, axis=-1, norm='ortho'))
 
-    for filt in spec:
+    for filt in bank:
         plt.plot(filt)
-    
-    plt.show()
+        plt.show()
