@@ -167,6 +167,8 @@ def conjure_article(filepath: str, target: RenderTarget, **kwargs: Dict[str, Any
     for i, ch in enumerate(final_chunks):
         t, new_content = ch
         
+        new_content = new_content.strip()
+        
         if t == 'CODE' and len(new_content):
             content += f'\n<code-block language="python">{new_content}</code-block>\n'
         elif t == 'MARKDOWN':

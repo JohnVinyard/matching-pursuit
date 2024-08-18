@@ -2,6 +2,7 @@
 
 # TODOS
 - table of contents
+- remove empty code blocks
 - Figure out conjure content types
 - convenience function for the `BytesIO` pattern
 - create s3 folder per experiment automatically with correct policies 
@@ -162,29 +163,20 @@ def main() -> Dict[str, Any]:
     _, _, spec = stft(audio)
     spec = np.abs(spec)
     
-    _ = time_frequency_plot(spec)
-    tf = time_frequency_plot.meta(spec)
+    _, tf = time_frequency_plot.result_and_meta(spec)
 
-    # TODO: conjure function to call function and 
-    # return result + metadata
-    # KLUDGE: I don't directly need the result here, but to ensure
-    # this is called and stored    
-    encoded_audio = encode_audio(audio)
-    audio_metadata = encode_audio.meta(audio)
+    _, audio_metadata = encode_audio.result_and_meta(audio)
     
     fb = gammatone_filter_bank(128, 128)
     
-    gt_full = gammatone_plot(fb)
-    gt_full_meta = gammatone_plot.meta(fb)
+    _, gt_full_meta = gammatone_plot.result_and_meta(fb)
     
-    gt_zoomed = gammatone_plot(fb[16:32])
-    gt_zoomed_meta = gammatone_plot.meta(fb[16:32])
+    _, gt_zoomed_meta = gammatone_plot.result_and_meta(fb[16:32])
     
     spec = ImageComponent(
         src=tf.public_uri.geturl(),
         height=400
     )
-    
     
     full_gammatone = ImageComponent(
         src=gt_full_meta.public_uri.geturl(), 
