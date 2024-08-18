@@ -1,6 +1,7 @@
 from typing import Any, Dict, Iterable, Literal, Tuple
 import tokenize
 import markdown
+from io import BytesIO
 
 ChunkType = Literal['CODE', 'MARKDOWN']
 
@@ -31,6 +32,22 @@ def build_template(page_title: str, content: str):
     '''
     return template
 
+
+class BytesContext:
+    
+    def __init__(self):
+        super().__init__()
+        self.bio = BytesIO()
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, exc_type, exc_value, traceback):
+        pass
+
+
+# with BytesContext() as f:
+#     f.bio.write()
 
 class ImageComponent:
     def __init__(self, src: str, height: int):
