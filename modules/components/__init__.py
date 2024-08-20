@@ -7,3 +7,4 @@ from .auditory import STFTTransform
 from .linear import LinearOutputStack
 from .upsample import ConvUpsample
 from .signal import make_waves
+from .analysis import AntiCausalStack
