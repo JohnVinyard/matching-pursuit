@@ -44,3 +44,5 @@ splatting/*
 splatting_backup/*
 
 avenues/*.html
+
+.jekyll-cache
