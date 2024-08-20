@@ -8,19 +8,19 @@ from torch import nn
 from torch.nn import functional as F
 from config.experiment import Experiment
 from modules.anticausal import AntiCausalStack
-from modules.components.linear import LinearOutputStack
-from modules.components.upsample import ConvUpsample
 from modules.ddsp import AudioModel, NoiseModel
 from modules.decompose import fft_frequency_decompose
 
 from modules.overlap_add import overlap_add
 from modules.angle import windowed_audio
 from modules.fft import fft_convolve
+from modules.linear import LinearOutputStack
 from modules.normalization import max_norm, unit_norm
 from modules.reverb import ReverbGenerator
 from modules.sparse import sparsify, sparsify_vectors
 from modules.stft import stft
 from modules.transfer import ResonanceChain
+from modules.upsample import ConvUpsample
 from train.experiment_runner import BaseExperimentRunner, MonitoredValueDescriptor
 from train.optim import optimizer
 from util import device
