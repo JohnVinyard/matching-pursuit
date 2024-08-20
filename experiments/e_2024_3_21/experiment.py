@@ -566,172 +566,13 @@ class Model(nn.Module):
             raise NotImplementedError('This code path is no longer supported')
     
 
-class UNet(nn.Module):
-    def __init__(self, channels, return_latent=False, is_disc=False):
-        super().__init__()
-        self.channels = channels
-        self.is_disc = is_disc
-        
-        self.return_latent = return_latent
-        
-        if self.return_latent:
-            self.to_latent = nn.Linear(channels * 4, channels)
-        
-        
-        self.embed_spec = nn.Conv1d(1024, 1024, 1, 1, 0)
-        self.pos = nn.Parameter(torch.zeros(1, 1024, 128).uniform_(-0.01, 0.01))
-        
-
-        self.down = nn.Sequential(
-            # 64
-            nn.Sequential(
-                nn.Dropout(0.1),
-                weight_norm(nn.Conv1d(channels, channels, 3, 2, 1)),
-                nn.LeakyReLU(0.2),
-            ),
-
-            # 32
-            nn.Sequential(
-                nn.Dropout(0.1),
-                weight_norm(nn.Conv1d(channels, channels, 3, 2, 1)),
-                nn.LeakyReLU(0.2),
-            ),
-
-            # 16
-            nn.Sequential(
-                nn.Dropout(0.1),
-                weight_norm(nn.Conv1d(channels, channels, 3, 2, 1)),
-                nn.LeakyReLU(0.2),
-            ),
-
-            # 8
-            nn.Sequential(
-                nn.Dropout(0.1),
-                weight_norm(nn.Conv1d(channels, channels, 3, 2, 1)),
-                nn.LeakyReLU(0.2),
-            ),
-
-            # 4
-            nn.Sequential(
-                nn.Dropout(0.1),
-                weight_norm(nn.Conv1d(channels, channels, 3, 2, 1)),
-                nn.LeakyReLU(0.2),
-            ),
-        )
-        
-        if self.is_disc:
-            self.judge = nn.Linear(self.channels * 4, 1)
-
-        self.up = nn.Sequential(
-            # 8
-            nn.Sequential(
-                nn.Dropout(0.1),
-                weight_norm(nn.ConvTranspose1d(channels, channels, 4, 2, 1)),
-                nn.LeakyReLU(0.2),
-            ),
-            # 16
-            nn.Sequential(
-                nn.Dropout(0.1),
-                weight_norm(nn.ConvTranspose1d(channels, channels, 4, 2, 1)),
-                nn.LeakyReLU(0.2),
-            ),
-
-            # 32
-            nn.Sequential(
-                nn.Dropout(0.1),
-                weight_norm(nn.ConvTranspose1d(channels, channels, 4, 2, 1)),
-                nn.LeakyReLU(0.2),
-            ),
-
-            # 64
-            nn.Sequential(
-                nn.Dropout(0.1),
-                weight_norm(nn.ConvTranspose1d(channels, channels, 4, 2, 1)),
-                nn.LeakyReLU(0.2),
-            ),
-
-            # 128
-            nn.Sequential(
-                nn.Dropout(0.1),
-                weight_norm(nn.ConvTranspose1d(channels, channels, 4, 2, 1)),
-                nn.LeakyReLU(0.2),
-            ),
-        )
-        
-        self.bias = nn.Conv1d(1024, 1024, 1, 1, 0)
-        self.proj = nn.Conv1d(1024, 1024, 1, 1, 0)
-        
-        if self.is_disc:
-            self.apply(lambda x: exp.init_weights(x))
-        
-
-    def forward(self, x):
-        # Input will be (batch, 1024, 128)
-        context = {}
-        
-        batch_size = x.shape[0]
-        
-        if x.shape[1] == 1:
-            x = stft(x, 2048, 256, pad=True).view(
-                batch_size, 128, 1025)[..., :1024].permute(0, 2, 1)
-        
-        x = self.embed_spec(x)
-        x = x + self.pos
-        
-        batch_size = x.shape[0]
-
-        for layer in self.down:
-            x = layer(x)
-            context[x.shape[-1]] = x
-        
-        if self.return_latent:
-            z = self.to_latent(x.view(-1, self.channels * 4))
-        
-        if self.is_disc:
-            j = self.judge(x.view(-1, self.channels * 4))
-            return j
-
-        for layer in self.up:
-            x = layer(x)
-            size = x.shape[-1]
-            if size in context:
-                x = x + context[size]
-
-        b = self.bias(x)
-        x = self.proj(x)
-        x = x - b
-                
-        if self.return_latent:
-            return x, z
-        
-        return x
 
 
 model = Model().to(device)
 optim = optimizer(model, lr=1e-4)
 
 
-disc = UNet(1024, return_latent=False, is_disc=True).to(device)
-disc_optim = optimizer(disc)
 
-# import zounds
-# scale = zounds.LinearScale.from_sample_rate(zounds.SR22050(), 64)
-# fb = zounds.learn.FilterBank(zounds.SR22050(), 64, scale, scaling_factors=0.1, normalize_filters=True).to(device)
-
-
-# def multiscale_pif(x: torch.Tensor):
-    
-#     batch_size = x.shape[0]
-    
-#     bands = fft_frequency_decompose(x, 512)
-#     results = []
-#     for size, band in bands.items():
-#         spec = fb.forward(band, normalize=False)
-#         windowed = spec.unfold(-1, 64, 32)
-#         ws = torch.abs(torch.fft.rfft(windowed))
-#         results.append(ws.view(batch_size, -1))
-
-#     return torch.cat(results, dim=-1)
                 
 
 def transform(x: torch.Tensor):
@@ -849,53 +690,53 @@ def train(batch, i):
     return loss, recon, encoded, scheduling
 
 
-def make_conjure(experiment: BaseExperimentRunner):
-    @numpy_conjure(experiment.collection, content_type=SupportedContentType.Spectrogram.value)
-    def encoded(x: torch.Tensor):
-        x = x.data.cpu().numpy()[0]
-        return x
+# def make_conjure(experiment: BaseExperimentRunner):
+#     @numpy_conjure(experiment.collection, content_type=SupportedContentType.Spectrogram.value)
+#     def encoded(x: torch.Tensor):
+#         x = x.data.cpu().numpy()[0]
+#         return x
 
-    return (encoded,)
+#     return (encoded,)
 
-def make_sched_conjure(experiment: BaseExperimentRunner):
-    @numpy_conjure(experiment.collection, content_type=SupportedContentType.Spectrogram.value)
-    def events(x: torch.Tensor):
-        x = torch.sum(x, dim=1)
-        x = x.data.cpu().numpy().squeeze()
-        return x
+# def make_sched_conjure(experiment: BaseExperimentRunner):
+#     @numpy_conjure(experiment.collection, content_type=SupportedContentType.Spectrogram.value)
+#     def events(x: torch.Tensor):
+#         x = torch.sum(x, dim=1)
+#         x = x.data.cpu().numpy().squeeze()
+#         return x
 
-    return (events,)
-
-
+#     return (events,)
 
 
-@readme
-class IterativeDecomposition8EventGenerator(BaseExperimentRunner):
-    encoded = MonitoredValueDescriptor(make_conjure)
-    sched = MonitoredValueDescriptor(make_sched_conjure)
 
-    def __init__(self, stream, port=None, load_weights=True, save_weights=False, model=model):
-        super().__init__(
-            stream, 
-            train, 
-            exp, 
-            port=port, 
-            load_weights=load_weights, 
-            save_weights=save_weights, 
-            model=model)
 
-    def run(self):
-        for i, item in enumerate(self.iter_items()):
-            item = item.view(-1, 1, n_samples)
-            l, r, e, s = train(item, i)
+# @readme
+# class IterativeDecomposition8EventGenerator(BaseExperimentRunner):
+#     encoded = MonitoredValueDescriptor(make_conjure)
+#     sched = MonitoredValueDescriptor(make_sched_conjure)
 
-            self.real = item
-            self.fake = r
-            self.encoded = e
-            self.sched = s
+#     def __init__(self, stream, port=None, load_weights=True, save_weights=False, model=model):
+#         super().__init__(
+#             stream, 
+#             train, 
+#             exp, 
+#             port=port, 
+#             load_weights=load_weights, 
+#             save_weights=save_weights, 
+#             model=model)
+
+#     def run(self):
+#         for i, item in enumerate(self.iter_items()):
+#             item = item.view(-1, 1, n_samples)
+#             l, r, e, s = train(item, i)
+
+#             self.real = item
+#             self.fake = r
+#             self.encoded = e
+#             self.sched = s
             
-            print(i, l.item())
-            self.after_training_iteration(l, i)
+#             print(i, l.item())
+#             self.after_training_iteration(l, i)
 
 
     

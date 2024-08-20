@@ -1,3 +1,4 @@
+from typing import List
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -39,7 +40,8 @@ class AntiCausalBlock(nn.Module):
 class AntiCausalStack(nn.Module):
     def __init__(self, channels, kernel_size, dilations, do_norm: bool = False):
         super().__init__()
-        self.blocks = nn.ModuleList([AntiCausalBlock(channels, kernel_size, d, do_norm=do_norm) for d in dilations])
+        self.blocks = nn.ModuleList([
+            AntiCausalBlock(channels, kernel_size, d, do_norm=do_norm) for d in dilations])
         self.ff = nn.Conv1d(channels, channels, 1, 1, 0)
     
     def forward(self, x):
@@ -49,4 +51,27 @@ class AntiCausalStack(nn.Module):
             output = output + x
         output = self.ff(output)
         return output
+
+
+class AntiCausalAnalysis(nn.Module):
+    """Wrapper around AntiCausalStack that first projects
+    from time-frequency transform channels to internal channels
+    """
+    def __init__(
+            self, 
+            in_channels: int,
+            channels: int, 
+            kernel_size: int, 
+            dilations: List[int], 
+            do_norm: bool = False):
+        
+        super().__init__()
+        
+        self.proj = nn.Conv1d(in_channels, channels, 1, 1, 0)
+        self.stack = AntiCausalStack(
+            channels, kernel_size, dilations, do_norm=do_norm)
     
+    def forward(self, x: torch.Tensor):
+        x = self.proj(x)
+        x = self.stack(x)
+        return x

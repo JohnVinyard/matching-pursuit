@@ -14,6 +14,13 @@ from util.weight_init import make_initializer
 init_weights = make_initializer(0.1)
 
 
+def upsample_with_holes(low_sr: torch.Tensor, desired_size: int) -> torch.Tensor:
+    factor = desired_size // low_sr.shape[-1]
+    upsampled = torch.zeros(*low_sr.shape[:-1], desired_size)
+    upsampled[..., ::factor] = low_sr
+    return upsampled
+
+
 class UpsampleBlock(nn.Module):
     def __init__(
             self,
@@ -220,34 +227,3 @@ class SimpleEncoder(nn.Module):
         x = self.net(x)
         x = self.final(x)
         return x.view(-1, self.latent_dim)
-
-
-def training_batch_stream(batch_size, n_samples, size):
-    stream = batch_stream(Config.audio_path(), '*.wav', batch_size, n_samples)
-    step = n_samples // size
-    for b in stream:
-        b = np.abs(b)
-        b /= (b.max() + 1e-12)
-        b = torch.from_numpy(b).to(device).view(batch_size, 1, n_samples)
-        b = b.unfold(-1, step, step)
-        b, _ = b.max(dim=-1)
-        yield b
-
-
-class ExperimentParams(object):
-    def __init__(
-            self,
-            name,
-            make_decoder,
-            batch_size=16,
-            n_samples=2**14,
-            size=128,
-            iterations=10000):
-
-        super().__init__()
-        self.name = name
-        self.make_decoder = make_decoder
-        self.batch_size = batch_size
-        self.n_samples = n_samples
-        self.size = size
-        self.iterations = iterations

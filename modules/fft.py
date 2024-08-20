@@ -3,6 +3,9 @@ from torch.nn import functional as F
 from functools import reduce
 import numpy as np
 
+def n_fft_coeffs(size: int) -> int:
+    return size // 2 + 1
+
 def fft_convolve(*args, norm=None) -> torch.Tensor:
 
     n_samples = args[0].shape[-1]

@@ -1,67 +1,28 @@
 
-import numpy as np
 import torch
 from conjure import numpy_conjure, SupportedContentType
 
-from scipy.signal import square, sawtooth
 from torch import nn
 from torch.nn import functional as F
-from config.experiment import Experiment
 from modules.anticausal import AntiCausalStack
-from modules.ddsp import AudioModel, NoiseModel
 from modules.decompose import fft_frequency_decompose
-
-from modules.overlap_add import overlap_add
 from modules.fft import fft_convolve
-from modules.linear import LinearOutputStack
+from modules.impulse import GenerateImpulse
+from modules.iterative import IterativeDecomposer
 from modules.normalization import max_norm, unit_norm
-from modules.phase import morlet_filter_bank
 from modules.reverb import ReverbGenerator
 from modules.sparse import sparsify, sparsify_vectors
-from modules.transfer import ResonanceChain
-from modules.upsample import ConvUpsample
+from modules.stft import stft
+from modules.transfer import ResonanceChain, make_waves
 from train.experiment_runner import BaseExperimentRunner, MonitoredValueDescriptor
 from train.optim import optimizer
 from util import device
 from util.music import musical_scale_hz
 from util.readmedocs import readme
 from torch.distributions import Normal
-
-exp = Experiment(
-    samplerate=22050,
-    n_samples=2 ** 15,
-    weight_init=0.05,
-    model_dim=256,
-    kernel_size=512)
+from torch.nn.utils.weight_norm import weight_norm
 
 
-import zounds
-band = zounds.FrequencyBand(20, 10000)
-scale = zounds.MelScale(band, 128)
-
-fb = morlet_filter_bank(exp.samplerate, 256, scale, 0.1, normalize=True).real
-fb = torch.from_numpy(fb).to(device)
-fb = fb.view(1, 128, 256)
-fb = F.pad(fb, (0, exp.n_samples - 256))
-
-
-
-def pif(signal: torch.Tensor):
-    signal = signal.view(-1, 1, exp.n_samples)
-    spec = fft_convolve(signal, fb)
-    spec = spec.view(signal.shape[0], -1, exp.n_samples)
-    spec = F.pad(spec, (0, 256))
-    windowed = spec.unfold(-1, 512, 256)
-    ws = torch.abs(torch.fft.rfft(windowed))
-    return ws
-    
-
-def transform(signal: torch.Tensor):
-    return pif(signal)                
-
-
-def experiment_spectrogram(signal: torch.Tensor):
-    return pif(signal)
 
 n_events = 16
 context_dim = 16
@@ -71,136 +32,13 @@ samplerate = 22050
 n_samples = 32768
 
 
-
-def make_waves(n_samples, f0s, samplerate):
-    sawtooths = []
-    squares = []
-    triangles = []
-    sines = []
+def experiment_spectrogram(x: torch.Tensor):
+    batch_size = x.shape[0]
     
-    total_atoms = len(f0s) * 4
+    x = stft(x, 2048, 256, pad=True).view(
+            batch_size, 128, 1025)[..., :1024].permute(0, 2, 1)
+    return x
 
-    for f0 in f0s:
-        f0 = f0 / (samplerate // 2)
-        rps = f0 * np.pi
-        radians = np.linspace(0, rps * n_samples, n_samples)
-        sq = square(radians)[None, ...]
-        squares.append(sq)
-        st = sawtooth(radians)[None, ...]
-        sawtooths.append(st)
-        tri = sawtooth(radians, 0.5)[None, ...]
-        triangles.append(tri)
-        sin = np.sin(radians)
-        sines.append(sin[None, ...])
-    
-    waves = np.concatenate([sawtooths, squares, triangles, sines], axis=0)
-    waves = torch.from_numpy(waves).view(total_atoms, n_samples).float()
-    return waves
-
-
-class GenerateMix(nn.Module):
-
-    def __init__(self, latent_dim, channels, encoding_channels, mixer_channels=2):
-        super().__init__()
-        self.encoding_channels = encoding_channels
-        self.latent_dim = latent_dim
-        self.channels = channels
-        mixer_channels = mixer_channels
-
-        self.to_mix = LinearOutputStack(
-            channels, 3, out_channels=mixer_channels, in_channels=latent_dim, norm=nn.LayerNorm((channels,)))
-
-    def forward(self, x):
-        x = self.to_mix(x)
-        x = x.view(-1, self.encoding_channels, 1)
-        x = torch.softmax(x, dim=-1)
-        return x
-
-class GenerateImpulse(nn.Module):
-
-    def __init__(self, latent_dim, channels, n_samples, n_filter_bands, encoding_channels):
-        super().__init__()
-        self.latent_dim = latent_dim
-        self.n_samples = n_samples
-        self.n_frames = n_samples // 256
-        self.n_filter_bands = n_filter_bands
-        self.channels = channels
-        self.filter_kernel_size = 16
-        self.encoding_channels = encoding_channels
-
-        self.to_frames = ConvUpsample(
-            latent_dim,
-            channels,
-            start_size=4,
-            mode='learned',
-            end_size=self.n_frames,
-            out_channels=channels,
-            # batch_norm=True
-            weight_norm=True
-        )
-
-        self.noise_model = NoiseModel(
-            channels,
-            self.n_frames,
-            self.n_frames * 4,
-            self.n_samples,
-            self.channels,
-            # batch_norm=True,
-            weight_norm=True,
-            squared=True,
-            activation=lambda x: torch.sigmoid(x),
-            mask_after=1
-        )
-        
-        self.to_env = nn.Linear(latent_dim, self.n_frames)
-
-    def forward(self, x):
-        batch_size = x.shape[0]
-        
-        env = self.to_env(x) ** 2
-        env = F.interpolate(env, mode='linear', size=self.n_samples)
-        
-        x = self.to_frames(x)
-        x = self.noise_model(x)
-        x = x.view(batch_size, -1, self.n_samples)
-        
-        x = x * env
-        return x
-
-
-
-class SimpleGenerateImpulse(nn.Module):
-    
-    def __init__(self, latent_dim, channels, n_samples, n_filter_bands, encoding_channels):
-        super().__init__()
-        
-        self.n_samples = n_samples
-        
-        self.filter_size = 64
-        
-        self.to_envelope = LinearOutputStack(
-            channels, layers=3, out_channels=self.n_samples // 128, in_channels=latent_dim, norm=nn.LayerNorm((channels,)))
-        
-        self.to_filt = LinearOutputStack(
-            channels, layers=3, out_channels=self.filter_size, in_channels=latent_dim, norm=nn.LayerNorm((channels,)))
-    
-    def forward(self, x):
-        env = self.to_envelope(x)
-        env = F.interpolate(env, size=self.n_samples, mode='linear')
-        
-        # TODO: consider making this a hard choice via gumbel softmax as well
-        env = torch.abs(env).view(x.shape[0], -1, self.n_samples)
-        
-        filt = self.to_filt(x).view(x.shape[0], -1, self.filter_size)
-        
-        noise = torch.zeros(x.shape[0], 1, self.n_samples, device=x.device).uniform_(-1, 1)
-        
-        noise = noise * env
-        
-        filt = F.pad(filt, (0, self.n_samples - self.filter_size))
-        
-        final = fft_convolve(noise, filt)
-        return final
 
 
 
@@ -208,9 +46,11 @@ class Model(nn.Module):
     def __init__(self):
         super().__init__()
 
-        self.embed_periodicity = nn.Linear(257, 8)
-        self.encoder = AntiCausalStack(1024, kernel_size=2, dilations=[1, 2, 4, 8, 16, 32, 64, 1], do_norm=True)
+        # TODO: replace this with anticausal analysis
+        self.encoder = AntiCausalStack(
+            1024, kernel_size=2, dilations=[1, 2, 4, 8, 16, 32, 64, 1])
         
+        # self.encoder = UNet(1024, return_latent=False, is_disc=False)
         
         self.to_event_vectors = nn.Conv1d(1024, context_dim, 1, 1, 0)
         self.to_event_switch = nn.Conv1d(1024, 1, 1, 1, 0)
@@ -226,7 +66,7 @@ class Model(nn.Module):
         
         total_atoms = 4096
         f0s = musical_scale_hz(start_midi=21, stop_midi=106, n_steps=total_atoms // 4)
-        waves = make_waves(resonance_size, f0s, int(samplerate))
+        waves = make_waves(resonance_size, f0s.tolist(), int(samplerate))
         
         self.res = ResonanceChain(
             1, 
@@ -234,7 +74,7 @@ class Model(nn.Module):
             window_size=512, 
             n_frames=256, 
             total_samples=resonance_size, 
-            mix_channels=4, 
+            mix_channels=16, 
             channels=64, 
             latent_dim=256,
             initial=waves,
@@ -249,18 +89,15 @@ class Model(nn.Module):
         
         self.atom_bias = nn.Parameter(torch.zeros(4096).uniform_(-1, 1))
 
-        self.apply(lambda x: exp.init_weights(x))
+        # self.apply(lambda x: exp.init_weights(x))
+        raise NotImplementedError('Initialize weights')
         
 
-    def encode(self, x, n_events=n_events):
+    def encode(self, x, n_events=1):
         batch_size = x.shape[0]
 
         if x.shape[1] == 1:
             x = experiment_spectrogram(x)
-            print(x.shape)
-        
-        x = self.embed_periodicity(x)
-        x = x.permute(0, 1, 3, 2).reshape(batch_size, 1024, -1)
 
         
         encoded = self.encoder.forward(x)
@@ -288,8 +125,6 @@ class Model(nn.Module):
 
     
     def generate(self, vecs, scheduling):
-        # (batch, 1, 16)
-        # (batch, n_events, 16)
         
         batch_size = vecs.shape[0]
         
@@ -308,11 +143,8 @@ class Model(nn.Module):
 
         # # resonances
         mixed = self.res.forward(embeddings, imp)
-        # print(f'\t {imp.shape} {embeddings.shape} {mixed.shape}')
         mixed = mixed.view(batch_size, -1, resonance_size)
         
-        # mixed = self.events(embeddings)
-        # imp = None
         
         mixed = unit_norm(mixed)
         
@@ -324,14 +156,11 @@ class Model(nn.Module):
         up = torch.zeros(final.shape[0], final.shape[1], n_samples, device=final.device)
         up[:, :, ::256] = scheduling
         
-        # print(f'\t FINAL {final.shape} {up.shape}')
         
         final = fft_convolve(final, up)[..., :n_samples]
         
-        # print(f'\t FINAL 2 {final.shape}')
 
         final = self.verb.forward(unit_norm(vecs, dim=-1), final)
-        # print(f'\t WITH_VERB {final.shape}')
         
 
         return final, imp, amps, mixed
@@ -344,11 +173,9 @@ class Model(nn.Module):
         spec = experiment_spectrogram(x)
         
         for i in range(n_events):
-            print(i, spec.shape)
             v, sched = self.encode(spec, n_events=1)
             vecs.append(v)
             schedules.append(sched)
-            # print(f'In iterate {i}, calling generate() with {v.shape} and {sched.shape}')
             ch, _, _, _ = self.generate(v, sched)
             current = experiment_spectrogram(ch)
             spec = (spec - current).clone().detach()
@@ -397,17 +224,69 @@ class Model(nn.Module):
     
 
 
-model = Model().to(device)
-optim = optimizer(model, lr=1e-3)
+
+model = IterativeDecomposer(
+    context_dim=context_dim,
+    n_events=n_events,
+    impulse_size=impulse_size,
+    resonance_size=resonance_size,
+    samplerate=samplerate,
+    n_samples=n_samples
+)
+optim = optimizer(model, lr=1e-4)
 
 
+                
 
+# def transform(x: torch.Tensor):
+#     batch_size, channels, _ = x.shape
+#     bands = multiband_transform(x)
+#     return torch.cat([b.reshape(batch_size, channels, -1) for b in bands.values()], dim=-1)
+
+        
+# def multiband_transform(x: torch.Tensor):
+#     bands = fft_frequency_decompose(x, 512)
+#     # TODO: each band should have 256 frequency bins and also 256 time bins
+#     # this requires a window size of (n_samples // 256) * 2
+#     # and a window size of 512, 256
+    
+#     # window_size = 512
+    
+    
+#     d1 = {f'{k}_xl': stft(v, 512, 64, pad=True) for k, v in bands.items()}
+#     d1 = {f'{k}_long': stft(v, 128, 64, pad=True) for k, v in bands.items()}
+#     d3 = {f'{k}_short': stft(v, 64, 32, pad=True) for k, v in bands.items()}
+#     d4 = {f'{k}_xs': stft(v, 16, 8, pad=True) for k, v in bands.items()}
+    
+#     normal = stft(x, 2048, 256, pad=True).reshape(-1, 128, 1025).permute(0, 2, 1)
+#     # pooled = F.avg_pool1d(normal, kernel_size=128, stride=1, padding=64)[..., :128]
+#     # residual = torch.relu(normal - pooled)
+    
+#     return dict(**d1, **d3, **d4, normal=normal)
+    
+#     # mbt = multiscale_pif(x)
+#     # return dict(mbt=mbt)
+
+
+# def patches(spec: torch.Tensor, size: int = 27, step: int = 9):
+#     batch, channels, time = spec.shape
+    
+#     p = spec.unfold(1, size, step).unfold(2, size, step)
+#     last_dim = np.prod(p.shape[-2:])
+#     p = p.reshape(batch, -1, last_dim)
+#     norms = torch.norm(p, dim=-1, keepdim=True)
+#     normed = p / (norms + 1e-12)
+    
+#     return p, norms, normed
 
 def single_channel_loss_3(target: torch.Tensor, recon: torch.Tensor):
     
     target = transform(target).reshape(target.shape[0], -1)
     
-    channels = transform(recon.view(-1, 1, exp.n_samples)).reshape(target.shape[0], n_events, -1)
+    # full = torch.sum(recon, dim=1, keepdim=True)
+    # full = transform(full).view(*target.shape)
+    
+    channels = transform(recon)
     
     residual = target
     
@@ -446,14 +325,27 @@ def train(batch, i):
     sparsity_loss = torch.abs(encoded).sum() * 1e-3
     
     
+    mask = torch.zeros(b, n_events, 1, device=batch.device).bernoulli_(p=0.5)
+    for_disc = torch.sum(recon * mask, dim=1, keepdim=True).clone().detach()    
+    j = disc.forward(for_disc)
+    d_loss = torch.abs(1 - j).mean()
     scl = single_channel_loss_3(batch, recon) * 1e-4
     
     
-    loss = scl + sparsity_loss #+ d_loss
+    loss = scl + sparsity_loss + d_loss
         
     loss.backward()
     optim.step()
     
+    
+    disc_optim.zero_grad()
+    
+    rj = disc.forward(batch)
+    fj = disc.forward(for_disc)
+    disc_loss = (torch.abs(1 - rj).mean() + torch.abs(0 - fj).mean()) * 0.5
+    disc_loss.backward()
+    disc_optim.step()
+    print('DISC', disc_loss.item())
     
     recon = max_norm(recon_summed)
     encoded = max_norm(encoded)
@@ -480,8 +372,9 @@ def make_sched_conjure(experiment: BaseExperimentRunner):
 
 
 
+
 @readme
-class IterativeDecomposition9EventGenerator(BaseExperimentRunner):
+class IterativeDecomposition8EventGenerator(BaseExperimentRunner):
     encoded = MonitoredValueDescriptor(make_conjure)
     sched = MonitoredValueDescriptor(make_sched_conjure)
 

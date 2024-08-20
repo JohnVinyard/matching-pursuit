@@ -11,7 +11,6 @@ from .sparse import \
     VectorwiseSparsity, ElementwiseSparsity, AtomPlacement, \
     to_sparse_vectors_with_context, sparsify, sparsify_vectors, to_key_points, sparsify2, encourage_sparsity_loss
 from .normal_pdf import pdf
-from .shape import Reshape
 from .fft import fft_shift, fft_convolve, simple_fft_convolve
 from .physical import Window, harmonics, BlockwiseResonatorModel, scale_and_rotate
 from .filter_bank import SynthesisBank
@@ -22,7 +21,6 @@ from .matchingpursuit import \
     SparseCodingLoss
 from .pointcloud import CanonicalOrdering, GraphEdgeEmbedding
 from .activation import unit_sine
-from .floodfill import flood_fill_loss
 from .hypernetwork import HyperNetworkLayer
-from .refractory import make_refractory_filter
 from .reds import RedsLikeModel
+from .iterative import iterative_loss, IterativeDecomposer
