@@ -98,14 +98,6 @@ def morlet_filter_bank(
     return basis
 
 
-# def geom_basis(fft_size, sr):
-#     return morlet_filter_bank(
-#         sr,
-#         fft_size,
-#         zounds.MelScale(zounds.FrequencyBand(20, sr.nyquist), fft_size),
-#         np.linspace(0.05, 0.99, fft_size))
-
-
 def short_time_transform(x, basis, pad=True):
 
     ws = basis.shape[1]
