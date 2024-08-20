@@ -269,6 +269,10 @@ class Instrument3(nn.Module):
         self.hyper = HyperNetworkLayer(
             shape_channels, 64, channels, encoding_channels)
         
+        self.energy_hyper = HyperNetworkLayer(
+            shape_channels, 16, channels, channels
+        )
+        
     def _pos_encoding(self, n_samples: int):
         """Returns a filterbank with periodic functions
         """
@@ -298,8 +302,8 @@ class Instrument3(nn.Module):
         envelopes = envelopes.view(batch, n_events, cp, frames)
         
         energy = fft_convolve(energy, envelopes)
-        energy = torch.tanh(energy)
-        orig_energy = energy
+        # energy = torch.tanh(energy)
+        # orig_energy = energy
         
         energy = energy.permute(0, 1, 3, 2)
         
@@ -314,13 +318,19 @@ class Instrument3(nn.Module):
         transforms = transforms.permute(0, 1, 3, 2)
         w, fwd = self.hyper.forward(transforms)
         
+        _, energy_fwd = self.energy_hyper.forward(transforms)
+        
         energy = energy.reshape(-1, self.channels)
+        
         transformed = fwd(energy)
         transformed = transformed.view(batch, n_events, frames, self.encoding_channels)
         transformed = transformed.permute(0, 1, 3, 2).view(batch * n_events, self.encoding_channels, self.n_frames)
         transformed = F.interpolate(transformed, size=self.n_samples, mode='linear')
         transformed = transformed.view(batch, n_events, self.encoding_channels, self.n_samples)
         
+        orig_energy = energy_fwd(energy)
+        orig_energy = orig_energy.view(batch, n_events, frames, self.channels)
+        orig_energy = orig_energy.permute(0, 1, 3, 2)
         
         final = pos * transformed
         final = torch.sum(final, dim=2)
@@ -486,32 +496,7 @@ def test_shift():
 
 
 if __name__ == '__main__':
-    
-    
     tryout_instrument_stack()
     
-    # tryout_instrument3()
-    
-    # TODO: 
-    # values = 1 - (np.linspace(0, 1) ** 4)
-    # plt.plot(values)
-    # plt.show()
-    
-    # decays = torch.zeros(1, 1, 1).fill_(0.5)
-    # env = exponential_decay(decays, 1, 128, 0, 128)
-    # plt.plot(env.data.cpu().numpy().squeeze())
-    # plt.show()
-    
-    # energy = torch.zeros(128)
-    # energy[10] = 1
-    # energy[50] = 3
-    # plt.plot(energy.data.cpu().numpy().squeeze())
-    # plt.show()
-    
-    
-    # print(energy.shape, env.shape)
-    # final = fft_convolve(energy[None, None, :], env)
-    # plt.plot(final.data.cpu().numpy().squeeze())
-    # plt.show()
     
     

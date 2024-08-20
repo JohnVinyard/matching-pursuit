@@ -4,7 +4,6 @@ from torch.nn import functional as F
 import numpy as np
 from config.dotenv import Config
 from data.datastore import batch_stream
-# from modules.pos_encode import ExpandUsingPosEncodings
 from util import device
 from torch.nn.utils.weight_norm import weight_norm as wnorm
 
@@ -114,60 +113,6 @@ def iter_layers(start_size, end_size):
     for i in range(int(np.log2(start_size)), int(np.log2(end_size))):
         yield i, 2**i
 
-
-# class PosEncodedUpsample(nn.Module):
-#     def __init__(
-#             self,
-#             latent_dim,
-#             channels,
-#             size,
-#             out_channels,
-#             layers,
-#             multiply=False,
-#             learnable_encodings=False,
-#             transformer=False,
-#             concat=False,
-#             filter_bank=False,
-#             activation=None):
-
-#         super().__init__()
-#         self.latent_dim = latent_dim
-#         self.channels = channels
-#         self.size = size
-#         self.out_channels = out_channels
-#         self.multiply = multiply
-#         self.learnable_encodings = learnable_encodings
-#         self.layers = layers
-#         self.transformer = transformer
-#         self.filter_bank = filter_bank
-
-#         self.expand = ExpandUsingPosEncodings(
-#             channels, size, 16, latent_dim, multiply, learnable_encodings, concat=concat, filter_bank=filter_bank)
-
-#         if self.transformer:
-#             encoder = nn.TransformerEncoderLayer(
-#                 channels, 2, channels, batch_first=True)
-#             self.net = nn.Sequential(
-#                 nn.TransformerEncoder(encoder, layers, norm=None),
-#                 nn.Linear(channels, 1)
-#             )
-
-#             # self.net = nn.Sequential(
-#             #     Transformer(channels, layers),
-#             #     nn.Linear(channels, out_channels)
-#             # )
-#         else:
-#             self.net = LinearOutputStack(
-#                 channels, layers, out_channels=out_channels, activation=activation)
-
-#         self.apply(init_weights)
-
-#     def forward(self, x):
-#         x = x.view(x.shape[0], -1, self.latent_dim)
-#         x = self.expand(x)
-#         x = self.net(x)
-#         x = x.permute(0, 2, 1)
-#         return x
 
 
 class ConvUpsample(nn.Module):
