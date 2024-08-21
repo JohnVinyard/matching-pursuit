@@ -56,9 +56,9 @@ class Model(nn.Module):
         self.to_event_switch = nn.Conv1d(1024, 1, 1, 1, 0)
         
     
-        self.embed_context = nn.Linear(4096, 256)
-        self.embed_one_hot = nn.Linear(4096, 256)
-        self.embed_latent = nn.Linear(1024, context_dim)
+        # self.embed_context = nn.Linear(4096, 256)
+        # self.embed_one_hot = nn.Linear(4096, 256)
+        # self.embed_latent = nn.Linear(1024, context_dim)
         
 
         self.imp = GenerateImpulse(256, 128, impulse_size, 16, n_events)
@@ -87,7 +87,7 @@ class Model(nn.Module):
 
         self.from_context = nn.Linear(context_dim, 256)
         
-        self.atom_bias = nn.Parameter(torch.zeros(4096).uniform_(-1, 1))
+        # self.atom_bias = nn.Parameter(torch.zeros(4096).uniform_(-1, 1))
 
         # self.apply(lambda x: exp.init_weights(x))
         raise NotImplementedError('Initialize weights')

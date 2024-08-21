@@ -56,5 +56,11 @@ class ModuleTests(TestCase):
     
     def test_can_analyze_pif(self):
         self.fail()
+    
+    def test_can_interpolate_along_final_axis(self):
+        self.fail()
+    
+    def test_can_interpolate_along_second_to_last_axis(self):
+        self.fail()
         
         

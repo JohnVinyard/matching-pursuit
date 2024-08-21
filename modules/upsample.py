@@ -2,11 +2,7 @@ from torch import nn
 import torch
 from torch.nn import functional as F
 import numpy as np
-from config.dotenv import Config
-from data.datastore import batch_stream
-from util import device
 from torch.nn.utils.weight_norm import weight_norm as wnorm
-
 
 from util.weight_init import make_initializer
 
@@ -15,6 +11,9 @@ init_weights = make_initializer(0.1)
 
 
 def upsample_with_holes(low_sr: torch.Tensor, desired_size: int) -> torch.Tensor:
+    """Upsample signal by simply placing existing samples at fixed
+    intervals, with zeros in between
+    """
     factor = desired_size // low_sr.shape[-1]
     upsampled = torch.zeros(*low_sr.shape[:-1], desired_size)
     upsampled[..., ::factor] = low_sr
