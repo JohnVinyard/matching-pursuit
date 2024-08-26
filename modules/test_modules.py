@@ -4,7 +4,7 @@ import torch
 from modules.anticausal import AntiCausalAnalysis
 from modules.auditory import STFT
 from modules.iterative import iterative_loss
-from modules.upsample import upsample_with_holes
+from modules.upsample import interpolate_along_axis, interpolate_last_axis, upsample_with_holes
 import numpy as np
 
 class ModuleTests(TestCase):
@@ -58,9 +58,43 @@ class ModuleTests(TestCase):
         self.fail()
     
     def test_can_interpolate_along_final_axis(self):
-        self.fail()
+        signal = torch.zeros(3, 4, 257, 128)
+        upsampled = interpolate_along_axis(signal, 1024, axis=3)
+        self.assertEqual((3, 4, 257, 1024), upsampled.shape)
     
     def test_can_interpolate_along_second_to_last_axis(self):
-        self.fail()
+        signal = torch.zeros(3, 4, 128, 257)
+        upsampled = interpolate_along_axis(signal, 1024, axis=2)
+        self.assertEqual((3, 4, 1024, 257), upsampled.shape)
         
         
+    def test_can_interpolate_along_final_axis_negative_index(self):
+        signal = torch.zeros(3, 4, 257, 128)
+        upsampled = interpolate_along_axis(signal, 1024, axis=-1)
+        self.assertEqual((3, 4, 257, 1024), upsampled.shape)
+    
+    def test_can_interpolate_along_second_to_last_axis_negative_index(self):
+        signal = torch.zeros(3, 4, 128, 257)
+        upsampled = interpolate_along_axis(signal, 1024, axis=-2)
+        self.assertEqual((3, 4, 1024, 257), upsampled.shape)
+    
+    
+    def test_can_interpolate_1d(self):
+        signal = torch.zeros(128)
+        upsampled = interpolate_last_axis(signal, 1024)
+        self.assertEqual((1024,), upsampled.shape)
+    
+    def test_can_interpolate_2d(self):
+        signal = torch.zeros(2, 128)
+        upsampled = interpolate_last_axis(signal, 1024)
+        self.assertEqual((2, 1024), upsampled.shape)
+    
+    def test_can_interpolate_3d(self):
+        signal = torch.zeros(3, 2, 128)
+        upsampled = interpolate_last_axis(signal, 1024)
+        self.assertEqual((3, 2, 1024), upsampled.shape)
+        
+    def test_can_interpolate_4d(self):
+        signal = torch.zeros(5, 3, 2, 128)
+        upsampled = interpolate_last_axis(signal, 1024)
+        self.assertEqual((5, 3, 2, 1024), upsampled.shape)

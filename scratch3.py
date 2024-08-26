@@ -12,8 +12,9 @@ from soundfile import SoundFile
 from scipy.signal import stft
 
 from modules.hypernetwork import HyperNetworkLayer
-from modules.transfer import fft_convolve
+from modules.transfer import fft_convolve, freq_domain_transfer_function_to_resonance
 
+from scipy.signal import gammatone
 
 """
 The NERF-like network is familiar, but still requires a scan, meaning
@@ -495,8 +496,21 @@ def test_shift():
     assert index.item() == 64
 
 
+# TODO: how do I fit resonances into the instrument stack?
+# TODO: frequency-matching experiment with damped harmonic resonantor
+# TODO: frequency-matching experiment with wavetable
+
 if __name__ == '__main__':
-    tryout_instrument_stack()
+    b, a = gammatone(440, ftype='fir', order=4, numtaps=1024, fs=22050)
+    plt.plot(b)
+    plt.show()
+    
+    _, _, x = stft(b, fs=22050, nperseg=64, noverlap=32)
+    print(x.shape)
+    
+    plt.matshow(np.log(1e-3 + np.abs(x)[::-1, :]))
+    plt.show()
+    
     
     
     
