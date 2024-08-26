@@ -4,7 +4,8 @@ import torch
 from modules.anticausal import AntiCausalAnalysis
 from modules.auditory import STFT
 from modules.iterative import iterative_loss
-from modules.upsample import interpolate_along_axis, interpolate_last_axis, upsample_with_holes
+from modules.quantize import select_items
+from modules.upsample import interpolate_last_axis, upsample_with_holes
 import numpy as np
 
 class ModuleTests(TestCase):
@@ -57,28 +58,6 @@ class ModuleTests(TestCase):
     def test_can_analyze_pif(self):
         self.fail()
     
-    def test_can_interpolate_along_final_axis(self):
-        signal = torch.zeros(3, 4, 257, 128)
-        upsampled = interpolate_along_axis(signal, 1024, axis=3)
-        self.assertEqual((3, 4, 257, 1024), upsampled.shape)
-    
-    def test_can_interpolate_along_second_to_last_axis(self):
-        signal = torch.zeros(3, 4, 128, 257)
-        upsampled = interpolate_along_axis(signal, 1024, axis=2)
-        self.assertEqual((3, 4, 1024, 257), upsampled.shape)
-        
-        
-    def test_can_interpolate_along_final_axis_negative_index(self):
-        signal = torch.zeros(3, 4, 257, 128)
-        upsampled = interpolate_along_axis(signal, 1024, axis=-1)
-        self.assertEqual((3, 4, 257, 1024), upsampled.shape)
-    
-    def test_can_interpolate_along_second_to_last_axis_negative_index(self):
-        signal = torch.zeros(3, 4, 128, 257)
-        upsampled = interpolate_along_axis(signal, 1024, axis=-2)
-        self.assertEqual((3, 4, 1024, 257), upsampled.shape)
-    
-    
     def test_can_interpolate_1d(self):
         signal = torch.zeros(128)
         upsampled = interpolate_last_axis(signal, 1024)
@@ -98,3 +77,27 @@ class ModuleTests(TestCase):
         signal = torch.zeros(5, 3, 2, 128)
         upsampled = interpolate_last_axis(signal, 1024)
         self.assertEqual((5, 3, 2, 1024), upsampled.shape)
+    
+    def test_can_select_single_item(self):
+        selection = torch.zeros(3).uniform_(-1, 1)
+        items = torch.zeros(3, 16).uniform_(-1, 1)
+        selected = select_items(selection, items)
+        self.assertEqual((16,), selected.shape)
+    
+    def test_can_select_2d(self):
+        selection = torch.zeros(21, 3).uniform_(-1, 1)
+        items = torch.zeros(3, 16).uniform_(-1, 1)
+        selected = select_items(selection, items)
+        self.assertEqual((21, 16), selected.shape)
+    
+    def test_can_select_3d(self):
+        selection = torch.zeros(18, 21, 3).uniform_(-1, 1)
+        items = torch.zeros(3, 16).uniform_(-1, 1)
+        selected = select_items(selection, items)
+        self.assertEqual((18, 21, 16), selected.shape)
+    
+    def test_can_select_4d(self):
+        selection = torch.zeros(13, 18, 21, 3).uniform_(-1, 1)
+        items = torch.zeros(3, 16).uniform_(-1, 1)
+        selected = select_items(selection, items)
+        self.assertEqual((13, 18, 21, 16), selected.shape)

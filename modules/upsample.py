@@ -33,54 +33,6 @@ def interpolate_last_axis(low_sr: torch.Tensor, desired_size) -> torch.Tensor:
     upsampled = upsampled.reshape(*new_shape)
     return upsampled
 
-
-# TODO: This isn't really what I need, just something to ensure
-# that we're in three dimensions
-def interpolate_along_axis(
-        low_sr: torch.Tensor, 
-        desired_size: int, 
-        axis: int = -1) -> torch.Tensor:
-    
-    print(low_sr.shape)
-    
-    # we need to move the axis along which we're interpolating
-    # to the last axis
-    indices = list(range(low_sr.ndim)) # e.g. [0, 1, 2, 3]
-    target_axis = indices[axis] # e.g. if axis = -3, then 1
-    
-    # e.g. if axis = -3, then [0, 2, 3, 1]
-    new_ordering = list(filter(lambda x: x != target_axis, indices)) + [target_axis]
-
-    # perform upsampling, which assumes that the last axis will 
-    # be upsampled    
-    permuted = low_sr.permute(*new_ordering)
-    print(permuted.shape)
-    
-    # ensure that we have a 3D signal
-    orig_shape = permuted.shape
-    permuted = permuted.reshape(
-        np.prod(orig_shape[:-1]), 1, -1)
-    
-    print(permuted.shape)
-    
-    upsampled = F.interpolate(permuted, size=desired_size, mode='linear')
-    
-    upsampled = upsampled.view(*orig_shape[:-1], upsampled.shape[-1])
-    
-    print(upsampled.shape)
-    
-    
-    # ensure that we've returned to the original shape
-    
-    # now, restore to the original shape by restoring the last
-    # axis to its original position
-    last_axis = new_ordering.pop()
-    new_ordering.insert(target_axis, last_axis)
-    orig = upsampled.permute(*new_ordering)
-    print(orig.shape)
-    
-    return orig
-    
     
 
 class UpsampleBlock(nn.Module):

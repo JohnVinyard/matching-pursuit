@@ -4,6 +4,26 @@ from torch import nn
 from modules.softmax import sparse_softmax
 from modules.transfer import make_waves
 from util.music import musical_scale_hz
+from torch.nn import functional as F
+from typing import Literal
+
+
+SelectionType = Literal['sparse_softmax', 'gumbel_softmax']
+
+
+def select_items(
+        selections: torch.Tensor, 
+        items: torch.Tensor, 
+        type: SelectionType = 'sparse_softmax'):
+    
+    if type == 'sparse_softmax':
+        selections = sparse_softmax(selections, normalize=True, dim=-1)
+    elif type == 'gumbel_softmax':
+        selections = F.gumbel_softmax(selections, tau=0.1, hard=True, dim=-1)
+    
+    selected = selections @ items
+    return selected
+
 
 class QuantizedResonanceMixture(nn.Module):
     def __init__(

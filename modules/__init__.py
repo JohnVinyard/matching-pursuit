@@ -24,3 +24,5 @@ from .activation import unit_sine
 from .hypernetwork import HyperNetworkLayer
 from .reds import RedsLikeModel
 from .iterative import iterative_loss, IterativeDecomposer
+from .quantize import select_items
+from .upsample import interpolate_last_axis
