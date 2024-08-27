@@ -5,6 +5,7 @@ from modules.anticausal import AntiCausalAnalysis
 from modules.auditory import STFT
 from modules.iterative import iterative_loss
 from modules.quantize import select_items
+from modules.transfer import hierarchical_dirac
 from modules.upsample import interpolate_last_axis, upsample_with_holes
 import numpy as np
 
@@ -101,3 +102,31 @@ class ModuleTests(TestCase):
         items = torch.zeros(3, 16).uniform_(-1, 1)
         selected = select_items(selection, items)
         self.assertEqual((13, 18, 21, 16), selected.shape)
+    
+    def test_can_produce_hierarchical_dirac_1d(self):
+        desired_size = 1024
+        n_elements = int(np.log2(desired_size))
+        pos = torch.zeros(n_elements, 2).uniform_(-1, 1)
+        x = hierarchical_dirac(pos)
+        self.assertEqual((1024,), x.shape)
+    
+    def test_can_produce_hierarchical_dirac_2d(self):
+        desired_size = 1024
+        n_elements = int(np.log2(desired_size))
+        pos = torch.zeros(3, n_elements, 2).uniform_(-1, 1)
+        x = hierarchical_dirac(pos)
+        self.assertEqual((3, 1024,), x.shape)
+    
+    def test_can_produce_hierarchical_dirac_3d(self):
+        desired_size = 1024
+        n_elements = int(np.log2(desired_size))
+        pos = torch.zeros(5, 3, n_elements, 2).uniform_(-1, 1)
+        x = hierarchical_dirac(pos)
+        self.assertEqual((5, 3, 1024,), x.shape)
+        
+    def test_can_produce_hierarchical_dirac_4d(self):
+        desired_size = 1024
+        n_elements = int(np.log2(desired_size))
+        pos = torch.zeros(4, 5, 3, n_elements, 2).uniform_(-1, 1)
+        x = hierarchical_dirac(pos)
+        self.assertEqual((4, 5, 3, 1024,), x.shape)

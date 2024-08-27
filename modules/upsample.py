@@ -15,7 +15,7 @@ def upsample_with_holes(low_sr: torch.Tensor, desired_size: int) -> torch.Tensor
     intervals, with zeros in between
     """
     factor = desired_size // low_sr.shape[-1]
-    upsampled = torch.zeros(*low_sr.shape[:-1], desired_size)
+    upsampled = torch.zeros(*low_sr.shape[:-1], desired_size, device=low_sr.device)
     upsampled[..., ::factor] = low_sr
     return upsampled
 

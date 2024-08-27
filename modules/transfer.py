@@ -14,6 +14,65 @@ from torch.nn import functional as F
 from scipy.signal import square, sawtooth
 
 
+# def mix(items: List[torch.Tensor], mixture: torch.Tensor):
+#     # items might be (batch, n_events, channels, n_frames)
+#     # mixture might be (batch, n_events, mix)
+#     # or (batch, n_events, n_frames, mix)
+#     stacked = torch.cat([x[..., None] for x in items], dim=-1)
+    
+
+def hierarchical_dirac(elements: torch.Tensor):
+    """
+    Produce a dirac/one-hot encoding from a binary encoded
+    tensor of the shape (..., log2, 2)
+    """
+    
+    # the shape except for the last two elements, which are (log2, 2)
+    seq_shape = elements.shape[:-2]
+    
+    # the number of steps taken to expand, log2
+    steps = elements.shape[-2]
+    
+    # starting size is 2**1 or 2
+    current_size = 2
+    chosen = torch.softmax(elements, dim=-1)
+    
+    signal = torch.zeros(*seq_shape, 1, device=elements.device)
+    
+    for i in range(steps):
+        
+        if i == 0:
+            signal = chosen[..., i, :]
+        else:
+            # new_size = signal.shape[-1] * 2
+            
+            new_size = current_size * 2
+            
+            # first, upsample with "holes" or by
+            # filling in zeros, instead of some kind of
+            # interpolation
+            new_signal = torch.zeros(*seq_shape, new_size)
+            
+            # print(new_signal.shape, signal.shape)
+            
+            new_signal[..., ::2] = signal
+            
+            diff = new_size - 2
+            
+            # pad the selection
+            current = torch.cat([
+                chosen[..., i, :], 
+                torch.zeros(*seq_shape, diff, device=elements.device)
+            ], dim=-1)
+            
+            signal = fft_convolve(new_signal, current)
+            
+            current_size = new_size
+        
+    
+    return signal
+
+
 def gaussian_bandpass_filtered(
         means: torch.Tensor, 
         stds: torch.Tensor, 
