@@ -8,6 +8,7 @@ from conjure import LmdbCollection
 from modules.iterative import TensorTransform, iterative_loss
 from modules.quantize import select_items
 from modules.softmax import sparse_softmax
+from modules.transfer import hierarchical_dirac
 from modules.upsample import interpolate_last_axis, upsample_with_holes
 from torch.nn import functional as F
 from torch.optim import Adam
@@ -197,6 +198,21 @@ class FFTShiftScheduler(nn.Module):
         return final
 
 
+class HierarchicalDiracModel(nn.Module):
+    def __init__(self, n_events: int, signal_size: int):
+        super().__init__()
+        self.n_events = n_events
+        self.signal_size = signal_size
+        n_elements = int(np.log2(signal_size))
+        self.elements = nn.Parameter(
+            torch.zeros(1, n_events, n_elements, 2).uniform_(-1, 1))
+    
+    def forward(self, events: torch.Tensor) -> torch.Tensor:
+        x = hierarchical_dirac(self.elements)
+        x = fft_convolve(x, events)
+        return x
+
+
 class OverfitResonanceModel(nn.Module):
     
     def __init__(
@@ -241,7 +257,9 @@ class OverfitResonanceModel(nn.Module):
         # self.scheduler = DiracScheduler(
         #     self.n_events, start_size=1024, n_samples=self.n_samples)
         
-        self.scheduler = FFTShiftScheduler(self.n_events)
+        # self.scheduler = FFTShiftScheduler(self.n_events)
+        self.scheduler = HierarchicalDiracModel(
+            n_events=self.n_events, signal_size=self.n_samples)
     
     def forward(self):
         

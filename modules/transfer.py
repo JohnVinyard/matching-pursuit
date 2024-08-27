@@ -7,6 +7,7 @@ from torch import nn
 from modules.ddsp import overlap_add
 from modules.normal_pdf import pdf2
 from modules.pos_encode import pos_encoded
+from modules.softmax import sparse_softmax
 from modules.upsample import ConvUpsample
 from util import device
 import numpy as np
@@ -35,7 +36,8 @@ def hierarchical_dirac(elements: torch.Tensor):
     
     # starting size is 2**1 or 2
     current_size = 2
-    chosen = torch.softmax(elements, dim=-1)
+    # chosen = torch.softmax(elements, dim=-1)
+    chosen = sparse_softmax(elements, normalize=True, dim=-1)
     
     signal = torch.zeros(*seq_shape, 1, device=elements.device)
     
@@ -51,7 +53,7 @@ def hierarchical_dirac(elements: torch.Tensor):
             # first, upsample with "holes" or by
             # filling in zeros, instead of some kind of
             # interpolation
-            new_signal = torch.zeros(*seq_shape, new_size)
+            new_signal = torch.zeros(*seq_shape, new_size, device=elements.device)
             
             # print(new_signal.shape, signal.shape)
             
