@@ -96,7 +96,7 @@ def fft_shift(a: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
     
     samples = torch.fft.irfft(spec, dim=-1, norm='ortho')
     # samples = samples[..., :n_samples]
-    samples = torch.relu(samples)
+    # samples = torch.relu(samples)
     return samples
 
 

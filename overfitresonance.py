@@ -12,16 +12,41 @@ from modules.upsample import interpolate_last_axis, upsample_with_holes
 from torch.nn import functional as F
 from torch.optim import Adam
 from itertools import count
+import numpy as np
 
 from util import device
 
 collection = LmdbCollection(path='overfitresonance')
 
 samplerate = 22050
-n_samples = 2 ** 17
+n_samples = 2 ** 16
 n_frames = 256
 n_events = 32
 
+def fft_shift(a: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
+    
+    # this is here to make the shift value interpretable
+    shift = (1 - shift)
+    
+    n_samples = a.shape[-1]
+    
+    shift_samples = (shift * n_samples * 0.5)
+    
+    # a = F.pad(a, (0, n_samples * 2))
+    
+    spec = torch.fft.rfft(a, dim=-1, norm='ortho')
+
+    n_coeffs = spec.shape[-1]
+    shift = (torch.arange(0, n_coeffs, device=a.device) * 2j * np.pi) / n_coeffs
+    
+    shift = torch.exp(shift * shift_samples)
+
+    spec = spec * shift
+    
+    samples = torch.fft.irfft(spec, dim=-1, norm='ortho')
+    # samples = samples[..., :n_samples]
+    # samples = torch.relu(samples)
+    return samples
 
 class Lookup(nn.Module):
     
@@ -145,6 +170,33 @@ class Deformations(Lookup):
         return x
         
 
+class DiracScheduler(nn.Module):
+    def __init__(self, n_events: int, start_size: int, n_samples: int):
+        super().__init__()
+        self.n_events = n_events
+        self.start_size = start_size
+        self.n_samples = n_samples
+        self.pos = nn.Parameter(
+            torch.zeros(1, n_events, start_size).uniform_(-1, 1)
+        )
+    
+    def forward(self, events: torch.Tensor) -> torch.Tensor:
+        pos = sparse_softmax(self.pos, normalize=True, dim=-1)
+        pos = upsample_with_holes(pos, desired_size=self.n_samples)
+        final = fft_convolve(events, pos)
+        return final
+
+class FFTShiftScheduler(nn.Module):
+    def __init__(self, n_events):
+        super().__init__()
+        self.n_events = n_events
+        self.pos = nn.Parameter(torch.zeros(1, n_events, 1))
+    
+    def forward(self, events: torch.Tensor) -> torch.Tensor:
+        final = fft_shift(events, self.pos)
+        return final
+
+
 class OverfitResonanceModel(nn.Module):
     
     def __init__(
@@ -179,16 +231,17 @@ class OverfitResonanceModel(nn.Module):
         self.amplitudes = nn.Parameter(
             torch.zeros(1, n_events, 1).uniform_(0, 0.1))
         
-        # TODO: try out FFT shift and hierarchical dirac
-        self.pos = nn.Parameter(
-            torch.zeros(1, n_events, 1024).uniform_(-1, 1)
-        )
 
         # dictionaries
         self.r = SampleLookup(n_resonances, n_samples, flatten_kernel_size=512)
         self.e = Envelopes(n_envelopes, n_frames, n_samples)
         self.d = Decays(n_decays, n_frames, n_samples)
         self.warp = Deformations(n_deformations, instr_expressivity, n_frames, n_samples)
+        
+        # self.scheduler = DiracScheduler(
+        #     self.n_events, start_size=1024, n_samples=self.n_samples)
+        
+        self.scheduler = FFTShiftScheduler(self.n_events)
     
     def forward(self):
         
@@ -232,10 +285,11 @@ class OverfitResonanceModel(nn.Module):
         
         # TODO: This is the final step, after all layers are done 
         # processing, which is _positioning_ the events
-        pos = sparse_softmax(self.pos, normalize=True, dim=-1)
-        pos = upsample_with_holes(pos, desired_size=self.n_samples)
+        # pos = sparse_softmax(self.pos, normalize=True, dim=-1)
+        # pos = upsample_with_holes(pos, desired_size=self.n_samples)
         
-        final = fft_convolve(final, pos)
+        # final = fft_convolve(final, pos)
+        final = self.scheduler.forward(final)
         
         return final
 
