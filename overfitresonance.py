@@ -179,7 +179,6 @@ class Deformations(Lookup):
         """Reshape so that the values are (..., channels, frames).  Apply
         softmax to the channel dimension and then upscale to full samplerate
         """
-        
         shape = items.shape[:-1]
         x = items.reshape(*shape, self.channels, self.frames)
         x = torch.softmax(x, dim=-2)
@@ -197,6 +196,9 @@ class DiracScheduler(nn.Module):
             torch.zeros(1, n_events, start_size).uniform_(-1, 1)
         )
     
+    def random_params(self):
+        return torch.zeros(1, self.n_events, self.start_size, device=device).uniform_(-1, 1)
+    
     @property
     def params(self):
         return self.pos
@@ -210,11 +212,15 @@ class DiracScheduler(nn.Module):
     def forward(self, events: torch.Tensor) -> torch.Tensor:
         return self.schedule(self.pos, events)
 
+
 class FFTShiftScheduler(nn.Module):
     def __init__(self, n_events):
         super().__init__()
         self.n_events = n_events
-        self.pos = nn.Parameter(torch.zeros(1, n_events, 1))
+        self.pos = nn.Parameter(torch.zeros(1, n_events, 1).uniform_(0, 1))
+    
+    def random_param(self):
+        return torch.zeros(1, self.n_events, 1, device=device).uniform_(0, 1)
     
     @property
     def params(self):
@@ -236,6 +242,9 @@ class HierarchicalDiracModel(nn.Module):
         n_elements = int(np.log2(signal_size))
         self.elements = nn.Parameter(
             torch.zeros(1, n_events, n_elements, 2).uniform_(-1, 1))
+    
+    def random_params(self):
+        return torch.zeros(1, self.n_events, self.n_elements, 2, device=device).uniform_(-1, 1)
     
     @property
     def params(self):
@@ -270,22 +279,31 @@ class OverfitResonanceModel(nn.Module):
         self.n_events = n_events
         self.n_samples = n_samples
         
+        self.resonance_shape = (1, n_events, instr_expressivity, n_resonances)
+        self.envelope_shape = (1, n_events, n_envelopes)
+        self.decay_shape = (1, n_events, n_decays)
+        self.deformation_shape = (1, n_events, n_deformations)
+        self.mix_shape = (1, n_events, 2)
+        self.amplitude_shape = (1, n_events, 1)
+        
         # choices/selections
         self.resonances = nn.Parameter(
-            torch.zeros(1, n_events, instr_expressivity, n_resonances).uniform_(-1, 1))
+            torch.zeros(*self.resonance_shape).uniform_(-1, 1))
+    
         self.envelopes = nn.Parameter(
-            torch.zeros(1, n_events, n_envelopes).uniform_(-1, 1))
+            torch.zeros(*self.envelope_shape).uniform_(-1, 1))
         
         self.decays = nn.Parameter(
-            torch.zeros(1, n_events, n_decays).uniform_(-1, 1))
+            torch.zeros(*self.decay_shape).uniform_(-1, 1))
         
         self.deformations = nn.Parameter(
-            torch.zeros(1, n_events, n_deformations).uniform_(-1, 1))
-        self.mixes = nn.Parameter(
-            torch.zeros(1, n_events, 2).uniform_(-1, 1))
-        self.amplitudes = nn.Parameter(
-            torch.zeros(1, n_events, 1).uniform_(0, 1))
+            torch.zeros(*self.deformation_shape).uniform_(-1, 1))
         
+        self.mixes = nn.Parameter(
+            torch.zeros(*self.mix_shape).uniform_(-1, 1))
+        
+        self.amplitudes = nn.Parameter(
+            torch.zeros(*self.amplitude_shape).uniform_(0, 1))
 
         # dictionaries
         self.r = SampleLookup(n_resonances, n_samples, flatten_kernel_size=512)
@@ -302,6 +320,16 @@ class OverfitResonanceModel(nn.Module):
         self.scheduler = DiracScheduler(
             self.n_events, start_size=self.n_samples // 32, n_samples=self.n_samples)
         
+    
+    def random_sequence(self):
+        return self.apply_forces(
+            envelopes=torch.zeros(*self.envelope_shape, device=device).uniform_(-1, 1),
+            resonances=torch.zeros(*self.resonance_shape, device=device).uniform_(-1, 1),
+            deformations=torch.zeros(*self.deformation_shape, device=device).uniform_(-1, 1),
+            decays=torch.zeros(*self.decay_shape, device=device).uniform_(-1, 1),
+            mixes=torch.zeros(*self.mix_shape, device=device).uniform_(-1, 1),
+            amplitudes=torch.zeros(*self.amplitude_shape, device=device).uniform_(0, 1),
+            times=self.scheduler.random_params())
     
     def apply_forces(
             self,
@@ -352,9 +380,9 @@ class OverfitResonanceModel(nn.Module):
         
         # End layer ==========================================
         
-        self.scheduler.schedule(times, final)
+        scheduled = self.scheduler.schedule(times, final)
         
-        return final
+        return scheduled
     
     def forward(self):
         
@@ -365,11 +393,13 @@ class OverfitResonanceModel(nn.Module):
             decays=self.decays,
             mixes=self.mixes,
             amplitudes=self.amplitudes,
-            times=self.scheduler.params
-        )
-
+            times=self.scheduler.params)
+    
+# TODO: consider multi-band transform or PIF here.
 def transform(audio: torch.Tensor) -> torch.Tensor:
     return stft(audio, ws=2048, step=256, pad=True)
+
+
 
 def audio(x: torch.Tensor):
     x = x.data.cpu().numpy()[0].reshape((-1,))
@@ -395,6 +425,11 @@ def recon_audio(x: torch.Tensor):
 @audio_conjure(storage=collection)
 def orig_audio(x: torch.Tensor):
     return audio(x)
+
+@audio_conjure(storage=collection)
+def random_audio(x: torch.Tensor):
+    return audio(x)
+
 
 def spec_loss(recon_audio: torch.Tensor, real_audio: torch.Tensor) -> torch.Tensor:
     recon_spec = transform(torch.sum(recon_audio, dim=1, keepdim=True))
@@ -431,6 +466,12 @@ def train(target: torch.Tensor):
         optim.step()
         print(iteration, loss.item())
         
+        with torch.no_grad():
+            rnd = model.random_sequence()
+            # logging
+            random_audio(max_norm(torch.sum(rnd, dim=1, keepdim=True)))
+            
+        
 
 if __name__ == '__main__':
     ai = AudioIterator(
@@ -448,6 +489,7 @@ if __name__ == '__main__':
         conjure_funcs=[
             recon_audio, 
             orig_audio, 
+            random_audio
         ], 
         port=9999, 
         n_workers=1
