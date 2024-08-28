@@ -10,6 +10,7 @@ from matplotlib import pyplot as plt
 from io import BytesIO
 from soundfile import SoundFile
 from scipy.signal import stft
+from data.audioiter import AudioIterator
 
 from modules.hypernetwork import HyperNetworkLayer
 from modules.transfer import fft_convolve, freq_domain_transfer_function_to_resonance
@@ -501,15 +502,32 @@ def test_shift():
 # TODO: frequency-matching experiment with wavetable
 
 if __name__ == '__main__':
-    b, a = gammatone(440, ftype='fir', order=4, numtaps=1024, fs=22050)
-    plt.plot(b)
-    plt.show()
+    ai = AudioIterator(
+        batch_size=1, 
+        n_samples=2**17, 
+        samplerate=22050, 
+        normalize=True, 
+        overfit=True,)
+    target: torch.Tensor = next(iter(ai)).view(-1)
+    target = target.data.cpu().numpy()
     
-    _, _, x = stft(b, fs=22050, nperseg=64, noverlap=32)
-    print(x.shape)
+    listen_to_sound(target, 22050)
     
-    plt.matshow(np.log(1e-3 + np.abs(x)[::-1, :]))
-    plt.show()
+    spec = np.fft.rfft(target, axis=-1)
+    spec.imag = 0
+    recon = np.fft.irfft(spec, axis=-1)
+    
+    listen_to_sound(recon, 22050)
+    
+    # b, a = gammatone(440, ftype='fir', order=4, numtaps=1024, fs=22050)
+    # plt.plot(b)
+    # plt.show()
+    
+    # _, _, x = stft(b, fs=22050, nperseg=64, noverlap=32)
+    # print(x.shape)
+    
+    # plt.matshow(np.log(1e-3 + np.abs(x)[::-1, :]))
+    # plt.show()
     
     
     

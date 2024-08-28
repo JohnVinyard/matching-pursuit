@@ -125,7 +125,8 @@ def freq_domain_transfer_function_to_resonance(
     window_size: int, 
     coeffs: torch.Tensor,
     # start_coeffs: torch.Tensor, 
-    n_frames: int) -> torch.Tensor:
+    n_frames: int,
+    apply_decay: bool = True) -> torch.Tensor:
     
     step_size = window_size // 2
     total_samples = step_size * n_frames
@@ -141,9 +142,11 @@ def freq_domain_transfer_function_to_resonance(
     # initial = start_coeffs
     
     res = coeffs.view(-1, expected_coeffs, 1).repeat(1, 1, n_frames)
-    res = torch.log(res + 1e-12)
-    res = torch.cumsum(res, dim=-1)
-    res = torch.exp(res)
+    
+    if apply_decay:
+        res = torch.log(res + 1e-12)
+        res = torch.cumsum(res, dim=-1)
+        res = torch.exp(res)
     
     
     # initial = initial.view(-1, expected_coeffs, 1)
@@ -152,7 +155,7 @@ def freq_domain_transfer_function_to_resonance(
     # spec = initial * res
     spec = spec.view(-1, expected_coeffs, n_frames).permute(0, 2, 1).view(-1, 1, n_frames, expected_coeffs)
     
-    phase = torch.zeros_like(spec)
+    phase = torch.zeros_like(spec).uniform_(-np.pi, np.pi)
     phase[:, :, :, :] = group_delay[None, None, None, :]
     phase = torch.cumsum(phase, dim=2)
     
@@ -161,7 +164,7 @@ def freq_domain_transfer_function_to_resonance(
     
     
     windowed = torch.fft.irfft(spec, dim=-1).view(-1, 1, n_frames, window_size)
-    windowed = windowed * torch.hamming_window(window_size, device=coeffs.device)[None, None, None, :]
+    # windowed = windowed * torch.hamming_window(window_size, device=coeffs.device)[None, None, None, :]
     audio = overlap_add(windowed, apply_window=False)[..., :total_samples]
     audio = audio.view(-1, 1, total_samples)
     return audio

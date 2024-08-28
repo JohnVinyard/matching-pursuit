@@ -10,7 +10,7 @@ from soundfile import SoundFile
 from modules.iterative import TensorTransform, iterative_loss
 from modules.quantize import select_items
 from modules.softmax import sparse_softmax
-from modules.transfer import hierarchical_dirac
+from modules.transfer import hierarchical_dirac, freq_domain_transfer_function_to_resonance
 from modules.upsample import interpolate_last_axis, upsample_with_holes
 from torch.nn import functional as F
 from torch.optim import Adam
@@ -108,12 +108,52 @@ class SampleLookup(Lookup):
         """Ensure that we have audio-rate samples at a relatively uniform
         amplitude throughout
         """
-        return flatten_envelope(
+        x = flatten_envelope(
             items, 
             kernel_size=self.flatten_kernel_size, 
             step_size=self.flatten_kernel_size // 2)
+        spec = torch.fft.rfft(x, dim=-1)
+        
+        mags = torch.abs(spec)
+        
+        # randomize phases
+        phases = torch.angle(spec)
+        phases = torch.zeros_like(phases).uniform_(-np.pi, np.pi)
+        imag = torch.cumsum(phases, dim=1)
+        imag = (imag + np.pi) % (2 * np.pi) - np.pi
+        spec = mags * torch.exp(1j * imag)
+        
+        x = torch.fft.irfft(spec, dim=-1)
+        return x
 
 
+class FFTBasedResonance(Lookup):
+    def __init__(self, n_items: int, n_samples: int, window_size: int):
+        
+        window_size = window_size
+        n_coeffs = window_size // 2 + 1
+        
+        def init(x: torch.Tensor):
+            return x.uniform_(0, 1)
+        
+        super().__init__(n_items, n_coeffs)
+        
+        self.window_size = window_size
+        self.n_coeffs = n_coeffs
+        self.step_size = self.window_size // 2
+        self.total_samples = n_samples
+    
+    def preprocess_items(self, items: torch.Tensor) -> torch.Tensor:
+        res = freq_domain_transfer_function_to_resonance(
+            window_size=self.window_size, 
+            coeffs=torch.clamp(items, 0, 1), 
+            n_frames=self.total_samples // self.step_size,
+            apply_decay=False)
+        res = res.view(self.n_items, -1)
+        return res
+
+
+        
 class Decays(Lookup):
     def __init__(self, n_items: int, n_samples: int, full_size: int, base_resonance: float = 0.8):
         super().__init__(n_items, n_samples)
@@ -240,8 +280,11 @@ class HierarchicalDiracModel(nn.Module):
         self.n_events = n_events
         self.signal_size = signal_size
         n_elements = int(np.log2(signal_size))
+        
         self.elements = nn.Parameter(
             torch.zeros(1, n_events, n_elements, 2).uniform_(-1, 1))
+        
+        self.n_elements = n_elements
     
     def random_params(self):
         return torch.zeros(1, self.n_events, self.n_elements, 2, device=device).uniform_(-1, 1)
@@ -317,8 +360,10 @@ class OverfitResonanceModel(nn.Module):
         self.d = Decays(n_decays, n_frames, n_samples)
         self.warp = Deformations(n_deformations, instr_expressivity, n_frames, n_samples)
         
-        self.scheduler = DiracScheduler(
-            self.n_events, start_size=self.n_samples // 32, n_samples=self.n_samples)
+        # self.scheduler = DiracScheduler(
+        #     self.n_events, start_size=self.n_samples // 32, n_samples=self.n_samples)
+        self.scheduler = HierarchicalDiracModel(
+            self.n_events, self.n_samples)
         
     
     def random_sequence(self):
@@ -450,7 +495,7 @@ def train(target: torch.Tensor):
         samplerate=samplerate
     ).to(device)
     
-    optim = Adam(model.parameters(), lr=1e-2)
+    optim = Adam(model.parameters(), lr=1e-3)
     
     for iteration in count():
         optim.zero_grad()
