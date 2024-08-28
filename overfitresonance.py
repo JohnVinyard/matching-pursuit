@@ -495,7 +495,7 @@ def train(target: torch.Tensor):
         samplerate=samplerate
     ).to(device)
     
-    optim = Adam(model.parameters(), lr=1e-3)
+    optim = Adam(model.parameters(), lr=1e-2)
     
     for iteration in count():
         optim.zero_grad()
