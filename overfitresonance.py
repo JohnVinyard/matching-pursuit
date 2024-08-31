@@ -501,9 +501,6 @@ class OverfitResonanceModel(nn.Module):
             times=self.scheduler.params)
 
 
-# TODO: consider multi-band transform or PIF here.
-def transform(audio: torch.Tensor) -> torch.Tensor:
-    return stft(audio, ws=2048, step=256, pad=True)
 
 
 def audio(x: torch.Tensor):
@@ -544,31 +541,35 @@ def spec_loss(recon_audio: torch.Tensor, real_audio: torch.Tensor) -> torch.Tens
     loss = torch.abs(recon_spec - real_spec).sum()
     return loss
 
+# TODO: consider multi-band transform or PIF here.
+# def transform(audio: torch.Tensor) -> torch.Tensor:
+#     return stft(audio, ws=2048, step=256, pad=True)
 
-# def transform(x: torch.Tensor) -> torch.Tensor:
-#     batch_size, channels, _ = x.shape
-#     bands = multiband_transform(x)
-#     return torch.cat([b.reshape(batch_size, channels, -1) for b in bands.values()], dim=-1)
-#
-#
-# def multiband_transform(x: torch.Tensor) -> Dict[str, torch.Tensor]:
-#     bands = fft_frequency_decompose(x, 512)
-#     # TODO: each band should have 256 frequency bins and also 256 time bins
-#     # this requires a window size of (n_samples // 256) * 2
-#     # and a window size of 512, 256
-#
-#     # window_size = 512
-#
-#     d1 = {f'{k}_xl': stft(v, 512, 64, pad=True) for k, v in bands.items()}
-#     d1 = {f'{k}_long': stft(v, 128, 64, pad=True) for k, v in bands.items()}
-#     d3 = {f'{k}_short': stft(v, 64, 32, pad=True) for k, v in bands.items()}
-#     d4 = {f'{k}_xs': stft(v, 16, 8, pad=True) for k, v in bands.items()}
-#
-#     normal = stft(x, 2048, 256, pad=True).reshape(-1, 128, 1025).permute(0, 2, 1)
-#     # pooled = F.avg_pool1d(normal, kernel_size=128, stride=1, padding=64)[..., :128]
-#     # residual = torch.relu(normal - pooled)
-#
-#     return dict(**d1, **d3, **d4, normal=normal)
+
+def transform(x: torch.Tensor) -> torch.Tensor:
+    batch_size, channels, _ = x.shape
+    bands = multiband_transform(x)
+    return torch.cat([b.reshape(batch_size, channels, -1) for b in bands.values()], dim=-1)
+
+
+def multiband_transform(x: torch.Tensor) -> Dict[str, torch.Tensor]:
+    bands = fft_frequency_decompose(x, 512)
+    # TODO: each band should have 256 frequency bins and also 256 time bins
+    # this requires a window size of (n_samples // 256) * 2
+    # and a window size of 512, 256
+
+    # window_size = 512
+
+    d1 = {f'{k}_xl': stft(v, 512, 64, pad=True) for k, v in bands.items()}
+    d1 = {f'{k}_long': stft(v, 128, 64, pad=True) for k, v in bands.items()}
+    d3 = {f'{k}_short': stft(v, 64, 32, pad=True) for k, v in bands.items()}
+    d4 = {f'{k}_xs': stft(v, 16, 8, pad=True) for k, v in bands.items()}
+
+    normal = stft(x, 2048, 256, pad=True).reshape(-1, 128, 1025).permute(0, 2, 1)
+    # pooled = F.avg_pool1d(normal, kernel_size=128, stride=1, padding=64)[..., :128]
+    # residual = torch.relu(normal - pooled)
+
+    return dict(**d1, **d3, **d4, normal=normal)
 
 
 
