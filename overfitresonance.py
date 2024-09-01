@@ -17,7 +17,6 @@ from torch.optim import Adam
 from itertools import count
 import numpy as np
 from modules.normalization import max_norm
-from matplotlib import pyplot as plt
 from util import device
 
 collection = LmdbCollection(path='overfitresonance')
@@ -301,6 +300,22 @@ class HierarchicalDiracModel(nn.Module):
 
 
 class OverfitResonanceModel(nn.Module):
+    """
+    A model that compresses an audio segment into n_events with the following:
+
+        - (1) one-hot choice of envelope
+        - (2) one-hot choice of noise resonance
+        - (3) one-hot choice of noise deformation
+        - (4) one-hot choice of noise mix
+        - (5) one-hot choice of resonance
+        - (6) one-hot choice of decay
+        - (7) one hot choice of deformation
+        - (8) one-hot choice of resonance mix
+        - (9) scalar amplitude (also could be quantized over a log-scale)
+        - (10) log2(n_samples) event time (for this experiment, around 2 bytes)
+
+    Assuming each of these has < 256 choices, then we'd have
+    """
 
     def __init__(
             self,
@@ -388,9 +403,9 @@ class OverfitResonanceModel(nn.Module):
         # self.scheduler = DiracScheduler(
         #     self.n_events, start_size=self.n_samples // 32, n_samples=self.n_samples)
 
-        self.scheduler = HierarchicalDiracModel(
-            self.n_events, self.n_samples)
-        # self.scheduler = FFTShiftScheduler(self.n_events)
+        # self.scheduler = HierarchicalDiracModel(
+        #     self.n_events, self.n_samples)
+        self.scheduler = FFTShiftScheduler(self.n_events)
 
     def random_sequence(self):
         return self.apply_forces(
@@ -534,16 +549,16 @@ def orig_audio(x: torch.Tensor):
 def random_audio(x: torch.Tensor):
     return audio(x)
 
-
-def spec_loss(recon_audio: torch.Tensor, real_audio: torch.Tensor) -> torch.Tensor:
-    recon_spec = transform(torch.sum(recon_audio, dim=1, keepdim=True))
-    real_spec = transform(real_audio)
-    loss = torch.abs(recon_spec - real_spec).sum()
-    return loss
-
 # TODO: consider multi-band transform or PIF here.
 # def transform(audio: torch.Tensor) -> torch.Tensor:
 #     return stft(audio, ws=2048, step=256, pad=True)
+#
+#
+# def spec_loss(recon_audio: torch.Tensor, real_audio: torch.Tensor) -> torch.Tensor:
+#     recon_spec = transform(torch.sum(recon_audio, dim=1, keepdim=True))
+#     real_spec = transform(real_audio)
+#     loss = torch.abs(recon_spec - real_spec).sum()
+#     return loss
 
 
 def transform(x: torch.Tensor) -> torch.Tensor:
