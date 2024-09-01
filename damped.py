@@ -5,6 +5,7 @@ from soundfile import SoundFile
 from io import BytesIO
 from matplotlib import pyplot as plt
 from subprocess import Popen, PIPE
+from scipy.signal import stft
 from numba import jit
 
 
@@ -85,33 +86,39 @@ def layer(
 
 
 def main():
-    batch_size = 4
-    n_events = 3
+    batch_size = 1
+    n_events = 1
+    n_layers = 4
 
     home_pos = torch.zeros(batch_size, n_events, dimension)
     vel = torch.zeros(batch_size, n_events, dimension)
-    pos = torch.zeros(batch_size, n_events, dimension).fill_(10)
 
-    tension = torch.zeros(batch_size, n_events, 1).fill_(0.01)
-    mass = torch.zeros(batch_size, n_events, 1).fill_(100)
-    damping = torch.zeros(batch_size, n_events, 1).fill_(0.9998)
+    pos = torch.zeros(batch_size, n_events, n_layers, dimension).uniform_(-10, 10)
+    tension = torch.zeros(batch_size, n_events, n_layers, 1).uniform_(0.1, 1)
+    mass = torch.zeros(batch_size, n_events, n_layers, 1).uniform_(1, 1000)
 
-    # a place to record the node's position
-    # rec = torch.zeros(batch_size, n_events, dimension, n_samples)
-    #
-    # for i in range(n_samples):
-    #     home_pos, vel, pos = step(
-    #         home=home_pos,
-    #         velocity=vel,
-    #         position=pos,
-    #         tension=tension,
-    #         mass=mass,
-    #         damping=damping)
-    #     # print(rec.shape, pos.shape)
-    #     rec[:, :, :, i] = pos
+    damping = torch.zeros(batch_size, n_events, 1).fill_(0.999)
 
-    rec = layer(
-        home_pos, vel, pos, tension, mass, damping, n_samples=n_samples)
+    rec = None
+    for i in range(n_layers):
+        if rec is None:
+            rec = layer(
+                home_pos,
+                vel,
+                pos[:, :, i, :],
+                tension[:, :, i, :],
+                mass[:, :, i, :],
+                damping,
+                n_samples=n_samples)
+        else:
+            rec = layer(
+                rec,
+                vel,
+                pos[:, :, i, :],
+                tension[:, :, i, :],
+                mass[:, :, i, :],
+                damping,
+                n_samples=n_samples)
 
     samples = rec[:, :, 0, :]
     return samples
@@ -119,5 +126,17 @@ def main():
 
 if __name__ == '__main__':
     s = main()
-    plt.plot(s[0, 0, :].data.cpu().numpy()[:8192])
+    s = s[0, 0, :].data.cpu().numpy()[:]
+
+    s /= s.max()
+
+    _, _, spec = np.abs(stft(s))
+
+    plt.plot(s)
     plt.show()
+
+    plt.matshow(spec)
+    plt.show()
+
+    listen_to_sound(s)
+
