@@ -2,6 +2,8 @@ from functools import reduce
 from typing import Collection, List
 import torch
 from torch import nn
+
+from modules import stft
 # from modules.angle import windowed_audio
 
 from modules.ddsp import overlap_add
@@ -31,87 +33,114 @@ from scipy.signal import square, sawtooth
 # #     # mixture might be (batch, n_events, mix)
 # #     # or (batch, n_events, n_frames, mix)
 # #     stacked = torch.cat([x[..., None] for x in items], dim=-1)
-    
+
+
+class ExponentialTransform(nn.Module):
+    def __init__(self, window_size: int, step: int, n_exponents: int, n_frames: int, max_exponent: float = 100):
+        super().__init__()
+        self.max_exponent = max_exponent
+        self.window_size = window_size
+        self.step = step
+        self.n_exponents = n_exponents
+        self.n_frames = n_frames
+
+        bank = \
+            torch.linspace(1, 0, n_frames)[None, :] \
+            ** torch.linspace(2, self.max_exponent, self.n_exponents)[:, None]
+        self.register_buffer('bank', torch.softmax(bank, dim=-1))
+
+    def forward(self, audio: torch.Tensor) -> torch.Tensor:
+        batch, n_events, _ = audio.shape
+        audio = audio.view(audio.shape[0], n_events, -1)
+        spec = stft(audio, self.window_size, self.step, pad=True)
+        batch, n_events, time, bands = spec.shape
+        spec = spec.permute(0, 1, 3, 2)[:, :, :, None, :]
+        b = self.bank[None, None, None, :, :]
+        result = fft_convolve(spec, b)
+        result = result.view(batch, n_events, bands, self.n_exponents, time)
+        result = result.view(batch, n_events, bands * self.n_exponents, time)
+        return result
+
+
 
 def hierarchical_dirac(elements: torch.Tensor):
     """
     Produce a dirac/one-hot encoding from a binary encoded
     tensor of the shape (..., log2, 2)
     """
-    
+
     # the shape except for the last two elements, which are (log2, 2)
     seq_shape = elements.shape[:-2]
-    
+
     # the number of steps taken to expand, log2
     steps = elements.shape[-2]
-    
+
     # starting size is 2**1 or 2
     current_size = 2
     # chosen = torch.softmax(elements, dim=-1)
     chosen = sparse_softmax(elements, normalize=True, dim=-1)
-    
+
     signal = torch.zeros(*seq_shape, 1, device=elements.device)
-    
+
     for i in range(steps):
-        
+
         if i == 0:
             signal = chosen[..., i, :]
         else:
             # new_size = signal.shape[-1] * 2
-            
+
             new_size = current_size * 2
-            
+
             # first, upsample with "holes" or by
             # filling in zeros, instead of some kind of
             # interpolation
             new_signal = torch.zeros(*seq_shape, new_size, device=elements.device)
-            
+
             # print(new_signal.shape, signal.shape)
-            
+
             new_signal[..., ::2] = signal
-            
+
             diff = new_size - 2
-            
+
             # pad the selection
             current = torch.cat([
-                chosen[..., i, :], 
+                chosen[..., i, :],
                 torch.zeros(*seq_shape, diff, device=elements.device)
             ], dim=-1)
-            
+
             signal = fft_convolve(new_signal, current)
-            
+
             current_size = new_size
-        
-    
+
     return signal
 
 
 def gaussian_bandpass_filtered(
-        means: torch.Tensor, 
-        stds: torch.Tensor, 
+        means: torch.Tensor,
+        stds: torch.Tensor,
         signals: torch.Tensor,
         normalize: bool = True):
-    
     batch, _, samples = signals.shape
     n_coeffs = samples // 2 + 1
     gaussians = pdf2(means, stds, n_coeffs, normalize=normalize)
-    
+
     spec = torch.fft.rfft(signals, dim=-1)
     spec = spec * gaussians
     filtered = torch.fft.irfft(spec)
     return filtered
+
 
 def make_waves(n_samples: int, f0s: List[float], samplerate: int):
     """
     Generate pure sines, sawtooth, triangle, and square waves
     with the provided fundamental frequencies
     """
-    
+
     sawtooths = []
     squares = []
     triangles = []
     sines = []
-    
+
     total_atoms = len(f0s) * 4
 
     for f0 in f0s:
@@ -126,54 +155,50 @@ def make_waves(n_samples: int, f0s: List[float], samplerate: int):
         triangles.append(tri)
         sin = np.sin(radians)
         sines.append(sin[None, ...])
-    
+
     waves = np.concatenate([sawtooths, squares, triangles, sines], axis=0)
     waves = torch.from_numpy(waves).view(total_atoms, n_samples).float()
     return waves
 
 
 def freq_domain_transfer_function_to_resonance(
-    window_size: int, 
-    coeffs: torch.Tensor,
-    # start_coeffs: torch.Tensor, 
-    n_frames: int,
-    apply_decay: bool = True) -> torch.Tensor:
-    
+        window_size: int,
+        coeffs: torch.Tensor,
+        # start_coeffs: torch.Tensor,
+        n_frames: int,
+        apply_decay: bool = True) -> torch.Tensor:
     step_size = window_size // 2
     total_samples = step_size * n_frames
-    
-    
+
     expected_coeffs = window_size // 2 + 1
-    
+
     group_delay = torch.linspace(0, np.pi, expected_coeffs)
-    
+
     # assert coeffs.shape[-1] == expected_coeffs
     # noise = torch.zeros(window_size, device=coeffs.device).uniform_(-1, 1)
     # initial = torch.abs(torch.fft.rfft(noise))[None, :] * coeffs
     # initial = start_coeffs
-    
+
     res = coeffs.view(-1, expected_coeffs, 1).repeat(1, 1, n_frames)
-    
+
     if apply_decay:
         res = torch.log(res + 1e-12)
         res = torch.cumsum(res, dim=-1)
         res = torch.exp(res)
-    
-    
+
     # initial = initial.view(-1, expected_coeffs, 1)
-    
+
     spec = res
     # spec = initial * res
     spec = spec.view(-1, expected_coeffs, n_frames).permute(0, 2, 1).view(-1, 1, n_frames, expected_coeffs)
-    
+
     phase = torch.zeros_like(spec).uniform_(-np.pi, np.pi)
     phase[:, :, :, :] = group_delay[None, None, None, :]
     phase = torch.cumsum(phase, dim=2)
-    
+
     # convert from polar coordinates
     spec = spec * torch.exp(1j * phase)
-    
-    
+
     windowed = torch.fft.irfft(spec, dim=-1).view(-1, 1, n_frames, window_size)
     # windowed = windowed * torch.hamming_window(window_size, device=coeffs.device)[None, None, None, :]
     audio = overlap_add(windowed, apply_window=False)[..., :total_samples]
@@ -183,7 +208,8 @@ def freq_domain_transfer_function_to_resonance(
 
 # TODO: frame-based FFT variant of this
 class ResonanceBank(nn.Module):
-    def __init__(self, n_resonances, window_size, n_frames, initial, fft_based_resonance=False, learnable_resonances=True):
+    def __init__(self, n_resonances, window_size, n_frames, initial, fft_based_resonance=False,
+                 learnable_resonances=True):
         super().__init__()
         self.n_coeffs = window_size // 2 + 1
         self.window_size = window_size
@@ -193,45 +219,43 @@ class ResonanceBank(nn.Module):
         self.fft_based_resonance = fft_based_resonance
         self.learnable_resonances = learnable_resonances
         self.n_frames = n_frames
-        
+
         if self.learnable_resonances:
             self.res_samples = nn.Parameter(initial)
         else:
             self.register_buffer('res_samples', initial)
-            
-        
+
         self.base_resonance = 0.02
         self.res_factor = (1 - self.base_resonance) * 0.99
-        
+
         self.decay = nn.Linear(n_resonances, self.n_frames)
         # self.amplitudes = nn.Parameter(torch.zeros(n_resonances, n_frames).uniform_(-6, 6))
         self.filters = nn.Parameter(torch.zeros(n_resonances, self.n_frames).uniform_(-1, 1))
-        
+
         self.fft_res = nn.Parameter(torch.zeros(n_resonances, self.n_coeffs).uniform_(-6, -6))
-        
-    
+
     def forward(self, selection: torch.Tensor, initial_selection: torch.Tensor, filter_selection: torch.Tensor):
-        
+
         batch_size = selection.shape[0]
-        
+
         # choose a linear combination of filters
         filt = filter_selection @ self.filters
         filt = filt.view(-1, 1, self.n_frames)
         filt = filt * torch.hamming_window(self.n_frames, device=filt.device)[None, None, :]
-        
+
         # choose a linear combination of envelopes
-        
+
         decay = torch.sigmoid(self.decay(initial_selection))
         decay = self.base_resonance + (decay * self.res_factor)
         decay = torch.log(1e-12 + decay)
         decay = torch.cumsum(decay, dim=-1)
-        
+
         decay = torch.exp(decay).view(batch_size, -1, self.n_frames)
-        
+
         amp = F.interpolate(decay, size=self.n_samples, mode='linear')
-        
+
         # amp = torch.sigmoid(torch.relu(initial_selection) @ self.amplitudes).view(-1, 1, 128)
-        
+
         # amp = F.interpolate(amp, size=self.n_samples, mode='linear')
 
         if not self.fft_based_resonance:
@@ -239,18 +263,18 @@ class ResonanceBank(nn.Module):
         else:
             coeffs = torch.sigmoid(selection @ self.fft_res)
             res = freq_domain_transfer_function_to_resonance(self.window_size, coeffs, 128)
-        
-        amp = amp.view(*res.shape)        
-        
+
+        amp = amp.view(*res.shape)
+
         # apply the envelopes
         res = res * amp
-        
+
         # convolve with filters
         filt = F.pad(filt, (0, self.n_samples - self.n_frames))
         filt = filt.view(*res.shape)
         res = fft_convolve(filt, res)[..., :self.n_samples]
         return res
-    
+
 
 class TimeVaryingMix(nn.Module):
     def __init__(self, latent_dim, channels, n_mixer_channels, n_frames):
@@ -259,30 +283,30 @@ class TimeVaryingMix(nn.Module):
         self.channels = channels
         self.n_mixer_channels = n_mixer_channels
         self.n_frames = n_frames
-        
+
         self.to_time_varying_mix = ConvUpsample(
-            latent_dim, 
-            channels, 
-            start_size=4, 
+            latent_dim,
+            channels,
+            start_size=4,
             mode='nearest',
-            end_size=self.n_frames, 
-            out_channels=n_mixer_channels, 
+            end_size=self.n_frames,
+            out_channels=n_mixer_channels,
             from_latent=True,
             batch_norm=False,
             layer_norm=False,
             weight_norm=True)
-    
+
     def forward(self, x, audio_channels):
         batch_size = x.shape[0]
-        
+
         total_samples = audio_channels.shape[-1]
         mix = self.to_time_varying_mix(x).view(-1, self.n_mixer_channels, self.n_frames)
-        
+
         # TODO: is softmax the best choice for the time-varying mix?
         # TODO: should softmax come before or after the upsampling
         mix = F.interpolate(mix, size=total_samples, mode='linear')
         mix = torch.softmax(mix, dim=1)
-        
+
         # audio channels and mix will both be (batch * n_events, mix_channels, samples)
         x = audio_channels * mix
         # the final result will be (batch * n_events, samples)
@@ -293,7 +317,8 @@ class TimeVaryingMix(nn.Module):
 
 
 class ResonanceBlock(nn.Module):
-    def __init__(self, n_atoms, window_size, n_frames, total_samples, mix_channels, channels, latent_dim, initial, learnable_resonances):
+    def __init__(self, n_atoms, window_size, n_frames, total_samples, mix_channels, channels, latent_dim, initial,
+                 learnable_resonances):
         super().__init__()
         self.n_atoms = n_atoms
         self.window_size = window_size
@@ -303,12 +328,13 @@ class ResonanceBlock(nn.Module):
         self.channels = channels
         self.latent_dim = latent_dim
         self.initial = initial
-        
-        self.bank = ResonanceBank(n_atoms, window_size, n_frames, self.initial, fft_based_resonance=False, learnable_resonances=learnable_resonances)
-        
+
+        self.bank = ResonanceBank(n_atoms, window_size, n_frames, self.initial, fft_based_resonance=False,
+                                  learnable_resonances=learnable_resonances)
+
         self.generate_mix = TimeVaryingMix(
             latent_dim, channels, mix_channels, n_frames)
-        
+
         # produce a resonance for each element in the mix
         self.res_choices = nn.ModuleList([
             nn.Sequential(
@@ -317,85 +343,82 @@ class ResonanceBlock(nn.Module):
             )
             for _ in range(mix_channels)
         ])
-        
+
         # produce a linear mixture of enevelopes
         self.init_choices = nn.ModuleList([
             nn.Sequential(
-                nn.Linear(latent_dim, n_atoms) ,
+                nn.Linear(latent_dim, n_atoms),
                 nn.ReLU()
             )
             for _ in range(mix_channels)
         ])
-        
+
         # produce a linear mixture of filters
         self.filt_choice = nn.ModuleList([
             nn.Sequential(
-                nn.Linear(latent_dim, n_atoms) ,
+                nn.Linear(latent_dim, n_atoms),
                 nn.ReLU()
             )
             for _ in range(mix_channels)
         ])
-        
+
         self.final_mix = nn.Linear(latent_dim, 2)
-    
+
     def forward(self, x, impulse):
         # print('------------------------------')
-        
+
         batch_size = x.shape[0]
-        
+
         impulse_samples = impulse.shape[-1]
-        
+
         final_mix = self.final_mix(x)
         # print(f'\t BATCH_SIZE {batch_size} FINAL_MIX {final_mix.shape}')
-        
+
         final_mix = torch.softmax(final_mix, dim=-1)
         final_mix = final_mix.view(batch_size, -1, 1, 2)
-        
+
         resonances = [res_choice(x)[:, None, ...] for res_choice in self.res_choices]
         inits = [init_choice(x)[:, None, ...] for init_choice in self.init_choices]
         filts = [filt_choice(x)[:, None, ...] for filt_choice in self.filt_choice]
-        
+
         resonances = [self.bank.forward(res, inits[i], filts[i]) for i, res in enumerate(resonances)]
         # resonances = [unit_norm(r) for r in resonances]
-        
+
         impulse = F.pad(impulse, (0, self.total_samples - impulse_samples))
         impulse = impulse.view(-1, 1, self.total_samples)
         # impulse = unit_norm(impulse)
-        
+
         resonances = torch.cat(resonances, dim=1).view(-1, self.mix_channels, self.total_samples)
-        
-        
+
         # final will be (batch * n_events, mix_channels, samples)
         final = fft_convolve(resonances, impulse)
-        
+
         # this will generate a mix over time of the different convolutions
         # with a resonance function
         mixed_down = self.generate_mix.forward(x, final)
-        
+
         impulse = impulse.view(*mixed_down.shape)
         imp_and_res = torch.cat([impulse[..., None], mixed_down[..., None]], dim=-1)
-        
+
         x = imp_and_res * final_mix
         x = torch.sum(x, dim=-1)
-        
+
         return x
-        
 
 
 class ResonanceChain(nn.Module):
     def __init__(
-            self, 
-            depth, 
-            n_atoms, 
-            window_size, 
-            n_frames, 
-            total_samples, 
-            mix_channels, 
-            channels, 
-            latent_dim, 
+            self,
+            depth,
+            n_atoms,
+            window_size,
+            n_frames,
+            total_samples,
+            mix_channels,
+            channels,
+            latent_dim,
             initial,
             learnable_resonances=True):
-        
         super().__init__()
         self.n_atoms = n_atoms
         self.window_size = window_size
@@ -406,44 +429,43 @@ class ResonanceChain(nn.Module):
         self.latent_dim = latent_dim
         self.depth = depth
         self.initial = initial
-        
+
         self.res = nn.ModuleList([
             ResonanceBlock(
-                n_atoms, 
-                window_size, 
-                n_frames, 
-                total_samples, 
-                mix_channels, 
-                channels, 
-                latent_dim, 
-                initial, 
-                learnable_resonances) 
+                n_atoms,
+                window_size,
+                n_frames,
+                total_samples,
+                mix_channels,
+                channels,
+                latent_dim,
+                initial,
+                learnable_resonances)
             for _ in range(depth)
         ])
-        
+
         self.to_mix = nn.Linear(latent_dim, depth)
-    
+
     def forward(self, latent: torch.Tensor, impulse: torch.Tensor):
         batch_size = latent.shape[0]
-        
+
         imp = impulse
         outputs = []
-        
+
         for i in range(self.depth):
             imp = self.res[i].forward(latent, imp)
             outputs.append(imp[..., None])
-        
+
         outputs = torch.cat(outputs, dim=-1)
         mx = self.to_mix(latent).view(batch_size, -1, 1, self.depth)
-        
-        
+
         # print(f'\t OUTPUTS {outputs.shape} {mx.shape}')
-        
+
         outputs = outputs * mx
         outputs = torch.sum(outputs, dim=-1)
-        
+
         return outputs
-            
+
 
 def fft_convolve(*args, correlation=False):
     args = list(args)
@@ -452,7 +474,7 @@ def fft_convolve(*args, correlation=False):
 
     # pad to avoid wraparound artifacts
     padded = [F.pad(x, (0, x.shape[-1])) for x in args]
-    
+
     specs = [torch.fft.rfft(x, dim=-1) for x in padded]
 
     if correlation:
@@ -460,7 +482,7 @@ def fft_convolve(*args, correlation=False):
         # this is what torch's convolution functions and modules 
         # perform
         specs[1] = torch.conj(specs[1])
-    
+
     spec = reduce(lambda accum, current: accum * current, specs[1:], specs[0])
     final = torch.fft.irfft(spec, dim=-1)
 
@@ -469,12 +491,13 @@ def fft_convolve(*args, correlation=False):
     final = final[..., :n_samples]
     return final
 
+
 def fft_shift(a, shift):
     n_samples = a.shape[-1]
     a = F.pad(a, (0, n_samples))
     shift_samples = (shift * 0.5) * n_samples
     spec = torch.fft.rfft(a, dim=-1, norm='ortho')
-    
+
     n_coeffs = spec.shape[-1]
     shift = (torch.arange(0, n_coeffs) * 2j * np.pi).to(device) / n_coeffs
     shift = torch.exp(-shift * shift_samples)
@@ -485,8 +508,6 @@ def fft_shift(a, shift):
 
 
 def position(x, clips, n_samples, sum_channels=False):
-    
-    
     if len(x.shape) != 2:
         raise ValueError('positions shoud be (batch, n_clips)')
 
@@ -518,11 +539,12 @@ def position(x, clips, n_samples, sum_channels=False):
             inner.append(canvas)
         canvas = torch.stack(inner)
         outer.append(canvas)
-    
+
     outer = torch.stack(outer)
     if sum_channels:
         outer = torch.sum(outer, dim=1, keepdim=True)
     return outer
+
 
 class ScalarPosition(torch.autograd.Function):
 
@@ -545,7 +567,7 @@ class ScalarPosition(torch.autograd.Function):
                 left, right = x[b, i, index:], x[b, i, :index]
                 scalar_grad = left.sum() - right.sum()
                 grads.append(scalar_grad.view(-1))
-        
+
         grads = torch.cat(grads).view(x.shape[0], -1, 1)
 
         # x = x.sum(dim=-1)
@@ -558,7 +580,9 @@ class ScalarPosition(torch.autograd.Function):
 
         return grads, None
 
+
 scalar_position = ScalarPosition.apply
+
 
 class FFTShifter(torch.autograd.Function):
     def forward(self, items, positions):
@@ -566,16 +590,17 @@ class FFTShifter(torch.autograd.Function):
         self.save_for_backward(items, positions)
         result = fft_shift(items, positions)
         return result
-    
+
     def backward(self, *grad_outputs):
         x, = grad_outputs
         items, positions = self.saved_tensors
         return x
 
+
 differentiable_fft_shift = FFTShifter.apply
 
-class Position(torch.autograd.Function):
 
+class Position(torch.autograd.Function):
     counter = 0
 
     def forward(self, items, positions, targets):
@@ -616,10 +641,11 @@ class Position(torch.autograd.Function):
 
 schedule_atoms = Position.apply
 
+
 class AtomScheduler(nn.Module):
     def __init__(self):
         super().__init__()
-    
+
     def forward(self, items, positions, targets):
         return schedule_atoms(items, positions, targets)
 
@@ -631,9 +657,8 @@ class PosEncodedImpulseGenerator(nn.Module):
         self.final_size = final_size
         self.softmax = softmax
         self.scale_frequencies = scale_frequencies
-    
-    def forward(self, p, softmax=None):
 
+    def forward(self, p, softmax=None):
         sm = softmax or self.softmax
 
         batch, _ = p.shape
@@ -660,16 +685,16 @@ class PosEncodedImpulseGenerator(nn.Module):
         output = torch.zeros(batch, 1, self.final_size, device=sim.device)
         step = self.final_size // self.n_frames
         output[:, :, ::step] = sim
-        
-        
+
         return output, orig_sim
+
 
 class ImpulseGenerator(nn.Module):
     def __init__(self, final_size, softmax=lambda x: torch.softmax(x, dim=-1)):
         super().__init__()
         self.final_size = final_size
         self.softmax = softmax
-    
+
     def forward(self, x, softmax=None, return_logits=False):
         sm = softmax or self.softmax
 
@@ -684,6 +709,7 @@ class ImpulseGenerator(nn.Module):
         else:
             return output
 
+
 class STFTTransferFunction(nn.Module):
     def __init__(self):
         super().__init__()
@@ -694,12 +720,12 @@ class STFTTransferFunction(nn.Module):
         self.n_frames = self.n_samples // self.step_size
 
         self.dim = self.n_coeffs * 2
-    
+
     def forward(self, tf):
         batch, n_coeffs = tf.shape
         if n_coeffs != self.dim:
             raise ValueError(f'Expected (*, {self.dim}) but got {tf.shape}')
-        
+
         tf = tf.view(-1, self.n_coeffs * 2, 1)
         tf = tf.repeat(1, 1, self.n_frames)
         tf = tf.view(-1, self.n_coeffs, 2, self.n_frames)
@@ -709,19 +735,17 @@ class STFTTransferFunction(nn.Module):
         real = torch.clamp(tf[:, :self.n_coeffs, :], 0, 1) * 0.9999
         imag = torch.clamp(tf[:, self.n_coeffs:, :], -1, 1) * np.pi
 
-
         real = real * torch.cos(imag)
         imag = real * torch.sin(imag)
         tf = torch.complex(real, imag)
         tf = torch.cumprod(tf, dim=-1)
 
         tf = tf.view(-1, self.n_coeffs, self.n_frames)
-        tf = torch.fft.irfft(tf, dim=1, norm='ortho')\
-            .permute(0, 2, 1)\
+        tf = torch.fft.irfft(tf, dim=1, norm='ortho') \
+            .permute(0, 2, 1) \
             .view(batch, 1, self.n_frames, self.window_size)
         tf = overlap_add(tf, trim=self.n_samples)
         return tf
-
 
 
 # class TransferFunction(nn.Module):
@@ -752,18 +776,18 @@ class STFTTransferFunction(nn.Module):
 #         bank = morlet_filter_bank(
 #             samplerate, n_samples, scale, 0.1, normalize=False)\
 #             .real.astype(np.float32)
-        
+
 #         self.register_buffer('filter_bank', torch.from_numpy(bank)[None, :, :])
 
 #         resonances = (torch.linspace(0, 0.999, resolution) ** resonance_exp)\
 #             .view(resolution, 1).repeat(1, n_frames)
 #         resonances = torch.cumprod(resonances, dim=-1)
 #         self.register_buffer('resonance', resonances)
-    
+
 #     @property
 #     def n_bands(self):
 #         return self.scale.n_bands
-    
+
 #     def forward(self, x: torch.Tensor):
 #         batch, bands, resolution = x.shape
 
@@ -784,7 +808,6 @@ class STFTTransferFunction(nn.Module):
 #         return x
 
 
-    
 '''
 # TODO: try matrix rotation instead: https://eecs.qmul.ac.uk/~gslabaugh/publications/euler.pdf
 
@@ -840,9 +863,7 @@ def test():
 '''
 
 
-
 def to_polar(x):
-    
     # mag = torch.abs(x)
     # phase = torch.angle(x)
     # return mag, phase
@@ -850,22 +871,24 @@ def to_polar(x):
     imag = x.imag[..., None]
     return torch.cat([real, imag], dim=-1)
 
+
 def to_complex(x):
     return torch.complex(x[..., 0], x[..., 1])
 
+
 def advance_one_frame(x):
     batch, _, coeffs = x.shape
-    
+
     x = to_polar(x)
     # print('BEFORE ROTATION', x.shape)
     # mag, phase = x[..., 0], x[..., 1]
-    
+
     group_delay = torch.linspace(0, np.pi, x.shape[-2], device=x.device)
     s = torch.sin(group_delay)
     c = torch.cos(group_delay)
     rotation_matrices = torch.cat([c[:, None], -s[:, None], s[:, None], -c[:, None]], dim=-1).reshape(-1, 2, 2)
     # print(rotation_matrices.shape)
-    
+
     # print(phase.shape, rotation_matrices.shape)
     # phase = phase @ rotation_matrices
     x = x.view(batch, coeffs, 1, 2) @ rotation_matrices
@@ -888,12 +911,12 @@ class STFTResonanceGenerator(nn.Module):
         self.z_dim = z_dim
         self.n_frames = n_samples // self.step_size
         self.inner_channels = inner_channels
-        
+
         self.to_initial_transfer_function = nn.Linear(self.z_dim, self.n_coeffs)
-        
+
         self.base_resonance = 0.02
         self.resonance_range = (1 - self.base_resonance) * 0.99
-        
+
         self.to_transfer_function = ConvUpsample(
             self.z_dim,
             self.inner_channels,
@@ -903,44 +926,41 @@ class STFTResonanceGenerator(nn.Module):
             out_channels=self.n_coeffs,
             weight_norm=True,
             from_latent=True)
-        
+
         # self.hypernetwork = HyperNetworkLayer(
         #     self.inner_channels, self.z_dim, self.n_coeffs, self.n_coeffs)
-    
+
     def forward(self, z, impulse):
         batch, n_events, impulse_samples = impulse.shape
         z_dim = z.shape[-1]
-        
+
         impulse = F.pad(impulse, (0, self.n_samples - impulse_samples + self.window_size))
         windowed = windowed_audio(impulse, self.window_size, self.step_size)
-        
+
         # generate the initial transfer function
         # transfer_func = \
         #     self.base_resonance \
         #     + (self.resonance_range * torch.sigmoid(self.to_initial_transfer_function(z)))
-        
-        
+
         z = z.view(-1, self.z_dim)
-        transfer_funcs = self\
-            .to_transfer_function(z)\
-            .view(batch, n_events, self.n_coeffs, self.n_frames)\
-            .permute(0, 1, 3, 2)\
+        transfer_funcs = self \
+            .to_transfer_function(z) \
+            .view(batch, n_events, self.n_coeffs, self.n_frames) \
+            .permute(0, 1, 3, 2) \
             .view(batch, n_events, self.n_frames, self.n_coeffs)
 
         # make sure transfer funcs are in the allowable range        
         transfer_funcs = self.base_resonance + (torch.sigmoid(transfer_funcs) * self.resonance_range)
-        
-        
+
         frames = []
-    
+
         for i in range(self.n_frames):
-            
+
             # get the transformation matrix for this frame
-            
+
             # apply the transformation to get the new transformation matrix
             transfer_func = transfer_funcs[:, :, i, :]
-            
-            
+
             if i == 0:
                 spec = torch.fft.rfft(windowed[:, :, i, :], dim=-1)
                 spec = spec * transfer_func
@@ -950,24 +970,17 @@ class STFTResonanceGenerator(nn.Module):
                 prev = frames[i - 1]
                 prev_spec = torch.fft.rfft(prev, dim=-1)
                 prev_spec = advance_one_frame(prev_spec)
-                
+
                 current_spec = torch.fft.rfft(windowed[:, :, i, :], dim=-1)
                 spec = current_spec + prev_spec
                 spec = spec * transfer_func
                 audio = torch.fft.irfft(spec, dim=-1)
                 frames.append(audio)
-            
-        
-        
+
         frames = torch.cat([f[:, :, None, :] for f in frames], dim=2)
-        
+
         frames = frames.view(batch, self.n_frames, n_events, self.window_size).permute(0, 2, 1, 3)
-        
+
         audio = overlap_add(frames, apply_window=True)[..., :self.n_samples]
-        
+
         return audio
-        
-        
-        
-        
-        

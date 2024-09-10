@@ -8,7 +8,7 @@ from torch.nn import functional as F
 from typing import Literal
 
 
-SelectionType = Literal['sparse_softmax', 'gumbel_softmax']
+SelectionType = Literal['sparse_softmax', 'gumbel_softmax', 'softmax']
 
 
 def select_items(
@@ -19,7 +19,11 @@ def select_items(
     if type == 'sparse_softmax':
         selections = sparse_softmax(selections, normalize=True, dim=-1)
     elif type == 'gumbel_softmax':
-        selections = F.gumbel_softmax(selections, tau=0.1, hard=True, dim=-1)
+        selections = F.gumbel_softmax(selections, tau=1, hard=True, dim=-1)
+    elif type == 'softmax':
+        selections = torch.softmax(selections, dim=-1)
+    else:
+        raise ValueError(f'{type} is an unknown selection type')
     
     selected = selections @ items
     return selected

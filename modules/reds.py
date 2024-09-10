@@ -105,7 +105,8 @@ class F0Resonance(nn.Module):
             f0: torch.Tensor, 
             decay_coefficients: torch.Tensor, 
             freq_spacing: torch.Tensor,
-            sigmoid_decay: bool = True) -> torch.Tensor:
+            sigmoid_decay: bool = True,
+            apply_exponential_decay: bool = True) -> torch.Tensor:
         
         batch, n_events, n_elements = f0.shape
         
@@ -124,13 +125,13 @@ class F0Resonance(nn.Module):
         # phase_offsets = torch.sigmoid(phase_offsets) * np.pi
         
         exp_decays = exponential_decay(
-            torch.sigmoid(decay_coefficients) if sigmoid_decay else decay_coefficients, 
-            n_atoms=n_events, 
-            n_frames=self.n_octaves, 
-            base_resonance=0.01, 
+            torch.sigmoid(decay_coefficients) if sigmoid_decay else decay_coefficients,
+            n_atoms=n_events,
+            n_frames=self.n_octaves,
+            base_resonance=0.01,
             n_samples=self.n_octaves)
         assert exp_decays.shape == (batch, n_events, self.n_octaves)
-        
+
         
         # frequencies in radians
         f0 = self.min_freq + (f0 * self.freq_range)
@@ -158,7 +159,9 @@ class F0Resonance(nn.Module):
         assert osc.shape == (batch, n_events, self.n_octaves, self.n_samples)
         
         # apply decaying value
-        osc = osc * exp_decays[..., None]
+        if apply_exponential_decay:
+            osc = osc * exp_decays[..., None]
+
         osc = torch.sum(osc, dim=2)
         osc = max_norm(osc, dim=-1)
         

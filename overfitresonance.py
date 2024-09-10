@@ -1,16 +1,19 @@
 from typing import Union, Dict
 import torch
 from torch import nn
+
+from config import Config
 from data.audioiter import AudioIterator
-from modules import stft, fft_frequency_decompose
+from modules import stft, fft_frequency_decompose, NeuralReverb
 from modules.fft import fft_convolve
-from conjure import LmdbCollection, audio_conjure, serve_conjure
+from conjure import LmdbCollection, audio_conjure, serve_conjure, numpy_conjure, SupportedContentType
 from io import BytesIO
 from soundfile import SoundFile
 from modules.iterative import TensorTransform, iterative_loss
 from modules.quantize import select_items
+from modules.reds import F0Resonance
 from modules.softmax import sparse_softmax
-from modules.transfer import hierarchical_dirac, freq_domain_transfer_function_to_resonance, make_waves
+from modules.transfer import hierarchical_dirac, make_waves
 from modules.upsample import interpolate_last_axis, upsample_with_holes
 from torch.nn import functional as F
 from torch.optim import Adam
@@ -35,6 +38,17 @@ TODOs:
 - damped oscillator scan
 - full, deeper architecture with impulse and room convolutions
 """
+
+
+def mix(dry: torch.Tensor, wet: torch.Tensor, mix: torch.Tensor) -> torch.Tensor:
+    batch, n_events, time = dry.shape
+
+    mix = torch.softmax(mix, dim=-1)
+    mix = mix[:, :, None, :]
+    stacked = torch.stack([dry, wet], dim=-1)
+    x = stacked * mix
+    x = torch.sum(x, dim=-1)
+    return x
 
 def fft_shift(a: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
     # this is here to make the shift value interpretable
@@ -67,13 +81,19 @@ class Lookup(nn.Module):
             self,
             n_items: int,
             n_samples: int,
-            initialize: Union[None, TensorTransform] = None):
+            initialize: Union[None, TensorTransform] = None,
+            fixed: bool = False):
         super().__init__()
         self.n_items = n_items
         self.n_samples = n_samples
         data = torch.zeros(n_items, n_samples)
+        self.fixed = fixed
         initialized = data.uniform_(-0.02, 0.02) if initialize is None else initialize(data)
-        self.items = nn.Parameter(initialized)
+
+        if self.fixed:
+            self.register_buffer('items', initialized)
+        else:
+            self.items = nn.Parameter(initialized)
 
     def preprocess_items(self, items: torch.Tensor) -> torch.Tensor:
         return items
@@ -107,6 +127,42 @@ def flatten_envelope(x: torch.Tensor, kernel_size: int, step_size: int):
     return result
 
 
+class F0ResonanceLookup(Lookup):
+    def __init__(self, n_items: int, n_samples: int):
+        super().__init__(n_items, n_samples=3)
+        self.f0 = F0Resonance(n_octaves=16, n_samples=n_samples)
+        self.audio_samples = n_samples
+
+
+    def postprocess_results(self, items: torch.Tensor) -> torch.Tensor:
+        batch, n_events, expressivity, _ = items.shape
+
+        items = items.view(batch * n_events, expressivity, 3)
+
+        f0 = items[..., :1]
+        spacing = items[..., 1:2]
+        decays = items[..., 2:]
+        res = self.f0.forward(
+            f0=f0, decay_coefficients=decays, freq_spacing=spacing, sigmoid_decay=True, apply_exponential_decay=True)
+        res = res.view(batch, n_events, expressivity, self.audio_samples)
+        return res
+
+
+class WavetableLookup(Lookup):
+    def __init__(self, n_items: int, n_samples: int, n_resonances: int, samplerate: int):
+        super().__init__(n_items, n_resonances)
+        w = make_waves(n_samples, np.linspace(20, 4000, num=n_resonances // 4), samplerate)
+        self.register_buffer('waves', w)
+
+    def preprocess_items(self, items: torch.Tensor) -> torch.Tensor:
+        return items
+
+    def postprocess_results(self, items: torch.Tensor) -> torch.Tensor:
+        # items is of dimension (batch, n_events, n_resonances)
+        items = torch.relu(items)
+        x = items @ self.waves
+        return x
+
 class SampleLookup(Lookup):
 
     def __init__(
@@ -114,7 +170,9 @@ class SampleLookup(Lookup):
             n_items: int,
             n_samples: int,
             flatten_kernel_size: Union[int, None] = None,
-            initial: Union[torch.Tensor, None] = None):
+            initial: Union[torch.Tensor, None] = None,
+            windowed: bool = False):
+
 
         if initial is not None:
             initializer = lambda x: initial
@@ -123,6 +181,7 @@ class SampleLookup(Lookup):
 
         super().__init__(n_items, n_samples, initialize=initializer)
         self.flatten_kernel_size = flatten_kernel_size
+        self.windowed = windowed
 
     def preprocess_items(self, items: torch.Tensor) -> torch.Tensor:
         """Ensure that we have audio-rate samples at a relatively uniform
@@ -148,11 +207,15 @@ class SampleLookup(Lookup):
         spec = mags * torch.exp(1j * imag)
 
         x = torch.fft.irfft(spec, dim=-1)
+
+        if self.windowed:
+            x *= torch.hamming_window(x.shape[-1], device=x.device)
+
         return x
 
 
 class Decays(Lookup):
-    def __init__(self, n_items: int, n_samples: int, full_size: int, base_resonance: float = 0.7):
+    def __init__(self, n_items: int, n_samples: int, full_size: int, base_resonance: float = 0.5):
         super().__init__(n_items, n_samples)
         self.full_size = full_size
         self.base_resonance = base_resonance
@@ -168,6 +231,7 @@ class Decays(Lookup):
     def postprocess_results(self, decay: torch.Tensor) -> torch.Tensor:
         """Apply a scan in log-space to end up with exponential decay
         """
+
         decay = torch.log(decay + 1e-12)
         decay = torch.cumsum(decay, dim=-1)
         decay = torch.exp(decay)
@@ -182,7 +246,13 @@ class Envelopes(Lookup):
             n_samples: int,
             full_size: int,
             padded_size: int):
-        super().__init__(n_items, n_samples)
+
+        def init(x):
+            return \
+                torch.zeros(n_items, n_samples).uniform_(-1, 1) \
+                * (torch.linspace(1, 0, steps=n_samples)[None, :] ** torch.zeros(n_items, 1).uniform_(50, 100))
+
+        super().__init__(n_items, n_samples, initialize=init)
         self.full_size = full_size
         self.padded_size = padded_size
 
@@ -196,6 +266,7 @@ class Envelopes(Lookup):
     def postprocess_results(self, decay: torch.Tensor) -> torch.Tensor:
         """Scale up to sample rate and multiply with noise
         """
+
         amp = interpolate_last_axis(decay, desired_size=self.full_size)
         amp = amp * torch.zeros_like(amp).uniform_(-0.02, 0.02)
         diff = self.padded_size - self.full_size
@@ -355,6 +426,12 @@ class OverfitResonanceModel(nn.Module):
         self.mix_shape = (1, n_events, 2)
         self.amplitude_shape = (1, n_events, 1)
 
+        verbs = NeuralReverb.tensors_from_directory(Config.impulse_response_path(), n_samples)
+        n_verbs = verbs.shape[0]
+
+        self.room_shape = (1, n_events, n_verbs)
+
+
         # noise choices/selections
         self.noise_resonances = nn.Parameter(
             torch.zeros(*self.noise_resonance_shape).uniform_())
@@ -380,18 +457,23 @@ class OverfitResonanceModel(nn.Module):
             torch.zeros(*self.mix_shape).uniform_(-0.02, 0.02))
 
         self.amplitudes = nn.Parameter(
-            torch.zeros(*self.amplitude_shape).uniform_(0, 1))
+            torch.zeros(*self.amplitude_shape).uniform_(0, 0.02))
 
-        # dictionaries
-        # n_freqs = n_resonances // 4
-        # starting_resonance = make_waves(
-        #     n_samples, np.geomspace(20, 4000, num=n_freqs).tolist(), samplerate)
-        self.r = SampleLookup(n_resonances, n_samples, flatten_kernel_size=512)
-        self.n = SampleLookup(n_noise_filters, noise_filter_samples)
+        # room choices and mix
+        self.rooms = nn.Parameter(torch.zeros(*self.room_shape).uniform_(-0.02, 0.02))
+        self.room_mix = nn.Parameter(torch.zeros(*self.mix_shape).uniform_(-0.02, 0.02))
+
+        self.r = WavetableLookup(n_resonances, n_samples, 2048, samplerate)
+        # self.r = SampleLookup(n_resonances, n_samples, flatten_kernel_size=512)
+        # self.r = F0ResonanceLookup(n_resonances, n_samples)
+        self.n = SampleLookup(n_noise_filters, noise_filter_samples, windowed=True)
+
+
+        self.verb = Lookup(n_verbs, n_samples, initialize=lambda x: verbs, fixed=True)
 
         self.e = Envelopes(
             n_envelopes,
-            n_samples=64,
+            n_samples=128,
             full_size=8192,
             padded_size=self.n_samples)
 
@@ -403,9 +485,10 @@ class OverfitResonanceModel(nn.Module):
         # self.scheduler = DiracScheduler(
         #     self.n_events, start_size=self.n_samples // 32, n_samples=self.n_samples)
 
-        # self.scheduler = HierarchicalDiracModel(
-        #     self.n_events, self.n_samples)
-        self.scheduler = FFTShiftScheduler(self.n_events)
+        self.scheduler = HierarchicalDiracModel(
+            self.n_events, self.n_samples)
+
+        # self.scheduler = FFTShiftScheduler(self.n_events)
 
     def random_sequence(self):
         return self.apply_forces(
@@ -418,7 +501,9 @@ class OverfitResonanceModel(nn.Module):
             decays=torch.zeros(*self.decay_shape, device=device).uniform_(-0.02, 0.02),
             mixes=torch.zeros(*self.mix_shape, device=device).uniform_(-0.02, 0.02),
             amplitudes=torch.zeros(*self.amplitude_shape, device=device).uniform_(0, 1),
-            times=self.scheduler.random_params())
+            times=self.scheduler.random_params(),
+            room_choice=torch.zeros(*self.room_shape, device=device).uniform_(-0.02, 0.02),
+            room_mix=torch.zeros(*self.mix_shape, device=device).uniform_(-0.02, 0.02))
 
     def apply_forces(
             self,
@@ -431,7 +516,10 @@ class OverfitResonanceModel(nn.Module):
             decays: torch.Tensor,
             mixes: torch.Tensor,
             amplitudes: torch.Tensor,
-            times: torch.Tensor) -> torch.Tensor:
+            times: torch.Tensor,
+            room_choice: torch.Tensor,
+            room_mix: torch.Tensor) -> torch.Tensor:
+
         # Begin layer ==========================================
 
         # calculate impulses or energy injected into a system
@@ -492,9 +580,20 @@ class OverfitResonanceModel(nn.Module):
         mixed = stacked * mixes
         final = torch.sum(mixed, dim=-1)
 
+        # apply reverb
+        verb = self.verb.forward(room_choice)
+        wet = fft_convolve(verb, final.view(*verb.shape))
+        verb_mix = torch.softmax(room_mix, dim=-1)[:, :, None, :]
+        stacked = torch.stack([wet, final.view(*verb.shape)], dim=-1)
+        stacked = stacked * verb_mix
+        final = stacked.sum(dim=-1)
+
+
         # apply amplitudes
         final = final.view(-1, self.n_events, self.n_samples)
         final = final * torch.abs(amplitudes)
+
+
 
         # End layer ==========================================
 
@@ -513,7 +612,9 @@ class OverfitResonanceModel(nn.Module):
             decays=self.decays,
             mixes=self.mixes,
             amplitudes=self.amplitudes,
-            times=self.scheduler.params)
+            times=self.scheduler.params,
+            room_mix=self.room_mix,
+            room_choice=self.rooms)
 
 
 
@@ -549,9 +650,14 @@ def orig_audio(x: torch.Tensor):
 def random_audio(x: torch.Tensor):
     return audio(x)
 
+@numpy_conjure(storage=collection, content_type=SupportedContentType.Spectrogram.value)
+def envelopes(x: torch.Tensor):
+    return x.data.cpu().numpy()
+
 # TODO: consider multi-band transform or PIF here.
 # def transform(audio: torch.Tensor) -> torch.Tensor:
 #     return stft(audio, ws=2048, step=256, pad=True)
+
 #
 #
 # def spec_loss(recon_audio: torch.Tensor, real_audio: torch.Tensor) -> torch.Tensor:
@@ -587,16 +693,15 @@ def multiband_transform(x: torch.Tensor) -> Dict[str, torch.Tensor]:
     return dict(**d1, **d3, **d4, normal=normal)
 
 
-
 def train(target: torch.Tensor):
     model = OverfitResonanceModel(
-        noise_filter_samples=4096,
+        noise_filter_samples=64,
         noise_deformations=16,
-        noise_expressivity=4,
+        noise_expressivity=2,
         n_noise_filters=16,
-        instr_expressivity=8,
+        instr_expressivity=4,
         n_events=n_events,
-        n_resonances=16,
+        n_resonances=32,
         n_envelopes=16,
         n_decays=16,
         n_deformations=16,
@@ -616,6 +721,8 @@ def train(target: torch.Tensor):
 
         loss = iterative_loss(target, recon, transform)
         # loss = spec_loss(recon, target)
+
+        envelopes(model.e.items)
 
         loss.backward()
         optim.step()
@@ -643,7 +750,8 @@ if __name__ == '__main__':
         conjure_funcs=[
             recon_audio,
             orig_audio,
-            random_audio
+            random_audio,
+            envelopes
         ],
         port=9999,
         n_workers=1

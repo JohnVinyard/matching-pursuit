@@ -3,6 +3,9 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from modules import pos_encoded
+
+
 class AntiCausalConv(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, dilation):
         super().__init__()
@@ -63,15 +66,30 @@ class AntiCausalAnalysis(nn.Module):
             channels: int, 
             kernel_size: int, 
             dilations: List[int], 
-            do_norm: bool = False):
+            do_norm: bool = False,
+            pos_encodings: bool = False):
         
         super().__init__()
-        
+
+        self.pos_encodings = pos_encodings
         self.proj = nn.Conv1d(in_channels, channels, 1, 1, 0)
+
+        if pos_encodings:
+            self.pos_projection = nn.Conv1d(33, channels, 1, 1, 0)
+
         self.stack = AntiCausalStack(
             channels, kernel_size, dilations, do_norm=do_norm)
+
     
     def forward(self, x: torch.Tensor):
+        batch, channels, time = x.shape
+
         x = self.proj(x)
+
+        if self.pos_encodings:
+            p = pos_encoded(batch, time, n_freqs=16).permute(0, 2, 1)
+            p = self.pos_projection.forward(p)
+            x = x + p
+
         x = self.stack(x)
         return x

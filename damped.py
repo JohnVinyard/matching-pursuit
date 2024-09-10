@@ -6,7 +6,7 @@ from io import BytesIO
 from matplotlib import pyplot as plt
 from subprocess import Popen, PIPE
 from scipy.signal import stft
-from numba import jit
+from torch import nn
 
 
 # TODO: It might be nice to move this into zounds
@@ -31,8 +31,8 @@ def listen_to_sound(
         input('Next')
 
 
-n_samples = 2**15
-dimension = 3
+n_samples = 2**17
+dimension = 4
 
 def step(
         home: torch.Tensor,
@@ -43,14 +43,11 @@ def step(
         damping: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
     batch, n_events, dim = home.shape
-
-
     direction = home - position
     acceleration = (tension * direction) / mass
     velocity += acceleration
     velocity *= damping
     position += velocity
-
     return home, velocity, position
 
 
@@ -97,7 +94,7 @@ def main():
     tension = torch.zeros(batch_size, n_events, n_layers, 1).uniform_(0.1, 1)
     mass = torch.zeros(batch_size, n_events, n_layers, 1).uniform_(1, 1000)
 
-    damping = torch.zeros(batch_size, n_events, 1).fill_(0.999)
+    damping = torch.zeros(batch_size, n_events, 1).fill_(0.9999)
 
     rec = None
     for i in range(n_layers):

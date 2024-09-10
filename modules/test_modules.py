@@ -3,9 +3,10 @@ import torch
 
 from modules.anticausal import AntiCausalAnalysis
 from modules.auditory import STFT
+from modules.fft import n_fft_coeffs
 from modules.iterative import iterative_loss
 from modules.quantize import select_items
-from modules.transfer import hierarchical_dirac
+from modules.transfer import hierarchical_dirac, ExponentialTransform
 from modules.upsample import interpolate_last_axis, upsample_with_holes
 import numpy as np
 
@@ -130,3 +131,38 @@ class ModuleTests(TestCase):
         pos = torch.zeros(4, 5, 3, n_elements, 2).uniform_(-1, 1)
         x = hierarchical_dirac(pos)
         self.assertEqual((4, 5, 3, 1024,), x.shape)
+
+    def test_anticausal_analysis_no_pos_encodings(self):
+        spec = torch.zeros(3, 16, 128)
+        model = AntiCausalAnalysis(16, 32, 2, dilations=[1, 2, 4, 1])
+        x = model.forward(spec)
+        self.assertEqual((3, 32, 128), x.shape)
+
+    def test_anticausal_analysis_pos_encodings(self):
+        spec = torch.zeros(3, 16, 128)
+        model = AntiCausalAnalysis(16, 32, 2, dilations=[1, 2, 4, 1], pos_encodings=True)
+        x = model.forward(spec)
+        self.assertEqual((3, 32, 128), x.shape)
+
+
+    def test_can_perform_exponential_transform_with_single_channel(self):
+        n_samples = 2**15
+        a = torch.zeros(3, 1, 2**15)
+        n_expoonents = 16
+        step = 32
+        n_frames = n_samples // step
+        t = ExponentialTransform(64, step, n_exponents=n_expoonents, n_frames=n_frames)
+        result = t.forward(a)
+        n = n_fft_coeffs(64)
+        self.assertEqual((3, 1, n * n_expoonents, n_frames), result.shape)
+
+    def test_can_perform_exponential_transform_with_multiple_channels(self):
+        n_samples = 2 ** 15
+        a = torch.zeros(3, 5, 2 ** 15)
+        n_expoonents = 16
+        step = 32
+        n_frames = n_samples // step
+        t = ExponentialTransform(64, step, n_exponents=n_expoonents, n_frames=n_frames)
+        result = t.forward(a)
+        n = n_fft_coeffs(64)
+        self.assertEqual((3, 5, n * n_expoonents, n_frames), result.shape)

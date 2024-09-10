@@ -26,7 +26,30 @@ class NeuralReverb(nn.Module):
                 raise ValueError(
                     f'impulses must have shape ({self.n_rooms}, {self.size}) but had shape {imp.shape}')
             self.register_buffer('rooms', imp)
-    
+
+    @staticmethod
+    def tensors_from_directory(path, n_samples):
+        root = pathlib.Path(path)
+        g = root.joinpath('*.wav')
+
+        audio = []
+        to_process = list(glob.iglob(str(g)))
+
+        for p in to_process:
+            a, sr = load(p)
+            a = to_mono(a)
+            if len(a) < n_samples:
+                a = np.pad(a, [(0, n_samples - len(a))])
+            else:
+                a = a[:n_samples]
+            audio.append(a[None, ...])
+
+        print(f'Processed {len(to_process)} impulse responses')
+
+        audio = np.concatenate(audio, axis=0)
+        audio = torch.from_numpy(audio)
+        return audio
+
     @staticmethod
     def from_directory(path, samplerate, n_samples):
         root = pathlib.Path(path)
