@@ -13,7 +13,7 @@ from modules.iterative import TensorTransform, iterative_loss
 from modules.quantize import select_items
 from modules.reds import F0Resonance
 from modules.softmax import sparse_softmax
-from modules.transfer import hierarchical_dirac, make_waves
+from modules.transfer import hierarchical_dirac, make_waves, ExponentialTransform
 from modules.upsample import interpolate_last_axis, upsample_with_holes
 from torch.nn import functional as F
 from torch.optim import Adam
@@ -27,7 +27,7 @@ collection = LmdbCollection(path='overfitresonance')
 samplerate = 22050
 n_samples = 2 ** 17
 n_frames = 256
-n_events = 16
+n_events = 32
 
 """
 TODOs:
@@ -149,10 +149,20 @@ class F0ResonanceLookup(Lookup):
 
 
 class WavetableLookup(Lookup):
-    def __init__(self, n_items: int, n_samples: int, n_resonances: int, samplerate: int):
+    def __init__(
+            self,
+            n_items: int,
+            n_samples: int,
+            n_resonances: int,
+            samplerate: int,
+            learnable: bool = False):
+
         super().__init__(n_items, n_resonances)
         w = make_waves(n_samples, np.linspace(20, 4000, num=n_resonances // 4), samplerate)
-        self.register_buffer('waves', w)
+        if learnable:
+            self.waves = nn.Parameter(w)
+        else:
+            self.register_buffer('waves', w)
 
     def preprocess_items(self, items: torch.Tensor) -> torch.Tensor:
         return items
@@ -459,11 +469,17 @@ class OverfitResonanceModel(nn.Module):
         self.amplitudes = nn.Parameter(
             torch.zeros(*self.amplitude_shape).uniform_(0, 0.02))
 
+        self.res_filter = nn.Parameter(
+            torch.zeros(1, n_events, instr_expressivity, n_noise_filters).uniform_(0.02, 0.02)
+        )
+
         # room choices and mix
         self.rooms = nn.Parameter(torch.zeros(*self.room_shape).uniform_(-0.02, 0.02))
         self.room_mix = nn.Parameter(torch.zeros(*self.mix_shape).uniform_(-0.02, 0.02))
 
-        self.r = WavetableLookup(n_resonances, n_samples, 2048, samplerate)
+        self.r = WavetableLookup(
+            n_resonances, n_samples, n_resonances=4096, samplerate=samplerate, learnable=False)
+
         # self.r = SampleLookup(n_resonances, n_samples, flatten_kernel_size=512)
         # self.r = F0ResonanceLookup(n_resonances, n_samples)
         self.n = SampleLookup(n_noise_filters, noise_filter_samples, windowed=True)
@@ -555,6 +571,13 @@ class OverfitResonanceModel(nn.Module):
         # choose a number of resonances to be convolved with
         # those impulses
         resonance = self.r.forward(resonances)
+        res_filters = self.n.forward(self.res_filter)
+        res_filters = torch.cat([
+            res_filters,
+            torch.zeros(*res_filters.shape[:-1], resonance.shape[-1] - res_filters.shape[-1], device=res_filters.device)
+        ], dim=-1)
+        resonance = fft_convolve(resonance, res_filters)
+
 
         # describe how we interpolate between different
         # resonances over time
@@ -666,6 +689,7 @@ def envelopes(x: torch.Tensor):
 #     loss = torch.abs(recon_spec - real_spec).sum()
 #     return loss
 
+exp_transform = ExponentialTransform(32, 16, n_exponents=16, n_frames=n_samples // 16).to(device)
 
 def transform(x: torch.Tensor) -> torch.Tensor:
     batch_size, channels, _ = x.shape
@@ -679,18 +703,23 @@ def multiband_transform(x: torch.Tensor) -> Dict[str, torch.Tensor]:
     # this requires a window size of (n_samples // 256) * 2
     # and a window size of 512, 256
 
-    # window_size = 512
+    window_size = 512
 
-    d1 = {f'{k}_xl': stft(v, 512, 64, pad=True) for k, v in bands.items()}
     d1 = {f'{k}_long': stft(v, 128, 64, pad=True) for k, v in bands.items()}
     d3 = {f'{k}_short': stft(v, 64, 32, pad=True) for k, v in bands.items()}
     d4 = {f'{k}_xs': stft(v, 16, 8, pad=True) for k, v in bands.items()}
 
     normal = stft(x, 2048, 256, pad=True).reshape(-1, 128, 1025).permute(0, 2, 1)
-    # pooled = F.avg_pool1d(normal, kernel_size=128, stride=1, padding=64)[..., :128]
-    # residual = torch.relu(normal - pooled)
 
-    return dict(**d1, **d3, **d4, normal=normal)
+    et = exp_transform.forward(x)
+
+    return dict(
+        normal=normal,
+        et=et * 1e-3,
+        **d1,
+        **d3,
+        **d4
+    )
 
 
 def train(target: torch.Tensor):

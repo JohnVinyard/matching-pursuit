@@ -3,7 +3,7 @@ from typing import Collection, List
 import torch
 from torch import nn
 
-from modules import stft
+from modules import stft, unit_norm
 # from modules.angle import windowed_audio
 
 from modules.ddsp import overlap_add
@@ -47,7 +47,7 @@ class ExponentialTransform(nn.Module):
         bank = \
             torch.linspace(1, 0, n_frames)[None, :] \
             ** torch.linspace(2, self.max_exponent, self.n_exponents)[:, None]
-        self.register_buffer('bank', torch.softmax(bank, dim=-1))
+        self.register_buffer('bank', unit_norm(bank))
 
     def forward(self, audio: torch.Tensor) -> torch.Tensor:
         batch, n_events, _ = audio.shape

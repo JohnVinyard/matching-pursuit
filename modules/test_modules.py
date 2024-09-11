@@ -10,6 +10,7 @@ from modules.transfer import hierarchical_dirac, ExponentialTransform
 from modules.upsample import interpolate_last_axis, upsample_with_holes
 import numpy as np
 
+
 class ModuleTests(TestCase):
     
     def test_stft_single_channel(self):
