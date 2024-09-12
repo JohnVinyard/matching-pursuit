@@ -42,7 +42,12 @@ can be found on GitHub. Trained segments come from the MusicNet dataset.
 
 ## Overfitting as Encoder
 
-TODO
+Assuming that our _decoder_ is parameter-less (i.e., only the encoded representation is needed), 
+and that the path from decoder to loss function is fully differentiable, then we
+can perform gradient descent to find the best encoded representation for a given
+piece of audio.  The [Gaussian/Gamma Splatting Experiment](https://johnvinyard.github.io/gamma-audio-splat.html)
+is an example of this;  audio is defined as a set of events/parameters passed to
+a fixed synthesizer.
 
 ## Other Areas of Interest
 
