@@ -1,11 +1,11 @@
-from typing import Tuple
+from typing import Tuple, Dict
 
 import torch
 from torch import nn
 from itertools import count
 
 from data import AudioIterator
-from modules import max_norm, stft
+from modules import max_norm, stft, fft_frequency_decompose
 from modules.overlap_add import overlap_add
 from torch.optim import Adam
 import numpy as np
@@ -17,7 +17,7 @@ from util import device
 from conjure import LmdbCollection, audio_conjure, serve_conjure, numpy_conjure, SupportedContentType
 from io import BytesIO
 from soundfile import SoundFile
-
+from torch.nn.utils.clip_grad import clip_grad_norm_, clip_grad_value_
 
 
 def gammatone_filter_bank(n_filters: int, size: int, device) -> torch.Tensor:
@@ -129,7 +129,7 @@ class SSM(nn.Module):
         result = torch.cat(results, dim=1)
         result = result[:, None, :, :]
 
-        result = overlap_add(result, apply_window=True)
+        result = overlap_add(result)
         return result[..., :frames * (self.input_dim // 2)]
 
 
@@ -211,8 +211,10 @@ def train(
         # real_spec = auditory_image_model(
         #     target, gammatone_bank, aim_window_size=512, aim_step_size=128)
 
-        fake_spec = stft(recon, ws=2048, step=256, pad=True)
-        real_spec = stft(target, ws=2048, step=256, pad=True)
+        # fake_spec = stft(recon, ws=2048, step=256, pad=True)
+        # real_spec = stft(target, ws=2048, step=256, pad=True)
+        fake_spec = transform(recon)
+        real_spec = transform(target)
         return torch.abs(fake_spec - real_spec).sum()
 
 
@@ -224,11 +226,17 @@ def train(
         recon = model.forward()
         recon_audio(max_norm(recon))
         loss = perceptual_loss(recon, target) + sparsity_loss(model.control_signal)
+        
+        non_zero = (model.control_signal > 0).sum()
+        sparsity = (non_zero / model.control_signal.numel()).item()
 
         envelopes(model.control_signal.view(control_plane_dim, -1))
         loss.backward()
+
+        clip_grad_value_(model.parameters(), 0.5)
+
         optim.step()
-        print(iteration, loss.item())
+        print(iteration, loss.item(), sparsity)
 
         with torch.no_grad():
             rnd = model.random()
@@ -236,11 +244,39 @@ def train(
             random_audio(rnd)
 
 
-n_samples = 2 ** 18
+def transform(x: torch.Tensor) -> torch.Tensor:
+    batch_size, channels, _ = x.shape
+    bands = multiband_transform(x)
+    return torch.cat([b.reshape(batch_size, channels, -1) for b in bands.values()], dim=-1)
+
+
+def multiband_transform(x: torch.Tensor) -> Dict[str, torch.Tensor]:
+    bands = fft_frequency_decompose(x, 512)
+    # TODO: each band should have 256 frequency bins and also 256 time bins
+    # this requires a window size of (n_samples // 256) * 2
+    # and a window size of 512, 256
+
+    window_size = 512
+
+    d1 = {f'{k}_long': stft(v, 128, 64, pad=True) for k, v in bands.items()}
+    d3 = {f'{k}_short': stft(v, 64, 32, pad=True) for k, v in bands.items()}
+    d4 = {f'{k}_xs': stft(v, 16, 8, pad=True) for k, v in bands.items()}
+
+    normal = stft(x, 2048, 256, pad=True).reshape(-1, 128, 1025).permute(0, 2, 1)
+
+    return dict(
+        normal=normal,
+        **d1,
+        **d3,
+        **d4
+    )
+
+
+n_samples = 2 ** 17
 samplerate = 22050
 window_size = 512
-control_plane_dim = 16
-state_dim = 64
+control_plane_dim = 32
+state_dim = 128
 
 
 if __name__ == '__main__':
