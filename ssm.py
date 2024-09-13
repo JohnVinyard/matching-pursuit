@@ -43,7 +43,6 @@ def gammatone_filter_bank(n_filters: int, size: int, device) -> torch.Tensor:
     return bank
 
 
-
 def fft_convolve(*args, norm=None) -> torch.Tensor:
     n_samples = args[0].shape[-1]
 
@@ -188,6 +187,10 @@ def orig_audio(x: torch.Tensor):
 def envelopes(x: torch.Tensor):
     return x.data.cpu().numpy()
 
+@numpy_conjure(storage=collection, content_type=SupportedContentType.Spectrogram.value)
+def state_space(x: torch.Tensor):
+    return x.data.cpu().numpy()
+
 @audio_conjure(storage=collection)
 def random_audio(x: torch.Tensor):
     return audio(x)
@@ -230,6 +233,7 @@ def train(
         non_zero = (model.control_signal > 0).sum()
         sparsity = (non_zero / model.control_signal.numel()).item()
 
+        state_space(model.ssm.state_matrix)
         envelopes(model.control_signal.view(control_plane_dim, -1))
         loss.backward()
 
@@ -272,7 +276,7 @@ def multiband_transform(x: torch.Tensor) -> Dict[str, torch.Tensor]:
     )
 
 
-n_samples = 2 ** 17
+n_samples = 2 ** 18
 samplerate = 22050
 window_size = 512
 control_plane_dim = 32
@@ -293,7 +297,8 @@ if __name__ == '__main__':
         orig_audio,
         recon_audio,
         envelopes,
-        random_audio
+        random_audio,
+        state_space
     ], port=9999, n_workers=1)
 
     train(

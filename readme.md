@@ -17,7 +17,7 @@ streams or sound sources sharing some physical space.
 
 # Recent Work
 
-![Sparse Representation](https://matching-pursuit-repo-media.s3.amazonaws.com/sparse_audio_represenation.png)
+![sparse decomposition of audio](https://zounds-blog-media.s3.amazonaws.com/sparse_audio.png)
 
 ## Sparse Intereptable Audio Model
 
