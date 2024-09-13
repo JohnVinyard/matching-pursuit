@@ -1,12 +1,8 @@
 """[markdown]
 
 # TODOS
-- move unused but useful things out into their own spot on matching-pursuit
 - convenience function for the `BytesIO` pattern
-- create s3 folder per experiment automatically with correct policies 
-- how can this work for both experiment time (monitoring) and writing time?
 - fix zounds issues
-- move conjurearticle into conjure
 """
 
 from functools import reduce
@@ -16,7 +12,7 @@ import requests
 from io import BytesIO
 from librosa import load
 import numpy as np
-from conjurearticle import conjure_article, AudioComponent, CitationComponent, ImageComponent
+# from conjurearticle import conjure_article, AudioComponent, CitationComponent, ImageComponent
 from soundfile import SoundFile
 from scipy.signal import gammatone, stft
 from matplotlib import pyplot as plt

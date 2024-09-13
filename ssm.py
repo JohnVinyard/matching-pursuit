@@ -18,17 +18,18 @@ import torch
 from torch import nn
 from itertools import count
 
-from avenues.conjurearticle import conjure_article
-from data import AudioIterator
-from modules import max_norm, stft, fft_frequency_decompose, flattened_multiband_spectrogram
+from data import AudioIterator, get_one_audio_segment
+from modules import max_norm, flattened_multiband_spectrogram
 from modules.overlap_add import overlap_add
 from torch.optim import Adam
 from util import device, encode_audio
 
 from conjure import logger, LmdbCollection, serve_conjure, SupportedContentType, loggers, \
-    NumpySerializer, NumpyDeserializer, audio_conjure, Conjure
+    NumpySerializer, NumpyDeserializer, S3Collection, \
+    two_dim_matrix_display_bytes, conjure_article, ImageComponent
 from torch.nn.utils.clip_grad import clip_grad_value_
 from argparse import ArgumentParser
+import numpy as np
 
 """[markdown]
 # The Model
@@ -44,6 +45,7 @@ blah
 ## Something Else
 
 """
+
 
 class SSM(nn.Module):
     def __init__(self, control_plane_dim: int, input_dim: int, state_matrix_dim: int):
@@ -117,25 +119,8 @@ class OverfitControlPlane(nn.Module):
         return self.ssm.forward(sig if sig is not None else self.control_signal)
 
 
-collection = LmdbCollection(path='ssm')
 
-def to_numpy(x: torch.Tensor):
-    return x.data.cpu().numpy()
-
-
-recon_audio, orig_audio, random_audio = loggers(
-    ['recon', 'orig', 'random'],
-    'audio/wav',
-    encode_audio,
-    collection)
-
-envelopes, state_space = loggers(
-    ['envelopes', 'statespace'],
-    SupportedContentType.Spectrogram.value,
-    to_numpy,
-    collection,
-    serializer=NumpySerializer(),
-    deserializer=NumpyDeserializer())
+# matrix
 
 
 """[markdown]
@@ -144,47 +129,6 @@ envelopes, state_space = loggers(
 """
 
 
-def train(
-        target: torch.Tensor,
-        control_plane_dim: int,
-        window_size: int,
-        state_dim: int,
-        device):
-    model = OverfitControlPlane(
-        control_plane_dim, window_size, state_dim, n_samples=target.shape[-1]).to(device)
-
-    optim = Adam(model.parameters(), lr=1e-2)
-
-    def perceptual_loss(recon: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        fake_spec = transform(recon)
-        real_spec = transform(target)
-        return torch.abs(fake_spec - real_spec).sum()
-
-    def sparsity_loss(c: torch.Tensor) -> torch.Tensor:
-        return torch.abs(c).sum() * 1e-5
-
-    for iteration in count():
-        optim.zero_grad()
-        recon = model.forward()
-        recon_audio(max_norm(recon))
-        loss = perceptual_loss(recon, target) + sparsity_loss(model.control_signal)
-
-        non_zero = (model.control_signal > 0).sum()
-        sparsity = (non_zero / model.control_signal.numel()).item()
-
-        state_space(model.ssm.state_matrix)
-        envelopes(model.control_signal.view(control_plane_dim, -1))
-        loss.backward()
-
-        clip_grad_value_(model.parameters(), 0.5)
-
-        optim.step()
-        print(iteration, loss.item(), sparsity)
-
-        with torch.no_grad():
-            rnd = model.random()
-            rnd = max_norm(rnd)
-            random_audio(rnd)
 
 
 """[markdown]
@@ -217,25 +161,61 @@ state_dim = 128
 
 
 def demo_page_dict() -> Dict[str, any]:
-    return dict()
+    remote = S3Collection('state-space-model-demo', is_public=True, cors_enabled=True)
+
+    tester = logger(
+        'testmatrix',
+        content_type='image/png',
+        func=lambda x: two_dim_matrix_display_bytes(x, cmap='hot'),
+        collection=remote)
+
+    data = np.random.normal(0, 1, (16, 16))
+
+    _, meta = tester.result_and_meta(data)
+
+    return dict(
+        matrix=ImageComponent(src=meta.public_uri.geturl(), height=500)
+    )
 
 
 def generate_demo_page():
+    remote = S3Collection('state-space-model-demo', is_public=True, cors_enabled=True)
+
+    tester = logger(
+        'testmatrix',
+        content_type='image/png',
+        func=lambda x: two_dim_matrix_display_bytes(x, cmap='hot'),
+        collection=remote)
+
+    data = np.random.normal(0, 1, (16, 16))
+    tester(data)
+
     display = demo_page_dict()
     conjure_article(__file__, 'html', **display)
 
 
 def train_and_monitor():
+    target = get_one_audio_segment(n_samples = n_samples, samplerate=samplerate)
+    collection = LmdbCollection(path='ssm')
 
-    # TODO: get_one convenience function
+    def to_numpy(x: torch.Tensor):
+        return x.data.cpu().numpy()
 
-    ai = AudioIterator(
-        batch_size=1,
-        n_samples=n_samples,
-        samplerate=samplerate,
-        normalize=True,
-        overfit=True, )
-    target: torch.Tensor = next(iter(ai)).to(device).view(-1, 1, n_samples)
+    recon_audio, orig_audio, random_audio = loggers(
+        ['recon', 'orig', 'random'],
+        'audio/wav',
+        encode_audio,
+        collection)
+
+    envelopes, state_space = loggers(
+        ['envelopes', 'statespace'],
+        SupportedContentType.Spectrogram.value,
+        to_numpy,
+        collection,
+        serializer=NumpySerializer(),
+        deserializer=NumpyDeserializer())
+
+
     orig_audio(target)
 
     serve_conjure([
@@ -245,6 +225,49 @@ def train_and_monitor():
         random_audio,
         state_space
     ], port=9999, n_workers=1)
+
+    def train(
+            target: torch.Tensor,
+            control_plane_dim: int,
+            window_size: int,
+            state_dim: int,
+            device):
+        model = OverfitControlPlane(
+            control_plane_dim, window_size, state_dim, n_samples=target.shape[-1]).to(device)
+
+        optim = Adam(model.parameters(), lr=1e-2)
+
+        def perceptual_loss(recon: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+            fake_spec = transform(recon)
+            real_spec = transform(target)
+            return torch.abs(fake_spec - real_spec).sum()
+
+        def sparsity_loss(c: torch.Tensor) -> torch.Tensor:
+            return torch.abs(c).sum() * 1e-5
+
+        for iteration in count():
+            optim.zero_grad()
+            recon = model.forward()
+            recon_audio(max_norm(recon))
+            loss = perceptual_loss(recon, target) + sparsity_loss(model.control_signal)
+
+            non_zero = (model.control_signal > 0).sum()
+            sparsity = (non_zero / model.control_signal.numel()).item()
+
+            state_space(model.ssm.state_matrix)
+            envelopes(model.control_signal.view(control_plane_dim, -1))
+            loss.backward()
+
+            clip_grad_value_(model.parameters(), 0.5)
+
+            optim.step()
+            print(iteration, loss.item(), sparsity)
+
+            with torch.no_grad():
+                rnd = model.random()
+                rnd = max_norm(rnd)
+                random_audio(rnd)
+
 
     train(
         target,
