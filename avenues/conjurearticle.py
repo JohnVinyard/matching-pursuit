@@ -1,14 +1,16 @@
+import os.path
 from typing import Any, Dict, Iterable, Literal, Tuple
 import tokenize
 import markdown
 from io import BytesIO
+import re
 
 ChunkType = Literal['CODE', 'MARKDOWN']
 
 RenderTarget = Literal['html', 'markdown']
 
 
-def build_template(page_title: str, content: str):
+def build_template(page_title: str, content: str, toc: str):
     template = f'''
         <!DOCTYPE html>
             <html lang="en">
@@ -23,10 +25,31 @@ def build_template(page_title: str, content: str):
                         font-family: Arial;
                         margin: 20px 100px;
                     }}
+                    .back-to-top {{
+                        position: fixed;
+                        bottom: 20px;
+                        right: 20px;
+                        background-color: #eee;
+                        padding: 10px;
+                        font-size: 0.8em;
+                    }}
                 </style>
+                <script type="text/javascript">
+                    setInterval(() => {{
+                        window.location.reload();
+                    }}, 10000);
+                </script>
             </head>
             <body>
+                {toc}
                 {content}
+                
+                <a href="#">
+                    <div class="back-to-top">
+                        Back to Top
+                    </div>
+                </a>
+                
             </body>
             </html>
     '''
@@ -45,9 +68,6 @@ class BytesContext:
     def __exit__(self, exc_type, exc_value, traceback):
         pass
 
-
-# with BytesContext() as f:
-#     f.bio.write()
 
 class ImageComponent:
     def __init__(self, src: str, height: int):
@@ -174,9 +194,50 @@ def classify_chunks(filepath: str, target: RenderTarget, **kwargs) -> Iterable[T
 
     yield ('CODE', '\n'.join(lines[current_line:]))
 
+header_pattern = r'<a\sid=\"(?P<id>[^\"]+)\".*\n\s*<(?P<header>h\d)>(?P<title>[^<]+)'
 
-def conjure_article(filepath: str, target: RenderTarget, **kwargs: Dict[str, Any]):
-    
+pattern = r'(?P<x><h\d>(?P<title>[^<]+)</h\d>\n)'
+
+def generate_table_of_contents(html: str) -> Tuple[str, str]:
+
+    # first, add anchor links to the html
+    p = re.compile(pattern)
+
+    def replacer(m) -> str:
+        gd = m.groupdict()
+        replacement = f'''
+<a id="{gd['title']}"></a>
+{gd['x']}'''
+        return replacement
+
+    html = p.sub(replacer, html)
+
+    p = re.compile(header_pattern)
+
+    # then scan all the anchor link and header pairs to produce a table
+    # of contents
+
+    markdown_content = '''
+# Table of Contents
+
+'''
+
+    for match in p.finditer(html):
+        d = match.groupdict()
+        _id, tag, title = d['id'], d['header'], d['title']
+        indent = int(tag[-1:]) - 1
+        tab = '\t'
+        entry = f'{tab * indent} - [{title}](#{_id})\n'
+        markdown_content += entry
+
+    html_toc = markdown.markdown(markdown_content)
+    return html, html_toc
+
+def conjure_article(
+        filepath: str,
+        target: RenderTarget,
+        **kwargs: Dict[str, Any]):
+
     final_chunks = classify_chunks(filepath, target, **kwargs)
     
     content = ''
@@ -190,6 +251,14 @@ def conjure_article(filepath: str, target: RenderTarget, **kwargs: Dict[str, Any
             content += f'\n<code-block language="python">{new_content}</code-block>\n'
         elif t == 'MARKDOWN':
             content += f'\n{new_content}\n'
-    
-    with open('phaseinvariance.html', 'w') as f:
-        f.write(build_template('Blah', content))
+
+    content, toc = generate_table_of_contents(content)
+
+    name, _ = os.path.splitext(filepath)
+
+    filename = f'{name}.html'
+    with open(filename, 'w') as f:
+        f.write(build_template('Blah', content, toc))
+
+    wd = os.getcwd()
+    full_path = os.path.join(wd, filename)

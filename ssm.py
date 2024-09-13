@@ -1,9 +1,25 @@
-from typing import Tuple, Dict
+"""[markdown]
+
+This work takes a slightly different approach to the problem of decomposing
+audio into a sparse and interpretable representation.  It models the physical
+system that produced a segment of "natural"
+(i.e., produced by acoustic instruments) musical audio as a state-space-model and
+attempts to find a sparse control signal for the system.  The control system
+can be thought of as the energy injected into the system by a human musician,
+corresponding roughly to a score, and the state-space model can be thought of
+as the dynamics and resonances of the musical instrument and room in which it
+was played.
+
+"""
+
+
+from typing import Dict
 
 import torch
 from torch import nn
 from itertools import count
 
+from avenues.conjurearticle import conjure_article
 from data import AudioIterator
 from modules import max_norm, stft, fft_frequency_decompose
 from modules.overlap_add import overlap_add
@@ -17,8 +33,24 @@ from util import device
 from conjure import LmdbCollection, audio_conjure, serve_conjure, numpy_conjure, SupportedContentType
 from io import BytesIO
 from soundfile import SoundFile
-from torch.nn.utils.clip_grad import clip_grad_norm_, clip_grad_value_
+from torch.nn.utils.clip_grad import clip_grad_value_
+from argparse import ArgumentParser
 
+
+"""[markdown]
+# The Model
+
+blah blah
+
+## Something
+
+blah
+
+### Nested
+
+## Something Else
+
+"""
 
 def gammatone_filter_bank(n_filters: int, size: int, device) -> torch.Tensor:
     bank = np.zeros((n_filters, size))
@@ -195,6 +227,11 @@ def state_space(x: torch.Tensor):
 def random_audio(x: torch.Tensor):
     return audio(x)
 
+"""[markdown]
+# The training process
+
+"""
+
 def train(
         target: torch.Tensor,
         control_plane_dim: int,
@@ -247,6 +284,15 @@ def train(
             rnd = max_norm(rnd)
             random_audio(rnd)
 
+"""[markdown]
+
+# Sparsity Loss
+
+blah
+
+## More about the sparsity loss 
+
+"""
 
 def transform(x: torch.Tensor) -> torch.Tensor:
     batch_size, channels, _ = x.shape
@@ -283,7 +329,14 @@ control_plane_dim = 32
 state_dim = 128
 
 
-if __name__ == '__main__':
+def demo_page_dict() -> Dict[str, any]:
+    return dict()
+
+def generate_demo_page():
+    display = demo_page_dict()
+    conjure_article(__file__, 'html', **display)
+
+def train_and_monitor():
     ai = AudioIterator(
         batch_size=1,
         n_samples=n_samples,
@@ -307,3 +360,13 @@ if __name__ == '__main__':
         window_size=window_size,
         state_dim=state_dim,
         device=device)
+
+
+if __name__ == '__main__':
+    parser = ArgumentParser()
+    parser.add_argument('--mode', type=str)
+    args = parser.parse_args()
+    if args.mode == 'train':
+        train_and_monitor()
+    elif args.mode == 'demo':
+        generate_demo_page()

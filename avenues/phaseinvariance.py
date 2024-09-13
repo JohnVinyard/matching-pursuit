@@ -1,7 +1,6 @@
 """[markdown]
 
 # TODOS
-- table of contents
 - Figure out conjure content types
 - convenience function for the `BytesIO` pattern
 - create s3 folder per experiment automatically with correct policies 
