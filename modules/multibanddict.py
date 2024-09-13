@@ -8,9 +8,6 @@ from util import device
 from modules.decompose import fft_frequency_decompose, fft_frequency_recompose, fft_resample
 from modules.matchingpursuit import build_scatter_segments, dictionary_learning_step, sparse_code
 from modules.normalization import unit_norm
-from torch.nn import functional as F
-from librosa.filters import mel, chroma
-import librosa
 from hashlib import sha256
 
 LocalEventTuple = Tuple[int, int, int, torch.Tensor]
@@ -18,6 +15,36 @@ GlobalEventTuple = Tuple[int, int, float, float]
 
 Shape = Tuple
 BandEncodingPackage = Tuple[List[LocalEventTuple], Callable, Shape]
+
+
+def multiband_spectrogram(
+        x: torch.Tensor,
+        stft_spec: Dict[str, Tuple[int, int]],
+        smallest_band_size: int = 512):
+
+    bands = fft_frequency_decompose(x, smallest_band_size)
+
+    # TODO: Add parameters for these values
+    normal = stft(x, 2048, 256, pad=True).reshape(-1, 128, 1025).permute(0, 2, 1)
+
+    accum = dict(normal=normal)
+
+    for name, sizes in stft_spec.items():
+        ws, step = sizes
+        d = {f'{k}_{name}': stft(v, ws, step, pad=True) for k, v in bands.items()}
+        accum = dict(**accum, **d)
+
+
+    return accum
+
+def flattened_multiband_spectrogram(
+        x: torch.Tensor,
+        stft_spec: Dict[str, Tuple[int, int]],
+        smallest_band_size: int = 512):
+    batch_size, channels, _ = x.shape
+    bands = multiband_spectrogram(x, stft_spec, smallest_band_size)
+    return torch.cat([b.reshape(batch_size, channels, -1) for b in bands.values()], dim=-1)
+
 
 class BandSpec(object):
     def __init__(

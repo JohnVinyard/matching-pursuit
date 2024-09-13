@@ -1,10 +1,12 @@
 """[markdown]
 
 # TODOS
-- Figure out conjure content types
+- move unused but useful things out into their own spot on matching-pursuit
 - convenience function for the `BytesIO` pattern
 - create s3 folder per experiment automatically with correct policies 
 - how can this work for both experiment time (monitoring) and writing time?
+- fix zounds issues
+- move conjurearticle into conjure
 """
 
 from functools import reduce
@@ -44,8 +46,8 @@ We'll start with some audio
 
 """
 
-class ExtendedContentType(Enum):
-    GIF = 'image/gif'
+# class ExtendedContentType(Enum):
+#     GIF = 'image/gif'
 
 
 def gammatone_filter_bank(n_filters: int, size: int) -> np.ndarray:
@@ -90,7 +92,7 @@ def gammatone_plot(filterbank: np.ndarray) -> bytes:
     return bio.read()
 
 
-@bytes_conjure(collection, content_type=ExtendedContentType.GIF)
+@bytes_conjure(collection, content_type='image/gif')
 def tensor_movie_gif(x: np.ndarray):
     a, b, c = x.shape
     
@@ -250,9 +252,17 @@ def main() -> Dict[str, Any]:
     
     n_filters = 128
     filter_size = 128
-    
+
+
+    # I also want to avoid this:  just running a function and grabbing the
+    # metadata
+    # I also had to define this gammatone plot function
+    # which doesn't do much of anything
+
+    # logger.log(filters,
     fb = gammatone_filter_bank(n_filters, filter_size)
     _, gt_full_meta = gammatone_plot.result_and_meta(fb)
+
     _, gt_zoomed_meta = gammatone_plot.result_and_meta(fb[16:32])
     
     gammatone_spec, aim = convolve(audio, fb)

@@ -1,9 +1,33 @@
+from io import BytesIO
 from typing import Union
 import numpy as np
 import zounds
 import torch
 from subprocess import Popen, PIPE
 
+from soundfile import SoundFile
+
+
+def encode_audio(
+        x: torch.Tensor,
+        samplerate: int = 22050,
+        format='WAV',
+        subtype='PCM_16'):
+
+    x = x.data.cpu().numpy()[0].reshape((-1,))
+    io = BytesIO()
+
+    with SoundFile(
+            file=io,
+            mode='w',
+            samplerate=samplerate,
+            channels=1,
+            format=format,
+            subtype=subtype) as sf:
+        sf.write(x)
+
+    io.seek(0)
+    return io.read()
 
 def playable(
     x: Union[torch.Tensor, np.ndarray], 
