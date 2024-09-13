@@ -117,49 +117,10 @@ class OverfitControlPlane(nn.Module):
         return self.ssm.forward(sig if sig is not None else self.control_signal)
 
 
-# def audio(x: torch.Tensor):
-#     x = x.data.cpu().numpy()[0].reshape((-1,))
-#     io = BytesIO()
-#
-#     with SoundFile(
-#             file=io,
-#             mode='w',
-#             samplerate=samplerate,
-#             channels=1,
-#             format='WAV',
-#             subtype='PCM_16') as sf:
-#         sf.write(x)
-#
-#     io.seek(0)
-#     return io.read()
-
-
 collection = LmdbCollection(path='ssm')
-
-
-# I want to avoid this:  having to define a function just to log
-# some value with a particular name to a collection
-# logger = conjure.logger(collection)
-
-# logger.log('recon_audio', audio(x), 'audio/wav')
-
-# the important pieces here are really
-# - collection
-# - name
-# - how to get to and from bytes
-
-
-# recon_audio = audio_conjure(storage=collection, identifier=b'recon_audio')(audio)
-
 
 def to_numpy(x: torch.Tensor):
     return x.data.cpu().numpy()
-
-
-# def audiowrapper(x: torch.Tensor) -> bytes:
-#     print('calling audio wrapper')
-#     return audio(x)
-
 
 
 recon_audio, orig_audio, random_audio = loggers(
@@ -246,33 +207,6 @@ def transform(x: torch.Tensor):
             'xs': (16, 8),
         },
         smallest_band_size=512)
-
-# def transform(x: torch.Tensor) -> torch.Tensor:
-#     batch_size, channels, _ = x.shape
-#     bands = multiband_transform(x)
-#     return torch.cat([b.reshape(batch_size, channels, -1) for b in bands.values()], dim=-1)
-#
-#
-# def multiband_transform(x: torch.Tensor) -> Dict[str, torch.Tensor]:
-#     bands = fft_frequency_decompose(x, 512)
-#     # TODO: each band should have 256 frequency bins and also 256 time bins
-#     # this requires a window size of (n_samples // 256) * 2
-#     # and a window size of 512, 256
-#
-#     window_size = 512
-#
-#     d1 = {f'{k}_long': stft(v, 128, 64, pad=True) for k, v in bands.items()}
-#     d3 = {f'{k}_short': stft(v, 64, 32, pad=True) for k, v in bands.items()}
-#     d4 = {f'{k}_xs': stft(v, 16, 8, pad=True) for k, v in bands.items()}
-#
-#     normal = stft(x, 2048, 256, pad=True).reshape(-1, 128, 1025).permute(0, 2, 1)
-#
-#     return dict(
-#         normal=normal,
-#         **d1,
-#         **d3,
-#         **d4
-#     )
 
 
 n_samples = 2 ** 18

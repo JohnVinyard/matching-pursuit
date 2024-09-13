@@ -1,6 +1,5 @@
 from collections import Counter, defaultdict, namedtuple
 from typing import Callable, Dict, List, Optional, Tuple
-import numpy as np
 import zounds
 import torch
 from modules.stft import stft
@@ -37,6 +36,7 @@ def multiband_spectrogram(
 
     return accum
 
+
 def flattened_multiband_spectrogram(
         x: torch.Tensor,
         stft_spec: Dict[str, Tuple[int, int]],
@@ -44,6 +44,7 @@ def flattened_multiband_spectrogram(
     batch_size, channels, _ = x.shape
     bands = multiband_spectrogram(x, stft_spec, smallest_band_size)
     return torch.cat([b.reshape(batch_size, channels, -1) for b in bands.values()], dim=-1)
+
 
 
 class BandSpec(object):
