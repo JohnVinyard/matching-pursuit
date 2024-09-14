@@ -18,18 +18,19 @@ import torch
 from torch import nn
 from itertools import count
 
-from data import AudioIterator, get_one_audio_segment
+from data import get_one_audio_segment, get_audio_segment
 from modules import max_norm, flattened_multiband_spectrogram
 from modules.overlap_add import overlap_add
 from torch.optim import Adam
+
 from util import device, encode_audio
 
 from conjure import logger, LmdbCollection, serve_conjure, SupportedContentType, loggers, \
     NumpySerializer, NumpyDeserializer, S3Collection, \
-    two_dim_matrix_display_bytes, conjure_article, ImageComponent
+    conjure_article, CitationComponent, numpy_conjure, AudioComponent
 from torch.nn.utils.clip_grad import clip_grad_value_
 from argparse import ArgumentParser
-import numpy as np
+
 
 """[markdown]
 # The Model
@@ -46,6 +47,11 @@ blah
 
 """
 
+n_samples = 2 ** 18
+samplerate = 22050
+window_size = 512
+control_plane_dim = 32
+state_dim = 128
 
 class SSM(nn.Module):
     def __init__(self, control_plane_dim: int, input_dim: int, state_matrix_dim: int):
@@ -141,6 +147,8 @@ blah
 
 """
 
+# sound
+
 
 def transform(x: torch.Tensor):
     return flattened_multiband_spectrogram(
@@ -153,43 +161,46 @@ def transform(x: torch.Tensor):
         smallest_band_size=512)
 
 
-n_samples = 2 ** 18
-samplerate = 22050
-window_size = 512
-control_plane_dim = 32
-state_dim = 128
-
 
 def demo_page_dict() -> Dict[str, any]:
     remote = S3Collection('state-space-model-demo', is_public=True, cors_enabled=True)
 
-    tester = logger(
-        'testmatrix',
-        content_type='image/png',
-        func=lambda x: two_dim_matrix_display_bytes(x, cmap='hot'),
-        collection=remote)
+    @numpy_conjure(remote)
+    def fetch_audio(url: str, start_sample: int):
+        return get_audio_segment(
+            url,
+            target_samplerate=samplerate,
+            start_sample=start_sample,
+            duration_samples=n_samples)
 
-    data = np.random.normal(0, 1, (16, 16))
+    def fetch_audio_bytes(url: str, start_sample: int) -> bytes:
+        audio_arr = fetch_audio(url, start_sample)
+        audio_bytes = encode_audio(audio_arr)
+        return audio_bytes
 
-    _, meta = tester.result_and_meta(data)
+    example_audio = logger(
+        'audio', 'audio/wav', fetch_audio_bytes, remote)
+
+    _, audio_meta = example_audio.result_and_meta(
+        'https://music-net.s3.amazonaws.com/1728', 128)
+
+    sound = AudioComponent(audio_meta.public_uri.geturl(), height=200)
+
+    citation = CitationComponent(
+        tag='johnvinyardstatespacemodels',
+        author='Vinyard, John',
+        url='https://blog.cochlea.xyz/ssm.html',
+        header='State Space Modelling for Sparse Decomposition of Audio',
+        year='2024'
+    )
 
     return dict(
-        matrix=ImageComponent(src=meta.public_uri.geturl(), height=500)
+        sound=sound,
+        citation=citation,
     )
 
 
 def generate_demo_page():
-    remote = S3Collection('state-space-model-demo', is_public=True, cors_enabled=True)
-
-    tester = logger(
-        'testmatrix',
-        content_type='image/png',
-        func=lambda x: two_dim_matrix_display_bytes(x, cmap='hot'),
-        collection=remote)
-
-    data = np.random.normal(0, 1, (16, 16))
-    tester(data)
-
     display = demo_page_dict()
     conjure_article(__file__, 'html', **display)
 
@@ -276,6 +287,13 @@ def train_and_monitor():
         state_dim=state_dim,
         device=device)
 
+'''[markdown]
+
+Thanks for reading!
+
+'''
+
+# citation
 
 if __name__ == '__main__':
     parser = ArgumentParser()

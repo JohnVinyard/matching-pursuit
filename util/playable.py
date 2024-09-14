@@ -9,12 +9,18 @@ from soundfile import SoundFile
 
 
 def encode_audio(
-        x: torch.Tensor,
+        x: Union[torch.Tensor, np.ndarray],
         samplerate: int = 22050,
         format='WAV',
         subtype='PCM_16'):
 
-    x = x.data.cpu().numpy()[0].reshape((-1,))
+    if isinstance(x, torch.Tensor):
+        x = x.data.cpu().numpy()
+
+    if x.ndim > 1:
+        x = x[0]
+
+    x = x.reshape((-1,))
     io = BytesIO()
 
     with SoundFile(

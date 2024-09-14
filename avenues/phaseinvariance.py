@@ -7,7 +7,8 @@
 
 from functools import reduce
 from typing import Any, Dict, Tuple
-from conjure import numpy_conjure, audio_conjure, bytes_conjure, S3Collection, SupportedContentType, tensor_movie
+from conjure import numpy_conjure, audio_conjure, bytes_conjure, S3Collection, SupportedContentType, tensor_movie, \
+    ImageComponent, AudioComponent, CitationComponent
 import requests
 from io import BytesIO
 from librosa import load
