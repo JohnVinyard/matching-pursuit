@@ -18,6 +18,16 @@ streams or sound sources sharing some physical space.
 # Table of Contents
 
 - [Recent Work](#recent-work)
+  - [Sparse Interpretable Audio Model](#sparse-intereptable-audio-model)
+  - [Gamma/Gaussian Splatting for Audio](#gammagaussian-splatting-for-audio)
+  - [Overfitting as Encoder](#overfitting-as-encoder)
+  - [Other Areas of Interest](#other-areas-of-interest)
+- [Getting Started](#getting-started)
+  - [Environment File Template](#environment-file-template)
+  - [MusicNet](#musicnet)
+  - [Room Impulse Responses](#room-impulse-responses)
+
+
 
 # Recent Work
 
@@ -91,8 +101,3 @@ be [downloaded here](https://oramics.github.io/sampled/IR/Voxengo/).
 You can then update the `IMPULSE_RESPONSE` environment variable to point at the directory on your local machine that
 contains the
 impulse response audio files.
-
-## My Trained Models
-
-If you'd like to try out some of the models I've trained locally, you can set `S3_BUCKET` to
-`matching-pursuit-trained-models`
