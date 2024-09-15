@@ -15,6 +15,10 @@ from this model, humans in natural settings typically perceive sound as the comb
 streams or sound sources sharing some physical space.
 
 
+# Table of Contents
+
+- [Recent Work](#recent-work)
+
 # Recent Work
 
 ![sparse decomposition of audio](https://zounds-blog-media.s3.amazonaws.com/sparse_audio.png)
@@ -55,6 +59,10 @@ a fixed synthesizer.
 - perceptually-motivated loss functions, inspired by [Mallat's scattering transform](https://arxiv.org/abs/1512.02125)
   and the [Auditory Image Model](https://code.soundsoftware.ac.uk/projects/aim).
 - approximate convolutions for long kernels
+  - since many useful kernels in music are highly redundant, can we find a 
+    low-rank approximation in the frequency domain and perform the multiplication/convolution there?
+  - approximate convolutions via [hyperdimensional computing](https://www.dafx.de/paper-archive/details/CsiwHdDxhJGtNCojXPixcQ)
+
 
 # Getting Started
 

@@ -126,14 +126,10 @@ class OverfitControlPlane(nn.Module):
 
 
 
-# matrix
-
-
 """[markdown]
 # The training process
 
 """
-
 
 
 
@@ -160,6 +156,8 @@ def transform(x: torch.Tensor):
         },
         smallest_band_size=512)
 
+def train_model_for_segment(url: str, start: int):
+    pass
 
 
 def demo_page_dict() -> Dict[str, any]:
