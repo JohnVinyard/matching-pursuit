@@ -3,6 +3,7 @@ from typing import Union
 from .audiostream import audio_stream
 import torch
 
+
 class AudioIterator(object):
 
     def __init__(
@@ -16,7 +17,6 @@ class AudioIterator(object):
             pattern='*.wav',
             as_torch=True,
             return_indices=False):
-
         super().__init__()
         self.batch_size = batch_size
         self.n_samples = n_samples
@@ -44,12 +44,11 @@ def get_one_audio_segment(
         n_samples: int,
         samplerate: int = 22050,
         device: Union[torch.device, None] = None) -> torch.Tensor:
-
     ai = AudioIterator(
         batch_size=1,
         n_samples=n_samples,
         samplerate=samplerate,
         normalize=True,
-        overfit=True, )
+        overfit=True)
     target: torch.Tensor = next(iter(ai)).to(device).view(-1, 1, n_samples)
     return target

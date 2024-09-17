@@ -4,8 +4,13 @@ import numpy as np
 import zounds
 import torch
 from subprocess import Popen, PIPE
-
 from soundfile import SoundFile
+
+
+def decode_audio(data: bytes) -> np.ndarray:
+    bio = BytesIO(data)
+    with SoundFile(bio, mode='rb') as sound:
+        return sound.read()
 
 
 def encode_audio(

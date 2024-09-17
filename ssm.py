@@ -11,9 +11,10 @@ as the dynamics and resonances of the musical instrument and room in which it
 was played.
 
 """
+from io import BytesIO
+from typing import Dict, Union
 
-from typing import Dict
-
+import numpy as np
 import torch
 from torch import nn
 from itertools import count
@@ -27,9 +28,10 @@ from util import device, encode_audio
 
 from conjure import logger, LmdbCollection, serve_conjure, SupportedContentType, loggers, \
     NumpySerializer, NumpyDeserializer, S3Collection, \
-    conjure_article, CitationComponent, numpy_conjure, AudioComponent
+    conjure_article, CitationComponent, numpy_conjure, AudioComponent, pickle_conjure, ImageComponent
 from torch.nn.utils.clip_grad import clip_grad_value_
 from argparse import ArgumentParser
+from matplotlib import pyplot as plt
 
 
 """[markdown]
@@ -52,6 +54,8 @@ samplerate = 22050
 window_size = 512
 control_plane_dim = 32
 state_dim = 128
+
+remote_collection_name = 'state-space-model-demo'
 
 class SSM(nn.Module):
     def __init__(self, control_plane_dim: int, input_dim: int, state_matrix_dim: int):
@@ -114,12 +118,17 @@ class OverfitControlPlane(nn.Module):
             torch.zeros(1, control_plane_dim, self.n_frames).uniform_(-0.01, 0.01))
 
     @property
-    def control_signal(self):
+    def control_signal_display(self) -> np.ndarray:
+        return self.control_signal.data.cpu().numpy().reshape((-1, self.n_frames))
+
+    @property
+    def control_signal(self) -> torch.Tensor:
         return torch.relu(self.control)
 
     def random(self):
         cp = torch.zeros_like(self.control, device=self.control.device).bernoulli_(p=0.001)
-        return self.forward(sig=cp)
+        audio = self.forward(sig=cp)
+        return max_norm(audio)
 
     def forward(self, sig=None):
         return self.ssm.forward(sig if sig is not None else self.control_signal)
@@ -143,7 +152,42 @@ blah
 
 """
 
-# sound
+
+"""[markdown]
+
+# Examples
+
+## Example 1
+
+### Original Audio
+
+"""
+
+# example_1
+
+"""[markdown]
+
+### Reconstruction
+
+"""
+
+# example_1_recon
+
+"""[markdown]
+
+### Random Generation
+
+"""
+
+# example_1_random
+
+"""[markdown]
+
+### Control Signal
+
+"""
+
+# example_1_control
 
 
 def transform(x: torch.Tensor):
@@ -156,33 +200,133 @@ def transform(x: torch.Tensor):
         },
         smallest_band_size=512)
 
-def train_model_for_segment(url: str, start: int):
-    pass
+
+def perceptual_loss(recon: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    fake_spec = transform(recon)
+    real_spec = transform(target)
+    return torch.abs(fake_spec - real_spec).sum()
 
 
-def demo_page_dict() -> Dict[str, any]:
-    remote = S3Collection('state-space-model-demo', is_public=True, cors_enabled=True)
+def sparsity_loss(c: torch.Tensor) -> torch.Tensor:
+    return torch.abs(c).sum() * 1e-5
+
+
+def to_numpy(x: torch.Tensor):
+    return x.data.cpu().numpy()
+
+
+def construct_experiment_model(state_dict: Union[None, dict] = None) -> OverfitControlPlane:
+    model = OverfitControlPlane(
+        control_plane_dim=control_plane_dim,
+        input_dim=window_size,
+        state_matrix_dim=state_dim,
+        n_samples=n_samples
+    )
+    model = model.to(device)
+
+    if state_dict is not None:
+        model.load_state_dict(state_dict)
+
+    return model
+
+def demo_page_dict(n_iterations: int = 100) -> Dict[str, any]:
+
+    print(f'Generating article, training models for {n_iterations} iterations')
+
+    remote = S3Collection(
+        remote_collection_name, is_public=True, cors_enabled=True)
 
     @numpy_conjure(remote)
-    def fetch_audio(url: str, start_sample: int):
+    def fetch_audio(url: str, start_sample: int) -> np.ndarray:
         return get_audio_segment(
             url,
             target_samplerate=samplerate,
             start_sample=start_sample,
             duration_samples=n_samples)
 
-    def fetch_audio_bytes(url: str, start_sample: int) -> bytes:
-        audio_arr = fetch_audio(url, start_sample)
-        audio_bytes = encode_audio(audio_arr)
-        return audio_bytes
 
-    example_audio = logger(
-        'audio', 'audio/wav', fetch_audio_bytes, remote)
+    # TODO: it may be simpler to accept the url and start sample here, produce all the artifacts
+    # then encode and log from there
 
-    _, audio_meta = example_audio.result_and_meta(
-        'https://music-net.s3.amazonaws.com/1728', 128)
+    @pickle_conjure(remote, read_hook=lambda x: print('reading train_model_for_segment from cache'))
+    def train_model_for_segment(
+            target: torch.Tensor,
+            iterations: int):
 
-    sound = AudioComponent(audio_meta.public_uri.geturl(), height=200)
+        model = construct_experiment_model()
+        optim = Adam(model.parameters(), lr=1e-2)
+
+        for iteration in range(iterations):
+            optim.zero_grad()
+            recon = model.forward()
+            loss = perceptual_loss(recon, target) + sparsity_loss(model.control_signal)
+            non_zero = (model.control_signal > 0).sum()
+            sparsity = (non_zero / model.control_signal.numel()).item()
+            loss.backward()
+            clip_grad_value_(model.parameters(), 0.5)
+            optim.step()
+            print(iteration, loss.item(), sparsity)
+
+        return model.state_dict()
+
+    def encode(arr: np.ndarray) -> bytes:
+        return encode_audio(arr)
+
+    def display_matrix(arr: Union[torch.Tensor, np.ndarray], cmap: str = 'hot') -> bytes:
+        if arr.ndim > 2:
+            raise ValueError('Only two-dimensional arrays are supported')
+
+        if isinstance(arr, torch.Tensor):
+            arr = arr.data.cpu().numpy()
+
+        bio = BytesIO()
+        plt.matshow(arr, cmap=cmap)
+        plt.savefig(bio)
+        plt.clf()
+        bio.seek(0)
+        return bio.read()
+
+
+    # define loggers
+    audio_logger = logger(
+        'audio', 'audio/wav', encode, remote)
+
+    matrix_logger = logger(
+        'matrix', 'image/png', display_matrix, remote)
+
+
+    # build a single example
+    example_1_audio_array = fetch_audio(
+        'https://music-net.s3.amazonaws.com/1919',
+        start_sample=8192
+    )
+    example_1_audio_tensor = torch\
+        .from_numpy(example_1_audio_array).to(device).view(1, 1, n_samples)
+    example_1_audio_tensor = max_norm(example_1_audio_tensor)
+
+    example_1_state_dict = train_model_for_segment(
+        example_1_audio_tensor,
+        iterations=n_iterations)
+
+    hydrated = construct_experiment_model(example_1_state_dict)
+
+    with torch.no_grad():
+        example_1_recon = hydrated.forward()
+        example_1_random = hydrated.random()
+        example_1_cp = hydrated.control_signal_display
+
+    _, example_1_audio_meta = audio_logger.result_and_meta(example_1_audio_array)
+    _, example_1_recon_meta = audio_logger.result_and_meta(example_1_recon)
+    _, example_1_random_meta = audio_logger.result_and_meta(example_1_random)
+    _, example_1_cp_meta = matrix_logger.result_and_meta(example_1_cp)
+
+    example_1_audio_component = AudioComponent(example_1_audio_meta.public_uri.geturl(), height=200)
+    example_1_recon_component = AudioComponent(example_1_recon_meta.public_uri.geturl(), height=200)
+    example_1_random_component = AudioComponent(example_1_random_meta.public_uri.geturl(), height=200)
+    example_1_cp_component = ImageComponent(example_1_cp_meta.public_uri.geturl(), height=200)
+
+    # end single example
+
 
     citation = CitationComponent(
         tag='johnvinyardstatespacemodels',
@@ -192,14 +336,18 @@ def demo_page_dict() -> Dict[str, any]:
         year='2024'
     )
 
+
     return dict(
-        sound=sound,
+        example_1=example_1_audio_component,
+        example_1_recon=example_1_recon_component,
+        example_1_random=example_1_random_component,
+        example_1_control=example_1_cp_component,
         citation=citation,
     )
 
 
-def generate_demo_page():
-    display = demo_page_dict()
+def generate_demo_page(iterations: int = 500):
+    display = demo_page_dict(n_iterations=iterations)
     conjure_article(__file__, 'html', **display)
 
 
@@ -207,8 +355,6 @@ def train_and_monitor():
     target = get_one_audio_segment(n_samples = n_samples, samplerate=samplerate)
     collection = LmdbCollection(path='ssm')
 
-    def to_numpy(x: torch.Tensor):
-        return x.data.cpu().numpy()
 
     recon_audio, orig_audio, random_audio = loggers(
         ['recon', 'orig', 'random'],
@@ -235,24 +381,11 @@ def train_and_monitor():
         state_space
     ], port=9999, n_workers=1)
 
-    def train(
-            target: torch.Tensor,
-            control_plane_dim: int,
-            window_size: int,
-            state_dim: int,
-            device):
-        model = OverfitControlPlane(
-            control_plane_dim, window_size, state_dim, n_samples=target.shape[-1]).to(device)
+    def train(target: torch.Tensor):
+
+        model = construct_experiment_model()
 
         optim = Adam(model.parameters(), lr=1e-2)
-
-        def perceptual_loss(recon: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-            fake_spec = transform(recon)
-            real_spec = transform(target)
-            return torch.abs(fake_spec - real_spec).sum()
-
-        def sparsity_loss(c: torch.Tensor) -> torch.Tensor:
-            return torch.abs(c).sum() * 1e-5
 
         for iteration in count():
             optim.zero_grad()
@@ -274,16 +407,9 @@ def train_and_monitor():
 
             with torch.no_grad():
                 rnd = model.random()
-                rnd = max_norm(rnd)
                 random_audio(rnd)
 
-
-    train(
-        target,
-        control_plane_dim=control_plane_dim,
-        window_size=window_size,
-        state_dim=state_dim,
-        device=device)
+    train(target)
 
 '''[markdown]
 
@@ -295,9 +421,19 @@ Thanks for reading!
 
 if __name__ == '__main__':
     parser = ArgumentParser()
-    parser.add_argument('--mode', type=str)
+    parser.add_argument('--mode', type=str, required=True)
+    parser.add_argument('--iterations', type=int, default=250)
     args = parser.parse_args()
+
+
+
     if args.mode == 'train':
         train_and_monitor()
     elif args.mode == 'demo':
-        generate_demo_page()
+        generate_demo_page(args.iterations)
+    elif args.mode == 'clear':
+        remote = S3Collection(
+            remote_collection_name, is_public=True, cors_enabled=True)
+        remote.destroy()
+    else:
+        raise ValueError('Please provide one of train, demo, or clear')

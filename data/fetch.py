@@ -7,7 +7,7 @@ def get_audio_segment(
         url: str,
         target_samplerate: int,
         start_sample: int,
-        duration_samples: int):
+        duration_samples: int) -> np.ndarray:
 
     resp = requests.get(url)
     bio = BytesIO(resp.content)
