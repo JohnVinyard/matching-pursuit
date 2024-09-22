@@ -10,11 +10,75 @@ corresponding roughly to a score, and the state-space model can be thought of
 as the dynamics and resonances of the musical instrument and room in which it
 was played.
 
+If you're curious to jump ahead, [listen to examples first](#Examples)!
+
+First, we'll set up high-level parameters for the experiment
 """
+
+# the size, in samples of the audio segment we'll overfit
+n_samples = 2 ** 18
+
+# the samplerate, in hz, of the audio signal
+samplerate = 22050
+
+# derived, the total number of seconds of audio
+n_seconds = n_samples / samplerate
+
+# the size of each, half-lapped audio "frame"
+window_size = 512
+
+# the dimensionality of the control plane or control signal
+control_plane_dim = 32
+
+# the dimensionality of the state vector, or hidden state
+state_dim = 128
+
+
+"""[markdown]
+# The Model
+
+State-Space models look a whole lot like RNNs (recurrent neural networks) in that
+they are auto-regressive and have a hidden/inner state vector that represents
+something like the "memory" of the model.  In this example, I conceptualize the
+hidden state or state vector as the stored energy of the resonant object.  A human
+musician has injected energy into the system by striking, plucking, or dragging a bow
+across a string and the instrument will store that energy and "leak" it out in pleasing
+ways.
+
+## Formula
+
+Formally, state space models take the follwing form (in pseudocode)
+
+First, we initialize the state/hidden vector
+
+`state_vector = zeros(state_dim)`
+
+Then, we transform the input and the _previous hidden state_ into a _new_ hidden state.
+
+`state_vector = (state_vector * state_matrix) + (input * input_matrix)`
+
+Finally, we map the hidden state and the input into a new output
+
+ `output_vector = (state_vector * output_matrix) + (input * direct_matrix)`
+
+This process is repeated until we have no more inputs to process.
+
+## This Experiment
+
+In this experiment, we'll build a model PyTorch that will learn the four matrices described above along with
+a sparse control signal by "overfitting" the model to a single segment of {n_seconds:.2} seconds of audio from
+my goto for acoustic musical signals, the [MusicNet dataset](https://zenodo.org/records/5120004#.Yhxr0-jMJBA) dataset.
+
+It hasn't showed up in the code quite yet, but we'll be using [`conjure`](https://github.com/JohnVinyard/conjure) to 
+monitor the training process while iterating on the code, and to generate this article once things have settled.
+
+We'll start with some boring imports.
+
+"""
+
 from io import BytesIO
 from typing import Dict, Union
 
-import matplotlib
 import numpy as np
 import torch
 from torch import nn
@@ -35,31 +99,25 @@ from torch.nn.utils.clip_grad import clip_grad_value_
 from argparse import ArgumentParser
 from matplotlib import pyplot as plt
 
-"""[markdown]
-# The Model
 
-blah blah
-
-## Something
-
-blah
-
-### Nested
-
-## Something Else
-
-"""
-
-n_samples = 2 ** 18
-samplerate = 22050
-window_size = 512
-control_plane_dim = 32
-state_dim = 128
 
 remote_collection_name = 'state-space-model-demo'
 
+"""[markdown]
+
+# The `SSM` Class
+
+Now, for the good stuff!  We'll define our simple State-Space Model as an `nn.Module`-derived class
+with four parameters corresponding to each of the four matrices.
+
+"""
+
 
 class SSM(nn.Module):
+    """
+    A state-space model
+    """
+
     def __init__(self, control_plane_dim: int, input_dim: int, state_matrix_dim: int):
         super().__init__()
         self.state_matrix_dim = state_matrix_dim
@@ -107,8 +165,25 @@ class SSM(nn.Module):
         result = overlap_add(result)
         return result[..., :frames * (self.input_dim // 2)]
 
+"""[markdown]
+
+# The `OverfitControlPlane` Class
+
+This model wraps up an `SSM` instance, and also has a parameter for the sparse "control plane" that will serve
+as the input energy for our resonant model.  I think of this as a time-series of vector that describe the different
+ways that energy can be injected into the model, e.g., you might have individual dimensions representing different
+keys on a piano, or strings on a cello.  
+
+I don't expect the control signals learned here to be quite that clear-cut
+and interpretable, but you might notice that the random audio samples produced using the learned models
+do seem to disentangle some characteristics of the instruments being played!
+
+"""
 
 class OverfitControlPlane(nn.Module):
+    """
+    Includes parameter for control plane or control signal
+    """
 
     def __init__(self, control_plane_dim: int, input_dim: int, state_matrix_dim: int, n_samples: int):
         super().__init__()
@@ -157,17 +232,7 @@ blah
 
 """
 
-"""[markdown]
 
-# Examples
-
-"""
-
-# example_1
-
-# example_2
-
-# example_3
 
 
 def transform(x: torch.Tensor):
@@ -196,6 +261,9 @@ def to_numpy(x: torch.Tensor):
 
 
 def construct_experiment_model(state_dict: Union[None, dict] = None) -> OverfitControlPlane:
+    """
+    Construct a randomly initialize `OverfitControlPlane` model, ready for training/overfitting
+    """
     model = OverfitControlPlane(
         control_plane_dim=control_plane_dim,
         input_dim=window_size,
@@ -209,6 +277,18 @@ def construct_experiment_model(state_dict: Union[None, dict] = None) -> OverfitC
 
     return model
 
+
+"""[markdown]
+
+# Examples
+
+"""
+
+# example_1
+
+# example_2
+
+# example_3
 
 def demo_page_dict(n_iterations: int = 100) -> Dict[str, any]:
     print(f'Generating article, training models for {n_iterations} iterations')
@@ -257,12 +337,14 @@ def demo_page_dict(n_iterations: int = 100) -> Dict[str, any]:
     def encode(arr: np.ndarray) -> bytes:
         return encode_audio(arr)
 
-    def display_matrix(arr: Union[torch.Tensor, np.ndarray], cmap: str = 'hot') -> bytes:
+    def display_matrix(arr: Union[torch.Tensor, np.ndarray], cmap: str = 'gray') -> bytes:
         if arr.ndim > 2:
             raise ValueError('Only two-dimensional arrays are supported')
 
         if isinstance(arr, torch.Tensor):
             arr = arr.data.cpu().numpy()
+
+        arr = arr * -1
 
         bio = BytesIO()
         plt.matshow(arr, cmap=cmap)
@@ -336,12 +418,16 @@ def demo_page_dict(n_iterations: int = 100) -> Dict[str, any]:
         composite = CompositeComponent(
             f'## Example {number}',
             '### Original Audio',
+            f'A random {n_seconds:.2f} seconds segment of audio drawn from the MusicNet dataset',
             component_dict['orig'],
             '### Reconstruction',
+            f'Reconstruction of the original audio after overfitting the model for {n_iterations} iterations',
             component_dict['recon'],
             '### Random Audio',
+            f'Signal produced by a random, sparse control signal after overfitting the model for {n_iterations} iterations',
             component_dict['random'],
             '### Control Signal',
+            f'Sparse control signal for the original audio after overfitting the model for {n_iterations} iterations',
             component_dict['control']
         )
         return composite
@@ -451,11 +537,13 @@ def train_and_monitor():
     train(target)
 
 
-'''[markdown]
+"""[markdown]
 
 Thanks for reading!
 
-'''
+# Cite this Article
+
+"""
 
 # citation
 
