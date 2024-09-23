@@ -1,18 +1,31 @@
 """[markdown]
 
-This work takes a slightly different approach to the problem of decomposing
-audio into a sparse and interpretable representation.  It models the physical
-system that produced a segment of "natural"
-(i.e., produced by acoustic instruments) musical audio as a state-space-model and
-attempts to find a sparse control signal for the system.  The control system
-can be thought of as the energy injected into the system by a human musician,
-corresponding roughly to a score, and the state-space model can be thought of
-as the dynamics and resonances of the musical instrument and room in which it
-was played.
+This work attempts to reproduce a short segment of "natural" (i.e., produced by acoustic
+instruments or physical objects in the world) audio by decomposing it into two distinct pieces:
 
-If you're curious to jump ahead, [listen to examples first](#Examples)!
+1. A state-space model simulating the resonances of the system
+2. a sparse control signal, representing energy injected into the system.
+
+The control signal can be thought of as roughly corresponding to a musical score, and the state-space model
+can be thought of as the dynamics/resonances of the musical instrument and the room in which it was played.
+
+It's notable that in this experiment (unlike
+[my other recent work](https://blog.cochlea.xyz/siam.html)), **there is no learned "encoder"**.  We simply "overfit"
+parameters to a single audio sample, by minimizing a combination of [reconstruction and sparsity losses](#Sparsity Loss).
+
+As a sneak-peek, here's a novel sound created by feeding a random, sparse control signal into
+a state-space model "extracted" from an audio segment from Beethoven's "Piano Sonata No 15 in D major".
+
+Feel free to [jump ahead](#Examples) if you're curious to hear all of the audio examples first!
+
+"""
+
+# example_1.random_component
+
+"""[markdown]
 
 First, we'll set up high-level parameters for the experiment
+
 """
 
 # the size, in samples of the audio segment we'll overfit
@@ -33,27 +46,30 @@ control_plane_dim = 32
 # the dimensionality of the state vector, or hidden state
 state_dim = 128
 
-
 """[markdown]
+
 # The Model
 
-State-Space models look a whole lot like RNNs (recurrent neural networks) in that
-they are auto-regressive and have a hidden/inner state vector that represents
-something like the "memory" of the model.  In this example, I conceptualize the
-hidden state or state vector as the stored energy of the resonant object.  A human
-musician has injected energy into the system by striking, plucking, or dragging a bow
-across a string and the instrument will store that energy and "leak" it out in pleasing
-ways.
+State-Space models look a lot like 
+[RNNs (recurrent neural networks)](https://stanford.edu/~shervine/teaching/cs-230/cheatsheet-recurrent-neural-networks) 
+in that they are auto-regressive and have a hidden/inner state vector that represents
+something like the "memory" of the model.  In this example, I tend to think of the
+hidden state as the stored energy of the resonant object.  A human
+musician has injected energy into the system by striking, plucking, or dragging a bow and the instrument stores that 
+energy and "leaks" it out in ways that are (hopefully) pleasing to the ear.
 
 ## Formula
 
-Formally, state space models take the follwing form (in pseudocode)
+Formally, state space models take the following form (in pseudocode)
 
 First, we initialize the state/hidden vector
 
 `state_vector = zeros(state_dim)`
 
-Then, we transform the input and the _previous hidden state_ into a _new_ hidden state.
+Then, we transform the input and the _previous hidden state_ into a _new_ hidden state.  This is where the 
+"auto-regressive" or recursive nature of the model comes into view;  notice that `state-vector` is on both sides of the 
+equation.  **There's a feedback look happening here**, which is a hallmark of 
+[waveguide synthesis](https://www.osar.fr/notes/waveguides/) and other physical modelling synthesis.
 
 `state_vector = (state_vector * state_matrix) + (input * input_matrix)`
 
@@ -61,16 +77,32 @@ Finally, we map the hidden state and the input into a new output
 
  `output_vector = (state_vector * output_matrix) + (input * direct_matrix)`
 
-This process is repeated until we have no more inputs to process.
+This process is repeated until we have no more inputs to process.  The `direct_matrix` is a mapping from
+inputs directly to the output vector, rather like a "skip connection" in other neural network architectures.
 
-## This Experiment
+As long as we have something like conservation of energy happening (not enforced explicitly), it's easy to see how
+the exponential decay we observe in resonant objects emerges from our model. 
 
-In this experiment, we'll build a model PyTorch that will learn the four matrices described above along with
-a sparse control signal by "overfitting" the model to a single segment of {n_seconds:.2} seconds of audio from
-my goto for acoustic musical signals, the [MusicNet dataset](https://zenodo.org/records/5120004#.Yhxr0-jMJBA) dataset.
 
-It hasn't showed up in the code quite yet, but we'll be using [`conjure`](https://github.com/JohnVinyard/conjure) to 
-monitor the training process while iterating on the code, and to generate this article once things have settled.
+## The Experiment
+
+We'll build a [PyTorch](https://pytorch.org/) model that will learn the four matrices described 
+above, along with a sparse control signal, by "overfitting" the model to a single segment of ~12 seconds of audio drawn 
+from my favorite source for acoustic musical signals, the 
+[MusicNet dataset](https://zenodo.org/records/5120004#.Yhxr0-jMJBA) dataset.  For the final example, we'll try fitting
+a different kind of "natural" acoustic signal, human speech, just for funsies!
+
+Even though we're _overfitting_ a single audio signal, the sparsity term serves 
+as a 
+[regularizer](https://www.reddit.com/r/learnmachinelearning/comments/w7yrog/what_regularization_does_to_a_machine_learning/) 
+that still forces the model to generalize in some way.  Our working theory is that the control signal must be _sparse_, 
+which places certain constraints on the type of matrices the model must learn to accurately reproduce the audio.  If I
+strike a piano key, the sound does not die away immediately and I do not have to continue to "drive" the sound by
+continually injecting energy;  the strings and the body of the piano continue to resonate for quite some time.  
+
+While it hasn't showed up in the code we've seen so far, but we'll be using 
+[`conjure`](https://github.com/JohnVinyard/conjure) to monitor the training process while iterating on the code, and 
+eventually to generate this article once things have settled.
 
 We'll start with some boring imports.
 
@@ -99,23 +131,29 @@ from torch.nn.utils.clip_grad import clip_grad_value_
 from argparse import ArgumentParser
 from matplotlib import pyplot as plt
 
-
-
 remote_collection_name = 'state-space-model-demo'
 
 """[markdown]
 
 # The `SSM` Class
 
-Now, for the good stuff!  We'll define our simple State-Space Model as an `nn.Module`-derived class
-with four parameters corresponding to each of the four matrices.
+Now, for the good stuff!  We'll define our simple State-Space Model as an 
+[`nn.Module`](https://pytorch.org/docs/stable/generated/torch.nn.Module.html)-derived class with four parameters 
+corresponding to each of the four matrices.
+
+Note that there is a slight deviation from the canonical SSM in that we have a fifth matrix, which projects from our
+"control plane" for the instrument into the dimension of a single audio frame.
 
 """
 
 
 class SSM(nn.Module):
     """
-    A state-space model
+    A state-space model-like module, with one additional matrix, used to project the control
+    signal into the shape of each audio frame.
+
+    The final output is produced by overlap-adding the windows/frames of audio into a single
+    1D signal.
     """
 
     def __init__(self, control_plane_dim: int, input_dim: int, state_matrix_dim: int):
@@ -124,19 +162,26 @@ class SSM(nn.Module):
         self.input_dim = input_dim
         self.control_plane_dim = control_plane_dim
 
+        # matrix mapping control signal to audio frame dimension
         self.proj = nn.Parameter(
             torch.zeros(control_plane_dim, input_dim).uniform_(-0.01, 0.01)
         )
 
+        # state matrix mapping previous state vector to next state vector
         self.state_matrix = nn.Parameter(
             torch.zeros(state_matrix_dim, state_matrix_dim).uniform_(-0.01, 0.01))
 
+        # matrix mapping audio frame to hidden/state vector dimension
         self.input_matrix = nn.Parameter(
             torch.zeros(input_dim, state_matrix_dim).uniform_(-0.01, 0.01))
 
+        # matrix mapping hidden/state vector to audio frame dimension
         self.output_matrix = nn.Parameter(
             torch.zeros(state_matrix_dim, input_dim).uniform_(-0.01, 0.01)
         )
+
+        # skip-connection-like matrix mapping input audio frame to next
+        # output audio frame
         self.direct_matrix = nn.Parameter(
             torch.zeros(input_dim, input_dim).uniform_(-0.01, 0.01)
         )
@@ -165,24 +210,26 @@ class SSM(nn.Module):
         result = overlap_add(result)
         return result[..., :frames * (self.input_dim // 2)]
 
+
 """[markdown]
 
 # The `OverfitControlPlane` Class
 
-This model wraps up an `SSM` instance, and also has a parameter for the sparse "control plane" that will serve
-as the input energy for our resonant model.  I think of this as a time-series of vector that describe the different
+This model encapsulates an `SSM` instance, and also has a parameter for the sparse "control plane" that will serve
+as the input energy for our resonant model.  I think of this as a time-series of vectors that describe the different
 ways that energy can be injected into the model, e.g., you might have individual dimensions representing different
 keys on a piano, or strings on a cello.  
 
-I don't expect the control signals learned here to be quite that clear-cut
+I don't expect the control signals learned here to be quite _that_ clear-cut
 and interpretable, but you might notice that the random audio samples produced using the learned models
 do seem to disentangle some characteristics of the instruments being played!
 
 """
 
+
 class OverfitControlPlane(nn.Module):
     """
-    Includes parameter for control plane or control signal
+    Encapsulates parameters for control signal and state-space model
     """
 
     def __init__(self, control_plane_dim: int, input_dim: int, state_matrix_dim: int, n_samples: int):
@@ -202,40 +249,48 @@ class OverfitControlPlane(nn.Module):
     def control_signal(self) -> torch.Tensor:
         return torch.relu(self.control)
 
-    def random(self):
-        cp = torch.zeros_like(self.control, device=self.control.device).bernoulli_(p=0.001)
+    def random(self, p=0.001):
+        """
+        Produces a random, sparse control signal, emulating short, transient bursts
+        of energy into the system modelled by the `SSM`
+        """
+        cp = torch.zeros_like(self.control, device=self.control.device).bernoulli_(p=p)
         audio = self.forward(sig=cp)
         return max_norm(audio)
 
     def forward(self, sig=None):
+        """
+        Inject energy defined by `sig` (or by the `control` parameters encapsulated by this class)
+        into the system modelled by `SSM`
+        """
         return self.ssm.forward(sig if sig is not None else self.control_signal)
 
 
-
-
 """[markdown]
-# The training process
+# The Training Process
 
-Here is an [inline link](https://www.example.com).  How does it look?
-
-> Here is a block quote
+To train the `OverfitControlPlane` model, we randomly initialize parameters for `SSM` and the learned
+control signal, and minimize a loss that consists of a reconstruction term and a sparsity term via gradient
+descent.  For this experiment, we're using the [`Adam`](https://pytorch.org/docs/stable/generated/torch.optim.Adam.html)
+optimizer with a learning rate of `1e-2`.
 
 """
 
 """[markdown]
 
-# Sparsity Loss
+## Reconstruction Loss
 
-blah
-
-## More about the sparsity loss 
+The first loss term is a simple reconstruction loss, consisting of the l1 norm of the difference between
+two multi-samplerate and multi-resolution spectrograms. 
 
 """
-
-
 
 
 def transform(x: torch.Tensor):
+    """
+    Decompose audio into sub-bands of varying sample rate, and compute spectrogram with
+    varying time-frequency tradeoffs on each band.
+    """
     return flattened_multiband_spectrogram(
         x,
         stft_spec={
@@ -246,13 +301,38 @@ def transform(x: torch.Tensor):
         smallest_band_size=512)
 
 
-def perceptual_loss(recon: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+def reconstruction_loss(recon: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """
+    Compute the l1 norm of the difference between the `recon` and `target`
+    representations
+    """
     fake_spec = transform(recon)
     real_spec = transform(target)
     return torch.abs(fake_spec - real_spec).sum()
 
 
+"""[markdown]
+
+## Sparsity Loss
+
+Ideally, we want the model to resonate, or store and "leak" energy slowly in the way that an
+acoustic instrument might.  This means that the control signal is not dense and continually "driving" the instrument, 
+but injecting energy infrequently in ways that encourage the natural resonances of the physical object.  
+
+I'm not fully satisfied with this approach. e.g. it tends to pull away from what might be a nice, 
+natural control signal for a violin or other bowed instrument.  In my mind, this might look like a sub-20hz sawtooth 
+wave that would "drive" the string, continually catching and releasing as the bow drags across the string.
+
+For now, the sparsity term _does_ seem to encourage models that resonate, but my intuition is that
+there is a better, more nuanced approach that could handle bowed string instruments and wind instruments, 
+in addition to percussive instruments, where this approach really seems to shine.
+"""
+
+
 def sparsity_loss(c: torch.Tensor) -> torch.Tensor:
+    """
+    Compute the l1 norm of the control signal
+    """
     return torch.abs(c).sum() * 1e-5
 
 
@@ -262,7 +342,7 @@ def to_numpy(x: torch.Tensor):
 
 def construct_experiment_model(state_dict: Union[None, dict] = None) -> OverfitControlPlane:
     """
-    Construct a randomly initialize `OverfitControlPlane` model, ready for training/overfitting
+    Construct a randomly initialized `OverfitControlPlane` instance, ready for training/overfitting
     """
     model = OverfitControlPlane(
         control_plane_dim=control_plane_dim,
@@ -282,6 +362,16 @@ def construct_experiment_model(state_dict: Union[None, dict] = None) -> OverfitC
 
 # Examples
 
+Finally, some trained models to listen to!  Each example consists of the following:
+
+1. the original audio signal from the MusicNet dataset
+1. the sparse control signal for the reconstruction
+1. the reconstructed audio, produced using the sparse control signal and the learned state-space model
+1. a novel, random audio signal produced using the learned state-space model and a random control signal
+
+Just for fun, we attempt to learn the fourth example from a speech signal from the 
+[LJ Speech Dataset](https://keithito.com/LJ-Speech-Dataset/)
+
 """
 
 # example_1
@@ -289,6 +379,20 @@ def construct_experiment_model(state_dict: Union[None, dict] = None) -> OverfitC
 # example_2
 
 # example_3
+
+# example_4
+
+"""[markdown]
+
+# Code For Generating this Article
+
+What follows is the code used to train the model and produce the article you're reading.  It uses 
+the [`conjure`](https://github.com/JohnVinyard/conjure) Python library, a tool I've been writing 
+that helps to persist and display images, audio and other code artifacts that are interleaved throughout
+this post.
+
+"""
+
 
 def demo_page_dict(n_iterations: int = 100) -> Dict[str, any]:
     print(f'Generating article, training models for {n_iterations} iterations')
@@ -315,7 +419,7 @@ def demo_page_dict(n_iterations: int = 100) -> Dict[str, any]:
             for iteration in range(iterations):
                 optim.zero_grad()
                 recon = model.forward()
-                loss = perceptual_loss(recon, target) + sparsity_loss(model.control_signal)
+                loss = reconstruction_loss(recon, target) + sparsity_loss(model.control_signal)
                 non_zero = (model.control_signal > 0).sum()
                 sparsity = (non_zero / model.control_signal.numel()).item()
 
@@ -388,8 +492,8 @@ def demo_page_dict(n_iterations: int = 100) -> Dict[str, any]:
         result = dict(
             orig=orig_audio,
             recon=recon_audio,
+            control_plane=control_plane,
             random=random_audio,
-            control_plane=control_plane
         )
         return result
 
@@ -397,6 +501,10 @@ def demo_page_dict(n_iterations: int = 100) -> Dict[str, any]:
             url: str,
             start_sample: int,
             n_iterations: int):
+
+        """
+        Produce artifacts/media for a single example section
+        """
 
         result_dict = train_model_for_segment_and_produce_artifacts(
             url, start_sample, n_iterations)
@@ -406,7 +514,7 @@ def demo_page_dict(n_iterations: int = 100) -> Dict[str, any]:
         random = AudioComponent(result_dict['random'].public_uri, height=200, samples=512)
         control = ImageComponent(result_dict['control_plane'].public_uri, height=200)
 
-        return dict(orig=orig, recon=recon, random=random, control=control)
+        return dict(orig=orig, recon=recon,control=control, random=random)
 
     def train_model_and_produce_content_section(
             url: str,
@@ -414,43 +522,54 @@ def demo_page_dict(n_iterations: int = 100) -> Dict[str, any]:
             n_iterations: int,
             number: int) -> CompositeComponent:
 
+        """
+        Produce a single "Examples" section for the post
+        """
+
         component_dict = train_model_and_produce_components(url, start_sample, n_iterations)
         composite = CompositeComponent(
-            f'## Example {number}',
-            '### Original Audio',
-            f'A random {n_seconds:.2f} seconds segment of audio drawn from the MusicNet dataset',
-            component_dict['orig'],
-            '### Reconstruction',
-            f'Reconstruction of the original audio after overfitting the model for {n_iterations} iterations',
-            component_dict['recon'],
-            '### Random Audio',
-            f'Signal produced by a random, sparse control signal after overfitting the model for {n_iterations} iterations',
-            component_dict['random'],
-            '### Control Signal',
-            f'Sparse control signal for the original audio after overfitting the model for {n_iterations} iterations',
-            component_dict['control']
+            header=f'## Example {number}',
+            orig_header='### Original Audio',
+            orig_text=f'A random {n_seconds:.2f} seconds segment of audio drawn from the MusicNet dataset',
+            orig_component=component_dict['orig'],
+            recon_header='### Reconstruction',
+            recon_text=f'Reconstruction of the original audio after overfitting the model for {n_iterations} iterations',
+            recon_component=component_dict['recon'],
+            random_header='### Random Audio',
+            random_text=f'Signal produced by a random, sparse control signal after overfitting the model for {n_iterations} iterations',
+            random_component=component_dict['random'],
+            control_header='### Control Signal',
+            control_text=f'Sparse control signal for the original audio after overfitting the model for {n_iterations} iterations',
+            control_component=component_dict['control']
         )
         return composite
 
     example_1 = train_model_and_produce_content_section(
         'https://music-net.s3.amazonaws.com/2358',
-        start_sample=2**16,
+        start_sample=2 ** 16,
         n_iterations=n_iterations,
         number=1
     )
 
     example_2 = train_model_and_produce_content_section(
         'https://music-net.s3.amazonaws.com/2296',
-        start_sample=2**18,
+        start_sample=2 ** 18,
         n_iterations=n_iterations,
         number=2
     )
 
     example_3 = train_model_and_produce_content_section(
         'https://music-net.s3.amazonaws.com/2391',
-        start_sample=2**18,
+        start_sample=2 ** 18,
         n_iterations=n_iterations,
         number=3
+    )
+
+    example_4 = train_model_and_produce_content_section(
+        'https://lj-speech.s3.amazonaws.com/LJ019-0120.wav',
+        start_sample=0,
+        n_iterations=n_iterations,
+        number=4
     )
 
     citation = CitationComponent(
@@ -465,6 +584,7 @@ def demo_page_dict(n_iterations: int = 100) -> Dict[str, any]:
         example_1=example_1,
         example_2=example_2,
         example_3=example_3,
+        example_4=example_4,
         citation=citation,
     )
 
@@ -474,9 +594,18 @@ def generate_demo_page(iterations: int = 500):
     conjure_article(
         __file__,
         'html',
-        title='Learning Playable State-Space Models from Audio',
+        title='Learning "Playable" State-Space Models from Audio',
         **display)
 
+
+"""[markdown]
+
+# Training Code
+
+As I developed this model, I used the following code to pick a random audio segment, overfit a model, and monitor
+its progress during training.
+
+"""
 
 
 def train_and_monitor():
@@ -516,7 +645,7 @@ def train_and_monitor():
             optim.zero_grad()
             recon = model.forward()
             recon_audio(max_norm(recon))
-            loss = perceptual_loss(recon, target) + sparsity_loss(model.control_signal)
+            loss = reconstruction_loss(recon, target) + sparsity_loss(model.control_signal)
 
             non_zero = (model.control_signal > 0).sum()
             sparsity = (non_zero / model.control_signal.numel()).item()
@@ -539,9 +668,42 @@ def train_and_monitor():
 
 """[markdown]
 
-Thanks for reading!
+# Conclusion
+
+Thanks for reading this far!  
+
+I'm excited about the results of this experiment, but am not totally pleased
+with the frame-based approach, which leads to very noticeable artifacts in the reconstructions.  It **runs counter to
+one of my guiding principles** as I try to design a sparse, interpretable, and easy-to-manipulate audio codec, which
+is that there is no place for arbitrary, fixed-size "frames".  Ideally, we represent audio as a sparse set of events
+or sound sources that are sample-rate independent, i.e., more like a function or operator, and less like a rasterized
+representation.
+
+I'm just beginning to learn more about state-space models and was excited when I learned from Albert Gu in his 
+excellent talk ["Efficiently Modeling Long Sequences with Structured State Spaces"](https://youtu.be/luCBXCErkCs?si=rRSQ7af3X6cZRivW&t=1776) 
+that there are ways to transform state-space models, which strongly resemble 
+[IIR filters](https://en.wikipedia.org/wiki/Infinite_impulse_response), into their 
+[FIR](https://en.wikipedia.org/wiki/Finite_impulse_response) counterpart, convolutions, which I've depended on 
+heavily to model resonance in other recent work.
+
+I'm looking forward to following this thread and beginning to find where the two different approaches converge! 
+
+## Future Work
+
+1. Instead of (or in addition to) a sparsity loss, could we build in more physics-informed losses, such as conservation
+   of energy, i.e., overall energy can never _increase_ unless it comes from the control signal?
+2. Could we use 
+   [`scipy.signal.StateSpace`](https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.StateSpace.html) to
+   derive a continuous-time formulation of the model?
+3. How would a model like this work as an event generator in my [sparse, interpretable audio model from other 
+   experiments?](https://blog.cochlea.xyz/machine-learning/2024/02/29/siam.html)
+4. Could we treat an entire, multi-instrument song as a single, large state-space model, learning a compressed 
+   representation of the audio _and_ a "playable" instrument, all at the same time?
+
 
 # Cite this Article
+
+If you'd like to cite this article, you can use the following [BibTeX block](https://bibtex.org/).
 
 """
 

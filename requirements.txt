@@ -6,3 +6,4 @@ librosa
 lmdb
 conjure
 requests
+matplotlib
