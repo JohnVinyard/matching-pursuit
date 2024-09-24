@@ -16,7 +16,7 @@ parameters to a single audio sample, by minimizing a combination of [reconstruct
 As a sneak-peek, here's a novel sound created by feeding a random, sparse control signal into
 a state-space model "extracted" from an audio segment from Beethoven's "Piano Sonata No 15 in D major".
 
-Feel free to [jump ahead](#Examples) if you're curious to hear all of the audio examples first!
+Feel free to [jump ahead](#Examples) if you're curious to hear all the audio examples first!
 
 """
 

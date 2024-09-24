@@ -25,7 +25,7 @@ from util import device
 collection = LmdbCollection(path='overfitresonance')
 
 samplerate = 22050
-n_samples = 2 ** 17
+n_samples = 2 ** 16
 n_frames = 256
 n_events = 32
 

@@ -21,6 +21,7 @@ streams or sound sources sharing some physical space.
   - [Sparse Interpretable Audio Model](#sparse-intereptable-audio-model)
   - [Gamma/Gaussian Splatting for Audio](#gammagaussian-splatting-for-audio)
   - [Overfitting as Encoder](#overfitting-as-encoder)
+  - [Playable State-Space Model From Single Audio Example](#playable-state-space-model-from-single-audio-example)
   - [Other Areas of Interest](#other-areas-of-interest)
 - [Getting Started](#getting-started)
   - [Environment File Template](#environment-file-template)
@@ -54,6 +55,7 @@ initialized and then fitted (3000 iterations) to a short segment of audio via a 
 sparse solution, with few active atoms is encouraged by a second, weighted loss term. Complete code for the experiment
 can be found on GitHub. Trained segments come from the MusicNet dataset.
 
+
 ## Overfitting as Encoder
 
 Assuming that our _decoder_ is parameter-less (i.e., only the encoded representation is needed), 
@@ -62,6 +64,17 @@ can perform gradient descent to find the best encoded representation for a given
 piece of audio.  The [Gaussian/Gamma Splatting Experiment](https://johnvinyard.github.io/gamma-audio-splat.html)
 is an example of this;  audio is defined as a set of events/parameters passed to
 a fixed synthesizer.
+
+## Playable State-Space Model From Single Audio Example
+
+[This work](https://blog.cochlea.xyz/ssm.html) takes a slightly different approach to extracting
+a sparse audio representation, but ties in to the [Overfitting as Encoder](#overfitting-as-encoder)
+idea.  We attempt to decompose a single musical audio signal into two distinct components:
+
+- A state-space model representing the resonances, or transfer function of the system as whole, 
+   including the instrument and the room in which it was played
+- A sparse control signal, representing the ways in which energy is injected into the system
+
 
 ## Other Areas of Interest
 

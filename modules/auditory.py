@@ -1,7 +1,7 @@
 from typing import Literal
 from torch import nn
 import torch
-from modules import stft
+from modules import stft, unit_norm
 from modules.fft import n_fft_coeffs
 import numpy as np
 from scipy.signal import gammatone

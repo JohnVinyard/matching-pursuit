@@ -1,12 +1,15 @@
 import torch
 from torch.nn import functional as F
-from modules import fft_convolve
+
+from modules.transfer import fft_convolve
+
 
 def auditory_image_model(
         signal: torch.Tensor,
         filters: torch.Tensor,
-        aim_window_size:
-        int, aim_step_size) -> torch.Tensor:
+        aim_window_size:int,
+        aim_step_size: int) -> torch.Tensor:
+
     n_samples = signal.shape[-1]
 
     n_filters, n_taps = filters.shape
