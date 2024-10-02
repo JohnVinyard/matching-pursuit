@@ -678,48 +678,48 @@ def envelopes(x: torch.Tensor):
     return x.data.cpu().numpy()
 
 # TODO: consider multi-band transform or PIF here.
-# def transform(audio: torch.Tensor) -> torch.Tensor:
-#     return stft(audio, ws=2048, step=256, pad=True)
+def transform(audio: torch.Tensor) -> torch.Tensor:
+    return stft(audio, ws=2048, step=256, pad=True)
 
+
+
+def spec_loss(recon_audio: torch.Tensor, real_audio: torch.Tensor) -> torch.Tensor:
+    recon_spec = transform(torch.sum(recon_audio, dim=1, keepdim=True))
+    real_spec = transform(real_audio)
+    loss = torch.abs(recon_spec - real_spec).sum()
+    return loss
+
+# exp_transform = ExponentialTransform(32, 16, n_exponents=16, n_frames=n_samples // 16).to(device)
+
+# def transform(x: torch.Tensor) -> torch.Tensor:
+#     batch_size, channels, _ = x.shape
+#     bands = multiband_transform(x)
+#     return torch.cat([b.reshape(batch_size, channels, -1) for b in bands.values()], dim=-1)
 #
 #
-# def spec_loss(recon_audio: torch.Tensor, real_audio: torch.Tensor) -> torch.Tensor:
-#     recon_spec = transform(torch.sum(recon_audio, dim=1, keepdim=True))
-#     real_spec = transform(real_audio)
-#     loss = torch.abs(recon_spec - real_spec).sum()
-#     return loss
-
-exp_transform = ExponentialTransform(32, 16, n_exponents=16, n_frames=n_samples // 16).to(device)
-
-def transform(x: torch.Tensor) -> torch.Tensor:
-    batch_size, channels, _ = x.shape
-    bands = multiband_transform(x)
-    return torch.cat([b.reshape(batch_size, channels, -1) for b in bands.values()], dim=-1)
-
-
-def multiband_transform(x: torch.Tensor) -> Dict[str, torch.Tensor]:
-    bands = fft_frequency_decompose(x, 512)
-    # TODO: each band should have 256 frequency bins and also 256 time bins
-    # this requires a window size of (n_samples // 256) * 2
-    # and a window size of 512, 256
-
-    window_size = 512
-
-    d1 = {f'{k}_long': stft(v, 128, 64, pad=True) for k, v in bands.items()}
-    d3 = {f'{k}_short': stft(v, 64, 32, pad=True) for k, v in bands.items()}
-    d4 = {f'{k}_xs': stft(v, 16, 8, pad=True) for k, v in bands.items()}
-
-    normal = stft(x, 2048, 256, pad=True).reshape(-1, 128, 1025).permute(0, 2, 1)
-
-    et = exp_transform.forward(x)
-
-    return dict(
-        normal=normal,
-        et=et * 1e-3,
-        **d1,
-        **d3,
-        **d4
-    )
+# def multiband_transform(x: torch.Tensor) -> Dict[str, torch.Tensor]:
+#     bands = fft_frequency_decompose(x, 512)
+#     # TODO: each band should have 256 frequency bins and also 256 time bins
+#     # this requires a window size of (n_samples // 256) * 2
+#     # and a window size of 512, 256
+#
+#     window_size = 512
+#
+#     d1 = {f'{k}_long': stft(v, 128, 64, pad=True) for k, v in bands.items()}
+#     d3 = {f'{k}_short': stft(v, 64, 32, pad=True) for k, v in bands.items()}
+#     d4 = {f'{k}_xs': stft(v, 16, 8, pad=True) for k, v in bands.items()}
+#
+#     normal = stft(x, 2048, 256, pad=True).reshape(-1, 128, 1025).permute(0, 2, 1)
+#
+#     # et = exp_transform.forward(x)
+#
+#     return dict(
+#         normal=normal,
+#         # et=et * 1e-3,
+#         **d1,
+#         **d3,
+#         **d4
+#     )
 
 
 def train(target: torch.Tensor):
@@ -730,7 +730,7 @@ def train(target: torch.Tensor):
         n_noise_filters=16,
         instr_expressivity=4,
         n_events=n_events,
-        n_resonances=32,
+        n_resonances=16,
         n_envelopes=16,
         n_decays=16,
         n_deformations=16,
