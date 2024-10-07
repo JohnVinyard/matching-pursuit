@@ -14,7 +14,19 @@ https://www.di.ens.fr/data/scattering/audio/
 """
 from modules import gammatone_filter_bank
 from modules.aim import auditory_image_model
+from modules.overfitraw import OverfitRawAudio
 from util import device
+from torch.optim import Adam
+from typing import Tuple, Callable
+from conjure import S3Collection, Logger, numpy_conjure, conjure_article, pickle_conjure, AudioComponent, ImageComponent
+from data import get_audio_segment
+import numpy as np
+import torch
+from argparse import ArgumentParser
+from scipy.signal import stft
+from matplotlib import cm
+from torch.nn import functional as F
+
 
 """[markdown]
 
@@ -27,16 +39,6 @@ the loss between the transform of the original audio and the transform of the ra
 
 # source
 
-
-from typing import Tuple
-
-from conjure import S3Collection, Logger, numpy_conjure, conjure_article, AudioComponent, ImageComponent
-from data import get_audio_segment
-import numpy as np
-import torch
-from argparse import ArgumentParser
-from scipy.signal import stft
-from matplotlib import cm
 
 
 collection = S3Collection(
@@ -59,6 +61,31 @@ def fetch_audio(url: str, start_sample: int) -> np.ndarray:
         duration_samples=n_samples)
 
 
+AudioTransform = Callable[[torch.Tensor], torch.Tensor]
+
+@numpy_conjure(collection)
+def overfit_audio_samples(
+        orig: torch.Tensor,
+        transform: AudioTransform,
+        n_iterations: int = 1000) -> np.ndarray:
+
+    model = OverfitRawAudio((1, 1, n_samples), normalize=True).to(device)
+    optim = Adam(model.parameters(), lr=1e-3)
+    orig = orig.view(1, 1, n_samples)
+    orig_transform = transform(orig)
+
+    for i in range(n_iterations):
+        optim.zero_grad()
+        recon = model.forward(None)
+        recon_transform = transform(recon)
+        loss = F.mse_loss(recon_transform, orig_transform)
+        loss.backward()
+        optim.step()
+        print(i, loss.item())
+
+    return model.as_numpy_array()
+
+
 """[markdown]
 # The Magnitude Spectrogram
 
@@ -78,13 +105,9 @@ def spectrogram(
 
     if mag_only:
         mag = np.abs(spec)
-
         if normalize:
             mag /= mag.std(axis=1, keepdims=True)
-
         return mag
-
-
 
     return spec
 
@@ -95,6 +118,12 @@ def spectrogram(
 """[markdown]
 
 ## Reconstruction from the Magnitude Spectrogram
+
+"""
+
+"""[markdown]
+
+## An Aside: Phase Manipulations
 
 """
 
@@ -209,15 +238,12 @@ def generate_page_dict() -> dict:
     window_size = 256
     fb = gammatone_filter_bank(n_filters=n_filters, size=256, device=device, band_spacing='geometric')
 
-    # single_gammatone, gammatone_meta = logger.log
-
     ta = torch.from_numpy(audio_example).float().to(device).view(1, 1, -1)
     aim = auditory_image_model(ta, fb, aim_window_size=window_size, aim_step_size=64)
     batch, channels, time, periodicity = aim.shape
 
 
     aim = aim.view(channels, time, periodicity).permute(1, 2, 0)
-    print(aim.shape)
     aim = aim / (aim.max() + 1e-8)
     aim_movie, aim_meta = logger.log_movie('aim', aim)
     aim_display = ImageComponent(aim_meta.public_uri, height=400)
