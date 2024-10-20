@@ -12,19 +12,18 @@ https://www.di.ens.fr/data/scattering/
 https://www.di.ens.fr/data/scattering/audio/
 
 """
-from modules import gammatone_filter_bank
+
+from modules import gammatone_filter_bank, max_norm, stft, rectified_filter_bank
 from modules.aim import auditory_image_model
 from modules.overfitraw import OverfitRawAudio
 from util import device
 from torch.optim import Adam
-from typing import Tuple, Callable
-from conjure import S3Collection, Logger, numpy_conjure, conjure_article, pickle_conjure, AudioComponent, ImageComponent
+from typing import Callable
+from conjure import S3Collection, Logger, numpy_conjure, conjure_article, AudioComponent, ImageComponent
 from data import get_audio_segment
 import numpy as np
 import torch
 from argparse import ArgumentParser
-from scipy.signal import stft
-from matplotlib import cm
 from torch.nn import functional as F
 
 
@@ -38,7 +37,6 @@ the loss between the transform of the original audio and the transform of the ra
 """
 
 # source
-
 
 
 collection = S3Collection(
@@ -63,28 +61,6 @@ def fetch_audio(url: str, start_sample: int) -> np.ndarray:
 
 AudioTransform = Callable[[torch.Tensor], torch.Tensor]
 
-@numpy_conjure(collection)
-def overfit_audio_samples(
-        orig: torch.Tensor,
-        transform: AudioTransform,
-        n_iterations: int = 1000) -> np.ndarray:
-
-    model = OverfitRawAudio((1, 1, n_samples), normalize=True).to(device)
-    optim = Adam(model.parameters(), lr=1e-3)
-    orig = orig.view(1, 1, n_samples)
-    orig_transform = transform(orig)
-
-    for i in range(n_iterations):
-        optim.zero_grad()
-        recon = model.forward(None)
-        recon_transform = transform(recon)
-        loss = F.mse_loss(recon_transform, orig_transform)
-        loss.backward()
-        optim.step()
-        print(i, loss.item())
-
-    return model.as_numpy_array()
-
 
 """[markdown]
 # The Magnitude Spectrogram
@@ -100,8 +76,12 @@ def spectrogram(
         mag_only: bool = False,
         normalize: bool = False) -> np.ndarray:
 
-    _, _, spec = stft(audio, nperseg=window_size, noverlap=window_size - step_size)
-    coeffs, frames = spec.shape
+    n_coeffs = window_size // 2 + 1
+
+    audio = torch.from_numpy(audio).view(1, 1, audio.shape[-1])
+    spec = stft(audio, ws=window_size, step=step_size, pad=True)
+    spec = spec.data.cpu().numpy()
+    spec = spec.reshape((-1, n_coeffs)).T
 
     if mag_only:
         mag = np.abs(spec)
@@ -121,97 +101,103 @@ def spectrogram(
 
 """
 
+def reconstruct_with_transform(
+    target: np.ndarray,
+    iterations: int,
+    transform: AudioTransform,
+) -> np.ndarray:
+
+    target = torch.from_numpy(target).float().to(device).view(1, 1, target.shape[-1])
+    target = max_norm(target)
+    real_repr = transform(target)
+    model = OverfitRawAudio((1, 1, target.shape[-1]), normalize=False).to(device)
+    optim = Adam(model.parameters(), lr=1e-2)
+
+    for i in range(iterations):
+        optim.zero_grad()
+        recon = model.forward(None)
+        fake_repr = transform(recon)
+        loss = F.mse_loss(fake_repr, real_repr)
+        loss.backward()
+        optim.step()
+        print(i, loss.item())
+
+    final = model.forward(None)
+    final = final.data.cpu().numpy()
+    return final
+
+
+def reconstruct_from_mag_spectrogram(
+        target: np.ndarray,
+        iterations: int,
+        window_size: int,
+        step_size: int) -> np.ndarray:
+
+    def transform(signal: torch.Tensor) -> torch.Tensor:
+        return stft(signal, ws=window_size, step=step_size, pad=True)
+
+    result = reconstruct_with_transform(target, iterations, transform)
+    return result
+
+
+def reconstruct_from_aim(
+        target: np.ndarray,
+        iterations: int,
+        filter_bank: torch.Tensor,
+        window_size: int,
+        step_size: int):
+
+    def transform(signal: torch.Tensor) -> torch.Tensor:
+        return auditory_image_model(signal, filter_bank, window_size, step_size)
+
+    result = reconstruct_with_transform(target, iterations, transform)
+    return result
+
+
+# mag_spec_recon
+
 """[markdown]
 
-## An Aside: Phase Manipulations
+## Reconstruction with Longer Windows and Shorter Step Size
 
 """
 
-"""[markdown]
-
-# The RainbowGram
-
-We visualize a feature that also displays frame-to-frame phase deltas
-"""
-
-def to_magnitude_and_phase_delta(
-        audio: np.ndarray,
-        window_size: int = 2048,
-        step_size: int = 256,
-        normalize: bool = False) -> Tuple[np.ndarray, np.ndarray]:
-
-    spec = spectrogram(audio, window_size, step_size, normalize=normalize)
-
-    mag = np.abs(spec)
-
-    phase = np.angle(spec)
-    phase_delta = np.gradient(phase, axis=-1)
-    phase = phase_delta % (2 * np.pi)
-
-    return mag, phase
-
-
-def from_magnitude_and_phase_delta(mag: np.ndarray, phase: np.ndarray) -> np.ndarray:
-    accum = np.cumsum(phase, axis=-1)
-    accum = (accum * np.pi) % (2 * np.pi) - np.pi
-    spec = mag * torch.exp(1j * accum)
-    return spec
-
-
-def unit_normalize(x: np.ndarray) -> np.ndarray:
-    return x / (x.max() + 1e-8)
-
-
-def rainbowgram(audio: np.ndarray):
-    mag, phase = to_magnitude_and_phase_delta(audio, normalize=True)
-    mag = unit_normalize(mag)
-    phase = unit_normalize(phase)
-    rg = cm.rainbow(phase)[..., :3]
-    rg *= mag[..., None]
-    rg = unit_normalize(rg)
-    return rg
-
-# rainbowgram
-
+# better_display
 
 """[markdown]
 
-## Reconstruction from the RainbowGram
-
-"""
+## Reconstruction with AIM-like feature
 
 
-"""[markdown]
-# Perceptual Results of Phase Transformations
-
-"""
-
-"""[markdown]
-
-## Fully Randomized Phase
-
-"""
-
-"""[markdown]
-
-## Per-Channel Random Phase Shifts
-
-"""
-
-"""[markdown]
-# The Phase-Invariant Feature and its Benefits
- 
 """
 
 # aim
 
-def generate_page_dict() -> dict:
+# spec_display
+
+
+def check_sparse(audio_example: np.ndarray, filter_bank: torch.Tensor) -> np.ndarray:
+    audio_example = torch.from_numpy(audio_example).float().to(device).view(1, 1, audio_example.shape[-1])
+
+    n_filters = 128
+    window_size = 256
+    aim_step_size = 64
+
+    spec = rectified_filter_bank(audio_example, filter_bank)
+
+    spec = spec.data.cpu().numpy()
+    spec = spec.reshape((n_filters, -1))[:, :2048]
+    return spec
+
+
+def generate_page_dict(iterations: int = 1000) -> dict:
 
     # source audio ===================================
     # fetch the source audio
     audio_example = fetch_audio(
-        'https://music-net.s3.amazonaws.com/2391',
+        'https://music-net.s3.amazonaws.com/2112',
         start_sample=samplerate * 30)
+    audio_example /= (audio_example.max() + 1e-8)
     # encode it as a wav file
     encoded_audio, audio_meta = logger.log_sound('source-audio', audio_example)
     # create a component for display
@@ -228,35 +214,62 @@ def generate_page_dict() -> dict:
     # create a component to display the spec
     spec_display = ImageComponent(spec_meta.public_uri, height=400)
 
-    # rainbowgram =============================================
-    rg = rainbowgram(audio_example)
-    img_data, rg_meta = logger.log_matrix('rainbowgram', rg[::-1, :, :])
-    rainbowgram_display = ImageComponent(rg_meta.public_uri, height=400)
+    # mag spectrogram reconstruction ==========================
+    mag_spec_recon = reconstruct_from_mag_spectrogram(
+        audio_example, iterations, window_size=512, step_size=256)
+    encoded_mag_spec_recon, encoded_recon_meta = logger.log_sound('mag-spec-recon', mag_spec_recon)
+    mag_spec_recon_display = AudioComponent(encoded_recon_meta.public_uri, height=400)
 
-    # auditory image model ========================================
+    # better recon
+    better = reconstruct_from_mag_spectrogram(audio_example, iterations, window_size=2048, step_size=256)
+    encoded_better, better_meta = logger.log_sound('mag-spec-recon-better', better)
+    better_display = AudioComponent(better_meta.public_uri, height=400)
+
+    # aim recon ====================================================
+
     n_filters = 128
     window_size = 256
-    fb = gammatone_filter_bank(n_filters=n_filters, size=256, device=device, band_spacing='geometric')
+    aim_step_size = 64
 
-    ta = torch.from_numpy(audio_example).float().to(device).view(1, 1, -1)
-    aim = auditory_image_model(ta, fb, aim_window_size=window_size, aim_step_size=64)
-    batch, channels, time, periodicity = aim.shape
+    fb = gammatone_filter_bank(
+        n_filters=n_filters, size=256, device=device, band_spacing='geometric')
+    with_aim = reconstruct_from_aim(
+        audio_example, iterations, fb, window_size=window_size, step_size=aim_step_size)
+    encoded_aim, aim_meta = logger.log_sound('aim-recon', with_aim)
+    aim_display = AudioComponent(aim_meta.public_uri, height=400)
 
 
-    aim = aim.view(channels, time, periodicity).permute(1, 2, 0)
-    aim = aim / (aim.max() + 1e-8)
-    aim_movie, aim_meta = logger.log_movie('aim', aim)
-    aim_display = ImageComponent(aim_meta.public_uri, height=400)
+    # sparse
+    spec = check_sparse(audio_example, fb)
+    encoded_spec, spec_meta = logger.log_matrix_with_cmap('spec', spec, cmap='hot')
+    spec_display = ImageComponent(spec_meta.public_uri, height=400)
+
+    # auditory image model ========================================
+    # ta = torch.from_numpy(audio_example).float().to(device).view(1, 1, -1)
+    # aim = auditory_image_model(ta, fb, aim_window_size=window_size, aim_step_size=aim_step_size)
+    # batch, channels, time, periodicity = aim.shape
+    #
+    #
+    # aim = aim.view(channels, time, periodicity).permute(1, 2, 0)
+    # aim = aim / (aim.max() + 1e-8)
+    # print('creating aim movie')
+    # aim_movie, aim_meta = logger.log_movie('aim', aim)
+    # print('done creating movie')
+    # aim_movie = ImageComponent(aim_meta.public_uri, height=400)
 
 
     return dict(
         source=audio_display,
         mag_spec=spec_display,
-        rainbowgram=rainbowgram_display,
-        aim=aim_display)
+        mag_spec_recon=mag_spec_recon_display,
+        better_display=better_display,
+        aim=aim_display,
+        spec_display=spec_display
+        # aim_movie=aim_movie
+    )
 
-def generate_article():
-    page_components = generate_page_dict()
+def generate_article(iterations: int = 5000):
+    page_components = generate_page_dict(iterations=iterations)
     conjure_article(
         __file__,
         'html',
@@ -271,8 +284,9 @@ if __name__ == '__main__':
         action='store_true',
         required=False,
         default=False)
+
     args = parser.parse_args()
     if args.clear:
         collection.destroy()
     else:
-        generate_article()
+        generate_article(iterations=10)

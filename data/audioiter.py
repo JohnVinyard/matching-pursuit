@@ -43,12 +43,14 @@ class AudioIterator(object):
 def get_one_audio_segment(
         n_samples: int,
         samplerate: int = 22050,
-        device: Union[torch.device, None] = None) -> torch.Tensor:
+        device: Union[torch.device, None] = None,
+        pattern: str = None) -> torch.Tensor:
     ai = AudioIterator(
         batch_size=1,
         n_samples=n_samples,
         samplerate=samplerate,
         normalize=True,
-        overfit=True)
+        overfit=True,
+        pattern=pattern)
     target: torch.Tensor = next(iter(ai)).to(device).view(-1, 1, n_samples)
     return target

@@ -186,6 +186,8 @@ class SSM(nn.Module):
             torch.zeros(input_dim, input_dim).uniform_(-0.01, 0.01)
         )
 
+
+
     def forward(self, control: torch.Tensor) -> torch.Tensor:
         batch, cpd, frames = control.shape
         assert cpd == self.control_plane_dim

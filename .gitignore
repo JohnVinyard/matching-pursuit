@@ -50,5 +50,7 @@ avenues/*.html
 instrumentmodel
 overfitresonance
 ssm
+ssmcompression
+iterativedecomposition
 
 *.html

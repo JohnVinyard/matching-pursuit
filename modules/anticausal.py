@@ -87,7 +87,7 @@ class AntiCausalAnalysis(nn.Module):
         x = self.proj(x)
 
         if self.pos_encodings:
-            p = pos_encoded(batch, time, n_freqs=16).permute(0, 2, 1)
+            p = pos_encoded(batch, time, n_freqs=16, device=x.device).permute(0, 2, 1)
             p = self.pos_projection.forward(p)
             x = x + p
 

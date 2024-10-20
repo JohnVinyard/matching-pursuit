@@ -4,7 +4,7 @@ from torch import nn
 
 from config import Config
 from data.audioiter import AudioIterator
-from modules import stft, fft_frequency_decompose, NeuralReverb
+from modules import stft, NeuralReverb, flattened_multiband_spectrogram
 from modules.fft import fft_convolve
 from conjure import LmdbCollection, audio_conjure, serve_conjure, numpy_conjure, SupportedContentType
 from io import BytesIO
@@ -678,8 +678,23 @@ def envelopes(x: torch.Tensor):
     return x.data.cpu().numpy()
 
 # TODO: consider multi-band transform or PIF here.
-def transform(audio: torch.Tensor) -> torch.Tensor:
-    return stft(audio, ws=2048, step=256, pad=True)
+# def transform(audio: torch.Tensor) -> torch.Tensor:
+#     return stft(audio, ws=2048, step=256, pad=True)
+
+
+def transform(x: torch.Tensor):
+    """
+    Decompose audio into sub-bands of varying sample rate, and compute spectrogram with
+    varying time-frequency tradeoffs on each band.
+    """
+    return flattened_multiband_spectrogram(
+        x,
+        stft_spec={
+            'long': (128, 64),
+            'short': (64, 32),
+            'xs': (16, 8),
+        },
+        smallest_band_size=512)
 
 
 
