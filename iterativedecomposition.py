@@ -8,16 +8,18 @@ from torch.optim import Adam
 from config import Config
 from conjure import LmdbCollection, serve_conjure, loggers
 from data import AudioIterator
-from modules import stft, sparsify, sparsify_vectors, iterative_loss, fft_convolve, select_items, interpolate_last_axis, \
+from modules import stft, sparsify, sparsify_vectors, iterative_loss, select_items, interpolate_last_axis, \
     sparse_softmax, NeuralReverb, LinearOutputStack
 from modules.anticausal import AntiCausalAnalysis
 from modules.iterative import TensorTransform
+from modules.transfer import make_waves
 from modules.upsample import upsample_with_holes
-from overfitresonance import envelopes
 from util import device, encode_audio
+from torch.nn import functional as F
+from modules.fft import fft_convolve
 
 # the size, in samples of the audio segment we'll overfit
-n_samples = 2 ** 18
+n_samples = 2 ** 15
 
 # the samplerate, in hz, of the audio signal
 samplerate = 22050
@@ -35,9 +37,13 @@ n_frames = n_samples // transform_step_size
 
 def transform(x: torch.Tensor):
     batch_size = x.shape[0]
+    x = stft(x, transform_window_size, transform_step_size, pad=True)
+    n_coeffs = transform_window_size // 2 + 1
+    x = x.view(batch_size, n_frames, n_coeffs)[..., :n_coeffs - 1].permute(0, 2, 1)
+    return x
 
-    x = stft(x, 2048, 256, pad=True).view(
-        batch_size, n_frames, 1025)[..., :1024].permute(0, 2, 1)
+def loss_transform(x: torch.Tensor) -> torch.Tensor:
+    x = stft(x, transform_window_size, transform_step_size, pad=True)
     return x
 
 
@@ -98,10 +104,10 @@ class MultiHeadTransform(nn.Module):
             channels=hidden_channels,
             layers=n_layers,
             in_channels=latent_dim,
-            out_channels=np.prod(shapes)
+            out_channels=np.prod(shapes[name])
         ) for name, shape in shapes.items()}
 
-        self.modules = nn.ModuleDict(modules)
+        self.mods = nn.ModuleDict(modules)
 
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         batch, n_events, latent = x.shape
@@ -109,7 +115,7 @@ class MultiHeadTransform(nn.Module):
         return {
             name: module.forward(x).view(batch, n_events, *self.shapes[name])
             for name, module
-            in self.modules.items()
+            in self.mods.items()
         }
 
 
@@ -487,12 +493,13 @@ class OverfitResonanceModel(nn.Module):
                 noise_mixes=(2,),
                 envelopes=(n_envelopes,),
                 resonances=(instr_expressivity, n_resonances),
+                res_filter=(noise_expressivity, n_noise_filters),
                 deformations=(n_deformations,),
                 decays=(n_decays,),
                 mixes=(2,),
                 amplitudes=(1,),
                 room_choice=(n_verbs,),
-                room_shape=(2,)
+                room_mix=(2,)
             )
         )
 
@@ -532,13 +539,15 @@ class OverfitResonanceModel(nn.Module):
             noise_mixes=torch.zeros(*self.mix_shape, device=device).uniform_(-0.02, 0.02),
             envelopes=torch.zeros(*self.envelope_shape, device=device).uniform_(-0.02, 0.02),
             resonances=torch.zeros(*self.resonance_shape, device=device).uniform_(-0.02, 0.02),
+            res_filter=torch.zeros(*self.resonance_shape, device=device).uniform_(-0.02, 0.02),
             deformations=torch.zeros(*self.deformation_shape, device=device).uniform_(-0.02, 0.02),
             decays=torch.zeros(*self.decay_shape, device=device).uniform_(-0.02, 0.02),
             mixes=torch.zeros(*self.mix_shape, device=device).uniform_(-0.02, 0.02),
             amplitudes=torch.zeros(*self.amplitude_shape, device=device).uniform_(0, 1),
             times=self.scheduler.random_params(),
             room_choice=torch.zeros(*self.room_shape, device=device).uniform_(-0.02, 0.02),
-            room_mix=torch.zeros(*self.mix_shape, device=device).uniform_(-0.02, 0.02))
+            room_mix=torch.zeros(*self.mix_shape, device=device).uniform_(-0.02, 0.02)
+        )
 
     def forward(
             self,
@@ -547,6 +556,7 @@ class OverfitResonanceModel(nn.Module):
             noise_mixes: torch.Tensor,
             envelopes: torch.Tensor,
             resonances: torch.Tensor,
+            res_filter: torch.Tensor,
             deformations: torch.Tensor,
             decays: torch.Tensor,
             mixes: torch.Tensor,
@@ -590,7 +600,7 @@ class OverfitResonanceModel(nn.Module):
         # choose a number of resonances to be convolved with
         # those impulses
         resonance = self.r.forward(resonances)
-        res_filters = self.n.forward(self.res_filter)
+        res_filters = self.n.forward(res_filter)
         res_filters = torch.cat([
             res_filters,
             torch.zeros(*res_filters.shape[:-1], resonance.shape[-1] - res_filters.shape[-1], device=res_filters.device)
@@ -627,6 +637,7 @@ class OverfitResonanceModel(nn.Module):
         verb_mix = torch.softmax(room_mix, dim=-1)[:, :, None, :]
         stacked = torch.stack([wet, final.view(*verb.shape)], dim=-1)
         stacked = stacked * verb_mix
+
         final = stacked.sum(dim=-1)
 
         # apply amplitudes
@@ -674,7 +685,25 @@ class Model(nn.Module):
         self.to_event_vectors = nn.Conv1d(hidden_channels, context_dim, 1, 1, 0)
         self.to_event_switch = nn.Conv1d(hidden_channels, 1, 1, 1, 0)
 
+        self.resonance = OverfitResonanceModel(
+            n_noise_filters=16,
+            noise_expressivity=8,
+            noise_filter_samples=32,
+            noise_deformations=8,
+            instr_expressivity=8,
+            n_events=1,
+            n_resonances=1024,
+            n_envelopes=64,
+            n_decays=32,
+            n_deformations=16,
+            n_samples=n_samples,
+            n_frames=n_frames,
+            samplerate=samplerate
+        )
+
     def encode(self, transformed: torch.Tensor):
+        n_events = 1
+
         batch_size = transformed.shape[0]
 
         if transformed.shape[1] == 1:
@@ -702,7 +731,10 @@ class Model(nn.Module):
         return vecs, scheduling
 
     def generate(self, vecs: torch.Tensor, scheduling: torch.Tensor):
-        pass
+        choices = self.resonance.multihead.forward(vecs)
+        choices_with_scheduling = dict(**choices, times=scheduling)
+        events = self.resonance.forward(**choices_with_scheduling)
+        return events
 
     def iterative(self, audio: torch.Tensor):
         channels = []
@@ -715,7 +747,7 @@ class Model(nn.Module):
             v, sched = self.encode(spec)
             vecs.append(v)
             schedules.append(sched)
-            ch, _, _, _ = self.generate(v, sched)
+            ch = self.generate(v, sched)
             current = transform(ch)
             spec = (spec - current).clone().detach()
             channels.append(ch)
@@ -765,7 +797,7 @@ def train_and_monitor(batch_size: int = 8):
             # TODO: log target
             recon, encoded, scheduling = model.iterative(target)
             # TODO: log recon
-            loss = iterative_loss(target, recon, transform)
+            loss = iterative_loss(target, recon, loss_transform)
             loss.backward()
             optim.step()
             print(i, loss.item())

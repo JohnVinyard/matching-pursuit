@@ -70,6 +70,8 @@ class AntiCausalAnalysis(nn.Module):
             pos_encodings: bool = False):
         
         super().__init__()
+        self.in_channels = in_channels
+        self.channels = channels
 
         self.pos_encodings = pos_encodings
         self.proj = nn.Conv1d(in_channels, channels, 1, 1, 0)

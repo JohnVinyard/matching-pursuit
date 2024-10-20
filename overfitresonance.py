@@ -519,7 +519,9 @@ class OverfitResonanceModel(nn.Module):
             amplitudes=torch.zeros(*self.amplitude_shape, device=device).uniform_(0, 1),
             times=self.scheduler.random_params(),
             room_choice=torch.zeros(*self.room_shape, device=device).uniform_(-0.02, 0.02),
-            room_mix=torch.zeros(*self.mix_shape, device=device).uniform_(-0.02, 0.02))
+            room_mix=torch.zeros(*self.mix_shape, device=device).uniform_(-0.02, 0.02),
+            res_filter=torch.zeros(*self.res_filter.shape, device=device).uniform_(-0.02, 0.02),
+        )
 
     def apply_forces(
             self,
@@ -534,7 +536,8 @@ class OverfitResonanceModel(nn.Module):
             amplitudes: torch.Tensor,
             times: torch.Tensor,
             room_choice: torch.Tensor,
-            room_mix: torch.Tensor) -> torch.Tensor:
+            room_mix: torch.Tensor,
+            res_filter: torch.Tensor) -> torch.Tensor:
 
         # Begin layer ==========================================
 
@@ -570,8 +573,12 @@ class OverfitResonanceModel(nn.Module):
 
         # choose a number of resonances to be convolved with
         # those impulses
+        print('==================================')
+        print(resonances.shape)
+        print(res_filter.shape)
+
         resonance = self.r.forward(resonances)
-        res_filters = self.n.forward(self.res_filter)
+        res_filters = self.n.forward(res_filter)
         res_filters = torch.cat([
             res_filters,
             torch.zeros(*res_filters.shape[:-1], resonance.shape[-1] - res_filters.shape[-1], device=res_filters.device)
@@ -637,7 +644,8 @@ class OverfitResonanceModel(nn.Module):
             amplitudes=self.amplitudes,
             times=self.scheduler.params,
             room_mix=self.room_mix,
-            room_choice=self.rooms)
+            room_choice=self.rooms,
+            res_filter=self.res_filter)
 
 
 
