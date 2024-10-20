@@ -9,7 +9,7 @@ from config import Config
 from conjure import LmdbCollection, serve_conjure, loggers
 from data import AudioIterator
 from modules import stft, sparsify, sparsify_vectors, iterative_loss, select_items, interpolate_last_axis, \
-    sparse_softmax, NeuralReverb, LinearOutputStack, max_norm
+    sparse_softmax, NeuralReverb, LinearOutputStack, max_norm, flattened_multiband_spectrogram
 from modules.anticausal import AntiCausalAnalysis
 from modules.iterative import TensorTransform
 from modules.transfer import make_waves
@@ -17,6 +17,7 @@ from modules.upsample import upsample_with_holes
 from util import device, encode_audio, make_initializer
 from torch.nn import functional as F
 from modules.fft import fft_convolve
+from argparse import ArgumentParser
 
 # the size, in samples of the audio segment we'll overfit
 n_samples = 2 ** 15
@@ -43,9 +44,20 @@ def transform(x: torch.Tensor):
     x = x.view(batch_size, n_frames, n_coeffs)[..., :n_coeffs - 1].permute(0, 2, 1)
     return x
 
+# def loss_transform(x: torch.Tensor) -> torch.Tensor:
+#     x = stft(x, transform_window_size, transform_step_size, pad=True)
+#     return x
+
+
 def loss_transform(x: torch.Tensor) -> torch.Tensor:
-    x = stft(x, transform_window_size, transform_step_size, pad=True)
-    return x
+    return flattened_multiband_spectrogram(
+        x,
+        stft_spec={
+            'long': (128, 64),
+            'short': (64, 32),
+            'xs': (16, 8),
+        },
+        smallest_band_size=512)
 
 
 def mix(dry: torch.Tensor, wet: torch.Tensor, mix: torch.Tensor) -> torch.Tensor:
@@ -105,7 +117,7 @@ class MultiHeadTransform(nn.Module):
             channels=hidden_channels,
             layers=n_layers,
             in_channels=latent_dim,
-            out_channels=np.prod(shapes[name])
+            out_channels=np.prod(shapes[name]),
         ) for name, shape in shapes.items()}
 
         self.mods = nn.ModuleDict(modules)
@@ -455,7 +467,8 @@ class OverfitResonanceModel(nn.Module):
             n_deformations: int,
             n_samples: int,
             n_frames: int,
-            samplerate: int):
+            samplerate: int,
+            hidden_channels: int):
         super().__init__()
 
         self.noise_filter_samples = noise_filter_samples
@@ -486,8 +499,8 @@ class OverfitResonanceModel(nn.Module):
 
         self.multihead = MultiHeadTransform(
             latent_dim=context_dim,
-            hidden_channels=256,
-            n_layers=3,
+            hidden_channels=hidden_channels,
+            n_layers=2,
             shapes=dict(
                 noise_resonance=(noise_expressivity, n_noise_filters),
                 noise_deformations=(noise_deformations,),
@@ -540,7 +553,7 @@ class OverfitResonanceModel(nn.Module):
             noise_mixes=torch.zeros(*self.mix_shape, device=device).uniform_(-0.02, 0.02),
             envelopes=torch.zeros(*self.envelope_shape, device=device).uniform_(-0.02, 0.02),
             resonances=torch.zeros(*self.resonance_shape, device=device).uniform_(-0.02, 0.02),
-            res_filter=torch.zeros(*self.resonance_shape, device=device).uniform_(-0.02, 0.02),
+            res_filter=torch.zeros(*self.noise_resonance_shape, device=device).uniform_(-0.02, 0.02),
             deformations=torch.zeros(*self.deformation_shape, device=device).uniform_(-0.02, 0.02),
             decays=torch.zeros(*self.decay_shape, device=device).uniform_(-0.02, 0.02),
             mixes=torch.zeros(*self.mix_shape, device=device).uniform_(-0.02, 0.02),
@@ -682,12 +695,13 @@ class Model(nn.Module):
             channels=hidden_channels,
             kernel_size=2,
             dilations=[1, 2, 4, 8, 16, 32, 64, 1],
-            pos_encodings=True)
+            pos_encodings=False,
+            do_norm=True)
         self.to_event_vectors = nn.Conv1d(hidden_channels, context_dim, 1, 1, 0)
         self.to_event_switch = nn.Conv1d(hidden_channels, 1, 1, 1, 0)
 
         self.resonance = OverfitResonanceModel(
-            n_noise_filters=16,
+            n_noise_filters=32,
             noise_expressivity=8,
             noise_filter_samples=32,
             noise_deformations=8,
@@ -699,7 +713,8 @@ class Model(nn.Module):
             n_deformations=16,
             n_samples=n_samples,
             n_frames=n_frames,
-            samplerate=samplerate
+            samplerate=samplerate,
+            hidden_channels=hidden_channels
         )
 
         self.apply(initializer)
@@ -767,18 +782,19 @@ class Model(nn.Module):
 
 
 
-def train_and_monitor(batch_size: int = 8):
+def train_and_monitor(batch_size: int = 8, overfit: bool = False):
     stream = AudioIterator(
         batch_size=batch_size,
         n_samples=n_samples,
         samplerate=samplerate,
-        normalize=True)
+        normalize=True,
+        overfit=overfit)
 
 
     collection = LmdbCollection(path='iterativedecomposition')
 
-    recon_audio, orig_audio = loggers(
-        ['recon', 'orig'],
+    recon_audio, orig_audio, random_audio = loggers(
+        ['recon', 'orig', 'random'],
         'audio/wav',
         encode_audio,
         collection)
@@ -786,10 +802,11 @@ def train_and_monitor(batch_size: int = 8):
     serve_conjure([
         orig_audio,
         recon_audio,
+        random_audio
     ], port=9999, n_workers=1)
 
     def train():
-        model = Model(in_channels=1024, hidden_channels=256).to(device)
+        model = Model(in_channels=1024, hidden_channels=512).to(device)
         optim = Adam(model.parameters(), lr=1e-3)
 
 
@@ -800,15 +817,64 @@ def train_and_monitor(batch_size: int = 8):
             recon, encoded, scheduling = model.iterative(target)
             recon_summed = torch.sum(recon, dim=1, keepdim=True)
             recon_audio(max_norm(recon_summed))
-            loss = iterative_loss(target, recon, loss_transform)
+
+            iter_loss = iterative_loss(target, recon, loss_transform)
+
+            real = loss_transform(target)
+            fake = loss_transform(recon_summed)
+            loss = F.mse_loss(fake, real)
+
+            loss = loss + iter_loss
+
             loss.backward()
             optim.step()
             print(i, loss.item())
+
+            with torch.no_grad():
+                rnd = model.resonance.random_sequence()
+                rnd = torch.sum(rnd, dim=1, keepdim=True)
+                rnd = max_norm(rnd)
+                random_audio(rnd)
 
 
     train()
 
 
 if __name__ == '__main__':
-    train_and_monitor()
+    parser = ArgumentParser()
+    parser.add_argument(
+        '--overfit',
+        required=False,
+        action='store_true',
+        default=False,
+    )
+    parser.add_argument(
+        '--loss-type',
+        type=str,
+        required=False,
+        choices=['stft', 'multresolution'],
+        default='multiresolution'
+    )
+    parser.add_argument(
+        '--sparsity-loss',
+        action='store_true',
+        required=False,
+        default=False
+    )
+    parser.add_argument(
+        '--synthetic-loss',
+        action='store_true',
+        required=False,
+        default=False
+    )
+    parser.add_argument(
+        '--batch-size',
+        type=int,
+        default=8,
+        required=False
+    )
+    args = parser.parse_args()
+    train_and_monitor(
+        batch_size=1 if args.overfit else args.batch_size,
+        overfit=args.overfit)
 
