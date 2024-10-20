@@ -24,8 +24,6 @@ def iterative_loss(
     
     batch_size, n_events, time = recon_channels.shape
 
-    print(target_audio.shape, recon_channels.shape)
-
     # perform a transform on the target audio and flatten everything
     # but the batch dimension
     target = transform(target_audio.view(batch, 1, time))\

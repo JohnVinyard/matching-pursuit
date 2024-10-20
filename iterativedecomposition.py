@@ -9,12 +9,12 @@ from config import Config
 from conjure import LmdbCollection, serve_conjure, loggers
 from data import AudioIterator
 from modules import stft, sparsify, sparsify_vectors, iterative_loss, select_items, interpolate_last_axis, \
-    sparse_softmax, NeuralReverb, LinearOutputStack
+    sparse_softmax, NeuralReverb, LinearOutputStack, max_norm
 from modules.anticausal import AntiCausalAnalysis
 from modules.iterative import TensorTransform
 from modules.transfer import make_waves
 from modules.upsample import upsample_with_holes
-from util import device, encode_audio
+from util import device, encode_audio, make_initializer
 from torch.nn import functional as F
 from modules.fft import fft_convolve
 
@@ -34,6 +34,7 @@ context_dim = 32
 
 n_frames = n_samples // transform_step_size
 
+initializer = make_initializer(0.05)
 
 def transform(x: torch.Tensor):
     batch_size = x.shape[0]
@@ -692,7 +693,7 @@ class Model(nn.Module):
             noise_deformations=8,
             instr_expressivity=8,
             n_events=1,
-            n_resonances=1024,
+            n_resonances=2048,
             n_envelopes=64,
             n_decays=32,
             n_deformations=16,
@@ -700,6 +701,8 @@ class Model(nn.Module):
             n_frames=n_frames,
             samplerate=samplerate
         )
+
+        self.apply(initializer)
 
     def encode(self, transformed: torch.Tensor):
         n_events = 1
@@ -774,8 +777,8 @@ def train_and_monitor(batch_size: int = 8):
 
     collection = LmdbCollection(path='iterativedecomposition')
 
-    recon_audio, orig_audio, random_audio = loggers(
-        ['recon', 'orig', 'random'],
+    recon_audio, orig_audio = loggers(
+        ['recon', 'orig'],
         'audio/wav',
         encode_audio,
         collection)
@@ -783,7 +786,6 @@ def train_and_monitor(batch_size: int = 8):
     serve_conjure([
         orig_audio,
         recon_audio,
-        random_audio,
     ], port=9999, n_workers=1)
 
     def train():
@@ -794,14 +796,15 @@ def train_and_monitor(batch_size: int = 8):
         for i, item in enumerate(iter(stream)):
             optim.zero_grad()
             target = item.view(batch_size, 1, n_samples).to(device)
-            # TODO: log target
+            orig_audio(target)
             recon, encoded, scheduling = model.iterative(target)
-            # TODO: log recon
+            recon_summed = torch.sum(recon, dim=1, keepdim=True)
+            recon_audio(max_norm(recon_summed))
             loss = iterative_loss(target, recon, loss_transform)
             loss.backward()
             optim.step()
             print(i, loss.item())
-            # TODO: log random generation
+
 
     train()
 
