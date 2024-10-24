@@ -32,6 +32,7 @@ class AntiCausalBlock(nn.Module):
         skip = x
         a = torch.tanh(self.conv(x))
         b = torch.sigmoid(self.gate(x))
+
         x = a * b
         x = x + skip
         

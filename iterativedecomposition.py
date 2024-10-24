@@ -9,7 +9,7 @@ from config import Config
 from conjure import LmdbCollection, serve_conjure, loggers
 from data import AudioIterator
 from modules import stft, sparsify, sparsify_vectors, iterative_loss, select_items, interpolate_last_axis, \
-    sparse_softmax, NeuralReverb, LinearOutputStack, max_norm, flattened_multiband_spectrogram
+    sparse_softmax, NeuralReverb, LinearOutputStack, max_norm, flattened_multiband_spectrogram, UnitNorm
 from modules.anticausal import AntiCausalAnalysis
 from modules.iterative import TensorTransform
 from modules.transfer import make_waves
@@ -31,7 +31,7 @@ n_seconds = n_samples / samplerate
 transform_window_size = 2048
 transform_step_size = 256
 n_events = 16
-context_dim = 32
+context_dim = 512
 
 n_frames = n_samples // transform_step_size
 
@@ -117,7 +117,9 @@ class MultiHeadTransform(nn.Module):
             channels=hidden_channels,
             layers=n_layers,
             in_channels=latent_dim,
+            shortcut=False,
             out_channels=np.prod(shapes[name]),
+            norm=nn.LayerNorm((hidden_channels,))
         ) for name, shape in shapes.items()}
 
         self.mods = nn.ModuleDict(modules)
@@ -360,7 +362,7 @@ class Deformations(Lookup):
 
 
 class DiracScheduler(nn.Module):
-    def __init__(self, n_events: int, start_size: int, n_samples: int):
+    def __init__(self, n_events: int, start_size: int, n_samples: int, pre_sparse: bool = False):
         super().__init__()
         self.n_events = n_events
         self.start_size = start_size
@@ -368,16 +370,21 @@ class DiracScheduler(nn.Module):
         self.pos = nn.Parameter(
             torch.zeros(1, n_events, start_size).uniform_(-0.02, 0.02)
         )
+        self.pre_sparse = pre_sparse
 
     def random_params(self):
-        return torch.zeros(1, self.n_events, self.start_size, device=device).uniform_(-0.02, 0.02)
+        pos = torch.zeros(1, self.n_events, self.start_size, device=device).uniform_(-0.02, 0.02)
+        if self.pre_sparse:
+            pos = sparse_softmax(pos, normalize=True, dim=-1)
+        return pos
 
     @property
     def params(self):
         return self.pos
 
     def schedule(self, pos: torch.Tensor, events: torch.Tensor) -> torch.Tensor:
-        pos = sparse_softmax(pos, normalize=True, dim=-1)
+        if not self.pre_sparse:
+            pos = sparse_softmax(pos, normalize=True, dim=-1)
         pos = upsample_with_holes(pos, desired_size=self.n_samples)
         final = fft_convolve(events, pos)
         return final
@@ -519,7 +526,7 @@ class OverfitResonanceModel(nn.Module):
 
 
         self.r = WavetableLookup(
-            n_resonances, n_samples, n_resonances=4096, samplerate=samplerate, learnable=False)
+            n_resonances, n_samples, n_resonances=2048, samplerate=samplerate, learnable=False)
 
         # self.r = SampleLookup(n_resonances, n_samples, flatten_kernel_size=512)
         # self.r = F0ResonanceLookup(n_resonances, n_samples)
@@ -539,7 +546,7 @@ class OverfitResonanceModel(nn.Module):
         self.noise_warp = Deformations(noise_deformations, noise_expressivity, n_frames, n_samples)
 
         self.scheduler = DiracScheduler(
-            self.n_events, start_size=n_frames, n_samples=self.n_samples)
+            self.n_events, start_size=n_frames, n_samples=self.n_samples, pre_sparse=True)
 
         # self.scheduler = HierarchicalDiracModel(
         #     self.n_events, self.n_samples)
@@ -781,8 +788,11 @@ class Model(nn.Module):
 
 
 
+def train_and_monitor(
+        batch_size: int = 8,
+        overfit: bool = False,
+        sparsity_loss: bool = False):
 
-def train_and_monitor(batch_size: int = 8, overfit: bool = False):
     stream = AudioIterator(
         batch_size=batch_size,
         n_samples=n_samples,
@@ -818,13 +828,15 @@ def train_and_monitor(batch_size: int = 8, overfit: bool = False):
             recon_summed = torch.sum(recon, dim=1, keepdim=True)
             recon_audio(max_norm(recon_summed))
 
-            iter_loss = iterative_loss(target, recon, loss_transform)
+            loss = iterative_loss(target, recon, loss_transform)
+
+            if sparsity_loss:
+                loss = loss + (torch.abs(encoded).sum() * 1e-3)
 
             real = loss_transform(target)
             fake = loss_transform(recon_summed)
-            loss = F.mse_loss(fake, real)
+            loss = loss + F.mse_loss(fake, real)
 
-            loss = loss + iter_loss
 
             loss.backward()
             optim.step()
@@ -868,6 +880,12 @@ if __name__ == '__main__':
         default=False
     )
     parser.add_argument(
+        '--adversarial-loss',
+        action='store_true',
+        required=False,
+        default=False
+    )
+    parser.add_argument(
         '--batch-size',
         type=int,
         default=8,
@@ -876,5 +894,6 @@ if __name__ == '__main__':
     args = parser.parse_args()
     train_and_monitor(
         batch_size=1 if args.overfit else args.batch_size,
-        overfit=args.overfit)
+        overfit=args.overfit,
+        sparsity_loss=args.sparsity_loss)
 

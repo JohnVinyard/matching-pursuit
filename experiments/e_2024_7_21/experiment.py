@@ -440,7 +440,6 @@ def train(batch, i):
     optim.zero_grad()
     
     b = batch.shape[0]
-    
     recon, encoded, scheduling = model.iterative(batch)
     recon_summed = torch.sum(recon, dim=1, keepdim=True)
     sparsity_loss = torch.abs(encoded).sum() * 1e-3
