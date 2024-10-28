@@ -44,7 +44,7 @@ def get_one_audio_segment(
         n_samples: int,
         samplerate: int = 22050,
         device: Union[torch.device, None] = None,
-        pattern: str = None) -> torch.Tensor:
+        pattern: str = '*.wav') -> torch.Tensor:
     ai = AudioIterator(
         batch_size=1,
         n_samples=n_samples,

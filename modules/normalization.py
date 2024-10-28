@@ -55,3 +55,4 @@ def limit_norm(x, dim=2, max_norm=0.9999):
     clamped_norm = torch.clamp(norm, 0, max_norm)
     x = unit_norm * clamped_norm
     return x
+
