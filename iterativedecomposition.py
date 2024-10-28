@@ -9,9 +9,10 @@ from config import Config
 from conjure import LmdbCollection, serve_conjure, loggers
 from data import AudioIterator
 from modules import stft, sparsify, sparsify_vectors, iterative_loss, select_items, interpolate_last_axis, \
-    sparse_softmax, NeuralReverb, LinearOutputStack, max_norm, flattened_multiband_spectrogram, UnitNorm
+    sparse_softmax, NeuralReverb, LinearOutputStack, max_norm, flattened_multiband_spectrogram, UnitNorm, UNet
 from modules.anticausal import AntiCausalAnalysis
 from modules.iterative import TensorTransform
+from modules.reds import F0Resonance
 from modules.transfer import make_waves
 from modules.upsample import upsample_with_holes
 from util import device, encode_audio, make_initializer
@@ -186,24 +187,24 @@ def flatten_envelope(x: torch.Tensor, kernel_size: int, step_size: int):
     return result
 
 
-# class F0ResonanceLookup(Lookup):
-#     def __init__(self, n_items: int, n_samples: int):
-#         super().__init__(n_items, n_samples=3)
-#         self.f0 = F0Resonance(n_octaves=16, n_samples=n_samples)
-#         self.audio_samples = n_samples
-#
-#     def postprocess_results(self, items: torch.Tensor) -> torch.Tensor:
-#         batch, n_events, expressivity, _ = items.shape
-#
-#         items = items.view(batch * n_events, expressivity, 3)
-#
-#         f0 = items[..., :1]
-#         spacing = items[..., 1:2]
-#         decays = items[..., 2:]
-#         res = self.f0.forward(
-#             f0=f0, decay_coefficients=decays, freq_spacing=spacing, sigmoid_decay=True, apply_exponential_decay=True)
-#         res = res.view(batch, n_events, expressivity, self.audio_samples)
-#         return res
+class F0ResonanceLookup(Lookup):
+    def __init__(self, n_items: int, n_samples: int):
+        super().__init__(n_items, n_samples=3)
+        self.f0 = F0Resonance(n_octaves=16, n_samples=n_samples)
+        self.audio_samples = n_samples
+
+    def postprocess_results(self, items: torch.Tensor) -> torch.Tensor:
+        batch, n_events, expressivity, _ = items.shape
+
+        items = items.view(batch * n_events, expressivity, 3)
+
+        f0 = items[..., :1]
+        spacing = items[..., 1:2]
+        decays = items[..., 2:]
+        res = self.f0.forward(
+            f0=f0, decay_coefficients=decays, freq_spacing=spacing, sigmoid_decay=True, apply_exponential_decay=True)
+        res = res.view(batch, n_events, expressivity, self.audio_samples)
+        return res
 
 
 class WavetableLookup(Lookup):
@@ -526,10 +527,10 @@ class OverfitResonanceModel(nn.Module):
 
 
         self.r = WavetableLookup(
-            n_resonances, n_samples, n_resonances=2048, samplerate=samplerate, learnable=False)
-
+            n_resonances, n_samples, n_resonances=4096, samplerate=samplerate, learnable=False)
         # self.r = SampleLookup(n_resonances, n_samples, flatten_kernel_size=512)
         # self.r = F0ResonanceLookup(n_resonances, n_samples)
+
         self.n = SampleLookup(n_noise_filters, noise_filter_samples, windowed=True)
 
         self.verb = Lookup(n_verbs, n_samples, initialize=lambda x: verbs, fixed=True)
@@ -688,6 +689,37 @@ class OverfitResonanceModel(nn.Module):
 
 
 
+class Discriminator(nn.Module):
+    def __init__(self, in_channels: int = 1024, hidden_channels: int = 256):
+        super().__init__()
+        self.hidden_channels = hidden_channels
+        self.in_channels = in_channels
+        self.encoder = AntiCausalAnalysis(
+            in_channels=in_channels,
+            channels=hidden_channels,
+            kernel_size=2,
+            dilations=[1, 2, 4, 8, 16, 32, 64, 1],
+            pos_encodings=False,
+            do_norm=True)
+        # self.encoder = UNet(in_channels, is_disc=True)
+        self.judge = nn.Linear(hidden_channels, 1)
+        self.apply(initializer)
+
+    def forward(self, transformed: torch.Tensor):
+        batch_size = transformed.shape[0]
+
+        if transformed.shape[1] == 1:
+            transformed = transform(transformed)
+
+        x = transformed
+
+        encoded = self.encoder.forward(x)
+        encoded = torch.sum(encoded, dim=-1)
+        x = self.judge(encoded)
+
+        return x
+
+
 class Model(nn.Module):
     def __init__(
             self,
@@ -711,13 +743,13 @@ class Model(nn.Module):
             n_noise_filters=32,
             noise_expressivity=8,
             noise_filter_samples=32,
-            noise_deformations=8,
+            noise_deformations=16,
             instr_expressivity=8,
             n_events=1,
-            n_resonances=2048,
-            n_envelopes=64,
+            n_resonances=256,
+            n_envelopes=128,
             n_decays=32,
-            n_deformations=16,
+            n_deformations=32,
             n_samples=n_samples,
             n_frames=n_frames,
             samplerate=samplerate,
@@ -791,7 +823,8 @@ class Model(nn.Module):
 def train_and_monitor(
         batch_size: int = 8,
         overfit: bool = False,
-        sparsity_loss: bool = False):
+        sparsity_loss: bool = False,
+        adv_loss: bool = False):
 
     stream = AudioIterator(
         batch_size=batch_size,
@@ -819,28 +852,46 @@ def train_and_monitor(
         model = Model(in_channels=1024, hidden_channels=512).to(device)
         optim = Adam(model.parameters(), lr=1e-3)
 
+        disc = Discriminator(in_channels=1024, hidden_channels=512).to(device)
+        disc_optim = Adam(model.parameters(), lr=1e-3)
 
         for i, item in enumerate(iter(stream)):
             optim.zero_grad()
+            disc_optim.zero_grad()
+
             target = item.view(batch_size, 1, n_samples).to(device)
             orig_audio(target)
             recon, encoded, scheduling = model.iterative(target)
             recon_summed = torch.sum(recon, dim=1, keepdim=True)
             recon_audio(max_norm(recon_summed))
 
+
             loss = iterative_loss(target, recon, loss_transform)
 
             if sparsity_loss:
                 loss = loss + (torch.abs(encoded).sum() * 1e-3)
 
-            real = loss_transform(target)
-            fake = loss_transform(recon_summed)
-            loss = loss + F.mse_loss(fake, real)
+            if adv_loss:
+                mask = torch.zeros(target.shape[0], n_events, 1, device=recon.device).bernoulli_(p=0.5)
+                for_disc = torch.sum(recon * mask, dim=1, keepdim=True)
+                j = disc.forward(for_disc)
+                d_loss = torch.abs(1 - j).mean()
+                print('G', d_loss.item())
+                loss = loss + d_loss
 
 
             loss.backward()
             optim.step()
             print(i, loss.item())
+
+            if adv_loss:
+                disc_optim.zero_grad()
+                r_j = disc.forward(target)
+                f_j = disc.forward(recon_summed.clone().detach())
+                d_loss = torch.abs(0 - f_j).mean() + torch.abs(1 - r_j).mean()
+                d_loss.backward()
+                print('D', d_loss.item())
+                disc_optim.step()
 
             with torch.no_grad():
                 rnd = model.resonance.random_sequence()
@@ -895,5 +946,6 @@ if __name__ == '__main__':
     train_and_monitor(
         batch_size=1 if args.overfit else args.batch_size,
         overfit=args.overfit,
-        sparsity_loss=args.sparsity_loss)
+        sparsity_loss=args.sparsity_loss,
+        adv_loss=args.adversarial_loss)
 

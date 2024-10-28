@@ -1,9 +1,13 @@
 from torch import nn
 
 class UNet(nn.Module):
-    def __init__(self, channels):
+    def __init__(self, channels, is_disc: bool = False):
         super().__init__()
         self.channels = channels
+        self.is_disc = is_disc
+
+        if self.is_disc:
+            self.disc = nn.Conv1d(channels, 1, kernel_size=4, stride=4, padding=0)
 
         self.down = nn.Sequential(
             # 64
@@ -97,6 +101,10 @@ class UNet(nn.Module):
         for layer in self.down:
             x = layer(x)
             context[x.shape[-1]] = x
+
+        if self.is_disc:
+            x = self.disc(x)
+            return x
         
         for layer in self.up:
             x = layer(x)
