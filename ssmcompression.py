@@ -1,7 +1,7 @@
 # the size, in samples of the audio segment we'll overfit
 from modules.atoms import unit_norm
 
-n_samples = 2 ** 18
+n_samples = 2 ** 16
 
 # the samplerate, in hz, of the audio signal
 samplerate = 22050
@@ -45,10 +45,18 @@ def limit_norm(x, dim=2, max_norm=0.9999):
 '''
 
 def project_and_limit_norm(vector: torch.Tensor, matrix: torch.Tensor) -> torch.Tensor:
+    # get the original norm, this is the absolute max norm/energy we should arrive at,
+    # given a perfectly efficient physical system
     original_norm = torch.norm(vector, dim=-1, keepdim=True)
+    # project
     x = vector @ matrix
+    # find the norm of the projection
     new_norm = torch.norm(x, dim=-1, keepdim=True)
+    # clamp the norm between the allowed values
     clamped_norm = torch.clamp(new_norm, min=None, max=original_norm)
+
+    # give the projected vector the clamped norm, such that it
+    # can have lost some or all energy, but not _gained_ any
     normalized = unit_norm(x, axis=-1)
     x = normalized * clamped_norm
     return x
@@ -224,7 +232,7 @@ def construct_experiment_model(state_dict: Union[None, dict] = None) -> OverfitC
 
 def train_and_monitor():
     target = get_one_audio_segment(n_samples=n_samples, samplerate=samplerate)
-    collection = LmdbCollection(path='ssm')
+    collection = LmdbCollection(path='ssmcompression')
 
     recon_audio, orig_audio, random_audio = loggers(
         ['recon', 'orig', 'random'],
