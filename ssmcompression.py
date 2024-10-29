@@ -1,7 +1,7 @@
 # the size, in samples of the audio segment we'll overfit
 from modules.atoms import unit_norm
 
-n_samples = 2 ** 16
+n_samples = 2 ** 18
 
 # the samplerate, in hz, of the audio signal
 samplerate = 22050
@@ -10,7 +10,7 @@ samplerate = 22050
 n_seconds = n_samples / samplerate
 
 # the size of each, half-lapped audio "frame"
-window_size = 512
+window_size = 2048
 
 # the dimensionality of the control plane or control signal
 control_plane_dim = 32
@@ -18,13 +18,18 @@ control_plane_dim = 32
 # the dimensionality of the state vector, or hidden state
 state_dim = 128
 
+is_complex = False
+
+max_efficiency = 0.99
+
+windowing = True
+
 from itertools import count
 from typing import Union
 
 import numpy as np
 import torch
 from torch import nn
-from torch.nn.utils.clip_grad import clip_grad_value_
 from torch.optim import Adam
 
 from conjure import LmdbCollection, serve_conjure, SupportedContentType, loggers, \
@@ -35,16 +40,11 @@ from modules.overlap_add import overlap_add
 from util import device, encode_audio
 
 
-'''
-def limit_norm(x, dim=2, max_norm=0.9999):
-    norm = torch.norm(x, dim=dim, keepdim=True)
-    unit_norm = x / (norm + 1e-8)
-    clamped_norm = torch.clamp(norm, 0, max_norm)
-    x = unit_norm * clamped_norm
-    return x
-'''
 
-def project_and_limit_norm(vector: torch.Tensor, matrix: torch.Tensor) -> torch.Tensor:
+def project_and_limit_norm(
+        vector: torch.Tensor,
+        matrix: torch.Tensor,
+        max_efficiency: float = max_efficiency) -> torch.Tensor:
     # get the original norm, this is the absolute max norm/energy we should arrive at,
     # given a perfectly efficient physical system
     original_norm = torch.norm(vector, dim=-1, keepdim=True)
@@ -53,7 +53,7 @@ def project_and_limit_norm(vector: torch.Tensor, matrix: torch.Tensor) -> torch.
     # find the norm of the projection
     new_norm = torch.norm(x, dim=-1, keepdim=True)
     # clamp the norm between the allowed values
-    clamped_norm = torch.clamp(new_norm, min=None, max=original_norm)
+    clamped_norm = torch.clamp(new_norm, min=None, max=original_norm * max_efficiency)
 
     # give the projected vector the clamped norm, such that it
     # can have lost some or all energy, but not _gained_ any
@@ -72,34 +72,44 @@ class SSM(nn.Module):
     1D signal.
     """
 
-    def __init__(self, control_plane_dim: int, input_dim: int, state_matrix_dim: int):
+    def __init__(self, control_plane_dim: int, input_dim: int, state_matrix_dim: int, complex: bool = False):
         super().__init__()
         self.state_matrix_dim = state_matrix_dim
         self.input_dim = input_dim
         self.control_plane_dim = control_plane_dim
+        self.complex = complex
+
+
+        control_plane_dim = control_plane_dim  // 2 + 1 if complex else control_plane_dim
+        state_matrix_dim = state_matrix_dim // 2 + 1 if complex else state_matrix_dim
+        input_dim = input_dim // 2 + 1 if complex else input_dim
+
+
+        self.input_dim = input_dim
+        self.state_matrix_dim = state_matrix_dim
 
         # matrix mapping control signal to audio frame dimension
         self.proj = nn.Parameter(
-            torch.zeros(control_plane_dim, input_dim).uniform_(-0.01, 0.01)
+            torch.zeros(control_plane_dim, input_dim, dtype=torch.complex64 if complex else torch.float32).uniform_(-0.01, 0.01)
         )
 
         # state matrix mapping previous state vector to next state vector
         self.state_matrix = nn.Parameter(
-            torch.zeros(state_matrix_dim, state_matrix_dim).uniform_(-0.01, 0.01))
+            torch.zeros(state_matrix_dim, state_matrix_dim, dtype=torch.complex64 if complex else torch.float32).uniform_(-0.01, 0.01))
 
         # matrix mapping audio frame to hidden/state vector dimension
         self.input_matrix = nn.Parameter(
-            torch.zeros(input_dim, state_matrix_dim).uniform_(-0.01, 0.01))
+            torch.zeros(input_dim, state_matrix_dim, dtype=torch.complex64 if complex else torch.float32).uniform_(-0.01, 0.01))
 
         # matrix mapping hidden/state vector to audio frame dimension
         self.output_matrix = nn.Parameter(
-            torch.zeros(state_matrix_dim, input_dim).uniform_(-0.01, 0.01)
+            torch.zeros(state_matrix_dim, input_dim, dtype=torch.complex64 if complex else torch.float32).uniform_(-0.01, 0.01)
         )
 
         # skip-connection-like matrix mapping input audio frame to next
         # output audio frame
         self.direct_matrix = nn.Parameter(
-            torch.zeros(input_dim, input_dim).uniform_(-0.01, 0.01)
+            torch.zeros(input_dim, input_dim, dtype=torch.complex64 if complex else torch.float32).uniform_(-0.01, 0.01)
         )
 
     def forward(self, control: torch.Tensor) -> torch.Tensor:
@@ -110,11 +120,20 @@ class SSM(nn.Module):
 
 
         # proj = control @ self.proj
+        if self.complex:
+            control = torch.fft.rfft(control, dim=-1)
+
+        # print(control.shape, self.proj.shape)
+
         proj = project_and_limit_norm(control, self.proj)
         assert proj.shape == (batch, frames, self.input_dim)
 
         results = []
-        state_vec = torch.zeros(batch, self.state_matrix_dim, device=control.device)
+        state_vec = torch.zeros(
+            batch,
+            self.state_matrix_dim,
+            device=control.device,
+            dtype=torch.complex64 if self.complex else torch.float32)
 
         for i in range(frames):
             inp = proj[:, i, :]
@@ -133,8 +152,13 @@ class SSM(nn.Module):
         result = torch.cat(results, dim=1)
         result = result[:, None, :, :]
 
-        result = overlap_add(result)
-        return result[..., :frames * (self.input_dim // 2)]
+        if self.complex:
+            print(result.shape)
+            result = torch.fft.irfft(result, dim=-1)
+            print(result.shape)
+
+        result = overlap_add(result, apply_window=windowing)
+        return result[..., :n_samples]
 
 
 class OverfitControlPlane(nn.Module):
@@ -142,9 +166,9 @@ class OverfitControlPlane(nn.Module):
     Encapsulates parameters for control signal and state-space model
     """
 
-    def __init__(self, control_plane_dim: int, input_dim: int, state_matrix_dim: int, n_samples: int):
+    def __init__(self, control_plane_dim: int, input_dim: int, state_matrix_dim: int, n_samples: int, complex: bool = False):
         super().__init__()
-        self.ssm = SSM(control_plane_dim, input_dim, state_matrix_dim)
+        self.ssm = SSM(control_plane_dim, input_dim, state_matrix_dim, complex)
         self.n_samples = n_samples
         self.n_frames = int(n_samples / (input_dim // 2))
 
@@ -205,7 +229,7 @@ def sparsity_loss(c: torch.Tensor) -> torch.Tensor:
     """
     Compute the l1 norm of the control signal
     """
-    return torch.abs(c).sum() * 1e-5
+    return torch.abs(c).sum() * 1e-2
 
 
 def to_numpy(x: torch.Tensor):
@@ -220,7 +244,8 @@ def construct_experiment_model(state_dict: Union[None, dict] = None) -> OverfitC
         control_plane_dim=control_plane_dim,
         input_dim=window_size,
         state_matrix_dim=state_dim,
-        n_samples=n_samples
+        n_samples=n_samples,
+        complex=is_complex
     )
     model = model.to(device)
 
@@ -261,7 +286,7 @@ def train_and_monitor():
     def train(target: torch.Tensor):
         model = construct_experiment_model()
 
-        optim = Adam(model.parameters(), lr=1e-3)
+        optim = Adam(model.parameters(), lr=1e-2)
 
         for iteration in count():
             optim.zero_grad()
@@ -276,7 +301,7 @@ def train_and_monitor():
             envelopes(model.control_signal.view(control_plane_dim, -1))
             loss.backward()
 
-            clip_grad_value_(model.parameters(), 0.5)
+            # clip_grad_value_(model.parameters(), 0.5)
 
             optim.step()
             print(iteration, loss.item(), sparsity)

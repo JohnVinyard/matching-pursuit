@@ -3,7 +3,7 @@ from typing import Collection, List
 import torch
 from torch import nn
 
-from modules import stft, unit_norm
+from modules import stft, unit_norm, max_norm
 # from modules.angle import windowed_audio
 
 from modules.ddsp import overlap_add
@@ -164,9 +164,9 @@ def make_waves(n_samples: int, f0s: List[float], samplerate: int):
 def freq_domain_transfer_function_to_resonance(
         window_size: int,
         coeffs: torch.Tensor,
-        # start_coeffs: torch.Tensor,
         n_frames: int,
         apply_decay: bool = True) -> torch.Tensor:
+
     step_size = window_size // 2
     total_samples = step_size * n_frames
 
@@ -201,8 +201,9 @@ def freq_domain_transfer_function_to_resonance(
 
     windowed = torch.fft.irfft(spec, dim=-1).view(-1, 1, n_frames, window_size)
     # windowed = windowed * torch.hamming_window(window_size, device=coeffs.device)[None, None, None, :]
-    audio = overlap_add(windowed, apply_window=False)[..., :total_samples]
+    audio = overlap_add(windowed, apply_window=True)[..., :total_samples]
     audio = audio.view(-1, 1, total_samples)
+    audio = max_norm(audio)
     return audio
 
 
