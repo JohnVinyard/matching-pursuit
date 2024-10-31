@@ -23,14 +23,15 @@ class Block(nn.Module):
         self.control_plane_dim = control_plane_dim
 
         self.transfer = nn.Parameter(torch.zeros((self.control_plane_dim, self.n_coeffs,)))
+        self.mixer_matrix = nn.Parameter(torch.eye(self.control_plane_dim))
+
         self.transfer.data[:] = transfer
 
         self.gain = nn.Parameter(torch.ones((1,)).fill_(gain))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
 
-        print('Block input', x.shape)
-        # TODO: mixing matrix
+        x = (x.permute(0, 2, 1) @ self.mixer_matrix).permute(0, 2, 1)
 
         batch, channels, time = x.shape
 
@@ -54,7 +55,6 @@ class Block(nn.Module):
             if i > 0:
                 current = current + output_frames[i - 1]
 
-            # print(current.shape, self.transfer.shape)
             # TODO: transform the transform function given a deformation matrix
             filtered = current * self.transfer[None, :, None, :]
 
@@ -66,9 +66,6 @@ class Block(nn.Module):
         samples = samples * self.gain
         samples = torch.tanh(samples)
         x = samples[..., :time]
-        # _, channels, time = x.shape
-        # assert channels == self.control_plane_dim
-        # x = torch.sum(x, dim=1, keepdim=True)
         return x
 
 
@@ -82,12 +79,12 @@ class AudioNetwork(nn.Module):
         self.n_coeffs = window_size // 2 + 1
 
         self.blocks = nn.ModuleList([
-            Block(window_size, control_plane_dim, self.init_transfer(), torch.zeros(1).uniform_(1, 10).item())
+            Block(window_size, control_plane_dim, self.init_transfer(), torch.zeros(1).uniform_(1, 50).item())
             for _ in range(self.n_blocks)
         ])
 
     def init_transfer(self):
-        resonances = torch.zeros(self.control_plane_dim, self.n_coeffs).uniform_(0.5, 0.999)
+        resonances = torch.zeros(self.control_plane_dim, self.n_coeffs).uniform_(0.9, 0.9998)
         sparse = torch.zeros_like(resonances).bernoulli_(p=0.01)
         resonances = resonances * sparse
         scaling = torch.linspace(1, 0, self.n_coeffs) ** 2
@@ -114,7 +111,6 @@ if __name__ == '__main__':
     window_size = 2048
     n_frames = 128
     control_plane_dim = 16
-
 
     impulse_size = 16
     impulse = torch.zeros(impulse_size).uniform_(-1, 1)
