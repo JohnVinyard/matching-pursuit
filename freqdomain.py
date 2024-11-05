@@ -1,17 +1,16 @@
-from typing import Union, List
+from typing import Union, List, Iterable
 
 import torch
 
 from modules import HyperNetworkLayer, limit_norm
 from modules.overlap_add import overlap_add
 from modules.phase import windowed_audio
-from util import playable
+from modules.transfer import fft_convolve
+from modules.upsample import upsample_with_holes
 from util.music import musical_scale_hz
-from util.playable import listen_to_sound
 from torch import nn
 import numpy as np
 from scipy.signal import morlet
-from matplotlib import pyplot as plt
 
 
 # TODO: The option to pass either a zounds.Scale or a list of center frequencies
@@ -192,11 +191,10 @@ class AudioNetwork(nn.Module):
         resonances = torch.zeros(self.control_plane_dim, self.n_coeffs).uniform_(0.8, 0.95)
         sparse = torch.zeros_like(resonances).bernoulli_(p=0.01)
         resonances = resonances * sparse
-        # scaling = torch.linspace(1, 0, self.n_coeffs) ** 2
-        scaled_resonances = resonances #* scaling[None, :]
+        scaled_resonances = resonances
         return scaled_resonances
 
-    def forward(self, x: torch.Tensor, deformations: List[torch.Tensor]) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, deformations: Iterable[torch.Tensor]) -> torch.Tensor:
         outputs = [x[..., None]]
         inp = x
 
@@ -209,6 +207,74 @@ class AudioNetwork(nn.Module):
         mixed = (result * mixer_values[None, None, None, :]).sum(dim=-1)
         mixed = torch.sum(mixed, dim=1, keepdim=True)
         return mixed
+
+
+class OverfitAudioNetwork(nn.Module):
+    def __init__(
+            self,
+            window_size: int = 2048,
+            control_plane_dim: int = 16,
+            low_rank_deformation_dim: int = 16,
+            n_samples: int = 2**15,
+            n_frames: int = 128,
+            n_layers: int = 3):
+
+        super().__init__()
+
+        self.n_samples = n_samples
+        self.n_layers = n_layers
+
+        env = torch.linspace(1, 0, steps=128) ** 10
+        env = torch.cat([env, torch.zeros(self.n_samples - 128)], dim=-1)
+        self.register_buffer('env', env)
+
+        msh = musical_scale_hz(start_midi=21, stop_midi=129, n_steps=transfer_dim)
+        # print([f'{x:.2f}' for x in msh])
+
+        # establish (optional) non-linear frequency space
+        fb = morlet_filter_bank(
+            samplerate,
+            kernel_size=window_size,
+            scale=msh,
+            scaling_factor=0.025,
+            normalize=True,
+            device=None)
+
+        control_plane = torch.zeros(1, control_plane_dim, n_frames).uniform_(-1, 1)
+        self.control_plane = nn.Parameter(control_plane)
+
+        # establish deformation matrix (batch, control_plane_dim, n_frames, low_rank_deformation_dim)
+        dm = [
+            torch.zeros(
+                1,
+                control_plane_dim,
+                n_frames,
+                low_rank_deformation_dim).uniform_(-0.1, 0.1)
+            for _ in range(n_layers)
+        ]
+        self.deformations = nn.ParameterList(dm)
+
+        self.network = AudioNetwork(
+            control_plane_dim,
+            window_size,
+            n_blocks=n_blocks,
+            deformation_latent_dim=low_rank_deformation_dim,
+            filter_bank=fb,
+            preserve_energy=False
+        )
+
+    def _upsampled_control_plane(self):
+        noise = torch.zeros((self.n_samples,), device=self.control_plane.device).uniform_(-1, 1)
+        us = upsample_with_holes(torch.relu(self.control_plane), self.n_samples)
+        us = fft_convolve(us, self.env[None, None, :])
+        us = us * noise
+        return us
+
+    def forward(self):
+        cp = self._upsampled_control_plane()
+        result = self.network.forward(cp, self.deformations)
+        return result
+
 
 
 if __name__ == '__main__':
@@ -224,52 +290,64 @@ if __name__ == '__main__':
     samplerate = 22050
     nyquist = samplerate // 2
 
-    msh = musical_scale_hz(start_midi=21, stop_midi=129, n_steps=transfer_dim)
-    print([f'{x:.2f}' for x in msh])
-
-    # establish (optional) non-linear frequency space
-    fb = morlet_filter_bank(
-        samplerate,
-        kernel_size=window_size,
-        # scale=np.geomspace(100, nyquist - 100, num=transfer_dim),
-        scale=msh,
-        scaling_factor=0.025,
-        normalize=True,
-        device=None)
-
-
-    # establish energy inputs (batch, control_plane_dim, n_samples)
-    impulse_size = 16
-    impulse = torch.zeros(impulse_size).uniform_(-1, 1)
-    impulse = impulse * torch.hann_window(impulse_size)
-
-    inp = torch.zeros(1, control_plane_dim, n_samples)
-
-    inp[:, 0, 1024: 1024 + impulse_size] += impulse * 0.1
-    inp[:, 1, 8192: 8192 + impulse_size] += impulse * 0.5
-    inp[:, 2, 16384: 16384 + impulse_size] += impulse
-
-    # establish deformation matrix (batch, control_plane_dim, n_frames, low_rank_deformation_dim)
-    dm = [
-        torch.zeros(
-            1,
-            control_plane_dim,
-            n_frames,
-            low_rank_deformation_dim).uniform_(-0.1, 0.1)
-        for _ in range(n_blocks)
-    ]
-
-    network = AudioNetwork(
-        control_plane_dim,
-        window_size,
-        n_blocks=n_blocks,
-        deformation_latent_dim=low_rank_deformation_dim,
-        filter_bank=fb,
-        preserve_energy=False
+    model = OverfitAudioNetwork(
+        window_size=window_size,
+        control_plane_dim=control_plane_dim,
+        low_rank_deformation_dim=low_rank_deformation_dim,
+        n_samples=n_samples,
+        n_frames=n_frames,
+        n_layers=n_blocks
     )
 
-    samples = network.forward(inp, dm)
+    result = model.forward()
+    print(result.shape)
 
-    print(samples.min(), samples.max())
-    samples = playable(samples, samplerate=22050, normalize=True)
-    listen_to_sound(samples)
+    # msh = musical_scale_hz(start_midi=21, stop_midi=129, n_steps=transfer_dim)
+    # print([f'{x:.2f}' for x in msh])
+    #
+    # # establish (optional) non-linear frequency space
+    # fb = morlet_filter_bank(
+    #     samplerate,
+    #     kernel_size=window_size,
+    #     scale=msh,
+    #     scaling_factor=0.025,
+    #     normalize=True,
+    #     device=None)
+    #
+    #
+    # # establish energy inputs (batch, control_plane_dim, n_samples)
+    # impulse_size = 16
+    # impulse = torch.zeros(impulse_size).uniform_(-1, 1)
+    # impulse = impulse * torch.hann_window(impulse_size)
+    #
+    # # TODO: upscale with exponential decay envelopes
+    # inp = torch.zeros(1, control_plane_dim, n_samples)
+    #
+    # inp[:, 0, 1024: 1024 + impulse_size] += impulse * 0.1
+    # inp[:, 1, 8192: 8192 + impulse_size] += impulse * 0.5
+    # inp[:, 2, 16384: 16384 + impulse_size] += impulse
+    #
+    # # establish deformation matrix (batch, control_plane_dim, n_frames, low_rank_deformation_dim)
+    # dm = [
+    #     torch.zeros(
+    #         1,
+    #         control_plane_dim,
+    #         n_frames,
+    #         low_rank_deformation_dim).uniform_(-0.1, 0.1)
+    #     for _ in range(n_blocks)
+    # ]
+    #
+    # network = AudioNetwork(
+    #     control_plane_dim,
+    #     window_size,
+    #     n_blocks=n_blocks,
+    #     deformation_latent_dim=low_rank_deformation_dim,
+    #     filter_bank=fb,
+    #     preserve_energy=False
+    # )
+    #
+    # samples = network.forward(inp, dm)
+    #
+    # print(samples.min(), samples.max())
+    # samples = playable(samples, samplerate=22050, normalize=True)
+    # listen_to_sound(samples)

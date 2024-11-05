@@ -3,7 +3,6 @@ import torch
 from torch.nn import functional as F
 import numpy as np
 from torch.nn.utils.weight_norm import weight_norm as wnorm
-
 from util.weight_init import make_initializer
 
 
