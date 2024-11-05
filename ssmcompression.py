@@ -50,6 +50,8 @@ def project_and_limit_norm(
     original_norm = torch.norm(vector, dim=-1, keepdim=True)
     # project
     x = vector @ matrix
+
+    # TODO: clamp norm should be a utility that lives in normalization
     # find the norm of the projection
     new_norm = torch.norm(x, dim=-1, keepdim=True)
     # clamp the norm between the allowed values
