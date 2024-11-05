@@ -8,6 +8,44 @@ from modules.phase import windowed_audio
 from util import playable
 from util.playable import listen_to_sound
 from torch import nn
+import numpy as np
+from scipy.signal import morlet
+from matplotlib import pyplot as plt
+
+
+# TODO: The option to pass either a zounds.Scale or a list of center frequencies
+# should be factored in to one of the pre-existing implementations
+def morlet_filter_bank(
+        samplerate: int,
+        kernel_size: int,
+        scale: List[int],
+        scaling_factor: Union[List, float, np.ndarray],
+        normalize=True,
+        device=None):
+
+    basis_size = len(scale)
+    basis = np.zeros((basis_size, kernel_size), dtype=np.complex128)
+
+    try:
+        if len(scaling_factor) != len(scale):
+            raise ValueError('scaling factor must have same length as scale')
+    except TypeError:
+        scaling_factor = np.repeat(float(scaling_factor), len(scale))
+
+    sr = int(samplerate)
+
+    for i, center_frequency in enumerate(scale):
+        scaling = scaling_factor[i]
+        w = center_frequency / (scaling * 2 * sr / kernel_size)
+        basis[i] = morlet(
+            M=kernel_size,
+            w=w,
+            s=scaling)
+
+    if normalize:
+        basis /= np.linalg.norm(basis, axis=-1, keepdims=True) + 1e-8
+
+    return torch.from_numpy(basis.real).float().to(device)
 
 
 class Block(nn.Module):
@@ -18,13 +56,20 @@ class Block(nn.Module):
             control_plane_dim: int,
             transfer: torch.Tensor,
             gain: Union[float, torch.Tensor],
-            deformation_latent_shape: int = None):
+            deformation_latent_shape: int = None,
+            filter_bank: torch.Tensor = None,):
 
         super().__init__()
         self.deformation_latent_shape = deformation_latent_shape
         self.window_size = window_size
         self.n_coeffs = self.window_size // 2 + 1
         self.control_plane_dim = control_plane_dim
+
+        if filter_bank is not None:
+            # TODO: validation code.  Filter bank should be (n_coeffs, window_size)
+            self.register_buffer('filter_bank', torch.abs(torch.fft.rfft(filter_bank, dim=-1, norm='ortho')))
+        else:
+            self.filter_bank = None
 
         if self.deformation_latent_shape is not None:
             self.hyper = HyperNetworkLayer(
@@ -82,7 +127,12 @@ class Block(nn.Module):
                 cdm = cdm.view(batch, control_plane_dim, 1, self.n_coeffs)
                 current_transfer = cdm
 
-            filtered = current * current_transfer
+            if self.filter_bank is not None:
+                filtered = current_transfer @ self.filter_bank
+                filtered = filtered * current
+            else:
+                # perform convolution in the frequency domain
+                filtered = current * current_transfer
 
             output_frames.append(filtered)
 
@@ -101,7 +151,9 @@ class AudioNetwork(nn.Module):
             control_plane_dim: int,
             window_size: int,
             n_blocks: int,
-            deformation_latent_dim: int = None):
+            deformation_latent_dim: int = None,
+            filter_bank: torch.Tensor = None,):
+
         super().__init__()
         self.window_size = window_size
         self.n_blocks = n_blocks
@@ -115,12 +167,13 @@ class AudioNetwork(nn.Module):
                 control_plane_dim,
                 self.init_transfer(),
                 torch.zeros(1).uniform_(1, 50).item(),
-                deformation_latent_shape=deformation_latent_dim)
+                deformation_latent_shape=deformation_latent_dim,
+                filter_bank=filter_bank)
             for _ in range(self.n_blocks)
         ])
 
     def init_transfer(self):
-        resonances = torch.zeros(self.control_plane_dim, self.n_coeffs).uniform_(0.9, 0.9998)
+        resonances = torch.zeros(self.control_plane_dim, self.n_coeffs).uniform_(0.95, 0.9998)
         sparse = torch.zeros_like(resonances).bernoulli_(p=0.01)
         resonances = resonances * sparse
         scaling = torch.linspace(1, 0, self.n_coeffs) ** 2
@@ -152,6 +205,18 @@ if __name__ == '__main__':
     n_samples = 2 ** 16
     n_frames = n_samples // step_size
     n_blocks = 3
+    samplerate = 22050
+    nyquist = samplerate // 2
+
+    # establish (optional) non-linear frequency space
+    fb = morlet_filter_bank(
+        samplerate,
+        kernel_size=window_size,
+        scale=np.geomspace(100, nyquist - 100, num=transfer_dim),
+        scaling_factor=0.025,
+        normalize=True,
+        device=None)
+
 
     # establish energy inputs (batch, control_plane_dim, n_samples)
     impulse_size = 16
@@ -170,7 +235,7 @@ if __name__ == '__main__':
             1,
             control_plane_dim,
             n_frames,
-            low_rank_deformation_dim).uniform_(-0.3, 0.3)
+            low_rank_deformation_dim).uniform_(-0.5, 0.5)
         for _ in range(n_blocks)
     ]
 
@@ -178,8 +243,8 @@ if __name__ == '__main__':
         control_plane_dim,
         window_size,
         n_blocks=n_blocks,
-        deformation_latent_dim=low_rank_deformation_dim
-        # deformation_latent_dim=None
+        deformation_latent_dim=low_rank_deformation_dim,
+        filter_bank=fb
     )
 
     samples = network.forward(inp, dm)
