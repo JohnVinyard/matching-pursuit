@@ -1,4 +1,4 @@
-from typing import Union
+from typing import Union, List
 
 import torch
 
@@ -33,7 +33,9 @@ class Block(nn.Module):
                 self.n_coeffs,
                 self.n_coeffs,
                 bias=False,
-                force_identity=True)
+                force_identity=False)
+        else:
+            self.hyper = None
 
         self.transfer = nn.Parameter(torch.zeros((self.control_plane_dim, self.n_coeffs,)))
         self.mixer_matrix = nn.Parameter(torch.eye(self.control_plane_dim))
@@ -44,6 +46,8 @@ class Block(nn.Module):
 
     def forward(self, x: torch.Tensor, deformations: torch.Tensor = None) -> torch.Tensor:
 
+        # route energy from the input control dim to the available
+        # transfer functions
         x = (x.permute(0, 2, 1) @ self.mixer_matrix).permute(0, 2, 1)
 
         batch, channels, time = x.shape
@@ -58,18 +62,22 @@ class Block(nn.Module):
 
         output_frames = []
 
+        identity = torch.eye(self.n_coeffs, device=x.device)
+
         for i in range(frames):
             current = spec[:, :, i: i + 1, :]
 
             if i > 0:
                 current = current + output_frames[i - 1]
 
-
             current_transfer = self.transfer[None, :, None, :]
 
-            if deformations is not None:
+            if deformations is not None and self.hyper is not None:
                 current_deformation = deformations[:, :, i, :]
-                w, func = self.hyper.forward(current_deformation.view(-1, self.deformation_latent_shape))
+                w, func = self.hyper.forward(
+                    current_deformation.view(-1, self.deformation_latent_shape),
+                    identity[None, ...]
+                )
                 cdm = func(current_transfer.view(-1, self.n_coeffs))
                 cdm = cdm.view(batch, control_plane_dim, 1, self.n_coeffs)
                 current_transfer = cdm
@@ -94,14 +102,12 @@ class AudioNetwork(nn.Module):
             window_size: int,
             n_blocks: int,
             deformation_latent_dim: int = None):
-
         super().__init__()
         self.window_size = window_size
         self.n_blocks = n_blocks
         self.mixer = nn.Parameter(torch.zeros((n_blocks + 1,)))
         self.control_plane_dim = control_plane_dim
         self.n_coeffs = window_size // 2 + 1
-
 
         self.blocks = nn.ModuleList([
             Block(
@@ -121,12 +127,12 @@ class AudioNetwork(nn.Module):
         scaled_resonances = resonances * scaling[None, :]
         return scaled_resonances
 
-    def forward(self, x: torch.Tensor, deformations: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, deformations: List[torch.Tensor]) -> torch.Tensor:
         outputs = [x[..., None]]
         inp = x
 
-        for block in self.blocks:
-            inp = block(inp, deformations)
+        for i, block in enumerate(self.blocks):
+            inp = block(inp, deformations[i])
             outputs.append(inp[..., None])
 
         result = torch.cat(outputs, dim=-1)
@@ -145,7 +151,7 @@ if __name__ == '__main__':
     low_rank_deformation_dim = 16
     n_samples = 2 ** 16
     n_frames = n_samples // step_size
-
+    n_blocks = 3
 
     # establish energy inputs (batch, control_plane_dim, n_samples)
     impulse_size = 16
@@ -159,13 +165,22 @@ if __name__ == '__main__':
     inp[:, 2, 16384: 16384 + impulse_size] += impulse
 
     # establish deformation matrix (batch, control_plane_dim, n_frames, low_rank_deformation_dim)
-    dm = torch.zeros(1, control_plane_dim, n_frames, low_rank_deformation_dim).uniform_(-0.01, 0.01)
+    dm = [
+        torch.zeros(
+            1,
+            control_plane_dim,
+            n_frames,
+            low_rank_deformation_dim).uniform_(-0.3, 0.3)
+        for _ in range(n_blocks)
+    ]
 
     network = AudioNetwork(
         control_plane_dim,
         window_size,
-        n_blocks=3,
-        deformation_latent_dim=low_rank_deformation_dim)
+        n_blocks=n_blocks,
+        deformation_latent_dim=low_rank_deformation_dim
+        # deformation_latent_dim=None
+    )
 
     samples = network.forward(inp, dm)
 

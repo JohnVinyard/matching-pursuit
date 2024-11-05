@@ -26,7 +26,7 @@ class HyperNetworkLayer(nn.Module):
         self.a = nn.Linear(latent_channels, layer_latent * layer_in_channels, bias=bias)
         self.b = nn.Linear(latent_channels, layer_latent * layer_out_channels, bias=bias)
 
-    def forward(self, x):
+    def forward(self, x, weight_bias: torch.Tensor = None):
 
         if self.force_identity:
             weights = torch.eye(
@@ -35,6 +35,10 @@ class HyperNetworkLayer(nn.Module):
             a = self.a(x).view(-1, self.layer_in_channels, self.layer_latent)
             b = self.b(x).view(-1, self.layer_latent, self.layer_out_channels)
             weights = a @ b
+
+            if weight_bias is not None:
+                weights = weights + weight_bias
+
 
         def forward(z):
             if len(z.shape) != 3:
