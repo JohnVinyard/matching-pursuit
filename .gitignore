@@ -52,5 +52,6 @@ overfitresonance
 ssm
 ssmcompression
 iterativedecomposition
+freqdomain
 
 *.html

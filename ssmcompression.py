@@ -1,7 +1,7 @@
 # the size, in samples of the audio segment we'll overfit
 from modules.atoms import unit_norm
 
-n_samples = 2 ** 18
+n_samples = 2 ** 17
 
 # the samplerate, in hz, of the audio signal
 samplerate = 22050
@@ -173,7 +173,7 @@ class OverfitControlPlane(nn.Module):
         self.ssm = SSM(control_plane_dim, input_dim, state_matrix_dim, complex)
         self.n_samples = n_samples
         self.n_frames = int(n_samples / (input_dim // 2))
-
+        self.control_plane_dim = control_plane_dim
         self.control = nn.Parameter(
             torch.zeros(1, control_plane_dim, self.n_frames).uniform_(-0.01, 0.01))
 
@@ -190,7 +190,12 @@ class OverfitControlPlane(nn.Module):
         Produces a random, sparse control signal, emulating short, transient bursts
         of energy into the system modelled by the `SSM`
         """
-        cp = torch.zeros_like(self.control, device=self.control.device).bernoulli_(p=p)
+        # cp = torch.zeros_like(self.control, device=self.control.device).bernoulli_(p=p)
+        # audio = self.forward(sig=cp)
+        # return max_norm(audio)
+
+        indices = torch.randperm(self.control_plane_dim)
+        cp = self.control_signal[:, indices, :]
         audio = self.forward(sig=cp)
         return max_norm(audio)
 
@@ -200,6 +205,7 @@ class OverfitControlPlane(nn.Module):
         into the system modelled by `SSM`
         """
         return self.ssm.forward(sig if sig is not None else self.control_signal)
+
 
 
 def transform(x: torch.Tensor):
