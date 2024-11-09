@@ -11,6 +11,7 @@ from data import AudioIterator
 from modules import stft, sparsify, sparsify_vectors, iterative_loss, select_items, interpolate_last_axis, \
     sparse_softmax, NeuralReverb, LinearOutputStack, max_norm, flattened_multiband_spectrogram, UnitNorm, UNet
 from modules.anticausal import AntiCausalAnalysis
+from modules.infoloss import MultiWindowSpectralInfoLoss
 from modules.iterative import TensorTransform
 from modules.reds import F0Resonance
 from modules.transfer import make_waves
@@ -21,7 +22,7 @@ from modules.fft import fft_convolve
 from argparse import ArgumentParser
 
 # the size, in samples of the audio segment we'll overfit
-n_samples = 2 ** 15
+n_samples = 2 ** 16
 
 # the samplerate, in hz, of the audio signal
 samplerate = 22050
@@ -31,8 +32,8 @@ n_seconds = n_samples / samplerate
 
 transform_window_size = 2048
 transform_step_size = 256
-n_events = 16
-context_dim = 512
+n_events = 32
+context_dim = 128
 
 n_frames = n_samples // transform_step_size
 
@@ -241,7 +242,9 @@ class SampleLookup(Lookup):
             n_samples: int,
             flatten_kernel_size: Union[int, None] = None,
             initial: Union[torch.Tensor, None] = None,
+            randomize_phases: bool = True,
             windowed: bool = False):
+
 
         if initial is not None:
             initializer = lambda x: initial
@@ -249,6 +252,7 @@ class SampleLookup(Lookup):
             initializer = None
 
         super().__init__(n_items, n_samples, initialize=initializer)
+        self.randomize_phases = randomize_phases
         self.flatten_kernel_size = flatten_kernel_size
         self.windowed = windowed
 
@@ -266,14 +270,14 @@ class SampleLookup(Lookup):
 
         spec = torch.fft.rfft(x, dim=-1)
 
-        mags = torch.abs(spec)
-
-        # randomize phases
-        phases = torch.angle(spec)
-        phases = torch.zeros_like(phases).uniform_(-np.pi, np.pi)
-        imag = torch.cumsum(phases, dim=1)
-        imag = (imag + np.pi) % (2 * np.pi) - np.pi
-        spec = mags * torch.exp(1j * imag)
+        if self.randomize_phases:
+            # randomize phases
+            mags = torch.abs(spec)
+            phases = torch.angle(spec)
+            phases = torch.zeros_like(phases).uniform_(-np.pi, np.pi)
+            imag = torch.cumsum(phases, dim=1)
+            imag = (imag + np.pi) % (2 * np.pi) - np.pi
+            spec = mags * torch.exp(1j * imag)
 
         x = torch.fft.irfft(spec, dim=-1)
 
@@ -531,7 +535,8 @@ class OverfitResonanceModel(nn.Module):
         # self.r = SampleLookup(n_resonances, n_samples, flatten_kernel_size=512)
         # self.r = F0ResonanceLookup(n_resonances, n_samples)
 
-        self.n = SampleLookup(n_noise_filters, noise_filter_samples, windowed=True)
+        self.n = SampleLookup(
+            n_noise_filters, noise_filter_samples, windowed=True, randomize_phases=False)
 
         self.verb = Lookup(n_verbs, n_samples, initialize=lambda x: verbs, fixed=True)
 
@@ -612,9 +617,10 @@ class OverfitResonanceModel(nn.Module):
         noise_wet = torch.sum(noise_wet, dim=2)
 
         # mix dry and wet
-        stacked = torch.stack([impulses, noise_wet], dim=-1)
-        mixed = stacked * noise_mix
-        mixed = torch.sum(mixed, dim=-1)
+        # stacked = torch.stack([impulses, noise_wet], dim=-1)
+        # mixed = stacked * noise_mix
+        # mixed = torch.sum(mixed, dim=-1)
+        mixed = noise_wet
 
         # initial filtered noise is now the input to our longer resonances
         impulses = mixed
@@ -742,11 +748,11 @@ class Model(nn.Module):
         self.resonance = OverfitResonanceModel(
             n_noise_filters=32,
             noise_expressivity=8,
-            noise_filter_samples=32,
+            noise_filter_samples=128,
             noise_deformations=16,
             instr_expressivity=8,
             n_events=1,
-            n_resonances=256,
+            n_resonances=512,
             n_envelopes=128,
             n_decays=32,
             n_deformations=32,
@@ -855,6 +861,7 @@ def train_and_monitor(
         disc = Discriminator(in_channels=1024, hidden_channels=512).to(device)
         disc_optim = Adam(model.parameters(), lr=1e-3)
 
+
         for i, item in enumerate(iter(stream)):
             optim.zero_grad()
             disc_optim.zero_grad()
@@ -899,7 +906,6 @@ def train_and_monitor(
                 rnd = max_norm(rnd)
                 random_audio(rnd)
 
-
     train()
 
 
@@ -936,6 +942,7 @@ if __name__ == '__main__':
         required=False,
         default=False
     )
+
     parser.add_argument(
         '--batch-size',
         type=int,

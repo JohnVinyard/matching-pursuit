@@ -93,6 +93,17 @@ class UNet(nn.Module):
         )
 
         self.proj = nn.Conv1d(1024, 4096, 1, 1, 0)
+
+    def encode(self, x):
+        # Input will be (batch, 1024, 128)
+        context = {}
+
+        for layer in self.down:
+            x = layer(x)
+            context[x.shape[-1]] = x
+
+        return x
+
     
     def forward(self, x):
         # Input will be (batch, 1024, 128)

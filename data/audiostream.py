@@ -14,10 +14,11 @@ def audio_stream(
         as_torch=True,
         step_size=1,
         pattern='*.wav',
-        return_indices=False):
+        return_indices=False,
+        audio_path: str = None):
 
     stream = batch_stream(
-        Config.audio_path(),
+        audio_path or Config.audio_path(),
         pattern,
         batch_size,
         n_samples,

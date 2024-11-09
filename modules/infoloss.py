@@ -214,7 +214,6 @@ class SpectralInfoLoss(nn.Module):
         
     
     def encode(self, signal: torch.Tensor):
-        
         if signal.shape[1] != 1:
             frames = signal.shape[1]
             spec = signal.view(-1, frames, self.start_channels)

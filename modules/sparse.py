@@ -73,13 +73,15 @@ def sparsify2(x: torch.Tensor, n_to_keep: int = 8):
     context_indices = (packed_range[None, :] * channels) + ch
 
     sparse = torch.zeros_like(x)
+
     sparse = torch.scatter(sparse, dim=-1, index=indices, src=values)
+
     sparse = sparse.view(batch, channels, time)
 
     context = torch.zeros(batch, n_to_keep * channels, device=x.device)
     context = torch.scatter(context, dim=-1, index=context_indices, src=values)
     context = context.view(batch, n_to_keep, channels)
-    
+
     packed = torch.zeros(batch, n_to_keep * time, device=x.device)
     packed = torch.scatter(packed, dim=-1, index=packed_indices, src=values)
     packed = packed.view(batch, n_to_keep, time)
