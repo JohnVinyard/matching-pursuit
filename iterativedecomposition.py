@@ -218,7 +218,7 @@ class WavetableLookup(Lookup):
             samplerate: int,
             learnable: bool = False):
 
-        super().__init__(n_items, n_resonances, initialize=lambda x: torch.eye(*x.shape))
+        super().__init__(n_items, n_resonances)
         w = make_waves(n_samples, np.linspace(20, 4000, num=n_resonances // 4), samplerate)
         if learnable:
             self.waves = nn.Parameter(w)
