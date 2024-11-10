@@ -1,4 +1,57 @@
 from torch import nn
+import torch
+import numpy as np
+
+from modules.stft import stft
+from torch.nn.utils import weight_norm
+
+class DownsamplingBlock(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Dropout(0.1),
+            weight_norm(nn.Conv1d(channels, channels, 3, 2, 1)),
+            nn.LeakyReLU(0.2),
+            # nn.BatchNorm1d(channels)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
+class DownsamplingDiscriminator(nn.Module):
+
+    def __init__(self, window_size: int, step_size: int, n_samples: int, channels: int):
+        super().__init__()
+        self.window_size = window_size
+        self.step_size = step_size
+        self.n_samples = n_samples
+        self.n_frames = n_samples // step_size
+        self.channels = channels
+        self.n_coeffs = self.window_size // 2 + 1
+
+        self.proj = nn.Conv1d(self.n_coeffs, channels, 1, 1, 0)
+        self.n_layers = int(np.log2(self.n_frames)) - 2
+        self.downsample = nn.Sequential(*[DownsamplingBlock(channels) for i in range(self.n_layers)])
+        self.judge = nn.Conv1d(channels, 1, 4, 4, 0)
+
+
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch, _, time = x.shape
+        assert time == self.n_samples
+
+        x = stft(
+            x,
+            ws=self.window_size,
+            step=self.step_size,
+            pad=True).view(batch, -1, self.n_coeffs).permute(0, 2, 1)
+        x = self.proj(x)
+        x = self.downsample(x)
+        x = self.judge(x)
+        return x
+
+
 
 class UNet(nn.Module):
     def __init__(self, channels, is_disc: bool = False):

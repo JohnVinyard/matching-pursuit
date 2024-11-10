@@ -8,9 +8,9 @@ from conjure import LmdbCollection, loggers, serve_conjure, SupportedContentType
 from conjure.logger import encode_audio
 
 from data import get_one_audio_segment, AudioIterator
-from modules import HyperNetworkLayer, limit_norm, flattened_multiband_spectrogram, max_norm, stft, UNet
+from modules import HyperNetworkLayer, limit_norm, flattened_multiband_spectrogram, max_norm, stft, UNet, \
+    DownsamplingDiscriminator
 from modules.anticausal import AntiCausalAnalysis
-from modules.infoloss import SpectralInfoLoss, MultiWindowSpectralInfoLoss
 from modules.overlap_add import overlap_add
 from modules.phase import windowed_audio
 from modules.transfer import fft_convolve
@@ -20,7 +20,6 @@ from util.music import musical_scale_hz
 from torch import nn
 import numpy as np
 from scipy.signal import morlet
-from torch.nn import functional as F
 
 n_samples = 2 ** 16
 transform_window_size = 2048
@@ -333,33 +332,14 @@ class Autoencoder(nn.Module):
 
 
 class Discriminator(nn.Module):
-    def __init__(self, in_channels: int = 1024, hidden_channels: int = 256):
+    def __init__(self):
         super().__init__()
-        self.hidden_channels = hidden_channels
-        self.in_channels = in_channels
-        self.encoder = AntiCausalAnalysis(
-            in_channels=in_channels,
-            channels=hidden_channels,
-            kernel_size=2,
-            dilations=[1, 2, 4, 8, 16, 32, 64, 1],
-            pos_encodings=False,
-            do_norm=True)
-        # self.encoder = UNet(in_channels, is_disc=True)
-        self.judge = nn.Linear(hidden_channels, 1)
+        self.disc = DownsamplingDiscriminator(
+            window_size=2048, step_size=256, n_samples=n_samples, channels=256)
         self.apply(initializer)
 
     def forward(self, transformed: torch.Tensor):
-        batch_size = transformed.shape[0]
-
-        if transformed.shape[1] == 1:
-            transformed = transform(transformed)
-
-        x = transformed
-
-        encoded = self.encoder.forward(x)
-        encoded = torch.sum(encoded, dim=-1)
-        x = self.judge(encoded)
-
+        x = self.disc(transformed)
         return x
 
 
@@ -541,12 +521,6 @@ def train_and_monitor_auto_encoder(batch_size: int = 4):
         n_frames=n_frames).to(device)
     optim = Adam(model.parameters(), lr=1e-3)
 
-    # loss_model = MultiWindowSpectralInfoLoss([
-    #     [(16, 16), (8, 8)],
-    #     [(3, 128), (1, 32)],
-    #     [(64, 3), (16, 1)],
-    # ]).to(device)
-    # loss_optim = Adam(loss_model.parameters(), lr=1e-4)
 
     disc = Discriminator().to(device)
     disc_optim = Adam(disc.parameters(), lr=1e-3)
@@ -579,16 +553,6 @@ def train_and_monitor_auto_encoder(batch_size: int = 4):
         item = item.view(-1, 1, n_samples)
 
         optim.zero_grad()
-        disc_optim.zero_grad()
-        # loss_optim.zero_grad()
-
-        # train loss
-        # spec_recon, orig_normed = loss_model.forward(item)
-        # loss_loss = F.mse_loss(spec_recon, orig_normed.detach())
-        # loss_loss.backward()
-        # loss_optim.step()
-        # print('LOSS MODEL', loss_loss.item())
-
 
         # train model
         orig_audio(item)
@@ -599,26 +563,33 @@ def train_and_monitor_auto_encoder(batch_size: int = 4):
         fake_spec = transform(recon)
         recon_loss = torch.abs(real_spec - fake_spec).sum()
 
-        fj = disc.forward(stft_transform(recon))
+        fj = disc.forward(recon)
+        print('ORIG', fj.mean().item())
         adv_loss = torch.abs(1 - fj).mean()
         sparsity_loss = torch.abs(cp).sum() * 1e-3
+
+        non_zero = (cp > 0).sum()
+        sparsity = (non_zero / cp.numel()).item()
+
         envelopes(max_norm(cp[0]))
 
         loss = recon_loss + sparsity_loss + adv_loss
 
-        # loss = loss_model.loss(item, recon) + sparsity_loss
-
         loss.backward()
         optim.step()
-        print(i, loss.item())
+        print(i, loss.item(), non_zero, sparsity)
 
         with torch.no_grad():
             r = model.random(p=0.001)
             random_audio(max_norm(r))
 
         # train disc
-        rj = disc.forward(stft_transform(item.clone().detach()))
-        fj = disc.forward(stft_transform(recon.clone().detach()))
+        disc_optim.zero_grad()
+
+        rj = disc.forward(item.clone().detach())
+        fj = disc.forward(recon.clone().detach())
+        print('REAL', rj.mean().item())
+        print('FAKE', fj.mean().item())
         disc_loss = torch.abs(1 - rj).mean() + torch.abs(0 - fj).mean()
         disc_loss.backward()
         disc_optim.step()
@@ -706,4 +677,4 @@ if __name__ == '__main__':
     #     n_samples=2 ** 16,
     #     samplerate=22050,
     #     audio_path='/home/john/workspace/audio-data/LJSpeech-1.1/wavs')
-    train_and_monitor_auto_encoder(batch_size=1)
+    train_and_monitor_auto_encoder(batch_size=2)

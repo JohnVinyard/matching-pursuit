@@ -5,11 +5,11 @@ from conjure import loggers, serve_conjure, LmdbCollection
 from conjure.logger import encode_audio
 from data import get_one_audio_segment
 from modules import stft, sparsify, sparsify2, gammatone_filter_bank
-from modules.atoms import unit_norm
 from modules.overfitraw import OverfitRawAudio
 from modules.transfer import fft_convolve
 from util import device
 from torch.nn import functional as F
+from itertools import count
 
 n_samples = 2 ** 16
 transform_window_size = 2048
@@ -23,6 +23,44 @@ def stft_transform(x: torch.Tensor):
     x = x.view(batch_size, -1, n_coeffs)[..., :n_coeffs - 1].permute(0, 2, 1)
     return x
 
+
+class SpectralCorrelationFeature(nn.Module):
+
+    def __init__(self, n_features: int = 128):
+        super().__init__()
+        self.n_features = n_features
+
+    def forward(self, audio: torch.Tensor) -> torch.Tensor:
+        batch_size, _, time = audio.shape
+        spec = stft_transform(audio)
+        spec = spec.reshape(batch_size, -1, 1024).permute(0, 2, 1)
+
+        means = torch.mean(spec, dim=-1, keepdim=True)
+        spec = spec - means
+        stds = torch.std(spec, dim=-1, keepdim=True)
+        spec = spec / (stds + 1e-8)
+
+        #
+        # corr = torch.cdist(spec, spec)
+        # corr = torch.triu(corr)
+        # return corr
+
+
+        #
+        spec = spec.reshape(batch_size, -1)
+        indices = torch.randperm(spec.shape[-1])[:self.n_features]
+        subsampled = spec[:, indices]
+        # subsampled = subsampled - subsampled.mean()
+        # subsampled = subsampled / (subsampled.std() + 1e-8)
+        #
+        ss = subsampled[:, None, :] * subsampled[:, :, None]
+        ss = torch.triu(ss)
+        # # ss = torch.abs(ss)
+        return ss
+
+        # cov = normalized_covariance(subsampled)
+        # print('COV', cov)
+        # return cov
 
 class SparseLossFeature(nn.Module):
     def __init__(self):
@@ -114,11 +152,13 @@ class LossFeature(nn.Module):
 
 def train(n_samples: int = 2 ** 16):
     target = get_one_audio_segment(n_samples=n_samples, device=device)
-    loss_model = SparseLossFeature().to(device)
+    # loss_model = SparseLossFeature().to(device)
     # loss_model = LossFeature().to(device)
 
-    model = OverfitRawAudio(shape=(1, 1, n_samples), std=0.1, normalize=False).to(device)
-    optim = Adam(model.parameters(), lr=1e-2)
+    loss_model = SpectralCorrelationFeature(n_features=int((256 * 1024) * 0.05))
+
+    model = OverfitRawAudio(shape=(1, 1, n_samples), std=0.1, normalize=True).to(device)
+    optim = Adam(model.parameters(), lr=1e-3)
 
     collection = LmdbCollection(path='noise')
 
@@ -140,7 +180,7 @@ def train(n_samples: int = 2 ** 16):
     with torch.no_grad():
         original_features = loss_model.forward(target)
 
-    while True:
+    for i in count():
         optim.zero_grad()
         recon = model.forward(None)
         recon_audio(recon)
@@ -148,7 +188,7 @@ def train(n_samples: int = 2 ** 16):
         loss = torch.abs(original_features - recon_feature).sum()
         loss.backward()
         optim.step()
-        print(loss.item())
+        print(i, loss.item())
 
 
 if __name__ == '__main__':

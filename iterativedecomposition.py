@@ -9,7 +9,8 @@ from config import Config
 from conjure import LmdbCollection, serve_conjure, loggers
 from data import AudioIterator
 from modules import stft, sparsify, sparsify_vectors, iterative_loss, select_items, interpolate_last_axis, \
-    sparse_softmax, NeuralReverb, LinearOutputStack, max_norm, flattened_multiband_spectrogram, UnitNorm, UNet
+    sparse_softmax, NeuralReverb, LinearOutputStack, max_norm, flattened_multiband_spectrogram, UnitNorm, UNet, \
+    DownsamplingDiscriminator
 from modules.anticausal import AntiCausalAnalysis
 from modules.infoloss import MultiWindowSpectralInfoLoss
 from modules.iterative import TensorTransform
@@ -689,40 +690,22 @@ class OverfitResonanceModel(nn.Module):
     #         decays=self.decays,
     #         mixes=self.mixes,
     #         amplitudes=self.amplitudes,
-    #         times=self.scheduler.params,
+    #         times=self.scheduler.params,if info_loss:
+                # train info loss
     #         room_mix=self.room_mix,
     #         room_choice=self.rooms)
 
 
 
 class Discriminator(nn.Module):
-    def __init__(self, in_channels: int = 1024, hidden_channels: int = 256):
+    def __init__(self):
         super().__init__()
-        self.hidden_channels = hidden_channels
-        self.in_channels = in_channels
-        self.encoder = AntiCausalAnalysis(
-            in_channels=in_channels,
-            channels=hidden_channels,
-            kernel_size=2,
-            dilations=[1, 2, 4, 8, 16, 32, 64, 1],
-            pos_encodings=False,
-            do_norm=True)
-        # self.encoder = UNet(in_channels, is_disc=True)
-        self.judge = nn.Linear(hidden_channels, 1)
+        self.disc = DownsamplingDiscriminator(
+            window_size=2048, step_size=256, n_samples=n_samples, channels=256)
         self.apply(initializer)
 
     def forward(self, transformed: torch.Tensor):
-        batch_size = transformed.shape[0]
-
-        if transformed.shape[1] == 1:
-            transformed = transform(transformed)
-
-        x = transformed
-
-        encoded = self.encoder.forward(x)
-        encoded = torch.sum(encoded, dim=-1)
-        x = self.judge(encoded)
-
+        x = self.disc(transformed)
         return x
 
 
@@ -828,9 +811,7 @@ class Model(nn.Module):
 
 def train_and_monitor(
         batch_size: int = 8,
-        overfit: bool = False,
-        sparsity_loss: bool = False,
-        adv_loss: bool = False):
+        overfit: bool = False):
 
     stream = AudioIterator(
         batch_size=batch_size,
@@ -858,8 +839,8 @@ def train_and_monitor(
         model = Model(in_channels=1024, hidden_channels=512).to(device)
         optim = Adam(model.parameters(), lr=1e-3)
 
-        disc = Discriminator(in_channels=1024, hidden_channels=512).to(device)
-        disc_optim = Adam(model.parameters(), lr=1e-3)
+        disc = Discriminator().to(device)
+        disc_optim = Adam(disc.parameters(), lr=1e-3)
 
 
         for i, item in enumerate(iter(stream)):
@@ -872,33 +853,29 @@ def train_and_monitor(
             recon_summed = torch.sum(recon, dim=1, keepdim=True)
             recon_audio(max_norm(recon_summed))
 
-
             loss = iterative_loss(target, recon, loss_transform)
 
-            if sparsity_loss:
-                loss = loss + (torch.abs(encoded).sum() * 1e-3)
+            loss = loss + (torch.abs(encoded).sum() * 1e-3)
 
-            if adv_loss:
-                mask = torch.zeros(target.shape[0], n_events, 1, device=recon.device).bernoulli_(p=0.5)
-                for_disc = torch.sum(recon * mask, dim=1, keepdim=True)
-                j = disc.forward(for_disc)
-                d_loss = torch.abs(1 - j).mean()
-                print('G', d_loss.item())
-                loss = loss + d_loss
-
+            mask = torch.zeros(target.shape[0], n_events, 1, device=recon.device).bernoulli_(p=0.5)
+            for_disc = torch.sum(recon * mask, dim=1, keepdim=True)
+            j = disc.forward(for_disc)
+            d_loss = torch.abs(1 - j).mean()
+            print('G', d_loss.item())
+            loss = loss + d_loss
 
             loss.backward()
             optim.step()
             print(i, loss.item())
 
-            if adv_loss:
-                disc_optim.zero_grad()
-                r_j = disc.forward(target)
-                f_j = disc.forward(recon_summed.clone().detach())
-                d_loss = torch.abs(0 - f_j).mean() + torch.abs(1 - r_j).mean()
-                d_loss.backward()
-                print('D', d_loss.item())
-                disc_optim.step()
+            disc_optim.zero_grad()
+            r_j = disc.forward(target)
+            f_j = disc.forward(recon_summed.clone().detach())
+            d_loss = torch.abs(0 - f_j).mean() + torch.abs(1 - r_j).mean()
+            d_loss.backward()
+            print('D', d_loss.item())
+            disc_optim.step()
+
 
             with torch.no_grad():
                 rnd = model.resonance.random_sequence()
@@ -907,6 +884,7 @@ def train_and_monitor(
                 random_audio(rnd)
 
     train()
+
 
 
 if __name__ == '__main__':
@@ -925,25 +903,6 @@ if __name__ == '__main__':
         default='multiresolution'
     )
     parser.add_argument(
-        '--sparsity-loss',
-        action='store_true',
-        required=False,
-        default=False
-    )
-    parser.add_argument(
-        '--synthetic-loss',
-        action='store_true',
-        required=False,
-        default=False
-    )
-    parser.add_argument(
-        '--adversarial-loss',
-        action='store_true',
-        required=False,
-        default=False
-    )
-
-    parser.add_argument(
         '--batch-size',
         type=int,
         default=8,
@@ -952,7 +911,5 @@ if __name__ == '__main__':
     args = parser.parse_args()
     train_and_monitor(
         batch_size=1 if args.overfit else args.batch_size,
-        overfit=args.overfit,
-        sparsity_loss=args.sparsity_loss,
-        adv_loss=args.adversarial_loss)
+        overfit=args.overfit)
 

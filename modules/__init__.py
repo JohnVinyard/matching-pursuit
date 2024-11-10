@@ -30,3 +30,4 @@ from .gammatone import gammatone_filter_bank
 from .multibanddict import flattened_multiband_spectrogram
 from .aim import auditory_image_model, rectified_filter_bank
 from .ssm import SSM, OverfitControlPlane
+from .unet import DownsamplingDiscriminator
