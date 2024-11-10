@@ -34,7 +34,7 @@ n_seconds = n_samples / samplerate
 transform_window_size = 2048
 transform_step_size = 256
 n_events = 32
-context_dim = 128
+context_dim = 16
 
 n_frames = n_samples // transform_step_size
 
@@ -165,7 +165,7 @@ class Lookup(nn.Module):
 
     def forward(self, selections: torch.Tensor) -> torch.Tensor:
         items = self.preprocess_items(self.items)
-        selected = select_items(selections, items, type='sparse_softmax')
+        selected = select_items(selections, items, type='softmax')
         processed = self.postprocess_results(selected)
         return processed
 
@@ -218,7 +218,7 @@ class WavetableLookup(Lookup):
             samplerate: int,
             learnable: bool = False):
 
-        super().__init__(n_items, n_resonances)
+        super().__init__(n_items, n_resonances, initialize=lambda x: torch.eye(*x.shape))
         w = make_waves(n_samples, np.linspace(20, 4000, num=n_resonances // 4), samplerate)
         if learnable:
             self.waves = nn.Parameter(w)
