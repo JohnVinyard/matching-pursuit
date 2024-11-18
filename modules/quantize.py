@@ -19,7 +19,7 @@ def select_items(
     if type == 'sparse_softmax':
         selections = sparse_softmax(selections, normalize=True, dim=-1)
     elif type == 'gumbel_softmax':
-        selections = F.gumbel_softmax(selections, tau=1, hard=True, dim=-1)
+        selections = F.gumbel_softmax(selections, tau=0.1, hard=True, dim=-1)
     elif type == 'softmax':
         selections = torch.softmax(selections, dim=-1)
     else:

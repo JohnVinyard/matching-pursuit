@@ -546,10 +546,12 @@ def train_and_monitor_auto_encoder(batch_size: int = 4):
         random_audio
     ], port=9999, n_workers=1)
 
-    # TODO: add option for adversarial loss
-    # TODO: add option for self-supervised loss
 
     for i, item in enumerate(ai):
+
+        if i % 100 != 0:
+            torch.save(model.state_dict(), 'freqdomain.dat')
+
         item = item.view(-1, 1, n_samples)
 
         optim.zero_grad()
@@ -564,7 +566,6 @@ def train_and_monitor_auto_encoder(batch_size: int = 4):
         recon_loss = torch.abs(real_spec - fake_spec).sum()
 
         fj = disc.forward(recon)
-        print('ORIG', fj.mean().item())
         adv_loss = torch.abs(1 - fj).mean()
         sparsity_loss = torch.abs(cp).sum() * 1e-3
 
@@ -588,8 +589,6 @@ def train_and_monitor_auto_encoder(batch_size: int = 4):
 
         rj = disc.forward(item.clone().detach())
         fj = disc.forward(recon.clone().detach())
-        print('REAL', rj.mean().item())
-        print('FAKE', fj.mean().item())
         disc_loss = torch.abs(1 - rj).mean() + torch.abs(0 - fj).mean()
         disc_loss.backward()
         disc_optim.step()

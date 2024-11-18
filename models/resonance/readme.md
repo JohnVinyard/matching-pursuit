@@ -1,1 +1,0 @@
-# TODO: Description of Sparse Resonance Model Architecture

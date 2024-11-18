@@ -1,8 +1,8 @@
 import torch
 
 def covariance(x):
-    m = x.mean(dim=0, keepdim=True)
-    x = x - m
+    # m = x.mean(dim=0, keepdim=True)
+    # x = x - m
     cov = torch.matmul(x.T, x.clone().detach()) * (1 / x.shape[1])
     return cov
 
