@@ -9,6 +9,8 @@ from data import AudioIterator
 from modules import stft, sparsify, sparsify_vectors, iterative_loss, max_norm, flattened_multiband_spectrogram, \
     DownsamplingDiscriminator
 from modules.anticausal import AntiCausalAnalysis
+from modules.eventgenerators.convimpulse import ConvImpulseEventGenerator
+from modules.eventgenerators.generator import EventGenerator
 from modules.eventgenerators.overfitresonance import OverfitResonanceModel
 from modules.multiheadtransform import MultiHeadTransform
 from util import device, encode_audio, make_initializer
@@ -24,8 +26,8 @@ n_seconds = n_samples / samplerate
 
 transform_window_size = 2048
 transform_step_size = 256
-n_events = 32
-context_dim = 512
+n_events = 16
+context_dim = 16
 
 n_frames = n_samples // transform_step_size
 
@@ -66,7 +68,7 @@ class Discriminator(nn.Module):
 class Model(nn.Module):
     def __init__(
             self,
-            resonance_model: nn.Module,
+            resonance_model: EventGenerator,
             in_channels: int = 1024,
             hidden_channels: int = 256):
 
@@ -155,7 +157,9 @@ class Model(nn.Module):
 
 def train_and_monitor(
         batch_size: int = 8,
-        overfit: bool = False):
+        overfit: bool = False,
+        model_type: str = 'conv'):
+
     stream = AudioIterator(
         batch_size=batch_size,
         n_samples=n_samples,
@@ -179,22 +183,33 @@ def train_and_monitor(
 
     def train():
         hidden_channels = 512
-        resonance_model = OverfitResonanceModel(
-            n_noise_filters=32,
-            noise_expressivity=8,
-            noise_filter_samples=128,
-            noise_deformations=16,
-            instr_expressivity=8,
-            n_events=1,
-            n_resonances=512,
-            n_envelopes=128,
-            n_decays=32,
-            n_deformations=32,
-            n_samples=n_samples,
-            n_frames=n_frames,
-            samplerate=samplerate,
-            hidden_channels=hidden_channels
-        )
+        if model_type == 'lookup':
+            resonance_model = OverfitResonanceModel(
+                n_noise_filters=32,
+                noise_expressivity=8,
+                noise_filter_samples=128,
+                noise_deformations=16,
+                instr_expressivity=8,
+                n_events=1,
+                n_resonances=512,
+                n_envelopes=128,
+                n_decays=32,
+                n_deformations=32,
+                n_samples=n_samples,
+                n_frames=n_frames,
+                samplerate=samplerate,
+                hidden_channels=hidden_channels
+            )
+        elif model_type == 'conv':
+            resonance_model = ConvImpulseEventGenerator(
+                context_dim=context_dim,
+                impulse_size=8192,
+                resonance_size=n_samples,
+                samplerate=samplerate,
+                n_samples=n_samples,
+            )
+        else:
+            raise ValueError(f'Unknown model type {model_type}')
 
         print(resonance_model.shape_spec)
 
@@ -258,12 +273,10 @@ if __name__ == '__main__':
         default=False,
     )
     parser.add_argument(
-        '--loss-type',
+        '--model-type',
         type=str,
-        required=False,
-        choices=['stft', 'multresolution'],
-        default='multiresolution'
-    )
+        required=True,
+        choices=['lookup', 'conv'])
     parser.add_argument(
         '--batch-size',
         type=int,
@@ -273,4 +286,5 @@ if __name__ == '__main__':
     args = parser.parse_args()
     train_and_monitor(
         batch_size=1 if args.overfit else args.batch_size,
-        overfit=args.overfit)
+        overfit=args.overfit,
+        model_type=args.model_type)
