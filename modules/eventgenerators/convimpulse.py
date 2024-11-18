@@ -161,10 +161,10 @@ class ConvImpulseEventGenerator(EventGenerator, nn.Module):
 
         return final
 
-    def random_sequence(self) -> torch.Tensor:
-        vecs = torch.zeros(1, 1, self.context_dim, device=device).uniform_(-1, 1)
-        times = self.scheduler.random_params()
-        final = self.forward(vecs, times)
-        return final
+    # def random_sequence(self) -> torch.Tensor:
+    #     vecs = torch.zeros(1, 1, self.context_dim, device=device).uniform_(-1, 1)
+    #     times = self.scheduler.random_params()
+    #     final = self.forward(vecs, times)
+    #     return final
 
 

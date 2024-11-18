@@ -364,23 +364,23 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
         )
 
 
-    def random_sequence(self):
-        # TODO: This should be moved to top-level model and should support specifying an arbitrary number of events
-        return self.forward(
-            noise_resonance=torch.zeros(*self.noise_resonance_shape, device=device).uniform_(-0.02, 0.02),
-            noise_deformations=torch.zeros(*self.noise_deformation_shape, device=device).uniform_(),
-            noise_mixes=torch.zeros(*self.mix_shape, device=device).uniform_(-0.02, 0.02),
-            envelopes=torch.zeros(*self.envelope_shape, device=device).uniform_(-0.02, 0.02),
-            resonances=torch.zeros(*self.resonance_shape, device=device).uniform_(-0.02, 0.02),
-            res_filter=torch.zeros(*self.noise_resonance_shape, device=device).uniform_(-0.02, 0.02),
-            deformations=torch.zeros(*self.deformation_shape, device=device).uniform_(-0.02, 0.02),
-            decays=torch.zeros(*self.decay_shape, device=device).uniform_(-0.02, 0.02),
-            mixes=torch.zeros(*self.mix_shape, device=device).uniform_(-0.02, 0.02),
-            amplitudes=torch.zeros(*self.amplitude_shape, device=device).uniform_(0, 1),
-            times=self.scheduler.random_params(),
-            room_choice=torch.zeros(*self.room_shape, device=device).uniform_(-0.02, 0.02),
-            room_mix=torch.zeros(*self.mix_shape, device=device).uniform_(-0.02, 0.02)
-        )
+    # def random_sequence(self):
+    #     # TODO: This should be moved to top-level model and should support specifying an arbitrary number of events
+    #     return self.forward(
+    #         noise_resonance=torch.zeros(*self.noise_resonance_shape, device=device).uniform_(-0.02, 0.02),
+    #         noise_deformations=torch.zeros(*self.noise_deformation_shape, device=device).uniform_(),
+    #         noise_mixes=torch.zeros(*self.mix_shape, device=device).uniform_(-0.02, 0.02),
+    #         envelopes=torch.zeros(*self.envelope_shape, device=device).uniform_(-0.02, 0.02),
+    #         resonances=torch.zeros(*self.resonance_shape, device=device).uniform_(-0.02, 0.02),
+    #         res_filter=torch.zeros(*self.noise_resonance_shape, device=device).uniform_(-0.02, 0.02),
+    #         deformations=torch.zeros(*self.deformation_shape, device=device).uniform_(-0.02, 0.02),
+    #         decays=torch.zeros(*self.decay_shape, device=device).uniform_(-0.02, 0.02),
+    #         mixes=torch.zeros(*self.mix_shape, device=device).uniform_(-0.02, 0.02),
+    #         amplitudes=torch.zeros(*self.amplitude_shape, device=device).uniform_(0, 1),
+    #         times=self.scheduler.random_params(),
+    #         room_choice=torch.zeros(*self.room_shape, device=device).uniform_(-0.02, 0.02),
+    #         room_mix=torch.zeros(*self.mix_shape, device=device).uniform_(-0.02, 0.02)
+    #     )
 
     def forward(
             self,

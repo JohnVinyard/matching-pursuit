@@ -7,11 +7,12 @@ from torch.optim import Adam
 from conjure import LmdbCollection, serve_conjure, loggers
 from data import AudioIterator
 from modules import stft, sparsify, sparsify_vectors, iterative_loss, max_norm, flattened_multiband_spectrogram, \
-    DownsamplingDiscriminator
+    DownsamplingDiscriminator, sparse_softmax
 from modules.anticausal import AntiCausalAnalysis
 from modules.eventgenerators.convimpulse import ConvImpulseEventGenerator
 from modules.eventgenerators.generator import EventGenerator
 from modules.eventgenerators.overfitresonance import OverfitResonanceModel
+from modules.eventgenerators.splat import SplattingEventGenerator
 from modules.multiheadtransform import MultiHeadTransform
 from util import device, encode_audio, make_initializer
 
@@ -129,6 +130,13 @@ class Model(nn.Module):
         events = self.resonance.forward(**choices_with_scheduling)
         return events
 
+    def random_sequence(self) -> torch.Tensor:
+        vecs = torch.zeros(1, 1, context_dim, device=device).uniform_(-1, 1)
+        times = sparse_softmax(
+            torch.zeros(1, 1, n_frames, device=device).uniform_(-1, 1), normalize=True, dim=-1)
+        final = self.generate(vecs, times)
+        return final
+
     def iterative(self, audio: torch.Tensor):
         channels = []
         schedules = []
@@ -159,7 +167,6 @@ def train_and_monitor(
         batch_size: int = 8,
         overfit: bool = False,
         model_type: str = 'conv'):
-
     stream = AudioIterator(
         batch_size=batch_size,
         n_samples=n_samples,
@@ -207,6 +214,13 @@ def train_and_monitor(
                 resonance_size=n_samples,
                 samplerate=samplerate,
                 n_samples=n_samples,
+            )
+        elif model_type == 'splat':
+            resonance_model = SplattingEventGenerator(
+                n_samples=n_samples,
+                samplerate=samplerate,
+                n_resonance_octaves=64,
+                n_frames=n_frames
             )
         else:
             raise ValueError(f'Unknown model type {model_type}')
@@ -256,13 +270,13 @@ def train_and_monitor(
             disc_optim.step()
 
             with torch.no_grad():
-                rnd = model.resonance.random_sequence()
+                rnd = model.random_sequence()
                 rnd = torch.sum(rnd, dim=1, keepdim=True)
                 rnd = max_norm(rnd)
                 random_audio(rnd)
 
-    train()
 
+    train()
 
 if __name__ == '__main__':
     parser = ArgumentParser()
@@ -276,7 +290,7 @@ if __name__ == '__main__':
         '--model-type',
         type=str,
         required=True,
-        choices=['lookup', 'conv'])
+        choices=['lookup', 'conv', 'splat'])
     parser.add_argument(
         '--batch-size',
         type=int,

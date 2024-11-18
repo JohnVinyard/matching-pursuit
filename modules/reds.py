@@ -147,8 +147,8 @@ class F0Resonance(nn.Module):
         assert f0s.shape == (batch, n_events, self.n_octaves)
         
         # filter out anything above nyquist
-        mask = f0s < 1
-        f0s = f0s * mask
+        # mask = f0s < 1
+        # f0s = f0s * mask
         
         # generate sine waves
         f0s = f0s.view(batch, n_events, self.n_octaves, 1).repeat(1, 1, 1, self.n_samples)

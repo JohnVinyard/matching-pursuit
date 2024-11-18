@@ -10,7 +10,3 @@ class EventGenerator(ABC):
     @abstractmethod
     def shape_spec(self) -> ShapeSpec:
         raise NotImplementedError()
-
-    @abstractmethod
-    def random_sequence(self):
-        raise NotImplementedError()
