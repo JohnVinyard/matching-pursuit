@@ -40,7 +40,6 @@ from modules.overlap_add import overlap_add
 from util import device, encode_audio
 
 
-
 def project_and_limit_norm(
         vector: torch.Tensor,
         matrix: torch.Tensor,
@@ -64,7 +63,6 @@ def project_and_limit_norm(
     return x
 
 
-
 class SSM(nn.Module):
     """
     A state-space model-like module, with one additional matrix, used to project the control
@@ -81,31 +79,33 @@ class SSM(nn.Module):
         self.control_plane_dim = control_plane_dim
         self.complex = complex
 
-
-        control_plane_dim = control_plane_dim  // 2 + 1 if complex else control_plane_dim
+        control_plane_dim = control_plane_dim // 2 + 1 if complex else control_plane_dim
         state_matrix_dim = state_matrix_dim // 2 + 1 if complex else state_matrix_dim
         input_dim = input_dim // 2 + 1 if complex else input_dim
-
 
         self.input_dim = input_dim
         self.state_matrix_dim = state_matrix_dim
 
         # matrix mapping control signal to audio frame dimension
         self.proj = nn.Parameter(
-            torch.zeros(control_plane_dim, input_dim, dtype=torch.complex64 if complex else torch.float32).uniform_(-0.01, 0.01)
+            torch.zeros(control_plane_dim, input_dim, dtype=torch.complex64 if complex else torch.float32).uniform_(
+                -0.01, 0.01)
         )
 
         # state matrix mapping previous state vector to next state vector
         self.state_matrix = nn.Parameter(
-            torch.zeros(state_matrix_dim, state_matrix_dim, dtype=torch.complex64 if complex else torch.float32).uniform_(-0.01, 0.01))
+            torch.zeros(state_matrix_dim, state_matrix_dim,
+                        dtype=torch.complex64 if complex else torch.float32).uniform_(-0.01, 0.01))
 
         # matrix mapping audio frame to hidden/state vector dimension
         self.input_matrix = nn.Parameter(
-            torch.zeros(input_dim, state_matrix_dim, dtype=torch.complex64 if complex else torch.float32).uniform_(-0.01, 0.01))
+            torch.zeros(input_dim, state_matrix_dim, dtype=torch.complex64 if complex else torch.float32).uniform_(
+                -0.01, 0.01))
 
         # matrix mapping hidden/state vector to audio frame dimension
         self.output_matrix = nn.Parameter(
-            torch.zeros(state_matrix_dim, input_dim, dtype=torch.complex64 if complex else torch.float32).uniform_(-0.01, 0.01)
+            torch.zeros(state_matrix_dim, input_dim, dtype=torch.complex64 if complex else torch.float32).uniform_(
+                -0.01, 0.01)
         )
 
         # skip-connection-like matrix mapping input audio frame to next
@@ -119,7 +119,6 @@ class SSM(nn.Module):
         assert cpd == self.control_plane_dim
 
         control = control.permute(0, 2, 1)
-
 
         # proj = control @ self.proj
         if self.complex:
@@ -168,7 +167,8 @@ class OverfitControlPlane(nn.Module):
     Encapsulates parameters for control signal and state-space model
     """
 
-    def __init__(self, control_plane_dim: int, input_dim: int, state_matrix_dim: int, n_samples: int, complex: bool = False):
+    def __init__(self, control_plane_dim: int, input_dim: int, state_matrix_dim: int, n_samples: int,
+                 complex: bool = False):
         super().__init__()
         self.ssm = SSM(control_plane_dim, input_dim, state_matrix_dim, complex)
         self.n_samples = n_samples
@@ -205,7 +205,6 @@ class OverfitControlPlane(nn.Module):
         into the system modelled by `SSM`
         """
         return self.ssm.forward(sig if sig is not None else self.control_signal)
-
 
 
 def transform(x: torch.Tensor):

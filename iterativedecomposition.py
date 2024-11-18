@@ -13,6 +13,7 @@ from modules.eventgenerators.convimpulse import ConvImpulseEventGenerator
 from modules.eventgenerators.generator import EventGenerator
 from modules.eventgenerators.overfitresonance import OverfitResonanceModel
 from modules.eventgenerators.splat import SplattingEventGenerator
+from modules.eventgenerators.ssm import StateSpaceModelEventGenerator
 from modules.multiheadtransform import MultiHeadTransform
 from util import device, encode_audio, make_initializer
 
@@ -222,6 +223,18 @@ def train_and_monitor(
                 n_resonance_octaves=64,
                 n_frames=n_frames
             )
+        elif model_type == 'ssm':
+            resonance_model = StateSpaceModelEventGenerator(
+                context_dim=context_dim,
+                control_plane_dim=16,
+                input_dim=512,
+                state_dim=32,
+                hypernetwork_dim=16,
+                hypernetwork_latent=16,
+                samplerate=samplerate,
+                n_samples=n_samples,
+                n_frames=n_frames,
+            )
         else:
             raise ValueError(f'Unknown model type {model_type}')
 
@@ -275,7 +288,6 @@ def train_and_monitor(
                 rnd = max_norm(rnd)
                 random_audio(rnd)
 
-
     train()
 
 if __name__ == '__main__':
@@ -290,7 +302,7 @@ if __name__ == '__main__':
         '--model-type',
         type=str,
         required=True,
-        choices=['lookup', 'conv', 'splat'])
+        choices=['lookup', 'conv', 'splat', 'ssm'])
     parser.add_argument(
         '--batch-size',
         type=int,

@@ -40,7 +40,7 @@ class HyperNetworkLayer(nn.Module):
                 weights = weights + weight_bias
 
 
-        def forward(z):
+        def forward(z: torch.Tensor) -> torch.Tensor:
             if len(z.shape) != 3:
                 z = z[:, None, :]
             z = torch.bmm(z, weights)
