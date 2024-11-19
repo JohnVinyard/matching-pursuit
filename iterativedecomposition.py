@@ -19,6 +19,9 @@ from util import device, encode_audio, make_initializer
 
 # the size, in samples of the audio segment we'll overfit
 n_samples = 2 ** 15
+samples_per_event = 2048
+n_events = n_samples // samples_per_event
+context_dim = 16
 
 # the samplerate, in hz, of the audio signal
 samplerate = 22050
@@ -28,8 +31,7 @@ n_seconds = n_samples / samplerate
 
 transform_window_size = 2048
 transform_step_size = 256
-n_events = 16
-context_dim = 16
+
 
 n_frames = n_samples // transform_step_size
 
@@ -56,10 +58,14 @@ def loss_transform(x: torch.Tensor) -> torch.Tensor:
 
 
 class Discriminator(nn.Module):
-    def __init__(self):
+    def __init__(self, disc_type='dilated'):
         super().__init__()
-        self.disc = DownsamplingDiscriminator(
-            window_size=2048, step_size=256, n_samples=n_samples, channels=256)
+        if disc_type == 'dilated':
+            self.disc = DownsamplingDiscriminator(
+                window_size=2048, step_size=256, n_samples=n_samples, channels=256)
+        elif disc_type == 'unet':
+            self.disc = DownsamplingDiscriminator(2048, 256, n_samples=n_samples, channels=256)
+
         self.apply(initializer)
 
     def forward(self, transformed: torch.Tensor):
@@ -167,6 +173,7 @@ class Model(nn.Module):
 def train_and_monitor(
         batch_size: int = 8,
         overfit: bool = False,
+        disc_type: str = 'dilated',
         model_type: str = 'conv'):
     stream = AudioIterator(
         batch_size=batch_size,
@@ -246,7 +253,7 @@ def train_and_monitor(
             hidden_channels=hidden_channels).to(device)
         optim = Adam(model.parameters(), lr=1e-3)
 
-        disc = Discriminator().to(device)
+        disc = Discriminator(disc_type=disc_type).to(device)
         disc_optim = Adam(disc.parameters(), lr=1e-3)
 
         for i, item in enumerate(iter(stream)):
@@ -283,6 +290,8 @@ def train_and_monitor(
             disc_optim.step()
 
             with torch.no_grad():
+                # TODO: this should be collecting statistics from reconstructions
+                # so that random reconstructions are within the expected distribution
                 rnd = model.random_sequence()
                 rnd = torch.sum(rnd, dim=1, keepdim=True)
                 rnd = max_norm(rnd)
@@ -304,6 +313,12 @@ if __name__ == '__main__':
         required=True,
         choices=['lookup', 'conv', 'splat', 'ssm'])
     parser.add_argument(
+        '--disc-type',
+        type=str,
+        default='dilated',
+        choices=['dilated', 'unet']
+    )
+    parser.add_argument(
         '--batch-size',
         type=int,
         default=8,
@@ -313,4 +328,5 @@ if __name__ == '__main__':
     train_and_monitor(
         batch_size=1 if args.overfit else args.batch_size,
         overfit=args.overfit,
-        model_type=args.model_type)
+        model_type=args.model_type,
+        disc_type=args.disc_type)

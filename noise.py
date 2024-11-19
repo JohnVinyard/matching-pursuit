@@ -4,7 +4,7 @@ from torch.optim import Adam
 from conjure import loggers, serve_conjure, LmdbCollection
 from conjure.logger import encode_audio
 from data import get_one_audio_segment
-from modules import stft, sparsify, sparsify2, gammatone_filter_bank
+from modules import stft, sparsify, sparsify2, gammatone_filter_bank, fft_frequency_decompose
 from modules.latent_loss import normalized_covariance, covariance
 from modules.overfitraw import OverfitRawAudio
 from modules.transfer import fft_convolve
@@ -31,69 +31,117 @@ def stft_transform(x: torch.Tensor):
     return x
 
 
-class CorrelationLoss(nn.Module):
+class MeanSquaredError(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
+        return F.mse_loss(recon, target)
+
+
+class HingeyTypeLoss(nn.Module):
+
     def __init__(self, n_elements: int = 256):
         super().__init__()
         self.n_elements = n_elements
 
     def forward(self, target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
         batch, _, time = target.shape
-        # noise = torch.zeros_like(target).uniform_(-1, 1)
+
+
 
         t_spec = stft_transform(target).reshape(batch, -1)
         r_spec = stft_transform(recon).reshape(batch, -1)
-        # noise_spec = stft_transform(noise).reshape(batch, -1)
+        residual = t_spec - r_spec
+        noise_spec = torch.zeros_like(residual).normal_(residual.mean().item(), residual.std().item())
+
+        target_norm = torch.norm(t_spec, dim=-1, keepdim=True)
+        recon_norm = torch.norm(r_spec, dim=-1, keepdim=True)
+
+        print(target_norm.item(), recon_norm.item())
+
+        # ensure that the norm does not grow
+        norm_loss = torch.clip(recon_norm - target_norm, min=0, max=np.inf).sum()
 
         indices = torch.randperm(t_spec.shape[-1], device=device)[:self.n_elements]
 
         t_spec = t_spec[:, indices]
         r_spec = r_spec[:, indices]
-        # noise_spec = noise_spec[:, indices]
+        residual = t_spec - r_spec
+        n_spec = noise_spec[:, indices]
 
-        print(t_spec.norm(), r_spec.norm())
+        # The residual covariance should resemble noise
+        t_cov = covariance(n_spec)
+        r_cov = covariance(residual)
+
+        cov_loss = torch.abs(t_cov - r_cov).sum()
+
+        return norm_loss + cov_loss
 
 
-        t_cov = covariance(t_spec)
-        r_cov = covariance(r_spec)
 
-        # t_cov = torch.triu(t_cov)
-        # r_cov = torch.triu(r_cov)
-
-        # noise_cov = covariance(noise_spec)
-
-        return torch.abs(t_cov - r_cov).sum()
 
 
 class SparseLossFeature(nn.Module):
     def __init__(self):
         super().__init__()
-        self.filter_size = 1024
-        self.n_filters = 512
+        self.filter_size = 64
+        self.n_filters = 64
         f = gammatone_filter_bank(self.n_filters, self.filter_size, device=device, band_spacing='linear')
         self.filters = nn.Parameter(f)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        batch, _, time = x.shape
-        filters = F.pad(self.filters[None, :, :], (0, n_samples - self.filter_size))
-        result = fft_convolve(x, filters)
-        result = torch.relu(result)
-        pooled = F.avg_pool1d(result, 512, stride=1, padding=256)[..., :n_samples]
-        result = result - pooled
-        result = torch.relu(result)
+        self.proj_time = nn.Parameter(torch.zeros(64, 128).uniform_(-1, 1))
+        self.proj_freq = nn.Parameter(torch.zeros(self.n_filters, 128).uniform_(-1, 1))
 
-        plt.matshow(np.flipud(result.data.cpu().numpy()[0, :, :4096]))
-        plt.show()
+    def forward(self, target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
+        t = self._forward(target)
+        r = self._forward(recon)
+        return torch.abs(t - r).mean()
 
-        return result
+
+    def _forward(self, x: torch.Tensor) -> torch.Tensor:
+        bands = fft_frequency_decompose(x, min_size=512)
+        results = []
+        for size, band in bands.items():
+            batch, _, samples = band.shape
+            filters = F.pad(self.filters[None, :, :], (0, samples - self.filter_size))
+            result = fft_convolve(band, filters)
+            stride = samples // 64
+            step = stride * 2
+            pooled = F.max_pool1d(result, step, stride=stride, padding=stride // 2)[..., :samples]
+            sparse, packed, one_hot = sparsify2(pooled, n_to_keep=512)
+            a = packed @ self.proj_time
+            b = one_hot @ self.proj_freq
+            result = torch.cat((a, b), dim=-1)
+            results.append(result)
+        return torch.cat(results, dim=-1)
+
+
+    # def _forward(self, x: torch.Tensor) -> torch.Tensor:
+    #     batch, _, time = x.shape
+    #     filters = F.pad(self.filters[None, :, :], (0, n_samples - self.filter_size))
+    #     result = fft_convolve(x, filters)
+    #     pooled = F.max_pool1d(result, 512, stride=256, padding=256)[..., :n_samples]
+    #
+    #     sparse, packed, one_hot = sparsify2(pooled, n_to_keep=2048)
+    #
+    #     a = packed @ self.proj_time
+    #     b = one_hot @ self.proj_freq
+    #
+    #     return torch.cat((a, b), dim=-1)
+
 
 
 
 def train(n_samples: int = 2 ** 16):
     target = get_one_audio_segment(n_samples=n_samples, device=device)
-    # loss_model = SparseLossFeature().to(device)
-    loss_model = CorrelationLoss(n_elements=512)
 
-    model = OverfitRawAudio(shape=(1, 1, n_samples), std=0.1, normalize=True).to(device)
+    loss_model = SparseLossFeature().to(device)
+    # loss_model = CorrelationLoss(n_elements=512)
+    # loss_model = MeanSquaredError()
+    # loss_model = HingeyTypeLoss()
+
+    model = OverfitRawAudio(shape=(1, 1, n_samples), std=1e-4, normalize=True).to(device)
     optim = Adam(model.parameters(), lr=1e-3)
 
     collection = LmdbCollection(path='noise')

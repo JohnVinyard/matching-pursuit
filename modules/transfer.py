@@ -62,7 +62,6 @@ class ExponentialTransform(nn.Module):
         return result
 
 
-
 def hierarchical_dirac(elements: torch.Tensor):
     """
     Produce a dirac/one-hot encoding from a binary encoded
@@ -166,7 +165,6 @@ def freq_domain_transfer_function_to_resonance(
         coeffs: torch.Tensor,
         n_frames: int,
         apply_decay: bool = True) -> torch.Tensor:
-
     step_size = window_size // 2
     total_samples = step_size * n_frames
 
@@ -207,10 +205,15 @@ def freq_domain_transfer_function_to_resonance(
     return audio
 
 
-# TODO: frame-based FFT variant of this
 class ResonanceBank(nn.Module):
-    def __init__(self, n_resonances, window_size, n_frames, initial, fft_based_resonance=False,
-                 learnable_resonances=True):
+    def __init__(
+            self, n_resonances,
+            window_size,
+            n_frames,
+            initial,
+            fft_based_resonance=False,
+            learnable_resonances=True):
+
         super().__init__()
         self.n_coeffs = window_size // 2 + 1
         self.window_size = window_size
