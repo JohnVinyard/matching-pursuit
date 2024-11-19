@@ -58,7 +58,7 @@ class Lookup(nn.Module):
 
     def forward(self, selections: torch.Tensor) -> torch.Tensor:
         items = self.preprocess_items(self.items)
-        selected = select_items(selections, items, type='softmax')
+        selected = select_items(selections, items, selection_type='sparse_softmax')
         processed = self.postprocess_results(selected)
         return processed
 
@@ -255,7 +255,6 @@ class Deformations(Lookup):
         x = torch.softmax(x, dim=-2)
         x = interpolate_last_axis(x, desired_size=self.full_size)
         return x
-
 
 
 

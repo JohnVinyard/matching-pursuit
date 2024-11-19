@@ -58,8 +58,6 @@ class HingeyTypeLoss(nn.Module):
         target_norm = torch.norm(t_spec, dim=-1, keepdim=True)
         recon_norm = torch.norm(r_spec, dim=-1, keepdim=True)
 
-        print(target_norm.item(), recon_norm.item())
-
         # ensure that the norm does not grow
         norm_loss = torch.clip(recon_norm - target_norm, min=0, max=np.inf).sum()
 

@@ -4,7 +4,6 @@ import torch
 from torch import nn
 
 from modules import stft, unit_norm, max_norm
-# from modules.angle import windowed_audio
 
 from modules.ddsp import overlap_add
 from modules.normal_pdf import pdf2
@@ -17,22 +16,6 @@ from torch.nn import functional as F
 from scipy.signal import square, sawtooth
 
 
-# def static_mix(items: List[torch.Tensor], mixture: torch.Tensor) -> torch.Tensor:
-#     if not len(items):
-#         raise ValueError('items must have at least one item')
-#
-#     batch, n_events, n_channels = mixture.shape
-#     mixture = mixture[:, :, None, :]
-#     mixture = torch.softmax(mixture, dim=-1)
-#
-#     stacked = torch.cat([x[..., None] for x in items], dim=-1)
-#
-#
-# # def mix(items: List[torch.Tensor], mixture: torch.Tensor):
-# #     # items might be (batch, n_events, channels, n_frames)
-# #     # mixture might be (batch, n_events, mix)
-# #     # or (batch, n_events, n_frames, mix)
-# #     stacked = torch.cat([x[..., None] for x in items], dim=-1)
 
 
 class ExponentialTransform(nn.Module):

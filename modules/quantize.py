@@ -10,15 +10,18 @@ from typing import Literal
 SelectionType = Literal['sparse_softmax', 'gumbel_softmax', 'softmax']
 
 
-def hard_choice(selections: torch.Tensor, selection_type: SelectionType = 'sparse_softmax') -> torch.Tensor:
-    if type == 'sparse_softmax':
+def hard_choice(
+        selections: torch.Tensor,
+        selection_type: SelectionType = 'sparse_softmax') -> torch.Tensor:
+
+    if selection_type == 'sparse_softmax':
         selections = sparse_softmax(selections, normalize=True, dim=-1)
-    elif type == 'gumbel_softmax':
+    elif selection_type == 'gumbel_softmax':
         selections = F.gumbel_softmax(selections, tau=0.1, hard=True, dim=-1)
-    elif type == 'softmax':
+    elif selection_type == 'softmax':
         selections = torch.softmax(selections, dim=-1)
     else:
-        raise ValueError(f'{type} is an unknown selection type')
+        raise ValueError(f'{selection_type} is an unknown selection type')
 
     return selections
 

@@ -289,6 +289,7 @@ def train_and_monitor(
             print('D', d_loss.item())
             disc_optim.step()
 
+
             with torch.no_grad():
                 # TODO: this should be collecting statistics from reconstructions
                 # so that random reconstructions are within the expected distribution

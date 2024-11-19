@@ -148,7 +148,8 @@ class StateSpaceModelEventGenerator(EventGenerator, nn.Module):
             proj_matrix_hypervector: torch.Tensor,
             times: torch.Tensor) -> torch.Tensor:
 
-        control_signal = torch.relu(control_signal)
+        # control_signal = torch.relu(control_signal)
+        control_signal = control_signal ** 2
 
         state_matrix, state_matrix_forward = self.state_matrix_hypernetwork(state_matrix_hypervector)
         _, input_matrix_forward = self.input_matrix_hypernetwork(input_matrix_hypervector)
