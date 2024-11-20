@@ -99,6 +99,9 @@ class Model(nn.Module):
             n_layers=2,
             shapes=self.resonance.shape_spec
         )
+
+        self._latents_reservoir = torch.zeros(128, context_dim, requires_grad=False, device=device)
+
         self.apply(initializer)
 
     def encode(self, transformed: torch.Tensor):
@@ -131,13 +134,21 @@ class Model(nn.Module):
         return vecs, scheduling
 
     def generate(self, vecs: torch.Tensor, scheduling: torch.Tensor):
+
+        with torch.no_grad():
+            flattened_vecs = vecs.reshape(-1, context_dim)
+            indices = torch.randperm(flattened_vecs.shape[0])[:16]
+            self._latents_reservoir[indices] = flattened_vecs[indices].clone().detach()
+
         choices = self.multihead.forward(vecs)
         choices_with_scheduling = dict(**choices, times=scheduling)
         events = self.resonance.forward(**choices_with_scheduling)
         return events
 
     def random_sequence(self) -> torch.Tensor:
-        vecs = torch.zeros(1, 1, context_dim, device=device).uniform_(-1, 1)
+        # choose a random latent from the reservoir
+        index = torch.randint(0, self._latents_reservoir.shape[0], (1,))
+        vecs = self._latents_reservoir[index].clone().view(1, 1, context_dim)
         times = sparse_softmax(
             torch.zeros(1, 1, n_frames, device=device).uniform_(-1, 1), normalize=True, dim=-1)
         final = self.generate(vecs, times)
