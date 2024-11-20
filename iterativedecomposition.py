@@ -174,13 +174,20 @@ def train_and_monitor(
         batch_size: int = 8,
         overfit: bool = False,
         disc_type: str = 'dilated',
-        model_type: str = 'conv'):
+        model_type: str = 'conv',
+        wipe_old_data: bool = True):
     stream = AudioIterator(
         batch_size=batch_size,
         n_samples=n_samples,
         samplerate=samplerate,
         normalize=True,
         overfit=overfit)
+
+    collection = LmdbCollection(path='iterativedecomposition')
+
+    if wipe_old_data:
+        print('Wiping previous experiment data')
+        collection.destroy()
 
     collection = LmdbCollection(path='iterativedecomposition')
 
@@ -195,6 +202,8 @@ def train_and_monitor(
         recon_audio,
         random_audio
     ], port=9999, n_workers=1)
+
+    print(f'training on {n_seconds} of audio and {n_events} with {model_type} event generator and {disc_type} disc')
 
     def train():
         hidden_channels = 512
@@ -320,6 +329,12 @@ if __name__ == '__main__':
         choices=['dilated', 'unet']
     )
     parser.add_argument(
+        '--save-data',
+        required=False,
+        default=False,
+        action='store_true'
+    )
+    parser.add_argument(
         '--batch-size',
         type=int,
         default=8,
@@ -330,4 +345,5 @@ if __name__ == '__main__':
         batch_size=1 if args.overfit else args.batch_size,
         overfit=args.overfit,
         model_type=args.model_type,
-        disc_type=args.disc_type)
+        disc_type=args.disc_type,
+        wipe_old_data=not args.save_data)
