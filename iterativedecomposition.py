@@ -4,7 +4,7 @@ import torch
 from torch import nn
 from torch.optim import Adam
 
-from conjure import LmdbCollection, serve_conjure, loggers
+from conjure import LmdbCollection, serve_conjure, loggers, SupportedContentType, NumpySerializer, NumpyDeserializer
 from data import AudioIterator
 from modules import stft, sparsify, sparsify_vectors, iterative_loss, max_norm, flattened_multiband_spectrogram, \
     DownsamplingDiscriminator, sparse_softmax
@@ -31,7 +31,6 @@ n_seconds = n_samples / samplerate
 
 transform_window_size = 2048
 transform_step_size = 256
-
 
 n_frames = n_samples // transform_step_size
 
@@ -170,6 +169,10 @@ class Model(nn.Module):
         raise NotImplementedError()
 
 
+def to_numpy(x: torch.Tensor):
+    return x.data.cpu().numpy()
+
+
 def train_and_monitor(
         batch_size: int = 8,
         overfit: bool = False,
@@ -197,10 +200,20 @@ def train_and_monitor(
         encode_audio,
         collection)
 
+    envelopes, latents = loggers(
+        ['envelopes', 'latents'],
+        SupportedContentType.Spectrogram.value,
+        to_numpy,
+        collection,
+        serializer=NumpySerializer(),
+        deserializer=NumpyDeserializer())
+
     serve_conjure([
         orig_audio,
         recon_audio,
-        random_audio
+        random_audio,
+        envelopes,
+        latents
     ], port=9999, n_workers=1)
 
     print(f'training on {n_seconds} of audio and {n_events} with {model_type} event generator and {disc_type} disc')
@@ -275,6 +288,9 @@ def train_and_monitor(
             recon_summed = torch.sum(recon, dim=1, keepdim=True)
             recon_audio(max_norm(recon_summed))
 
+            envelopes(max_norm(scheduling[0]))
+            latents(max_norm(encoded[0]))
+
             loss = iterative_loss(target, recon, loss_transform)
 
             loss = loss + (torch.abs(encoded).sum() * 1e-3)
@@ -298,7 +314,6 @@ def train_and_monitor(
             print('D', d_loss.item())
             disc_optim.step()
 
-
             with torch.no_grad():
                 # TODO: this should be collecting statistics from reconstructions
                 # so that random reconstructions are within the expected distribution
@@ -308,6 +323,7 @@ def train_and_monitor(
                 random_audio(rnd)
 
     train()
+
 
 if __name__ == '__main__':
     parser = ArgumentParser()
