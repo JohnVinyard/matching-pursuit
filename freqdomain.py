@@ -426,11 +426,11 @@ class OverfitAudioNetwork(nn.Module):
         Produces a random, sparse control signal, emulating short, transient bursts
         of energy into the system modelled by the `SSM`
         """
-
+        # TODO: support a parameter/option to switch between the two
         # TODO: this does not support deformations currently
-        # cp = torch.zeros_like(self.control_plane).bernoulli_(p=p)
-        indices = torch.randperm(self.control_plane_dim)
-        cp = self.control_signal[:, indices, :]
+        cp = torch.zeros_like(self.control_plane).bernoulli_(p=p)
+        # indices = torch.randperm(self.control_plane_dim)
+        # cp = self.control_signal[:, indices, :]
         audio = self.forward(sig=cp)
         return max_norm(audio)
 
@@ -475,7 +475,7 @@ def sparsity_loss(c: torch.Tensor) -> torch.Tensor:
     """
     Compute the l1 norm of the control signal
     """
-    return torch.abs(c).sum() * 10
+    return torch.abs(c).sum() * 1e-2
 
 
 def construct_experiment_model(n_samples: int) -> OverfitAudioNetwork:
@@ -631,9 +631,9 @@ def train_and_monitor_overfit_model(
         model = construct_experiment_model(n_samples=n_samples)
         # loss_model = AntiCausalAnalysis(
         #     1024, 256, 2, [1, 2, 4, 8, 16, 32, 1], do_norm=False).to(device)
-        loss_model = UNet(1024).to(device)
+        # loss_model = UNet(1024).to(device)
 
-        optim = Adam(model.parameters(), lr=1e-3)
+        optim = Adam(model.parameters(), lr=1e-2)
 
         for iteration in count():
             optim.zero_grad()
@@ -641,10 +641,11 @@ def train_and_monitor_overfit_model(
 
             recon_audio(max_norm(recon))
 
-            real_spec = compute_spec(target, loss_model)
-            fake_spec = compute_spec(recon, loss_model)
+            # real_spec = compute_spec(target, loss_model)
+            # fake_spec = compute_spec(recon, loss_model)
+            # recon_loss = torch.abs(real_spec - fake_spec).sum()
 
-            recon_loss = torch.abs(real_spec - fake_spec).sum()
+            recon_loss = reconstruction_loss(recon, target)
 
             loss = \
                 recon_loss \
@@ -672,8 +673,7 @@ def train_and_monitor_overfit_model(
 
 
 if __name__ == '__main__':
-    # train_and_monitor_overfit_model(
-    #     n_samples=2 ** 16,
-    #     samplerate=22050,
-    #     audio_path='/home/john/workspace/audio-data/LJSpeech-1.1/wavs')
-    train_and_monitor_auto_encoder(batch_size=2)
+    train_and_monitor_overfit_model(
+        n_samples=2 ** 16,
+        samplerate=22050)
+    # train_and_monitor_auto_encoder(batch_size=2)

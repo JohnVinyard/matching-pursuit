@@ -1,4 +1,5 @@
 from argparse import ArgumentParser
+from typing import Union
 
 import torch
 from torch import nn
@@ -18,7 +19,7 @@ from modules.multiheadtransform import MultiHeadTransform
 from util import device, encode_audio, make_initializer
 
 # the size, in samples of the audio segment we'll overfit
-n_samples = 2 ** 15
+n_samples = 2 ** 16
 samples_per_event = 2048
 n_events = n_samples // samples_per_event
 context_dim = 16
@@ -75,7 +76,7 @@ class Discriminator(nn.Module):
 class Model(nn.Module):
     def __init__(
             self,
-            resonance_model: EventGenerator,
+            resonance_model: Union[EventGenerator, nn.Module],
             in_channels: int = 1024,
             hidden_channels: int = 256):
 
@@ -100,7 +101,7 @@ class Model(nn.Module):
             shapes=self.resonance.shape_spec
         )
 
-        self._latents_reservoir = torch.zeros(128, context_dim, requires_grad=False, device=device)
+        # self._latents_reservoir = torch.zeros(128, context_dim, requires_grad=False, device=device)
 
         self.apply(initializer)
 
@@ -135,10 +136,10 @@ class Model(nn.Module):
 
     def generate(self, vecs: torch.Tensor, scheduling: torch.Tensor):
 
-        with torch.no_grad():
-            flattened_vecs = vecs.reshape(-1, context_dim)
-            indices = torch.randperm(flattened_vecs.shape[0])[:16]
-            self._latents_reservoir[indices] = flattened_vecs[indices].clone().detach()
+        # with torch.no_grad():
+        #     flattened_vecs = vecs.reshape(-1, context_dim)
+        #     indices = torch.randperm(flattened_vecs.shape[0])[:16]
+        #     self._latents_reservoir[indices] = flattened_vecs[indices].clone().detach()
 
         choices = self.multihead.forward(vecs)
         choices_with_scheduling = dict(**choices, times=scheduling)
@@ -227,7 +228,9 @@ def train_and_monitor(
         latents
     ], port=9999, n_workers=1)
 
+    print('==========================================')
     print(f'training on {n_seconds} of audio and {n_events} with {model_type} event generator and {disc_type} disc')
+    print('==========================================')
 
     def train():
         hidden_channels = 512
@@ -239,7 +242,7 @@ def train_and_monitor(
                 noise_deformations=16,
                 instr_expressivity=8,
                 n_events=1,
-                n_resonances=512,
+                n_resonances=2048,
                 n_envelopes=128,
                 n_decays=32,
                 n_deformations=32,
@@ -332,6 +335,10 @@ def train_and_monitor(
                 rnd = torch.sum(rnd, dim=1, keepdim=True)
                 rnd = max_norm(rnd)
                 random_audio(rnd)
+
+
+            if i % 100 == 0:
+                torch.save(model.state_dict(), 'iterativedecomposition.dat')
 
     train()
 

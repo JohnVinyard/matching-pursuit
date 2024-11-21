@@ -58,7 +58,7 @@ class Lookup(nn.Module):
 
     def forward(self, selections: torch.Tensor) -> torch.Tensor:
         items = self.preprocess_items(self.items)
-        selected = select_items(selections, items, selection_type='sparse_softmax')
+        selected = select_items(selections, items, selection_type='softmax')
         processed = self.postprocess_results(selected)
         return processed
 
@@ -109,14 +109,18 @@ class WavetableLookup(Lookup):
             n_samples: int,
             n_resonances: int,
             samplerate: int,
-            learnable: bool = False):
+            learnable: bool = False,
+            wavetable_device = None):
 
         super().__init__(n_items, n_resonances)
         w = make_waves(n_samples, np.linspace(20, 4000, num=n_resonances // 4), samplerate)
         if learnable:
             self.waves = nn.Parameter(w)
         else:
-            self.register_buffer('waves', w)
+            # TODO: This should be registered as a buffer, but I'm trying to understand what
+            # the total parameter size is, and this one is easily compute-able/recreate-able
+            # self.register_buffer('waves', w)
+            self.waves = w.to(wavetable_device or device)
 
     def preprocess_items(self, items: torch.Tensor) -> torch.Tensor:
         return items
@@ -275,7 +279,8 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
             n_samples: int,
             n_frames: int,
             samplerate: int,
-            hidden_channels: int):
+            hidden_channels: int,
+            wavetable_device = None):
         super().__init__()
 
         self.noise_filter_samples = noise_filter_samples
@@ -312,7 +317,12 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
         self.n_resonances = n_resonances
 
         self.r = WavetableLookup(
-            n_resonances, n_samples, n_resonances=4096, samplerate=samplerate, learnable=False)
+            n_resonances,
+            n_samples,
+            n_resonances=4096,
+            samplerate=samplerate,
+            learnable=False,
+            wavetable_device=wavetable_device)
 
         # TODO: This is an issue because we have gradients for every sample, even though
         # they are largely redundant (think exponential vs.

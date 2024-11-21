@@ -6,12 +6,14 @@ from conjure.logger import encode_audio
 from data import get_one_audio_segment
 from modules import stft, sparsify, sparsify2, gammatone_filter_bank, fft_frequency_decompose
 from modules.latent_loss import normalized_covariance, covariance
+from modules.normal_pdf import pdf2
 from modules.overfitraw import OverfitRawAudio
 from modules.transfer import fft_convolve
 from util import device
 from torch.nn import functional as F
 from itertools import count
 import numpy as np
+from torch.distributions import Normal
 
 import matplotlib
 matplotlib.use('Qt5Agg')
@@ -76,8 +78,15 @@ class HingeyTypeLoss(nn.Module):
 
         return norm_loss + cov_loss
 
+def pos_encoding(n_elements: int, n_sinusoids: int) -> torch.Tensor:
+    t = torch.linspace(1e-8, 1, n_elements)
+    # freq = torch.linspace(0.001, 1, n_sinusoids)
+    # ps = torch.sin(t[:, None] * freq[None, :])
+    # return ps
 
-
+    r = pdf2(t[:, None], t[None, :], n_elements = n_sinusoids)
+    print(r.shape)
+    return r
 
 
 class SparseLossFeature(nn.Module):
@@ -85,11 +94,16 @@ class SparseLossFeature(nn.Module):
         super().__init__()
         self.filter_size = 64
         self.n_filters = 64
+        self.n_frames = 64
+
         f = gammatone_filter_bank(self.n_filters, self.filter_size, device=device, band_spacing='linear')
         self.filters = nn.Parameter(f)
 
-        self.proj_time = nn.Parameter(torch.zeros(64, 128).uniform_(-1, 1))
-        self.proj_freq = nn.Parameter(torch.zeros(self.n_filters, 128).uniform_(-1, 1))
+        self.proj_time = nn.Parameter(pos_encoding(self.n_frames, 128))
+        self.proj_freq = nn.Parameter(pos_encoding(self.n_filters, 128))
+
+        # self.proj_time = nn.Parameter(torch.zeros(self.n_frames, 128).uniform_(-1, 1))
+        # self.proj_freq = nn.Parameter(torch.zeros(self.n_filters, 128).uniform_(-1, 1))
 
     def forward(self, target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
         t = self._forward(target)
@@ -107,12 +121,14 @@ class SparseLossFeature(nn.Module):
             stride = samples // 64
             step = stride * 2
             pooled = F.max_pool1d(result, step, stride=stride, padding=stride // 2)[..., :samples]
-            sparse, packed, one_hot = sparsify2(pooled, n_to_keep=512)
+            sparse, packed, one_hot = sparsify2(pooled, n_to_keep=128)
             a = packed @ self.proj_time
             b = one_hot @ self.proj_freq
             result = torch.cat((a, b), dim=-1)
             results.append(result)
-        return torch.cat(results, dim=-1)
+
+        result = torch.cat(results, dim=-1)
+        return result
 
 
     # def _forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -134,12 +150,12 @@ class SparseLossFeature(nn.Module):
 def train(n_samples: int = 2 ** 16):
     target = get_one_audio_segment(n_samples=n_samples, device=device)
 
-    loss_model = SparseLossFeature().to(device)
+    # loss_model = SparseLossFeature().to(device)
     # loss_model = CorrelationLoss(n_elements=512)
     # loss_model = MeanSquaredError()
-    # loss_model = HingeyTypeLoss()
+    loss_model = HingeyTypeLoss()
 
-    model = OverfitRawAudio(shape=(1, 1, n_samples), std=1e-4, normalize=True).to(device)
+    model = OverfitRawAudio(shape=(1, 1, n_samples), std=0.1, normalize=False).to(device)
     optim = Adam(model.parameters(), lr=1e-3)
 
     collection = LmdbCollection(path='noise')
