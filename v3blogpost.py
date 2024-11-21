@@ -5,16 +5,14 @@
 This article covers the continuation of work I've been pursuing in the area of sparse, interpretable audio models.
 
 Some previous iterations of this work:
-    - [Iterative Decomposition Model V2](https://blog.cochlea.xyz/siam.html)
-    - [Gaussian/Gamma Splatting for Audio](https://blog.cochlea.xyz/gamma-audio-splat.html)
+
+
+- [Iterative Decomposition Model V2](https://blog.cochlea.xyz/siam.html)
+- [Gaussian/Gamma Splatting for Audio](https://blog.cochlea.xyz/gamma-audio-splat.html)
 
 
 All training and model code can be
 [found here](https://github.com/JohnVinyard/matching-pursuit/blob/main/iterativedecomposition.py).
-
-This blog post is generated from a
-[Python script](https://github.com/JohnVinyard/matching-pursuit/blob/main/v3blogpost.py) using
-[conjure](https://github.com/JohnVinyard/conjure).
 
 Our goal is to decompose a musical audio signal into a small number of "events", roughly analogous to a musical score,
 but carrying information about the resonant characteristics of the instrument being played, and the room it is being
@@ -34,10 +32,10 @@ threshold.
 In this work, we replace the convolution of a large dictionary of audio "atoms" with analysis via a "deep" neural
 network, which uses an STFT transform followed by
 [cascading dilated convolutions](https://github.com/JohnVinyard/matching-pursuit/blob/main/iterativedecomposition.py#L86)
-to efficiently analyze relatively long audio segments.  At each iteration, it proposes and **event vector** and a
-**time-of-occurrence**.  This event is then rendered by an "event generator" network, "scheduled", by convolving the
+to efficiently analyze relatively long audio segments.  At each iteration, it proposes an **event vector** and a
+**time-of-occurrence**.  This event is then rendered by an event-generator network and scheduled, by convolving the
 rendered event with a dirac function (unit-valued spike) at the desired time.  It is subtracted from the original audio
-signal, and the process is repeated.  During training, this process runs for a fixed number of steps, but it's possible
+spectrogram[^1], and the process is repeated.  During training, this process runs for a fixed number of steps, but it's possible
 to imagine a modification whereby some other stopping condition is observed to improve efficiency.
 
 The decoder makes some simple physics-based assumptions about the underlying signal, and uses convolutions with long
@@ -63,14 +61,12 @@ driving toward a fully streaming algorithm that can handle signals of arbitrary 
 a much simpler decoder, which generates each event as a linear combination of lookup tables for the following elements:
 
 - a noisy impulse, or injection of energy into the system
-- a number resonances, built by combining sine, sawtooch, triangle and square waves
-- an interpolation between the resonances, representing the deformation of the system/instrument being played
-   (e.g, the bending of a violin string as vibrato)
-- a pre-baked room impulse response, which is, in fact, just another transfer function, this time for the entire room
-   or space in which the piece is played
+- some number of resonances, built by combining sine, sawtooth, triangle, and square waves
+- an interpolation between the resonances, representing the deformation of the system/instrument being played (e.g, the bending of a violin string as vibrato)
+- a pre-baked room impulse response, which is, in fact, _just another transfer function_, this time for the entire room or space in which the piece is played
+
 
 # Future Work
-
 
 ## Model Size, Training Time and Dataset
 
@@ -98,7 +94,25 @@ better, more realistic, and sparser renderings of the audio.
 
 """
 
+"""[markdown]
 
+# Cite this Article
+
+If you'd like to cite this article, you can use the following [BibTeX block](https://bibtex.org/).
+
+"""
+
+# citation
+
+
+"""[markdown]
+
+# Sponsor this Work
+
+If this work seems interesting and worthwhile, and you want to see where it leads, 
+[sponsor me](https://github.com/sponsors/JohnVinyard) on GitHub and I'll keep chasing this down.
+
+"""
 
 """[markdown]
 
@@ -131,6 +145,8 @@ better, more realistic, and sparser renderings of the audio.
 """[markdown]
 
 ### Event Vectors
+
+Notice the blocks of silent event vectors.
  
 """
 
@@ -201,6 +217,8 @@ better, more realistic, and sparser renderings of the audio.
 
 ### Event Vectors
 
+Notice the blocks of silent event vectors.
+
 """
 
 # example_2.latents
@@ -270,6 +288,8 @@ better, more realistic, and sparser renderings of the audio.
 
 ### Event Vectors
 
+Notice the blocks of silent event vectors.
+
 """
 
 # example_3.latents
@@ -338,6 +358,8 @@ better, more realistic, and sparser renderings of the audio.
 """[markdown]
 
 ### Event Vectors
+
+Notice the blocks of silent event vectors.
 
 """
 
@@ -409,6 +431,8 @@ better, more realistic, and sparser renderings of the audio.
 
 ### Event Vectors
 
+Notice the blocks of silent event vectors.
+
 """
 
 # example_5.latents
@@ -453,9 +477,7 @@ better, more realistic, and sparser renderings of the audio.
 # example_5.event31
 
 
-from typing import Dict
 
-from modules.eventgenerators.overfitresonance import OverfitResonanceModel
 
 # the size, in samples of the audio segment we'll overfit
 n_samples = 2 ** 16
@@ -476,7 +498,8 @@ transform_step_size = 256
 n_frames = n_samples // transform_step_size
 
 
-
+from typing import Dict
+from modules.eventgenerators.overfitresonance import OverfitResonanceModel
 import numpy as np
 import torch
 from data import get_one_audio_segment, get_audio_segment
@@ -524,7 +547,6 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
 
     with open('iterativedecomposition.dat', 'rb') as f:
         model.load_state_dict(torch.load(f, map_location=lambda storage, loc: storage))
-        # model = model.to(device)
 
     print('Total parameters', count_parameters(model))
     print('Encoder parameters', count_parameters(model.encoder))
@@ -565,7 +587,16 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
 
 """[markdown]
 
-Thanks for reading!
+# Notes
+
+This blog post is generated from a
+[Python script](https://github.com/JohnVinyard/matching-pursuit/blob/main/v3blogpost.py) using
+[conjure](https://github.com/JohnVinyard/conjure).
+
+[^1]:  While the STFT (short-time fourier transform) doesn't capture _everything_ of perceptual import, it does a fairly
+good job, better than the "raw", time-domain audio signal, at least.  In the time domain, we get into trouble when we
+begin to try to represent and remove the noisier parts of the signal;  here the statistics and relationships between
+different auditory bandpass filters become more important than the precise amplitude values.  
 
 """
 
@@ -616,28 +647,8 @@ def generate_demo_page():
     conjure_article(
         __file__,
         'html',
-        title='Learning "Playable" State-Space Models from Audio',
+        title='Iterative Decomposition Model V3',
         **display)
-
-
-
-
-
-"""[markdown]
-
-# Conclusion
-
-
-## Future Work
-
-
-# Cite this Article
-
-If you'd like to cite this article, you can use the following [BibTeX block](https://bibtex.org/).
-
-"""
-
-# citation
 
 
 if __name__ == '__main__':
