@@ -4,9 +4,81 @@ Hello
 
 """
 
+"""[markdown]
+
+# Examples
+
+"""
+
+
+"""[markdown]
+
+## Example 1
+
+"""
+
+"""[markdown]
+
+### Original Audio
+
+"""
 # example_1.orig_audio
 
+"""[markdown]
+
+### Reconstruction
+
+"""
+
 # example_1.recon_audio
+
+"""[markdown]
+
+### Event Vectors
+ 
+"""
+
+# example_1.latents
+
+"""[markdown]
+
+### Individual Audio Events
+
+"""
+
+# example_1.event0
+# example_1.event1
+# example_1.event2
+# example_1.event3
+# example_1.event4
+# example_1.event5
+# example_1.event6
+# example_1.event7
+# example_1.event8
+# example_1.event9
+# example_1.event10
+# example_1.event11
+# example_1.event12
+# example_1.event13
+# example_1.event14
+# example_1.event15
+# example_1.event16
+# example_1.event17
+# example_1.event18
+# example_1.event19
+# example_1.event20
+# example_1.event21
+# example_1.event22
+# example_1.event23
+# example_1.event24
+# example_1.event25
+# example_1.event26
+# example_1.event27
+# example_1.event28
+# example_1.event29
+# example_1.event30
+# example_1.event31
+
 
 from typing import Dict, Union
 
@@ -104,9 +176,22 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
     orig_audio_component = AudioComponent(original.public_uri, height=200)
     recon_audio_component = AudioComponent(reconstruction.public_uri, height=200)
 
+
+    events = {f'event{i}': events[:, i: i + 1, :] for i in range(events.shape[1])}
+
+    event_components = {}
+    for k, v in events.items():
+        _, e = logger.log_sound(k, v)
+        event_components[k] = AudioComponent(e.public_uri, height=50, controls=False)
+
+    _, event_vectors = logger.log_matrix_with_cmap('latents', vectors[0], cmap='hot')
+    latents = ImageComponent(event_vectors.public_uri, height=200, title='latent event vectors')
+
     composite = CompositeComponent(
         orig_audio=orig_audio_component,
         recon_audio=recon_audio_component,
+        latents=latents,
+        **event_components
     )
     return composite
 
@@ -199,4 +284,24 @@ If you'd like to cite this article, you can use the following [BibTeX block](htt
 
 
 if __name__ == '__main__':
+    parser = ArgumentParser()
+
+    parser.add_argument('--clear', action='store_true')
+    parser.add_argument('--list', action='store_true')
+
+    args = parser.parse_args()
+
+    if args.list:
+        remote = S3Collection(
+            remote_collection_name, is_public=True, cors_enabled=True)
+        print(remote)
+        print('Listing stored keys')
+        for key in remote.iter_prefix(start_key=b'', prefix=b''):
+            print(key)
+
+    if args.clear:
+        remote = S3Collection(
+            remote_collection_name, is_public=True, cors_enabled=True)
+        remote.destroy(prefix=b'')
+
     generate_demo_page()
