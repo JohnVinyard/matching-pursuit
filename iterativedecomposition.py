@@ -37,6 +37,39 @@ n_frames = n_samples // transform_step_size
 
 initializer = make_initializer(0.05)
 
+def fft_shift(a: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
+    # this is here to make the shift value interpretable
+    shift = (1 - shift)
+
+    n_samples = a.shape[-1]
+
+    shift_samples = (shift * n_samples * 0.5)
+
+    # a = F.pad(a, (0, n_samples * 2))
+
+    spec = torch.fft.rfft(a, dim=-1, norm='ortho')
+
+    n_coeffs = spec.shape[-1]
+    shift = (torch.arange(0, n_coeffs, device=a.device) * 2j * np.pi) / n_coeffs
+
+    shift = torch.exp(shift * shift_samples)
+
+    spec = spec * shift
+
+    samples = torch.fft.irfft(spec, dim=-1, norm='ortho')
+    # samples = samples[..., :n_samples]
+    # samples = torch.relu(samples)
+    return samples
+
+
+"""
+TODOs: 
+
+- Fine positioning via fft shift
+- gather statistics
+- self-supervised learning
+
+"""
 
 def transform(x: torch.Tensor):
     batch_size = x.shape[0]
@@ -101,8 +134,6 @@ class Model(nn.Module):
             shapes=self.resonance.shape_spec
         )
 
-        # self._latents_reservoir = torch.zeros(128, context_dim, requires_grad=False, device=device)
-
         self.apply(initializer)
 
     def encode(self, transformed: torch.Tensor):
@@ -135,22 +166,12 @@ class Model(nn.Module):
         return vecs, scheduling
 
     def generate(self, vecs: torch.Tensor, scheduling: torch.Tensor):
-
-        # with torch.no_grad():
-        #     flattened_vecs = vecs.reshape(-1, context_dim)
-        #     indices = torch.randperm(flattened_vecs.shape[0])[:16]
-        #     self._latents_reservoir[indices] = flattened_vecs[indices].clone().detach()
-
         choices = self.multihead.forward(vecs)
         choices_with_scheduling = dict(**choices, times=scheduling)
         events = self.resonance.forward(**choices_with_scheduling)
         return events
 
     def random_sequence(self) -> torch.Tensor:
-        # choose a random latent from the reservoir
-
-        # index = torch.randint(0, self._latents_reservoir.shape[0], (1,))
-        # vecs = self._latents_reservoir[index].clone().view(1, 1, context_dim)
         vecs = torch.zeros(1, 1, context_dim, device=device).uniform_(-1, 1)
         times = sparse_softmax(
             torch.zeros(1, 1, n_frames, device=device).uniform_(-1, 1), normalize=True, dim=-1)
@@ -192,7 +213,8 @@ def train_and_monitor(
         overfit: bool = False,
         disc_type: str = 'dilated',
         model_type: str = 'conv',
-        wipe_old_data: bool = True):
+        wipe_old_data: bool = True,
+        fine_positioning: bool = False):
     stream = AudioIterator(
         batch_size=batch_size,
         n_samples=n_samples,
@@ -252,7 +274,8 @@ def train_and_monitor(
                 n_frames=n_frames,
                 samplerate=samplerate,
                 hidden_channels=hidden_channels,
-                wavetable_device=device
+                wavetable_device=device,
+                fine_positioning=fine_positioning
             )
         elif model_type == 'conv':
             resonance_model = ConvImpulseEventGenerator(
@@ -290,6 +313,10 @@ def train_and_monitor(
             resonance_model=resonance_model,
             in_channels=1024,
             hidden_channels=hidden_channels).to(device)
+
+        # KLUDGE: Unless the same command line arguments are used, this will
+        # require manual intervention to delete old weights, e.g., if a different
+        # event generator is used
         try:
             model.load_state_dict(torch.load('iterativedecomposition2.dat'))
             print('loaded model weights')
@@ -389,10 +416,17 @@ if __name__ == '__main__':
         default=8,
         required=False
     )
+    parser.add_argument(
+        '--fine-positioning',
+        action='store_true',
+        default=False
+    )
+
     args = parser.parse_args()
     train_and_monitor(
         batch_size=1 if args.overfit else args.batch_size,
         overfit=args.overfit,
         model_type=args.model_type,
         disc_type=args.disc_type,
-        wipe_old_data=not args.save_data)
+        wipe_old_data=not args.save_data,
+        fine_positioning=args.fine_positioning)

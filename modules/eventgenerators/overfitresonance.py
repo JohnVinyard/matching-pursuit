@@ -27,6 +27,30 @@ def mix(dry: torch.Tensor, wet: torch.Tensor, mix: torch.Tensor) -> torch.Tensor
     return x
 
 
+def fft_shift(a: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
+    # this is here to make the shift value interpretable
+    shift = (1 - shift)
+
+    n_samples = a.shape[-1]
+
+    shift_samples = (shift * n_samples * 0.5)
+
+    # a = F.pad(a, (0, n_samples * 2))
+
+    spec = torch.fft.rfft(a, dim=-1, norm='ortho')
+
+    n_coeffs = spec.shape[-1]
+    shift = (torch.arange(0, n_coeffs, device=a.device) * 2j * np.pi) / n_coeffs
+
+    shift = torch.exp(shift * shift_samples)
+
+    spec = spec * shift
+
+    samples = torch.fft.irfft(spec, dim=-1, norm='ortho')
+    # samples = samples[..., :n_samples]
+    # samples = torch.relu(samples)
+    return samples
+
 
 
 
@@ -280,6 +304,7 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
             n_frames: int,
             samplerate: int,
             hidden_channels: int,
+            fine_positioning: bool = False,
             wavetable_device = None):
         super().__init__()
 
@@ -288,6 +313,9 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
         self.n_noise_filters = n_noise_filters
         self.noise_deformations = noise_deformations
         self.n_envelopes = n_envelopes
+        self.fine_positioning = fine_positioning
+        self.samples_per_frame = n_samples // n_frames
+        self.frame_ratio = self.samples_per_frame / n_samples
 
         self.samplerate = samplerate
         self.n_events = n_events
@@ -357,7 +385,7 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
 
     @property
     def shape_spec(self) -> ShapeSpec:
-        return dict(
+        params = dict(
             noise_resonance=(self.noise_expressivity, self.n_noise_filters),
             noise_deformations=(self.noise_deformations,),
             noise_mixes=(2,),
@@ -369,27 +397,14 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
             mixes=(2,),
             amplitudes=(1,),
             room_choice=(self.n_verbs,),
-            room_mix=(2,)
+            room_mix=(2,),
         )
 
+        if self.fine_positioning:
+            params['fine'] = (1,)
 
-    # def random_sequence(self):
-    #     # TODO: This should be moved to top-level model and should support specifying an arbitrary number of events
-    #     return self.forward(
-    #         noise_resonance=torch.zeros(*self.noise_resonance_shape, device=device).uniform_(-0.02, 0.02),
-    #         noise_deformations=torch.zeros(*self.noise_deformation_shape, device=device).uniform_(),
-    #         noise_mixes=torch.zeros(*self.mix_shape, device=device).uniform_(-0.02, 0.02),
-    #         envelopes=torch.zeros(*self.envelope_shape, device=device).uniform_(-0.02, 0.02),
-    #         resonances=torch.zeros(*self.resonance_shape, device=device).uniform_(-0.02, 0.02),
-    #         res_filter=torch.zeros(*self.noise_resonance_shape, device=device).uniform_(-0.02, 0.02),
-    #         deformations=torch.zeros(*self.deformation_shape, device=device).uniform_(-0.02, 0.02),
-    #         decays=torch.zeros(*self.decay_shape, device=device).uniform_(-0.02, 0.02),
-    #         mixes=torch.zeros(*self.mix_shape, device=device).uniform_(-0.02, 0.02),
-    #         amplitudes=torch.zeros(*self.amplitude_shape, device=device).uniform_(0, 1),
-    #         times=self.scheduler.random_params(),
-    #         room_choice=torch.zeros(*self.room_shape, device=device).uniform_(-0.02, 0.02),
-    #         room_mix=torch.zeros(*self.mix_shape, device=device).uniform_(-0.02, 0.02)
-    #     )
+        return params
+
 
     def forward(
             self,
@@ -405,7 +420,9 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
             amplitudes: torch.Tensor,
             times: torch.Tensor,
             room_choice: torch.Tensor,
-            room_mix: torch.Tensor) -> torch.Tensor:
+            room_mix: torch.Tensor,
+            fine: Union[torch.Tensor, None]) -> torch.Tensor:
+
         # Begin layer ==========================================
 
         # calculate impulses or energy injected into a system
@@ -489,5 +506,11 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
         # End layer ==========================================
 
         scheduled = self.scheduler.schedule(times, final)
+
+        if fine is not None:
+            print('performing fine positioning')
+            fine_shifts = torch.tanh(fine) * self.frame_ratio
+            scheduled = fft_shift(scheduled, fine_shifts)
+            scheduled = scheduled[..., :self.n_samples]
 
         return scheduled
