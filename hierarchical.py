@@ -12,6 +12,7 @@ from itertools import count
 from torch.optim import Adam
 from typing import Tuple
 from modules.transfer import hierarchical_dirac, fft_convolve, make_waves
+from util import device
 from util.music import musical_scale_hz
 
 
@@ -88,9 +89,9 @@ def reconstruction_loss(target: torch.Tensor, recon: torch.Tensor) -> torch.Tens
 def overfit():
     n_samples = 2 ** 15
     samplerate = 22050
-    atom_samples = 512
+    atom_samples = 2048
     n_atoms = 16
-    n_events = 64
+    n_events = 32
 
 
     # Begin: this would be a nice little helper to wrap up
@@ -106,7 +107,7 @@ def overfit():
 
 
     audio = get_one_audio_segment(n_samples, samplerate, device='cpu')
-    target = audio.view(1, 1, n_samples)
+    target = audio.view(1, 1, n_samples).to(device)
 
     orig_audio(target)
 
@@ -119,7 +120,7 @@ def overfit():
 
 
     model = OverfitHierarchicalEvents(
-        n_samples, samplerate, atom_samples, n_atoms, n_events, soft=False)
+        n_samples, samplerate, atom_samples, n_atoms, n_events, soft=False).to(device)
     optim = Adam(model.parameters(), lr=1e-3)
 
     for i in count():

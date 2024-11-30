@@ -100,6 +100,7 @@ class HingeyTypeLoss(nn.Module):
         # ensure that the norm does not grow
         norm_loss = torch.clip(recon_norm - target_norm, min=0, max=np.inf).sum()
 
+        # choose a random subset of the indices
         indices = torch.randperm(t_spec.shape[-1], device=device)[:self.n_elements]
 
         t_spec = t_spec[:, indices]
@@ -107,7 +108,7 @@ class HingeyTypeLoss(nn.Module):
         residual = t_spec - r_spec
         n_spec = noise_spec[:, indices]
 
-        # The residual covariance should resemble noise
+        # The residual covariance should resemble/move toward noise
         t_cov = covariance(n_spec)
         r_cov = covariance(residual)
 
@@ -163,7 +164,6 @@ class SparseLossFeature(nn.Module):
             b = one_hot @ self.proj_freq
             result = torch.cat((a, b), dim=-1)
 
-            # result = torch.sum(sparse.permute(0, 2, 1), dim=-1, keepdim=True)
             results.append(result)
 
         result = torch.cat(results, dim=-1)
@@ -173,10 +173,10 @@ class SparseLossFeature(nn.Module):
 def train(n_samples: int = 2 ** 16):
     target = get_one_audio_segment(n_samples=n_samples, device=device)
 
-    loss_model = SparseLossFeature().to(device)
+    # loss_model = SparseLossFeature().to(device)
     # loss_model = CorrelationLoss(n_elements=512)
     # loss_model = MeanSquaredError()
-    # loss_model = HingeyTypeLoss()
+    loss_model = HingeyTypeLoss()
     # loss_model = ScatteringLoss().to(device)
 
     model = OverfitRawAudio(shape=(1, 1, n_samples), std=1e-3, normalize=False).to(device)

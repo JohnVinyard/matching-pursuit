@@ -65,9 +65,9 @@ def fft_shift(a: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
 """
 TODOs: 
 
-- Fine positioning via fft shift
 - gather statistics
 - self-supervised learning
+    - distance metric between one-hot time vectors
 
 """
 
@@ -215,6 +215,8 @@ def train_and_monitor(
         model_type: str = 'conv',
         wipe_old_data: bool = True,
         fine_positioning: bool = False):
+
+
     stream = AudioIterator(
         batch_size=batch_size,
         n_samples=n_samples,
@@ -253,7 +255,7 @@ def train_and_monitor(
     ], port=9999, n_workers=1)
 
     print('==========================================')
-    print(f'training on {n_seconds} of audio and {n_events} with {model_type} event generator and {disc_type} disc')
+    print(f'training on {n_seconds} of audio and {n_events} events with {model_type} event generator and {disc_type} disc')
     print('==========================================')
 
     def train():
