@@ -171,7 +171,7 @@ class Model(nn.Module):
         events = self.resonance.forward(**choices_with_scheduling)
         return events
 
-    def random_sequence(self) -> torch.Tensor:
+    def random_sequence(self, device=device) -> torch.Tensor:
         vecs = torch.zeros(1, 1, context_dim, device=device).uniform_(-1, 1)
         times = sparse_softmax(
             torch.zeros(1, 1, n_frames, device=device).uniform_(-1, 1), normalize=True, dim=-1)

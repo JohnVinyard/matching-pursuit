@@ -9,6 +9,11 @@ from matplotlib import pyplot as plt
 from modules.fft import fft_convolve
 from modules.softmax import sparse_softmax
 
+import matplotlib
+matplotlib.use('Qt5Agg')
+from matplotlib import pyplot as plt
+
+
 class BinaryModel(nn.Module):
     def __init__(self, n_elements):
         super().__init__()
@@ -222,9 +227,13 @@ def experiment_hierarchical_dirac():
     optim = Adam(model.parameters(), lr=1e-3)
     target = dirac_impulse(raster_size, 768)
 
-    scale = torch.linspace(1, 0.001, steps=33)[None, None, :]
+    scale = torch.linspace(1, 0.001, steps=33)[None, None, :] ** 2
     pe = pos_encoded(1, raster_size, n_freqs=16)
     pe = pe * scale
+
+    dist = torch.cdist(pe.view(1024, 33), pe.view(1024, 33))
+    plt.matshow(dist.data.cpu().numpy())
+    plt.show()
 
     t =  target @ pe
 
