@@ -148,8 +148,10 @@ class Model(nn.Module):
 
     def random_sequence(self) -> torch.Tensor:
         # choose a random latent from the reservoir
-        index = torch.randint(0, self._latents_reservoir.shape[0], (1,))
-        vecs = self._latents_reservoir[index].clone().view(1, 1, context_dim)
+
+        # index = torch.randint(0, self._latents_reservoir.shape[0], (1,))
+        # vecs = self._latents_reservoir[index].clone().view(1, 1, context_dim)
+        vecs = torch.zeros(1, 1, context_dim, device=device).uniform_(-1, 1)
         times = sparse_softmax(
             torch.zeros(1, 1, n_frames, device=device).uniform_(-1, 1), normalize=True, dim=-1)
         final = self.generate(vecs, times)
@@ -242,14 +244,15 @@ def train_and_monitor(
                 noise_deformations=16,
                 instr_expressivity=8,
                 n_events=1,
-                n_resonances=2048,
-                n_envelopes=128,
+                n_resonances=4096,
+                n_envelopes=256,
                 n_decays=32,
                 n_deformations=32,
                 n_samples=n_samples,
                 n_frames=n_frames,
                 samplerate=samplerate,
-                hidden_channels=hidden_channels
+                hidden_channels=hidden_channels,
+                wavetable_device=device
             )
         elif model_type == 'conv':
             resonance_model = ConvImpulseEventGenerator(
@@ -287,9 +290,21 @@ def train_and_monitor(
             resonance_model=resonance_model,
             in_channels=1024,
             hidden_channels=hidden_channels).to(device)
+        try:
+            model.load_state_dict(torch.load('iterativedecomposition2.dat'))
+            print('loaded model weights')
+        except IOError:
+            print('No model weights to load')
+
         optim = Adam(model.parameters(), lr=1e-3)
 
         disc = Discriminator(disc_type=disc_type).to(device)
+        try:
+            disc.load_state_dict(torch.load('iterativedecompositiondisc2.dat'))
+            print('loaded discriminator weights')
+        except IOError:
+            print('no discriminator weights to load')
+
         disc_optim = Adam(disc.parameters(), lr=1e-3)
 
         for i, item in enumerate(iter(stream)):
@@ -307,7 +322,7 @@ def train_and_monitor(
 
             loss = iterative_loss(target, recon, loss_transform)
 
-            loss = loss + (torch.abs(encoded).sum() * 1e-3)
+            loss = loss + (torch.abs(encoded).sum() * 1e-4)
 
             mask = torch.zeros(target.shape[0], n_events, 1, device=recon.device).bernoulli_(p=0.5)
             for_disc = torch.sum(recon * mask, dim=1, keepdim=True)
@@ -336,9 +351,9 @@ def train_and_monitor(
                 rnd = max_norm(rnd)
                 random_audio(rnd)
 
-
             if i % 100 == 0:
-                torch.save(model.state_dict(), 'iterativedecomposition.dat')
+                torch.save(model.state_dict(), 'iterativedecomposition2.dat')
+                torch.save(disc.state_dict(), 'iterativedecompositiondisc2.dat')
 
     train()
 

@@ -13,12 +13,13 @@ from util import device
 from torch.nn import functional as F
 from itertools import count
 import numpy as np
+from kymatio.torch import Scattering1D
 from torch.distributions import Normal
 
 import matplotlib
+
 matplotlib.use('Qt5Agg')
 from matplotlib import pyplot as plt
-
 
 n_samples = 2 ** 16
 transform_window_size = 2048
@@ -41,6 +42,43 @@ class MeanSquaredError(nn.Module):
         return F.mse_loss(recon, target)
 
 
+class ScatteringLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.scat = Scattering1D(J=6, shape=n_samples, Q=16)
+        meta = self.scat.meta()
+
+        self.order_0_indices = np.where(meta['order'] == 0)
+        self.order_1_indices = np.where(meta['order'] == 1)
+        self.order_2_indices = np.where(meta['order'] == 2)
+
+        print(self.order_0_indices)
+        print(self.order_1_indices)
+        print(self.order_2_indices)
+
+    def _forward(self, audio: torch.Tensor):
+        print(audio.shape)
+        x = self.scat(audio)
+        print(x.shape, x.dtype)
+
+        # zero = x[self.order_0_indices]
+        # one = x[self.order_1_indices]
+        # two = x[self.order_2_indices]
+        #
+        # print(zero.shape, zero.dtype)
+        # print(one.shape, one.dtype)
+        # print(two.shape, two.dtype)
+
+        return x
+
+    def forward(self, target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
+        t = self._forward(target)
+        r = self._forward(recon)
+        l = torch.abs(t - r).sum()
+        return l
+
+
+
 class HingeyTypeLoss(nn.Module):
 
     def __init__(self, n_elements: int = 256):
@@ -49,8 +87,6 @@ class HingeyTypeLoss(nn.Module):
 
     def forward(self, target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
         batch, _, time = target.shape
-
-
 
         t_spec = stft_transform(target).reshape(batch, -1)
         r_spec = stft_transform(recon).reshape(batch, -1)
@@ -78,13 +114,14 @@ class HingeyTypeLoss(nn.Module):
 
         return norm_loss + cov_loss
 
+
 def pos_encoding(n_elements: int, n_sinusoids: int) -> torch.Tensor:
     t = torch.linspace(1e-8, 1, n_elements)
     # freq = torch.linspace(0.001, 1, n_sinusoids)
     # ps = torch.sin(t[:, None] * freq[None, :])
     # return ps
 
-    r = pdf2(t[:, None], t[None, :], n_elements = n_sinusoids)
+    r = pdf2(t[:, None], t[None, :], n_elements=n_sinusoids)
     print(r.shape)
     return r
 
@@ -110,7 +147,6 @@ class SparseLossFeature(nn.Module):
         r = self._forward(recon)
         return torch.abs(t - r).mean()
 
-
     def _forward(self, x: torch.Tensor) -> torch.Tensor:
         bands = fft_frequency_decompose(x, min_size=512)
         results = []
@@ -125,37 +161,24 @@ class SparseLossFeature(nn.Module):
             a = packed @ self.proj_time
             b = one_hot @ self.proj_freq
             result = torch.cat((a, b), dim=-1)
+
+            # result = torch.sum(sparse.permute(0, 2, 1), dim=-1, keepdim=True)
             results.append(result)
 
         result = torch.cat(results, dim=-1)
         return result
 
 
-    # def _forward(self, x: torch.Tensor) -> torch.Tensor:
-    #     batch, _, time = x.shape
-    #     filters = F.pad(self.filters[None, :, :], (0, n_samples - self.filter_size))
-    #     result = fft_convolve(x, filters)
-    #     pooled = F.max_pool1d(result, 512, stride=256, padding=256)[..., :n_samples]
-    #
-    #     sparse, packed, one_hot = sparsify2(pooled, n_to_keep=2048)
-    #
-    #     a = packed @ self.proj_time
-    #     b = one_hot @ self.proj_freq
-    #
-    #     return torch.cat((a, b), dim=-1)
-
-
-
-
 def train(n_samples: int = 2 ** 16):
     target = get_one_audio_segment(n_samples=n_samples, device=device)
 
-    # loss_model = SparseLossFeature().to(device)
+    loss_model = SparseLossFeature().to(device)
     # loss_model = CorrelationLoss(n_elements=512)
     # loss_model = MeanSquaredError()
-    loss_model = HingeyTypeLoss()
+    # loss_model = HingeyTypeLoss()
+    # loss_model = ScatteringLoss().to(device)
 
-    model = OverfitRawAudio(shape=(1, 1, n_samples), std=0.1, normalize=False).to(device)
+    model = OverfitRawAudio(shape=(1, 1, n_samples), std=1e-3, normalize=False).to(device)
     optim = Adam(model.parameters(), lr=1e-3)
 
     collection = LmdbCollection(path='noise')
@@ -174,7 +197,6 @@ def train(n_samples: int = 2 ** 16):
     ], port=8888, n_workers=1)
 
     orig_audio(target)
-
 
     for i in count():
         optim.zero_grad()

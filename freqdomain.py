@@ -1,27 +1,26 @@
 from itertools import count
 from typing import Union, List, Iterable, Optional
 
+import numpy as np
 import torch
+from scipy.signal import morlet
+from torch import nn
+from torch.nn import functional as F
 from torch.optim import Adam
 
 from conjure import LmdbCollection, loggers, serve_conjure, SupportedContentType, NumpySerializer, NumpyDeserializer
 from conjure.logger import encode_audio
-
-from data import get_one_audio_segment, AudioIterator
-from modules import HyperNetworkLayer, limit_norm, flattened_multiband_spectrogram, max_norm, stft, UNet, \
-    DownsamplingDiscriminator
-from modules.anticausal import AntiCausalAnalysis
+from data import get_one_audio_segment
+from modules import HyperNetworkLayer, limit_norm, flattened_multiband_spectrogram, max_norm, stft, \
+    sparse_softmax, iterative_loss
+from modules.normal_pdf import pdf2
 from modules.overlap_add import overlap_add
 from modules.phase import windowed_audio
 from modules.transfer import fft_convolve
-from modules.upsample import upsample_with_holes
 from util import device, make_initializer
 from util.music import musical_scale_hz
-from torch import nn
-import numpy as np
-from scipy.signal import morlet
 
-n_samples = 2 ** 16
+n_samples = 2 ** 17
 transform_window_size = 2048
 transform_step_size = 256
 samplerate = 22050
@@ -234,113 +233,13 @@ class AudioNetwork(nn.Module):
         return mixed
 
 
-class Autoencoder(nn.Module):
-    def __init__(
-            self,
-            window_size: int = 2048,
-            control_plane_dim: int = 16,
-            low_rank_deformation_dim: int = 16,
-            n_samples: int = 2 ** 15,
-            n_frames: int = 128,
-            n_layers: int = 3,
-            impulse_decay_samples: int = 128,
-            samplerate: int = 22050,
-            deformations_enabled: bool = False,
-            preserve_energy: bool = False):
-        super().__init__()
-        self.preserve_energy = preserve_energy
-        self.deformations_enabled = deformations_enabled
-        self.samplerate = samplerate
-        self.impulse_decay_samples = impulse_decay_samples
-        self.n_layers = n_layers
-        self.n_frames = n_frames
-        self.n_samples = n_samples
-        self.low_rank_deformation_dim = low_rank_deformation_dim
-        self.control_plane_dim = control_plane_dim
-        self.window_size = window_size
 
-        env = torch.linspace(1, 0, steps=impulse_decay_samples) ** 10
-        env = torch.cat([env, torch.zeros(self.n_samples - impulse_decay_samples)], dim=-1)
-        env[:4] = torch.linspace(0, 1, 4)
-        self.register_buffer('env', env)
-
-        self.encoder = AntiCausalAnalysis(
-            1024,
-            256,
-            2,
-            [1, 2, 4, 8, 16, 32, 1],
-            do_norm=True)
-
-        transfer_dim = window_size // 2 + 1
-        self.proj = nn.Conv1d(256, self.control_plane_dim, 1, 1, 0)
-
-        msh = musical_scale_hz(start_midi=21, stop_midi=129, n_steps=transfer_dim)
-        # print([f'{x:.2f}' for x in msh])
-
-        # establish (optional) non-linear frequency space
-        fb = morlet_filter_bank(
-            samplerate,
-            kernel_size=window_size,
-            scale=msh,
-            scaling_factor=0.025,
-            normalize=True,
-            device=None)
-
-        self.decoder = AudioNetwork(
-            control_plane_dim,
-            window_size,
-            n_blocks=n_layers,
-            deformation_latent_dim=None,
-            filter_bank=fb,
-            preserve_energy=False
-        )
-
-        self.apply(initializer)
-
-    def random(self, p=0.001):
-        """
-        Produces a random, sparse control signal, emulating short, transient bursts
-        of energy into the system modelled by the `SSM`
-        """
-
-        # TODO: this does not support deformations currently
-        cp = torch.zeros(1, self.control_plane_dim, n_frames, device=device).bernoulli_(p=p)
-        audio = self.decode(cp)
-        return max_norm(audio)
-
-    def decode(self, cp):
-        cp = torch.relu(cp)
-        cp = self._upsampled_control_plane(cp)
-        audio = self.decoder.forward(cp, None)
-        return audio
-
-    def _upsampled_control_plane(self, cp: torch.Tensor):
-        noise = torch.zeros((1, 1, self.n_samples,), device=cp.device).uniform_(-1, 1)
-        us = upsample_with_holes(cp, self.n_samples)
-        us = fft_convolve(us, self.env[None, None, :])
-        us = us * noise
-        return us
-
-    def forward(self, audio: torch.Tensor):
-        spec = stft_transform(audio)
-        encoded = self.encoder(spec)
-        cp = self.proj(encoded)
-        orig_cp = cp = torch.relu(cp)
-        cp = self._upsampled_control_plane(cp)
-        audio = self.decoder.forward(cp, None)
-        return audio, orig_cp
-
-
-class Discriminator(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.disc = DownsamplingDiscriminator(
-            window_size=2048, step_size=256, n_samples=n_samples, channels=256)
-        self.apply(initializer)
-
-    def forward(self, transformed: torch.Tensor):
-        x = self.disc(transformed)
-        return x
+def l0_norm(x: torch.Tensor):
+    mask = (x > 0).float()
+    forward = mask
+    backward = x
+    y = backward + (forward - backward).detach()
+    return y.sum()
 
 
 class OverfitAudioNetwork(nn.Module):
@@ -355,22 +254,26 @@ class OverfitAudioNetwork(nn.Module):
             impulse_decay_samples: int = 128,
             samplerate: int = 22050,
             deformations_enabled: bool = False,
-            preserve_energy: bool = False):
+            preserve_energy: bool = False,
+            n_events: int = 32):
+
         super().__init__()
 
         self.n_samples = n_samples
         self.n_layers = n_layers
         self.deformations_enabled = deformations_enabled
+        self.n_frames = n_frames
+        self.n_events = n_events
 
         transfer_dim = window_size // 2 + 1
 
-        env = torch.linspace(1, 0, steps=impulse_decay_samples) ** 10
-        env = torch.cat([env, torch.zeros(self.n_samples - impulse_decay_samples)], dim=-1)
-        env[:4] = torch.linspace(0, 1, 4)
-        self.register_buffer('env', env)
+        self.event_vectors = nn.Parameter(torch.zeros(1, n_events, control_plane_dim).uniform_(0, 1e-8))
+        self.event_envelopes = nn.Parameter(torch.zeros(1, n_events, 2).uniform_(0, 1))
+        self.event_times = nn.Parameter(torch.zeros(1, n_events, n_samples).uniform_(-1, 1))
+
+        self.channel_decays = nn.Parameter(torch.zeros((control_plane_dim,)))
 
         msh = musical_scale_hz(start_midi=21, stop_midi=129, n_steps=transfer_dim)
-        # print([f'{x:.2f}' for x in msh])
 
         # establish (optional) non-linear frequency space
         fb = morlet_filter_bank(
@@ -381,7 +284,7 @@ class OverfitAudioNetwork(nn.Module):
             normalize=True,
             device=None)
 
-        control_plane = torch.zeros(1, control_plane_dim, n_frames).uniform_(-1, 1)
+        control_plane = torch.zeros(1, control_plane_dim, n_frames).uniform_(0, 1e-8)
         self.control_plane = nn.Parameter(control_plane)
         self.control_plane_dim = control_plane_dim
 
@@ -405,6 +308,7 @@ class OverfitAudioNetwork(nn.Module):
             preserve_energy=preserve_energy
         )
 
+
     @property
     def control_signal(self):
         return torch.relu(self.control_plane)
@@ -414,30 +318,97 @@ class OverfitAudioNetwork(nn.Module):
         x = torch.stack([d for d in self.deformations], dim=0)
         return x
 
-    def _upsampled_control_plane(self, cp: Union[torch.Tensor, None] = None):
-        noise = torch.zeros((self.n_samples,), device=self.control_plane.device).uniform_(-1, 1)
-        us = upsample_with_holes(cp if cp is not None else self.control_signal, self.n_samples)
-        us = fft_convolve(us, self.env[None, None, :])
-        us = us * noise
-        return us
+    def _random_gaussian_events(self):
 
-    def random(self, p=0.001):
-        """
-        Produces a random, sparse control signal, emulating short, transient bursts
-        of energy into the system modelled by the `SSM`
-        """
-        # TODO: support a parameter/option to switch between the two
-        # TODO: this does not support deformations currently
-        cp = torch.zeros_like(self.control_plane).bernoulli_(p=p)
-        # indices = torch.randperm(self.control_plane_dim)
-        # cp = self.control_signal[:, indices, :]
-        audio = self.forward(sig=cp)
-        return max_norm(audio)
+        ee = torch.zeros_like(self.event_envelopes).uniform_(0, 1)
+        et = torch.zeros_like(self.event_times).uniform_(0, 1)
 
-    def forward(self, sig=None):
-        result = self._upsampled_control_plane(sig)
+        means = ee[:, :, 0] * 0
+        stds = torch.abs(ee[:, :, 1] + 1e-8) * 0.1
+        x = pdf2(means, stds, n_elements=self.n_samples)
+        x = x[:, :, None, :]
+
+        # place the event vectors at the start of a vector, ready to be positioned
+        ev = self.event_vectors[:, :, :, None]
+        ev = torch.cat(
+            [ev, torch.zeros((1, self.n_events, self.control_plane_dim, self.n_samples - 1), device=ev.device)], dim=-1)
+
+        # TODO: Try gumbel softmax with a decaying temperature
+        t = sparse_softmax(et, dim=-1, normalize=True)
+        # t = F.gumbel_softmax(self.event_times, tau=0.1, hard=True)
+
+        # convolve the times (dirac functions) with the pdfs, such that the PDFs
+        # are now "scheduled", or shifted to the appropriate times
+        x = fft_convolve(t[:, :, None, :], x)
+
+        # next convolve the event vectors with the PDFs
+        # TODO: Is this necessary, or could I just multiply with broadcasting?
+        x = fft_convolve(x, ev)
+        # print(x.shape, ev.shape)
+        # x = x * ev
+
+        # x = torch.sum(x, dim=1)
+        return x
+
+    def _gaussian_events(self) -> torch.Tensor:
+
+        # get the probability density function given our mean and std parameters
+        means = self.event_envelopes[:, :, 0] * 0
+        stds = torch.abs(self.event_envelopes[:, :, 1] + 1e-8) * 0.1
+        x = pdf2(means, stds, n_elements=self.n_samples)
+        x = x[:, :, None, :]
+
+        # place the event vectors at the start of a vector, ready to be positioned
+        ev = self.event_vectors[:, :, :, None]
+        ev = torch.cat(
+            [ev, torch.zeros((1, self.n_events, self.control_plane_dim, self.n_samples - 1), device=ev.device)], dim=-1)
+
+        # TODO: Try gumbel softmax with a decaying temperature
+        t = sparse_softmax(self.event_times, dim=-1, normalize=True)
+        # t = F.gumbel_softmax(self.event_times, tau=0.1, hard=True)
+
+        print(t.shape, x.shape)
+        # convolve the times (dirac functions) with the pdfs, such that the PDFs
+        # are now "scheduled", or shifted to the appropriate times
+        x = fft_convolve(t[:, :, None, :], x)
+
+        print(x.shape, ev.shape)
+        # next convolve the event vectors with the PDFs
+        # TODO: Is this necessary, or could I just multiply with broadcasting?
+        x = fft_convolve(x, ev)
+        print(x.shape)
+        # print(x.shape, ev.shape)
+        # x = x * ev
+
+        # x = torch.sum(x, dim=1)
+        return x
+
+    def forward(self, sig=None, random=False):
+        if sig is not None:
+            result = sig
+            control_signal = sig
+            uscp = result = self._upsampled_control_plane(result)
+        else:
+            if random:
+                result = control_signal = self._random_gaussian_events()
+            else:
+                result = control_signal = self._gaussian_events()
+            batch, n_events, cp, time = result.shape
+            result = control_signal.reshape(batch * n_events, cp, time)
+
         result = self.network.forward(result, self.deformations)
-        return result
+
+        if sig is not None:
+            control_signal = F.avg_pool1d(uscp, kernel_size=512, stride=256, padding=256)
+        else:
+            result = result.reshape(-1, self.n_events, result.shape[-1])
+            control_signal = torch.sum(control_signal, dim=1)
+            # downsample so this is viewable
+            control_signal = F.avg_pool1d(control_signal, kernel_size=512, stride=256, padding=256)
+
+        # result = torch.sum(result, dim=1, keepdim=True)
+
+        return result, control_signal
 
 
 def transform(x: torch.Tensor):
@@ -475,10 +446,11 @@ def sparsity_loss(c: torch.Tensor) -> torch.Tensor:
     """
     Compute the l1 norm of the control signal
     """
-    return torch.abs(c).sum() * 1e-2
+    # return torch.abs(c).sum() * 1e-2
+    return l0_norm(c)
 
 
-def construct_experiment_model(n_samples: int) -> OverfitAudioNetwork:
+def construct_experiment_model(n_samples: int, n_events: int = 32) -> OverfitAudioNetwork:
     window_size = 2048
     control_plane_dim = 16
     low_rank_deformation_dim = 16
@@ -496,7 +468,8 @@ def construct_experiment_model(n_samples: int) -> OverfitAudioNetwork:
         impulse_decay_samples=128,
         deformations_enabled=False,
         samplerate=samplerate,
-        preserve_energy=False
+        preserve_energy=False,
+        n_events=n_events
     ).to(device)
     return model
 
@@ -505,27 +478,19 @@ def to_numpy(x: torch.Tensor):
     return x.data.cpu().numpy()
 
 
-def train_and_monitor_auto_encoder(batch_size: int = 4):
-    ai = AudioIterator(
-        batch_size=batch_size,
-        n_samples=n_samples,
-        samplerate=samplerate,
-        normalize=True,
-        overfit=False)
 
+def train_and_monitor_overfit_model(
+        n_samples: int,
+        n_events: int = 32,
+        samplerate: int = 22050,
+        audio_path: Optional[str] = None):
+    target = get_one_audio_segment(
+        n_samples=n_samples, samplerate=samplerate, audio_path=audio_path)
     collection = LmdbCollection(path='freqdomain')
 
-    model = Autoencoder(
-        control_plane_dim=256,
-        n_samples=n_samples,
-        n_frames=n_frames).to(device)
-    optim = Adam(model.parameters(), lr=1e-3)
+    print(f'overfitting to {n_samples // samplerate} seconds with {n_events} events')
 
-
-    disc = Discriminator().to(device)
-    disc_optim = Adam(disc.parameters(), lr=1e-3)
-
-    recon_audio, orig_audio, random_audio = loggers(
+    recon_audio, orig_audio, rnd = loggers(
         ['recon', 'orig', 'rnd'],
         'audio/wav',
         encode_audio,
@@ -539,134 +504,48 @@ def train_and_monitor_auto_encoder(batch_size: int = 4):
         serializer=NumpySerializer(),
         deserializer=NumpyDeserializer())
 
-    serve_conjure([
-        orig_audio,
-        recon_audio,
-        envelopes,
-        random_audio
-    ], port=9999, n_workers=1)
-
-
-    for i, item in enumerate(ai):
-
-        if i % 100 != 0:
-            torch.save(model.state_dict(), 'freqdomain.dat')
-
-        item = item.view(-1, 1, n_samples)
-
-        optim.zero_grad()
-
-        # train model
-        orig_audio(item)
-        recon, cp = model.forward(item)
-        recon_audio(max_norm(recon))
-
-        real_spec = transform(item)
-        fake_spec = transform(recon)
-        recon_loss = torch.abs(real_spec - fake_spec).sum()
-
-        fj = disc.forward(recon)
-        adv_loss = torch.abs(1 - fj).mean()
-        sparsity_loss = torch.abs(cp).sum() * 1e-3
-
-        non_zero = (cp > 0).sum()
-        sparsity = (non_zero / cp.numel()).item()
-
-        envelopes(max_norm(cp[0]))
-
-        loss = recon_loss + sparsity_loss + adv_loss
-
-        loss.backward()
-        optim.step()
-        print(i, loss.item(), non_zero, sparsity)
-
-        with torch.no_grad():
-            r = model.random(p=0.001)
-            random_audio(max_norm(r))
-
-        # train disc
-        disc_optim.zero_grad()
-
-        rj = disc.forward(item.clone().detach())
-        fj = disc.forward(recon.clone().detach())
-        disc_loss = torch.abs(1 - rj).mean() + torch.abs(0 - fj).mean()
-        disc_loss.backward()
-        disc_optim.step()
-        print('DISC', disc_loss.item())
-
-
-def train_and_monitor_overfit_model(
-        n_samples: int,
-        samplerate: int = 22050,
-        audio_path: Optional[str] = None):
-    target = get_one_audio_segment(
-        n_samples=n_samples, samplerate=samplerate, audio_path=audio_path)
-    collection = LmdbCollection(path='freqdomain')
-
-    recon_audio, orig_audio, rnd = loggers(
-        ['recon', 'orig', 'rnd'],
-        'audio/wav',
-        encode_audio,
-        collection)
-
-    envelopes, deformation = loggers(
-        ['envelopes', 'deformation'],
-        SupportedContentType.Spectrogram.value,
-        to_numpy,
-        collection,
-        serializer=NumpySerializer(),
-        deserializer=NumpyDeserializer())
-
     orig_audio(target)
 
     serve_conjure([
         orig_audio,
         recon_audio,
         envelopes,
-        deformation,
-        rnd
+        rnd,
     ], port=9999, n_workers=1)
 
     def train(target: torch.Tensor):
-        model = construct_experiment_model(n_samples=n_samples)
-        # loss_model = AntiCausalAnalysis(
-        #     1024, 256, 2, [1, 2, 4, 8, 16, 32, 1], do_norm=False).to(device)
-        # loss_model = UNet(1024).to(device)
+        model = construct_experiment_model(n_samples=n_samples, n_events=n_events)
 
-        optim = Adam(model.parameters(), lr=1e-2)
+        optim = Adam(model.parameters(), lr=1e-3)
 
         for iteration in count():
             optim.zero_grad()
-            recon = model.forward()
+            recon, control_signal = model.forward()
 
-            recon_audio(max_norm(recon))
+            recon_audio(max_norm(recon.sum(dim=1, keepdim=True)))
 
-            # real_spec = compute_spec(target, loss_model)
-            # fake_spec = compute_spec(recon, loss_model)
-            # recon_loss = torch.abs(real_spec - fake_spec).sum()
+            loss = iterative_loss(target, recon, transform)
+            # recon_loss = reconstruction_loss(recon, target)
 
-            recon_loss = reconstruction_loss(recon, target)
-
-            loss = \
-                recon_loss \
-                + sparsity_loss(model.control_signal)
+            # loss = recon_loss + sparsity_loss(control_signal)
 
             if model.deformations_enabled:
                 loss = loss + sparsity_loss(model.all_deformations)
 
-            non_zero = (model.control_signal > 0).sum()
-            sparsity = (non_zero / model.control_signal.numel()).item()
+            non_zero = (control_signal > 0).sum()
+            sparsity = (non_zero / control_signal.numel()).item()
 
             loss.backward()
 
-            envelopes(model.control_signal[0])
-            deformation(model.all_deformations[0, 0, 0])
+            envelopes(max_norm(control_signal[0]))
 
             optim.step()
             print(iteration, loss.item(), sparsity)
 
             with torch.no_grad():
-                r = model.random()
+                # log random output from the model
+                r, _ = model.forward(sig=None, random=True)
+                r = torch.sum(r, dim=1, keepdim=True)
                 rnd(max_norm(r))
 
     train(target)
@@ -675,5 +554,6 @@ def train_and_monitor_overfit_model(
 if __name__ == '__main__':
     train_and_monitor_overfit_model(
         n_samples=2 ** 16,
-        samplerate=22050)
+        samplerate=22050,
+        n_events=32)
     # train_and_monitor_auto_encoder(batch_size=2)

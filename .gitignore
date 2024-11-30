@@ -56,5 +56,7 @@ freqdomain
 noise
 
 iterativedecomposition.dat
+iterativedecomposition2.dat
+iterativedecompositiondisc2.dat
 
 *.html
