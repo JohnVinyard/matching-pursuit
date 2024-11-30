@@ -508,7 +508,6 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
         scheduled = self.scheduler.schedule(times, final)
 
         if fine is not None:
-            print('performing fine positioning')
             fine_shifts = torch.tanh(fine) * self.frame_ratio
             scheduled = fft_shift(scheduled, fine_shifts)
             scheduled = scheduled[..., :self.n_samples]

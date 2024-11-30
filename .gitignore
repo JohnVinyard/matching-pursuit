@@ -54,6 +54,7 @@ ssmcompression
 iterativedecomposition
 freqdomain
 noise
+hierarchical
 
 iterativedecomposition.dat
 iterativedecomposition2.dat

@@ -28,8 +28,8 @@ def hierarchical_dirac(elements: torch.Tensor):
     log2, _ = elements.shape
     total_size = 2 ** log2
     
-    chosen = torch.softmax(elements, dim=-1)
-    # chosen = sparse_softmax(elements, normalize=True, dim=-1)
+    # chosen = torch.softmax(elements, dim=-1)
+    chosen = sparse_softmax(elements, normalize=True, dim=-1)
     # chosen = F.gumbel_softmax(elements, tau=0.01, hard=True, dim=-1)
     
     signal = torch.zeros(1)

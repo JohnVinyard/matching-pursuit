@@ -45,7 +45,7 @@ class ExponentialTransform(nn.Module):
         return result
 
 
-def hierarchical_dirac(elements: torch.Tensor):
+def hierarchical_dirac(elements: torch.Tensor, soft: bool = False):
     """
     Produce a dirac/one-hot encoding from a binary encoded
     tensor of the shape (..., log2, 2)
@@ -59,8 +59,11 @@ def hierarchical_dirac(elements: torch.Tensor):
 
     # starting size is 2**1 or 2
     current_size = 2
-    # chosen = torch.softmax(elements, dim=-1)
-    chosen = sparse_softmax(elements, normalize=True, dim=-1)
+
+    if soft:
+        chosen = torch.softmax(elements, dim=-1)
+    else:
+        chosen = sparse_softmax(elements, normalize=True, dim=-1)
 
     signal = torch.zeros(*seq_shape, 1, device=elements.device)
 

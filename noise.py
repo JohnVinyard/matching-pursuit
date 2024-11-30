@@ -4,7 +4,8 @@ from torch.optim import Adam
 from conjure import loggers, serve_conjure, LmdbCollection
 from conjure.logger import encode_audio
 from data import get_one_audio_segment
-from modules import stft, sparsify, sparsify2, gammatone_filter_bank, fft_frequency_decompose
+from modules import stft, sparsify, sparsify2, gammatone_filter_bank, fft_frequency_decompose, pos_encoded, \
+    hard_pos_encoding
 from modules.latent_loss import normalized_covariance, covariance
 from modules.normal_pdf import pdf2
 from modules.overfitraw import OverfitRawAudio
@@ -117,13 +118,13 @@ class HingeyTypeLoss(nn.Module):
 
 def pos_encoding(n_elements: int, n_sinusoids: int) -> torch.Tensor:
     t = torch.linspace(1e-8, 1, n_elements)
-    # freq = torch.linspace(0.001, 1, n_sinusoids)
-    # ps = torch.sin(t[:, None] * freq[None, :])
-    # return ps
+    freq = torch.linspace(0.001, 1, n_sinusoids)
+    ps = torch.sin(t[:, None] * freq[None, :])
+    return ps
 
-    r = pdf2(t[:, None], t[None, :], n_elements=n_sinusoids)
-    print(r.shape)
-    return r
+    # r = pdf2(t[:, None], t[None, :], n_elements=n_sinusoids)
+    # print(r.shape)
+    # return r
 
 
 class SparseLossFeature(nn.Module):
@@ -210,3 +211,4 @@ def train(n_samples: int = 2 ** 16):
 
 if __name__ == '__main__':
     train(n_samples=n_samples)
+
