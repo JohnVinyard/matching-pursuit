@@ -37,5 +37,5 @@ model.load_state_dict(torch.load(
 
 rnd = model.random_sequence(device=device)
 rnd = playable(rnd, samplerate=22050, normalize=True)
-listen_to_sound(rnd)
+# listen_to_sound(rnd)
 

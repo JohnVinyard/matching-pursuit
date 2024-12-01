@@ -1,5 +1,5 @@
 from functools import reduce
-from typing import Collection, List
+from typing import Collection, List, Sequence
 import torch
 from torch import nn
 
@@ -113,6 +113,25 @@ def gaussian_bandpass_filtered(
     spec = spec * gaussians
     filtered = torch.fft.irfft(spec)
     return filtered
+
+def make_waves_vectorized(n_samples: int, f0s: np.ndarray, samplerate: int):
+    n_frequencies = len(f0s)
+    total_atoms = n_frequencies * 4
+
+    f0s = f0s / (samplerate // 2)
+    rps = f0s * np.pi
+    radians = np.linspace(0, n_samples, n_samples)
+
+    radians = rps[:, None] * radians[None, :]
+
+    sawtooths = sawtooth(radians)
+    squares = square(radians)
+    triangles = sawtooth(radians, width=0.5)
+    sines = np.sin(radians)
+
+    waves = np.concatenate([sawtooths, squares, triangles, sines], axis=0)
+    waves = torch.from_numpy(waves).view(total_atoms, n_samples).float()
+    return waves
 
 
 def make_waves(n_samples: int, f0s: List[float], samplerate: int):
