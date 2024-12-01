@@ -11,12 +11,12 @@ from torch.optim import Adam
 from conjure import LmdbCollection, loggers, serve_conjure, SupportedContentType, NumpySerializer, NumpyDeserializer
 from conjure.logger import encode_audio
 from data import get_one_audio_segment
-from modules import HyperNetworkLayer, limit_norm, flattened_multiband_spectrogram, max_norm, stft, \
-    sparse_softmax, iterative_loss
-from modules.normal_pdf import pdf2
+from modules import HyperNetworkLayer, limit_norm, flattened_multiband_spectrogram, max_norm, stft
+from modules.infoloss import CorrelationLoss
 from modules.overlap_add import overlap_add
 from modules.phase import windowed_audio
 from modules.transfer import fft_convolve
+from modules.upsample import upsample_with_holes
 from util import device, make_initializer
 from util.music import musical_scale_hz
 
@@ -255,7 +255,7 @@ class OverfitAudioNetwork(nn.Module):
             samplerate: int = 22050,
             deformations_enabled: bool = False,
             preserve_energy: bool = False,
-            n_events: int = 32):
+    ):
 
         super().__init__()
 
@@ -263,15 +263,17 @@ class OverfitAudioNetwork(nn.Module):
         self.n_layers = n_layers
         self.deformations_enabled = deformations_enabled
         self.n_frames = n_frames
-        self.n_events = n_events
+
+        self.samples_per_frame = self.n_samples // self.n_frames
 
         transfer_dim = window_size // 2 + 1
 
-        self.event_vectors = nn.Parameter(torch.zeros(1, n_events, control_plane_dim).uniform_(0, 1e-8))
-        self.event_envelopes = nn.Parameter(torch.zeros(1, n_events, 2).uniform_(0, 1))
-        self.event_times = nn.Parameter(torch.zeros(1, n_events, n_samples).uniform_(-1, 1))
+        # self.event_vectors = nn.Parameter(torch.zeros(1, n_events, control_plane_dim).uniform_(0, 1e-8))
+        # self.event_envelopes = nn.Parameter(torch.zeros(1, n_events, 2).uniform_(0, 1))
+        # self.event_times = nn.Parameter(torch.zeros(1, n_events, n_samples).uniform_(-1, 1))
 
-        self.channel_decays = nn.Parameter(torch.zeros((control_plane_dim,)))
+        self.control_plane = nn.Parameter(torch.zeros(1, control_plane_dim, n_frames).uniform_(0, 1e-8))
+        self.channel_decays = nn.Parameter(torch.zeros((control_plane_dim,)).uniform_(0, 1))
 
         msh = musical_scale_hz(start_midi=21, stop_midi=129, n_steps=transfer_dim)
 
@@ -318,97 +320,98 @@ class OverfitAudioNetwork(nn.Module):
         x = torch.stack([d for d in self.deformations], dim=0)
         return x
 
-    def _random_gaussian_events(self):
+    # def _random_gaussian_events(self):
+    #
+    #     ee = torch.zeros_like(self.event_envelopes).uniform_(0, 1)
+    #     et = torch.zeros_like(self.event_times).uniform_(0, 1)
+    #
+    #     means = ee[:, :, 0] * 0
+    #     stds = torch.abs(ee[:, :, 1] + 1e-8) * 0.1
+    #     x = pdf2(means, stds, n_elements=self.n_samples)
+    #     x = x[:, :, None, :]
+    #
+    #     # place the event vectors at the start of a vector, ready to be positioned
+    #     ev = self.event_vectors[:, :, :, None]
+    #     ev = torch.cat(
+    #         [ev, torch.zeros((1, self.n_events, self.control_plane_dim, self.n_samples - 1), device=ev.device)], dim=-1)
+    #
+    #     # TODO: Try gumbel softmax with a decaying temperature
+    #     t = sparse_softmax(et, dim=-1, normalize=True)
+    #     # t = F.gumbel_softmax(self.event_times, tau=0.1, hard=True)
+    #
+    #     # convolve the times (dirac functions) with the pdfs, such that the PDFs
+    #     # are now "scheduled", or shifted to the appropriate times
+    #     x = fft_convolve(t[:, :, None, :], x)
+    #
+    #     # next convolve the event vectors with the PDFs
+    #     # TODO: Is this necessary, or could I just multiply with broadcasting?
+    #     x = fft_convolve(x, ev)
+    #     # print(x.shape, ev.shape)
+    #     # x = x * ev
+    #
+    #     # x = torch.sum(x, dim=1)
+    #     return x
 
-        ee = torch.zeros_like(self.event_envelopes).uniform_(0, 1)
-        et = torch.zeros_like(self.event_times).uniform_(0, 1)
+    # def _gaussian_events(self) -> torch.Tensor:
+    #
+    #     # get the probability density function given our mean and std parameters
+    #     means = self.event_envelopes[:, :, 0] * 0
+    #     stds = torch.abs(self.event_envelopes[:, :, 1] + 1e-8) * 0.1
+    #     x = pdf2(means, stds, n_elements=self.n_samples)
+    #     x = x[:, :, None, :]
+    #
+    #     # place the event vectors at the start of a vector, ready to be positioned
+    #     ev = self.event_vectors[:, :, :, None]
+    #     ev = torch.cat(
+    #         [ev, torch.zeros((1, self.n_events, self.control_plane_dim, self.n_samples - 1), device=ev.device)], dim=-1)
+    #
+    #     # TODO: Try gumbel softmax with a decaying temperature
+    #     t = sparse_softmax(self.event_times, dim=-1, normalize=True)
+    #     # t = F.gumbel_softmax(self.event_times, tau=0.1, hard=True)
+    #
+    #     print(t.shape, x.shape)
+    #     # convolve the times (dirac functions) with the pdfs, such that the PDFs
+    #     # are now "scheduled", or shifted to the appropriate times
+    #     x = fft_convolve(t[:, :, None, :], x)
+    #
+    #     print(x.shape, ev.shape)
+    #     # next convolve the event vectors with the PDFs
+    #     # TODO: Is this necessary, or could I just multiply with broadcasting?
+    #     x = fft_convolve(x, ev)
+    #     print(x.shape)
+    #     # print(x.shape, ev.shape)
+    #     # x = x * ev
+    #
+    #     # x = torch.sum(x, dim=1)
+    #     return x
 
-        means = ee[:, :, 0] * 0
-        stds = torch.abs(ee[:, :, 1] + 1e-8) * 0.1
-        x = pdf2(means, stds, n_elements=self.n_samples)
-        x = x[:, :, None, :]
+    def _base_envelopes(self):
+        ls = torch.linspace(1, 0, self.samples_per_frame, device=device).view(1, 1, self.samples_per_frame)
+        ls = ls ** self.channel_decays[None, :, None]
+        return ls
 
-        # place the event vectors at the start of a vector, ready to be positioned
-        ev = self.event_vectors[:, :, :, None]
-        ev = torch.cat(
-            [ev, torch.zeros((1, self.n_events, self.control_plane_dim, self.n_samples - 1), device=ev.device)], dim=-1)
+    def _upsampled_control_plane(self, cp: torch.Tensor):
+        noise = torch.zeros((self.n_samples,), device=cp.device).uniform_(-1, 1)
+        us = upsample_with_holes(cp, self.n_samples)
+        ls = self._base_envelopes()
+        ls = torch.cat(
+            [ls, torch.zeros(1, self.control_plane_dim, self.n_samples - self.samples_per_frame, device=cp.device)],
+            dim=-1)
+        us = fft_convolve(us, ls)
+        us = us * noise
+        return us
 
-        # TODO: Try gumbel softmax with a decaying temperature
-        t = sparse_softmax(et, dim=-1, normalize=True)
-        # t = F.gumbel_softmax(self.event_times, tau=0.1, hard=True)
+    def random(self):
+        cp = torch.zeros_like(self.control_plane).bernoulli_(p=0.001)
+        cp = cp * torch.zeros_like(cp).uniform_(0, self.control_signal.max().item())
+        result = self.forward(sig=cp)
+        return result
 
-        # convolve the times (dirac functions) with the pdfs, such that the PDFs
-        # are now "scheduled", or shifted to the appropriate times
-        x = fft_convolve(t[:, :, None, :], x)
-
-        # next convolve the event vectors with the PDFs
-        # TODO: Is this necessary, or could I just multiply with broadcasting?
-        x = fft_convolve(x, ev)
-        # print(x.shape, ev.shape)
-        # x = x * ev
-
-        # x = torch.sum(x, dim=1)
-        return x
-
-    def _gaussian_events(self) -> torch.Tensor:
-
-        # get the probability density function given our mean and std parameters
-        means = self.event_envelopes[:, :, 0] * 0
-        stds = torch.abs(self.event_envelopes[:, :, 1] + 1e-8) * 0.1
-        x = pdf2(means, stds, n_elements=self.n_samples)
-        x = x[:, :, None, :]
-
-        # place the event vectors at the start of a vector, ready to be positioned
-        ev = self.event_vectors[:, :, :, None]
-        ev = torch.cat(
-            [ev, torch.zeros((1, self.n_events, self.control_plane_dim, self.n_samples - 1), device=ev.device)], dim=-1)
-
-        # TODO: Try gumbel softmax with a decaying temperature
-        t = sparse_softmax(self.event_times, dim=-1, normalize=True)
-        # t = F.gumbel_softmax(self.event_times, tau=0.1, hard=True)
-
-        print(t.shape, x.shape)
-        # convolve the times (dirac functions) with the pdfs, such that the PDFs
-        # are now "scheduled", or shifted to the appropriate times
-        x = fft_convolve(t[:, :, None, :], x)
-
-        print(x.shape, ev.shape)
-        # next convolve the event vectors with the PDFs
-        # TODO: Is this necessary, or could I just multiply with broadcasting?
-        x = fft_convolve(x, ev)
-        print(x.shape)
-        # print(x.shape, ev.shape)
-        # x = x * ev
-
-        # x = torch.sum(x, dim=1)
-        return x
-
-    def forward(self, sig=None, random=False):
-        if sig is not None:
-            result = sig
-            control_signal = sig
-            uscp = result = self._upsampled_control_plane(result)
-        else:
-            if random:
-                result = control_signal = self._random_gaussian_events()
-            else:
-                result = control_signal = self._gaussian_events()
-            batch, n_events, cp, time = result.shape
-            result = control_signal.reshape(batch * n_events, cp, time)
-
+    def forward(self, sig=None):
+        cs = sig if sig is not None else self.control_signal
+        result = self._upsampled_control_plane(cs)
         result = self.network.forward(result, self.deformations)
-
-        if sig is not None:
-            control_signal = F.avg_pool1d(uscp, kernel_size=512, stride=256, padding=256)
-        else:
-            result = result.reshape(-1, self.n_events, result.shape[-1])
-            control_signal = torch.sum(control_signal, dim=1)
-            # downsample so this is viewable
-            control_signal = F.avg_pool1d(control_signal, kernel_size=512, stride=256, padding=256)
-
-        # result = torch.sum(result, dim=1, keepdim=True)
-
-        return result, control_signal
+        return result, cs
 
 
 def transform(x: torch.Tensor):
@@ -446,11 +449,11 @@ def sparsity_loss(c: torch.Tensor) -> torch.Tensor:
     """
     Compute the l1 norm of the control signal
     """
-    # return torch.abs(c).sum() * 1e-2
-    return l0_norm(c)
+    return torch.abs(c).sum() * 1e-2
+    # return l0_norm(c) * 100
 
 
-def construct_experiment_model(n_samples: int, n_events: int = 32) -> OverfitAudioNetwork:
+def construct_experiment_model(n_samples: int) -> OverfitAudioNetwork:
     window_size = 2048
     control_plane_dim = 16
     low_rank_deformation_dim = 16
@@ -469,7 +472,6 @@ def construct_experiment_model(n_samples: int, n_events: int = 32) -> OverfitAud
         deformations_enabled=False,
         samplerate=samplerate,
         preserve_energy=False,
-        n_events=n_events
     ).to(device)
     return model
 
@@ -478,17 +480,15 @@ def to_numpy(x: torch.Tensor):
     return x.data.cpu().numpy()
 
 
-
 def train_and_monitor_overfit_model(
         n_samples: int,
-        n_events: int = 32,
         samplerate: int = 22050,
         audio_path: Optional[str] = None):
     target = get_one_audio_segment(
         n_samples=n_samples, samplerate=samplerate, audio_path=audio_path)
     collection = LmdbCollection(path='freqdomain')
 
-    print(f'overfitting to {n_samples // samplerate} seconds with {n_events} events')
+    print(f'overfitting to {n_samples // samplerate} seconds')
 
     recon_audio, orig_audio, rnd = loggers(
         ['recon', 'orig', 'rnd'],
@@ -513,8 +513,10 @@ def train_and_monitor_overfit_model(
         rnd,
     ], port=9999, n_workers=1)
 
+    loss_model = CorrelationLoss(n_elements=2048).to(device)
+
     def train(target: torch.Tensor):
-        model = construct_experiment_model(n_samples=n_samples, n_events=n_events)
+        model = construct_experiment_model(n_samples=n_samples)
 
         optim = Adam(model.parameters(), lr=1e-3)
 
@@ -524,10 +526,10 @@ def train_and_monitor_overfit_model(
 
             recon_audio(max_norm(recon.sum(dim=1, keepdim=True)))
 
-            loss = iterative_loss(target, recon, transform)
-            # recon_loss = reconstruction_loss(recon, target)
+            recon_loss = reconstruction_loss(recon, target)
+            recon_loss = recon_loss + loss_model.forward(target, recon)
 
-            # loss = recon_loss + sparsity_loss(control_signal)
+            loss = recon_loss + sparsity_loss(control_signal)
 
             if model.deformations_enabled:
                 loss = loss + sparsity_loss(model.all_deformations)
@@ -540,12 +542,11 @@ def train_and_monitor_overfit_model(
             envelopes(max_norm(control_signal[0]))
 
             optim.step()
-            print(iteration, loss.item(), sparsity)
+            print(iteration, loss.item(), sparsity, non_zero.item())
 
             with torch.no_grad():
                 # log random output from the model
-                r, _ = model.forward(sig=None, random=True)
-                r = torch.sum(r, dim=1, keepdim=True)
+                r, _ = model.random()
                 rnd(max_norm(r))
 
     train(target)
@@ -553,7 +554,7 @@ def train_and_monitor_overfit_model(
 
 if __name__ == '__main__':
     train_and_monitor_overfit_model(
-        n_samples=2 ** 16,
+        n_samples=2 ** 17,
         samplerate=22050,
-        n_events=32)
+    )
     # train_and_monitor_auto_encoder(batch_size=2)
