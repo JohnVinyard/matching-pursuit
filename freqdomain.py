@@ -5,7 +5,6 @@ import numpy as np
 import torch
 from scipy.signal import morlet
 from torch import nn
-from torch.nn import functional as F
 from torch.optim import Adam
 
 from conjure import LmdbCollection, loggers, serve_conjure, SupportedContentType, NumpySerializer, NumpyDeserializer
@@ -234,12 +233,6 @@ class AudioNetwork(nn.Module):
 
 
 
-def l0_norm(x: torch.Tensor):
-    mask = (x > 0).float()
-    forward = mask
-    backward = x
-    y = backward + (forward - backward).detach()
-    return y.sum()
 
 
 class OverfitAudioNetwork(nn.Module):
@@ -267,10 +260,6 @@ class OverfitAudioNetwork(nn.Module):
         self.samples_per_frame = self.n_samples // self.n_frames
 
         transfer_dim = window_size // 2 + 1
-
-        # self.event_vectors = nn.Parameter(torch.zeros(1, n_events, control_plane_dim).uniform_(0, 1e-8))
-        # self.event_envelopes = nn.Parameter(torch.zeros(1, n_events, 2).uniform_(0, 1))
-        # self.event_times = nn.Parameter(torch.zeros(1, n_events, n_samples).uniform_(-1, 1))
 
         self.control_plane = nn.Parameter(torch.zeros(1, control_plane_dim, n_frames).uniform_(0, 1e-8))
         self.channel_decays = nn.Parameter(torch.zeros((control_plane_dim,)).uniform_(0, 1))
@@ -320,71 +309,6 @@ class OverfitAudioNetwork(nn.Module):
         x = torch.stack([d for d in self.deformations], dim=0)
         return x
 
-    # def _random_gaussian_events(self):
-    #
-    #     ee = torch.zeros_like(self.event_envelopes).uniform_(0, 1)
-    #     et = torch.zeros_like(self.event_times).uniform_(0, 1)
-    #
-    #     means = ee[:, :, 0] * 0
-    #     stds = torch.abs(ee[:, :, 1] + 1e-8) * 0.1
-    #     x = pdf2(means, stds, n_elements=self.n_samples)
-    #     x = x[:, :, None, :]
-    #
-    #     # place the event vectors at the start of a vector, ready to be positioned
-    #     ev = self.event_vectors[:, :, :, None]
-    #     ev = torch.cat(
-    #         [ev, torch.zeros((1, self.n_events, self.control_plane_dim, self.n_samples - 1), device=ev.device)], dim=-1)
-    #
-    #     # TODO: Try gumbel softmax with a decaying temperature
-    #     t = sparse_softmax(et, dim=-1, normalize=True)
-    #     # t = F.gumbel_softmax(self.event_times, tau=0.1, hard=True)
-    #
-    #     # convolve the times (dirac functions) with the pdfs, such that the PDFs
-    #     # are now "scheduled", or shifted to the appropriate times
-    #     x = fft_convolve(t[:, :, None, :], x)
-    #
-    #     # next convolve the event vectors with the PDFs
-    #     # TODO: Is this necessary, or could I just multiply with broadcasting?
-    #     x = fft_convolve(x, ev)
-    #     # print(x.shape, ev.shape)
-    #     # x = x * ev
-    #
-    #     # x = torch.sum(x, dim=1)
-    #     return x
-
-    # def _gaussian_events(self) -> torch.Tensor:
-    #
-    #     # get the probability density function given our mean and std parameters
-    #     means = self.event_envelopes[:, :, 0] * 0
-    #     stds = torch.abs(self.event_envelopes[:, :, 1] + 1e-8) * 0.1
-    #     x = pdf2(means, stds, n_elements=self.n_samples)
-    #     x = x[:, :, None, :]
-    #
-    #     # place the event vectors at the start of a vector, ready to be positioned
-    #     ev = self.event_vectors[:, :, :, None]
-    #     ev = torch.cat(
-    #         [ev, torch.zeros((1, self.n_events, self.control_plane_dim, self.n_samples - 1), device=ev.device)], dim=-1)
-    #
-    #     # TODO: Try gumbel softmax with a decaying temperature
-    #     t = sparse_softmax(self.event_times, dim=-1, normalize=True)
-    #     # t = F.gumbel_softmax(self.event_times, tau=0.1, hard=True)
-    #
-    #     print(t.shape, x.shape)
-    #     # convolve the times (dirac functions) with the pdfs, such that the PDFs
-    #     # are now "scheduled", or shifted to the appropriate times
-    #     x = fft_convolve(t[:, :, None, :], x)
-    #
-    #     print(x.shape, ev.shape)
-    #     # next convolve the event vectors with the PDFs
-    #     # TODO: Is this necessary, or could I just multiply with broadcasting?
-    #     x = fft_convolve(x, ev)
-    #     print(x.shape)
-    #     # print(x.shape, ev.shape)
-    #     # x = x * ev
-    #
-    #     # x = torch.sum(x, dim=1)
-    #     return x
-
     def _base_envelopes(self):
         ls = torch.linspace(1, 0, self.samples_per_frame, device=device).view(1, 1, self.samples_per_frame)
         ls = ls ** self.channel_decays[None, :, None]
@@ -427,12 +351,6 @@ def transform(x: torch.Tensor):
             'xs': (16, 8),
         },
         smallest_band_size=512)
-
-
-def compute_spec(audio: torch.Tensor, model: nn.Module) -> torch.Tensor:
-    spec = stft_transform(audio)
-    vec = model.forward(spec)
-    return vec
 
 
 def reconstruction_loss(recon: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
