@@ -93,7 +93,6 @@ The decoder side of the model is very interesting, and all sorts of physical mod
 better, more realistic, and sparser renderings of the audio.
 
 """
-from conjure.article import ScatterPlotComponent
 
 """[markdown]
 
@@ -120,7 +119,6 @@ If this work seems interesting and worthwhile, and you want to see where it lead
 # Examples
 
 """
-
 
 """[markdown]
 
@@ -446,7 +444,6 @@ Events clustered using [t-SNE](https://scikit-learn.org/stable/modules/generated
 # example_4.event31
 
 
-
 """[markdown]
 
 ## Example 5
@@ -528,8 +525,6 @@ Events clustered using [t-SNE](https://scikit-learn.org/stable/modules/generated
 # example_5.event31
 
 
-
-
 # the size, in samples of the audio segment we'll overfit
 n_samples = 2 ** 16
 samples_per_event = 2048
@@ -548,7 +543,6 @@ transform_step_size = 256
 
 n_frames = n_samples // transform_step_size
 
-
 from typing import Dict
 from modules.eventgenerators.overfitresonance import OverfitResonanceModel
 import numpy as np
@@ -556,17 +550,17 @@ import torch
 from data import get_one_audio_segment, get_audio_segment
 from conjure import S3Collection, \
     conjure_article, CitationComponent, numpy_conjure, AudioComponent, ImageComponent, \
-    CompositeComponent, Logger
+    CompositeComponent, Logger, ScatterPlotComponent
 from argparse import ArgumentParser
 from iterativedecomposition import Model as IterativeDecompositionModel
 from sklearn.manifold import TSNE
-
 
 remote_collection_name = 'iterative-decomposition-v3'
 
 
 def to_numpy(x: torch.Tensor):
     return x.data.cpu().numpy()
+
 
 # thanks to https://discuss.pytorch.org/t/how-do-i-check-the-number-of-parameters-of-a-model/4325/9
 def count_parameters(model):
@@ -576,28 +570,27 @@ def count_parameters(model):
 def reconstruction_section(logger: Logger) -> CompositeComponent:
     hidden_channels = 512
 
-
     model = IterativeDecompositionModel(
         in_channels=1024,
         hidden_channels=hidden_channels,
         resonance_model=OverfitResonanceModel(
-                n_noise_filters=32,
-                noise_expressivity=8,
-                noise_filter_samples=128,
-                noise_deformations=16,
-                instr_expressivity=8,
-                n_events=1,
-                n_resonances=4096,
-                n_envelopes=256,
-                n_decays=32,
-                n_deformations=32,
-                n_samples=n_samples,
-                n_frames=n_frames,
-                samplerate=samplerate,
-                hidden_channels=hidden_channels,
-                wavetable_device='cpu',
-                fine_positioning=True
-            ))
+            n_noise_filters=32,
+            noise_expressivity=8,
+            noise_filter_samples=128,
+            noise_deformations=16,
+            instr_expressivity=8,
+            n_events=1,
+            n_resonances=4096,
+            n_envelopes=256,
+            n_decays=32,
+            n_deformations=32,
+            n_samples=n_samples,
+            n_frames=n_frames,
+            samplerate=samplerate,
+            hidden_channels=hidden_channels,
+            wavetable_device='cpu',
+            fine_positioning=True
+        ))
 
     with open('iterativedecomposition2.dat', 'rb') as f:
         model.load_state_dict(torch.load(f, map_location=lambda storage, loc: storage))
@@ -620,6 +613,13 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
     normalized = normalized / (normalized.max(axis=0, keepdims=True) + 1e-8)
     tsne = TSNE(n_components=2)
     points = tsne.fit_transform(normalized)
+    proj = np.random.uniform(0, 1, (2, 3))
+    colors = points @ proj
+    colors -= colors.min()
+    colors /= (colors.max() + 1e-8)
+    colors *= 255
+    colors = colors.astype(np.uint8)
+    colors = [f'rgb({c[0]} {c[1]} {c[2]})' for c in colors]
 
     # sum together all events
     summed = torch.sum(events, dim=1, keepdim=True)
@@ -630,9 +630,7 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
     orig_audio_component = AudioComponent(original.public_uri, height=200)
     recon_audio_component = AudioComponent(reconstruction.public_uri, height=200)
 
-
     events = {f'event{i}': events[:, i: i + 1, :] for i in range(events.shape[1])}
-
 
     scatterplot_srcs = []
 
@@ -643,7 +641,13 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
         event_components[k] = AudioComponent(e.public_uri, height=35, controls=False)
 
     scatterplot_component = ScatterPlotComponent(
-        scatterplot_srcs, width=300, height=300, radius=0.04, points=points, times=times)
+        scatterplot_srcs,
+        width=300,
+        height=300,
+        radius=0.04,
+        points=points,
+        times=times,
+        colors=colors, )
 
     _, event_vectors = logger.log_matrix('latents', vectors[0].T)
     latents = ImageComponent(event_vectors.public_uri, height=200, title='latent event vectors')
@@ -656,6 +660,7 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
         **event_components
     )
     return composite
+
 
 """[markdown]
 
@@ -675,7 +680,6 @@ different auditory bandpass filters become more important than the precise ampli
 
 def demo_page_dict() -> Dict[str, any]:
     print(f'Generating article...')
-
 
     remote = S3Collection(
         remote_collection_name, is_public=True, cors_enabled=True)
