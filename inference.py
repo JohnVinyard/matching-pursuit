@@ -36,6 +36,7 @@ model.load_state_dict(torch.load(
     map_location=lambda storage, loc: storage))
 
 rnd = model.random_sequence(device=device)
+print(rnd.shape)
 rnd = playable(rnd, samplerate=22050, normalize=True)
 # listen_to_sound(rnd)
 

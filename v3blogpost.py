@@ -70,7 +70,7 @@ a much simpler decoder, which generates each event as a linear combination of lo
 
 ## Model Size, Training Time and Dataset
 
-Firstly, this model is relatively small, weighing in at 18M parameters (82 MB on disk) and has only been trained for
+Firstly, this model is relatively small, weighing in at ~26M parameters (~117 MB on disk) and has only been trained for
 around 24 hours, so it seems there is a lot of space to increase the model size, dataset size and training time to
 further improve.  The reconstruction quality of the examples on this page is not amazing, certainly not good enough
 even for a lossy audio codec, but the structure the model extracts seems like it could be used for many interesting
@@ -93,6 +93,7 @@ The decoder side of the model is very interesting, and all sorts of physical mod
 better, more realistic, and sparser renderings of the audio.
 
 """
+from conjure.article import ScatterPlotComponent
 
 """[markdown]
 
@@ -146,11 +147,21 @@ If this work seems interesting and worthwhile, and you want to see where it lead
 
 ### Event Vectors
 
-Notice the blocks of silent event vectors.
+
  
 """
 
 # example_1.latents
+
+"""[markdown]
+
+### Event Scatterplot
+
+Events clustered using [t-SNE](https://scikit-learn.org/stable/modules/generated/sklearn.manifold.TSNE.html)
+
+"""
+
+# example_1.scatterplot
 
 """[markdown]
 
@@ -217,11 +228,21 @@ Notice the blocks of silent event vectors.
 
 ### Event Vectors
 
-Notice the blocks of silent event vectors.
+
 
 """
 
 # example_2.latents
+
+"""[markdown]
+
+### Event Scatterplot
+
+Events clustered using [t-SNE](https://scikit-learn.org/stable/modules/generated/sklearn.manifold.TSNE.html)
+
+"""
+
+# example_2.scatterplot
 
 """[markdown]
 
@@ -288,11 +309,21 @@ Notice the blocks of silent event vectors.
 
 ### Event Vectors
 
-Notice the blocks of silent event vectors.
+
 
 """
 
 # example_3.latents
+
+"""[markdown]
+
+### Event Scatterplot
+
+Events clustered using [t-SNE](https://scikit-learn.org/stable/modules/generated/sklearn.manifold.TSNE.html)
+
+"""
+
+# example_3.scatterplot
 
 """[markdown]
 
@@ -359,11 +390,21 @@ Notice the blocks of silent event vectors.
 
 ### Event Vectors
 
-Notice the blocks of silent event vectors.
+
 
 """
 
 # example_4.latents
+
+"""[markdown]
+
+### Event Scatterplot
+
+Events clustered using [t-SNE](https://scikit-learn.org/stable/modules/generated/sklearn.manifold.TSNE.html)
+
+"""
+
+# example_4.scatterplot
 
 """[markdown]
 
@@ -431,11 +472,21 @@ Notice the blocks of silent event vectors.
 
 ### Event Vectors
 
-Notice the blocks of silent event vectors.
+
 
 """
 
 # example_5.latents
+
+"""[markdown]
+
+### Event Scatterplot
+
+Events clustered using [t-SNE](https://scikit-learn.org/stable/modules/generated/sklearn.manifold.TSNE.html)
+
+"""
+
+# example_5.scatterplot
 
 """[markdown]
 
@@ -508,6 +559,7 @@ from conjure import S3Collection, \
     CompositeComponent, Logger
 from argparse import ArgumentParser
 from iterativedecomposition import Model as IterativeDecompositionModel
+from sklearn.manifold import TSNE
 
 
 remote_collection_name = 'iterative-decomposition-v3'
@@ -524,6 +576,7 @@ def count_parameters(model):
 def reconstruction_section(logger: Logger) -> CompositeComponent:
     hidden_channels = 512
 
+
     model = IterativeDecompositionModel(
         in_channels=1024,
         hidden_channels=hidden_channels,
@@ -534,18 +587,19 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
                 noise_deformations=16,
                 instr_expressivity=8,
                 n_events=1,
-                n_resonances=2048,
-                n_envelopes=128,
+                n_resonances=4096,
+                n_envelopes=256,
                 n_decays=32,
                 n_deformations=32,
                 n_samples=n_samples,
                 n_frames=n_frames,
                 samplerate=samplerate,
                 hidden_channels=hidden_channels,
-                wavetable_device='cpu'
+                wavetable_device='cpu',
+                fine_positioning=True
             ))
 
-    with open('iterativedecomposition.dat', 'rb') as f:
+    with open('iterativedecomposition2.dat', 'rb') as f:
         model.load_state_dict(torch.load(f, map_location=lambda storage, loc: storage))
 
     print('Total parameters', count_parameters(model))
@@ -556,6 +610,16 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
     samples = get_one_audio_segment(n_samples, samplerate, device='cpu').view(1, 1, n_samples)
     events, vectors, times = model.iterative(samples)
     print(events.shape)
+
+    total_seconds = n_samples / samplerate
+    positions = torch.argmax(times, dim=-1, keepdim=True) / times.shape[-1]
+    times = [float(x) for x in (positions * total_seconds).view(-1).data.cpu().numpy()]
+
+    normalized = vectors.data.cpu().numpy().reshape((-1, context_dim))
+    normalized = normalized - normalized.min(axis=0, keepdims=True)
+    normalized = normalized / (normalized.max(axis=0, keepdims=True) + 1e-8)
+    tsne = TSNE(n_components=2)
+    points = tsne.fit_transform(normalized)
 
     # sum together all events
     summed = torch.sum(events, dim=1, keepdim=True)
@@ -569,10 +633,17 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
 
     events = {f'event{i}': events[:, i: i + 1, :] for i in range(events.shape[1])}
 
+
+    scatterplot_srcs = []
+
     event_components = {}
     for k, v in events.items():
         _, e = logger.log_sound(k, v)
+        scatterplot_srcs.append(e.public_uri)
         event_components[k] = AudioComponent(e.public_uri, height=35, controls=False)
+
+    scatterplot_component = ScatterPlotComponent(
+        scatterplot_srcs, width=300, height=300, radius=0.04, points=points, times=times)
 
     _, event_vectors = logger.log_matrix('latents', vectors[0].T)
     latents = ImageComponent(event_vectors.public_uri, height=200, title='latent event vectors')
@@ -581,6 +652,7 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
         orig_audio=orig_audio_component,
         recon_audio=recon_audio_component,
         latents=latents,
+        scatterplot=scatterplot_component,
         **event_components
     )
     return composite

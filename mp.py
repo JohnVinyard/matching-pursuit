@@ -8,6 +8,7 @@ from conjure.logger import encode_audio
 from data import AudioIterator
 from modules import unit_norm, sparsify2, stft, iterative_loss
 from modules.transfer import fft_convolve
+from modules.matchingpursuit import dictionary_learning_step, sparse_code
 
 from util import device
 

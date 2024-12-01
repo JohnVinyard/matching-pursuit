@@ -9,7 +9,7 @@ from modules.eventgenerators.schedule import DiracScheduler
 from modules.iterative import TensorTransform
 from modules.multiheadtransform import ShapeSpec
 from modules.reds import F0Resonance
-from modules.transfer import fft_convolve, make_waves
+from modules.transfer import fft_convolve, make_waves, make_waves_vectorized
 from modules.upsample import upsample_with_holes
 from util import device
 import numpy as np
@@ -137,7 +137,12 @@ class WavetableLookup(Lookup):
             wavetable_device = None):
 
         super().__init__(n_items, n_resonances)
-        w = make_waves(n_samples, np.linspace(20, 4000, num=n_resonances // 4), samplerate)
+
+        # w = make_waves(n_samples, np.linspace(20, 4000, num=n_resonances // 4), samplerate)
+
+        w = make_waves_vectorized(n_samples, np.linspace(20, 4000, num=n_resonances // 4), samplerate)
+
+
         if learnable:
             self.waves = nn.Parameter(w)
         else:

@@ -177,13 +177,8 @@ class ModuleTests(TestCase):
 
 
         original = make_waves(n_samples, f0s, samplerate)
-        plt.matshow(original)
-        plt.show()
-
         vectorized = make_waves_vectorized(n_samples, f0s, samplerate)
-        plt.matshow(vectorized)
-        plt.show()
 
         self.assertEqual(original.shape, vectorized.shape)
 
-        np.testing.assert_allclose(original, vectorized, rtol=1e-5)
+        np.testing.assert_allclose(original, vectorized, rtol=1e-6)
