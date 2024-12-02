@@ -1,5 +1,6 @@
 # the size, in samples of the audio segment we'll overfit
 from modules.atoms import unit_norm
+from modules.infoloss import CorrelationLoss
 
 n_samples = 2 ** 17
 
@@ -20,7 +21,7 @@ state_dim = 128
 
 is_complex = False
 
-max_efficiency = 0.99
+max_efficiency = 0.9
 
 windowing = True
 
@@ -49,6 +50,7 @@ def project_and_limit_norm(
     original_norm = torch.norm(vector, dim=-1, keepdim=True)
     # project
     x = vector @ matrix
+    return x
 
     # TODO: clamp norm should be a utility that lives in normalization
     # find the norm of the projection
@@ -190,14 +192,15 @@ class OverfitControlPlane(nn.Module):
         Produces a random, sparse control signal, emulating short, transient bursts
         of energy into the system modelled by the `SSM`
         """
-        # cp = torch.zeros_like(self.control, device=self.control.device).bernoulli_(p=p)
-        # audio = self.forward(sig=cp)
-        # return max_norm(audio)
-
-        indices = torch.randperm(self.control_plane_dim)
-        cp = self.control_signal[:, indices, :]
+        cp = torch.zeros_like(self.control, device=self.control.device).bernoulli_(p=p)
+        cp = cp * torch.zeros_like(cp).uniform_(0, 1)
         audio = self.forward(sig=cp)
         return max_norm(audio)
+
+        # indices = torch.randperm(self.control_plane_dim)
+        # cp = self.control_signal[:, indices, :]
+        # audio = self.forward(sig=cp)
+        # return max_norm(audio)
 
     def forward(self, sig=None):
         """
@@ -236,7 +239,7 @@ def sparsity_loss(c: torch.Tensor) -> torch.Tensor:
     """
     Compute the l1 norm of the control signal
     """
-    return torch.abs(c).sum() * 1e-2
+    return torch.abs(c).sum() * 0.1
 
 
 def to_numpy(x: torch.Tensor):
@@ -292,14 +295,18 @@ def train_and_monitor():
 
     def train(target: torch.Tensor):
         model = construct_experiment_model()
+        loss_model = CorrelationLoss(n_elements=1024).to(device)
 
-        optim = Adam(model.parameters(), lr=1e-2)
+        optim = Adam(model.parameters(), lr=1e-3)
 
         for iteration in count():
             optim.zero_grad()
             recon = model.forward()
             recon_audio(max_norm(recon))
-            loss = reconstruction_loss(recon, target) + sparsity_loss(model.control_signal)
+            loss = \
+                reconstruction_loss(recon, target) \
+                + sparsity_loss(model.control_signal) \
+                + loss_model.forward(target, recon)
 
             non_zero = (model.control_signal > 0).sum()
             sparsity = (non_zero / model.control_signal.numel()).item()
@@ -311,7 +318,7 @@ def train_and_monitor():
             # clip_grad_value_(model.parameters(), 0.5)
 
             optim.step()
-            print(iteration, loss.item(), sparsity)
+            print(iteration, loss.item(), sparsity, non_zero)
 
             with torch.no_grad():
                 rnd = model.random()
