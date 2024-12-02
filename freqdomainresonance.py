@@ -18,7 +18,7 @@ using a fully-linear network.
 This mini-experiment takes these ideas a bit further, overfitting a network to a single audio segment of ~6 seconds.
 The "prior" here is that the signal was produced by injecting energy into a low-dimensional "control plane", which is
 connected to multiple layers of resonances, gains and non-linearities.  Ideally, this model might be able to capture
-some of the nuances of physical resonance that the state-spec model could not, and could lead to highly sparse "scores"
+some of the nuances of physical resonance that the state-space model could not, and could lead to highly sparse "scores"
 which can be seen when looking at the "Control Signal" section of each example.
 
 ## Statefulness
