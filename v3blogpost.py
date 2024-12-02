@@ -116,6 +116,18 @@ If this work seems interesting and worthwhile, and you want to see where it lead
 
 """[markdown]
 
+# Event Scatterplot
+
+Here is a scatterplot mapping events from four different audio segments onto a 2D plane using t-SNE.  
+Each 16-dimensional event vector encodes information about attack, resonance, and room impulse response.
+
+"""
+
+# large_scatterplot
+
+
+"""[markdown]
+
 # Examples
 
 """
@@ -543,17 +555,20 @@ transform_step_size = 256
 
 n_frames = n_samples // transform_step_size
 
-from typing import Dict
-from modules.eventgenerators.overfitresonance import OverfitResonanceModel
+from argparse import ArgumentParser
+from typing import Dict, Tuple
+
 import numpy as np
 import torch
-from data import get_one_audio_segment, get_audio_segment
-from conjure import S3Collection, \
-    conjure_article, CitationComponent, numpy_conjure, AudioComponent, ImageComponent, \
-    CompositeComponent, Logger, ScatterPlotComponent
-from argparse import ArgumentParser
-from iterativedecomposition import Model as IterativeDecompositionModel
 from sklearn.manifold import TSNE
+from torch import nn
+
+from conjure import S3Collection, \
+    conjure_article, CitationComponent, AudioComponent, ImageComponent, \
+    CompositeComponent, Logger, ScatterPlotComponent
+from data import get_one_audio_segment, AudioIterator
+from iterativedecomposition import Model as IterativeDecompositionModel
+from modules.eventgenerators.overfitresonance import OverfitResonanceModel
 
 remote_collection_name = 'iterative-decomposition-v3'
 
@@ -567,7 +582,31 @@ def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
-def reconstruction_section(logger: Logger) -> CompositeComponent:
+def process_events(
+        vectors: torch.Tensor,
+        times: torch.Tensor,
+        total_seconds: float) -> Tuple:
+
+    positions = torch.argmax(times, dim=-1, keepdim=True) / times.shape[-1]
+    times = [float(x) for x in (positions * total_seconds).view(-1).data.cpu().numpy()]
+
+    normalized = vectors.data.cpu().numpy().reshape((-1, context_dim))
+    normalized = normalized - normalized.min(axis=0, keepdims=True)
+    normalized = normalized / (normalized.max(axis=0, keepdims=True) + 1e-8)
+    tsne = TSNE(n_components=2)
+    points = tsne.fit_transform(normalized)
+    proj = np.random.uniform(0, 1, (2, 3))
+    colors = points @ proj
+    colors -= colors.min()
+    colors /= (colors.max() + 1e-8)
+    colors *= 255
+    colors = colors.astype(np.uint8)
+    colors = [f'rgb({c[0]} {c[1]} {c[2]})' for c in colors]
+
+    return points, times, colors
+
+
+def load_model() -> nn.Module:
     hidden_channels = 512
 
     model = IterativeDecompositionModel(
@@ -599,27 +638,92 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
     print('Encoder parameters', count_parameters(model.encoder))
     print('Decoder parameters', count_parameters(model.resonance))
 
+    return model
+
+def scatterplot_section(logger: Logger) -> ScatterPlotComponent:
+    model = load_model()
+    ai = AudioIterator(
+        batch_size=4,
+        n_samples=n_samples,
+        samplerate=22050,
+        normalize=True,
+        as_torch=True)
+
+    batch = next(iter(ai))
+    batch = batch.view(-1, 1, n_samples).to('cpu')
+    events, vectors, times = model.iterative(batch)
+
+    total_seconds = n_samples / samplerate
+
+    points, times, colors = process_events(vectors, times, total_seconds)
+    print(len(points), len(times), len(colors))
+
+    events = events.view(-1, n_samples)
+
+    events = {f'event{i}': events[i: i + 1, :] for i in range(events.shape[0])}
+    print(len(events))
+
+    scatterplot_srcs = []
+
+    event_components = {}
+    for k, v in events.items():
+        _, e = logger.log_sound(k, v)
+        scatterplot_srcs.append(e.public_uri)
+        event_components[k] = AudioComponent(e.public_uri, height=35, controls=False)
+
+    scatterplot_component = ScatterPlotComponent(
+        scatterplot_srcs,
+        width=500,
+        height=500,
+        radius=0.3,
+        points=points,
+        times=times,
+        colors=colors, )
+
+    return scatterplot_component
+
+
+def reconstruction_section(logger: Logger) -> CompositeComponent:
+    # hidden_channels = 512
+    #
+    # model = IterativeDecompositionModel(
+    #     in_channels=1024,
+    #     hidden_channels=hidden_channels,
+    #     resonance_model=OverfitResonanceModel(
+    #         n_noise_filters=32,
+    #         noise_expressivity=8,
+    #         noise_filter_samples=128,
+    #         noise_deformations=16,
+    #         instr_expressivity=8,
+    #         n_events=1,
+    #         n_resonances=4096,
+    #         n_envelopes=256,
+    #         n_decays=32,
+    #         n_deformations=32,
+    #         n_samples=n_samples,
+    #         n_frames=n_frames,
+    #         samplerate=samplerate,
+    #         hidden_channels=hidden_channels,
+    #         wavetable_device='cpu',
+    #         fine_positioning=True
+    #     ))
+    #
+    # with open('iterativedecomposition2.dat', 'rb') as f:
+    #     model.load_state_dict(torch.load(f, map_location=lambda storage, loc: storage))
+    #
+    # print('Total parameters', count_parameters(model))
+    # print('Encoder parameters', count_parameters(model.encoder))
+    # print('Decoder parameters', count_parameters(model.resonance))
+
+    model = load_model()
+
     # get a random audio segment
     samples = get_one_audio_segment(n_samples, samplerate, device='cpu').view(1, 1, n_samples)
     events, vectors, times = model.iterative(samples)
-    print(events.shape)
 
     total_seconds = n_samples / samplerate
-    positions = torch.argmax(times, dim=-1, keepdim=True) / times.shape[-1]
-    times = [float(x) for x in (positions * total_seconds).view(-1).data.cpu().numpy()]
 
-    normalized = vectors.data.cpu().numpy().reshape((-1, context_dim))
-    normalized = normalized - normalized.min(axis=0, keepdims=True)
-    normalized = normalized / (normalized.max(axis=0, keepdims=True) + 1e-8)
-    tsne = TSNE(n_components=2)
-    points = tsne.fit_transform(normalized)
-    proj = np.random.uniform(0, 1, (2, 3))
-    colors = points @ proj
-    colors -= colors.min()
-    colors /= (colors.max() + 1e-8)
-    colors *= 255
-    colors = colors.astype(np.uint8)
-    colors = [f'rgb({c[0]} {c[1]} {c[2]})' for c in colors]
+    points, times, colors = process_events(vectors, times, total_seconds)
 
     # sum together all events
     summed = torch.sum(events, dim=1, keepdim=True)
@@ -659,6 +763,7 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
         scatterplot=scatterplot_component,
         **event_components
     )
+
     return composite
 
 
@@ -686,19 +791,24 @@ def demo_page_dict() -> Dict[str, any]:
 
     logger = Logger(remote)
 
+    print('Creating large scatterplot')
+    large_scatterplot = scatterplot_section(logger)
+
+    print('Creating reconstruction examples')
     example_1 = reconstruction_section(logger)
     example_2 = reconstruction_section(logger)
     example_3 = reconstruction_section(logger)
     example_4 = reconstruction_section(logger)
     example_5 = reconstruction_section(logger)
 
-    @numpy_conjure(remote)
-    def fetch_audio(url: str, start_sample: int) -> np.ndarray:
-        return get_audio_segment(
-            url,
-            target_samplerate=samplerate,
-            start_sample=start_sample,
-            duration_samples=n_samples)
+
+    # @numpy_conjure(remote)
+    # def fetch_audio(url: str, start_sample: int) -> np.ndarray:
+    #     return get_audio_segment(
+    #         url,
+    #         target_samplerate=samplerate,
+    #         start_sample=start_sample,
+    #         duration_samples=n_samples)
 
     citation = CitationComponent(
         tag='johnvinyarditerativedecompositionv3',
@@ -709,6 +819,7 @@ def demo_page_dict() -> Dict[str, any]:
     )
 
     return dict(
+        large_scatterplot=large_scatterplot,
         example_1=example_1,
         example_2=example_2,
         example_3=example_3,

@@ -426,7 +426,7 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
             times: torch.Tensor,
             room_choice: torch.Tensor,
             room_mix: torch.Tensor,
-            fine: Union[torch.Tensor, None]) -> torch.Tensor:
+            fine: Union[torch.Tensor, None] = None) -> torch.Tensor:
 
         # Begin layer ==========================================
 

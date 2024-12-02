@@ -305,6 +305,14 @@ class OverfitAudioNetwork(nn.Module):
         return torch.relu(self.control_plane)
 
     @property
+    def nonzero_count(self):
+        return (self.control_signal > 0).sum().item()
+
+    @property
+    def sparsity(self):
+        return self.nonzero_count / self.control_plane.numel()
+
+    @property
     def all_deformations(self):
         x = torch.stack([d for d in self.deformations], dim=0)
         return x

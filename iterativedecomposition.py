@@ -15,6 +15,7 @@ from modules.eventgenerators.generator import EventGenerator
 from modules.eventgenerators.overfitresonance import OverfitResonanceModel
 from modules.eventgenerators.splat import SplattingEventGenerator
 from modules.eventgenerators.ssm import StateSpaceModelEventGenerator
+from modules.infoloss import CorrelationLoss
 from modules.multiheadtransform import MultiHeadTransform
 from util import device, encode_audio, make_initializer
 
@@ -258,6 +259,9 @@ def train_and_monitor(
     print(f'training on {n_seconds} of audio and {n_events} events with {model_type} event generator and {disc_type} disc')
     print('==========================================')
 
+    model_filename = 'iterativedecomposition3.dat'
+    disc_filename = 'iterativedecompositiondisc3.dat'
+
     def train():
         hidden_channels = 512
         if model_type == 'lookup':
@@ -320,7 +324,7 @@ def train_and_monitor(
         # require manual intervention to delete old weights, e.g., if a different
         # event generator is used
         try:
-            model.load_state_dict(torch.load('iterativedecomposition2.dat'))
+            model.load_state_dict(torch.load(model_filename))
             print('loaded model weights')
         except IOError:
             print('No model weights to load')
@@ -329,7 +333,7 @@ def train_and_monitor(
 
         disc = Discriminator(disc_type=disc_type).to(device)
         try:
-            disc.load_state_dict(torch.load('iterativedecompositiondisc2.dat'))
+            disc.load_state_dict(torch.load(disc_filename))
             print('loaded discriminator weights')
         except IOError:
             print('no discriminator weights to load')
@@ -350,7 +354,6 @@ def train_and_monitor(
             latents(max_norm(encoded[0]))
 
             loss = iterative_loss(target, recon, loss_transform)
-
             loss = loss + (torch.abs(encoded).sum() * 1e-4)
 
             mask = torch.zeros(target.shape[0], n_events, 1, device=recon.device).bernoulli_(p=0.5)
@@ -358,7 +361,7 @@ def train_and_monitor(
             j = disc.forward(for_disc)
             d_loss = torch.abs(1 - j).mean()
             print('G', d_loss.item())
-            loss = loss + d_loss
+            loss = loss + (d_loss * 10)
 
             loss.backward()
             optim.step()
@@ -381,8 +384,8 @@ def train_and_monitor(
                 random_audio(rnd)
 
             if i % 100 == 0:
-                torch.save(model.state_dict(), 'iterativedecomposition2.dat')
-                torch.save(disc.state_dict(), 'iterativedecompositiondisc2.dat')
+                torch.save(model.state_dict(), model_filename)
+                torch.save(disc.state_dict(), disc_filename)
 
     train()
 
@@ -431,4 +434,4 @@ if __name__ == '__main__':
         model_type=args.model_type,
         disc_type=args.disc_type,
         wipe_old_data=not args.save_data,
-        fine_positioning=args.fine_positioning)
+        fine_positioning=bool(args.fine_positioning))
