@@ -1,5 +1,5 @@
 from argparse import ArgumentParser
-from typing import Union
+from typing import Union, Dict
 
 import torch
 from torch import nn
@@ -94,28 +94,51 @@ def loss_transform(x: torch.Tensor) -> torch.Tensor:
         smallest_band_size=512)
 
 
-# def multiband_spectrogram(samples: torch.Tensor, min_size=512) -> torch.Tensor:
-#     batch = samples.shape[0]
-#
-#     bands = fft_frequency_decompose(samples, min_size=min_size)
-#
-#     specs = []
-#
-#     for size, band in bands.items():
-#         window = 512
-#         step = size // 256
-#
-#         n_coeffs = window // 2 + 1
-#         band = F.pad(band, (window // 2, window // 2))
-#         spec = stft(band, window, step, pad=False).reshape(batch, -1, n_coeffs).permute(0, 2, 1)
-#         if size > min_size:
-#             spec = spec[:, n_coeffs // 2:, :]
-#         specs.append(spec)
-#
-#     spec = torch.cat(specs, dim=1)
-#
-#     return spec[..., :256]
+def multiband_spectrogram(samples: torch.Tensor, min_size=512) -> Dict[int, torch.Tensor]:
+    batch = samples.shape[0]
 
+    bands = fft_frequency_decompose(samples, min_size=min_size)
+
+    specs = {}
+
+    for size, band in bands.items():
+        spec = stft(band, ws=64, step=16, pad=True)
+        specs[size] = spec
+
+
+    return specs
+
+
+
+
+def iterative_loss2(
+        target: Dict[int, torch.Tensor],
+        recon: Dict[int, torch.Tensor],
+        n_events: int) -> torch.Tensor:
+
+    residual = {k: t.clone() for k, t in target.items()}
+
+    loss = 0
+
+    for i in range(n_events):
+        for size, band in residual.items():
+            r = recon[size][:, i: i + 1, :]
+
+            t_norm = torch.norm(band)
+
+            residual = band - r
+
+            new_norm = torch.norm(residual)
+            residual[size] = residual
+
+            loss = loss + (new_norm / t_norm)
+
+    return loss
+
+def full_iterative_loss(target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
+    spec = multiband_spectrogram(target)
+    rspec = multiband_spectrogram(recon)
+    return iterative_loss2(spec, rspec, n_events)
 
 # class MultibandDownsamplingDiscriminator(nn.Module):
 #
