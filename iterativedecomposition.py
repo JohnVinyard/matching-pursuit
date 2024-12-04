@@ -8,7 +8,7 @@ from torch.optim import Adam
 from conjure import LmdbCollection, serve_conjure, loggers, SupportedContentType, NumpySerializer, NumpyDeserializer
 from data import AudioIterator
 from modules import stft, sparsify, sparsify_vectors, iterative_loss, max_norm, flattened_multiband_spectrogram, \
-    DownsamplingDiscriminator, sparse_softmax
+    DownsamplingDiscriminator, sparse_softmax, fft_frequency_decompose
 from modules.anticausal import AntiCausalAnalysis
 from modules.eventgenerators.convimpulse import ConvImpulseEventGenerator
 from modules.eventgenerators.generator import EventGenerator
@@ -17,7 +17,10 @@ from modules.eventgenerators.splat import SplattingEventGenerator
 from modules.eventgenerators.ssm import StateSpaceModelEventGenerator
 from modules.infoloss import CorrelationLoss
 from modules.multiheadtransform import MultiHeadTransform
+from modules.unet import DownsamplingBlock
 from util import device, encode_audio, make_initializer
+from torch.nn import functional as F
+import numpy as np
 
 # the size, in samples of the audio segment we'll overfit
 n_samples = 2 ** 16
@@ -91,6 +94,54 @@ def loss_transform(x: torch.Tensor) -> torch.Tensor:
         smallest_band_size=512)
 
 
+# def multiband_spectrogram(samples: torch.Tensor, min_size=512) -> torch.Tensor:
+#     batch = samples.shape[0]
+#
+#     bands = fft_frequency_decompose(samples, min_size=min_size)
+#
+#     specs = []
+#
+#     for size, band in bands.items():
+#         window = 512
+#         step = size // 256
+#
+#         n_coeffs = window // 2 + 1
+#         band = F.pad(band, (window // 2, window // 2))
+#         spec = stft(band, window, step, pad=False).reshape(batch, -1, n_coeffs).permute(0, 2, 1)
+#         if size > min_size:
+#             spec = spec[:, n_coeffs // 2:, :]
+#         specs.append(spec)
+#
+#     spec = torch.cat(specs, dim=1)
+#
+#     return spec[..., :256]
+
+
+# class MultibandDownsamplingDiscriminator(nn.Module):
+#
+#     def __init__(self, n_frames: int, in_channels: int, channels: int):
+#         super().__init__()
+#         self.channels = channels
+#         self.n_frames = n_frames
+#         self.in_channels = in_channels
+#
+#         self.proj = nn.Conv1d(self.in_channels, channels, 1, 1, 0)
+#         self.n_layers = int(np.log2(self.n_frames)) - 2
+#         self.downsample = nn.Sequential(*[DownsamplingBlock(channels) for i in range(self.n_layers)])
+#         self.judge = nn.Conv1d(channels, 1, 4, 4, 0)
+#
+#
+#     def forward(self, x: torch.Tensor) -> torch.Tensor:
+#         batch, _, time = x.shape
+#
+#         x = multiband_spectrogram(x, min_size=512)
+#         print(x.shape)
+#         x = self.proj(x)
+#         x = self.downsample(x)
+#         x = self.judge(x)
+#         return x
+
+
 class Discriminator(nn.Module):
     def __init__(self, disc_type='dilated'):
         super().__init__()
@@ -98,7 +149,12 @@ class Discriminator(nn.Module):
             self.disc = DownsamplingDiscriminator(
                 window_size=2048, step_size=256, n_samples=n_samples, channels=256)
         elif disc_type == 'unet':
-            self.disc = DownsamplingDiscriminator(2048, 256, n_samples=n_samples, channels=256)
+            self.disc = DownsamplingDiscriminator(
+                2048, 256, n_samples=n_samples, channels=256)
+        # elif disc_type == 'multiband':
+        #     self.disc = MultibandDownsamplingDiscriminator(n_frames=n_frames, in_channels=1160, channels=256)
+        else:
+            raise ValueError(f'Unknown discriminator type: {disc_type}')
 
         self.apply(initializer)
 
@@ -215,7 +271,8 @@ def train_and_monitor(
         disc_type: str = 'dilated',
         model_type: str = 'conv',
         wipe_old_data: bool = True,
-        fine_positioning: bool = False):
+        fine_positioning: bool = False,
+        save_and_load_weights: bool = False):
 
 
     stream = AudioIterator(
@@ -259,8 +316,9 @@ def train_and_monitor(
     print(f'training on {n_seconds} of audio and {n_events} events with {model_type} event generator and {disc_type} disc')
     print('==========================================')
 
-    model_filename = 'iterativedecomposition3.dat'
-    disc_filename = 'iterativedecompositiondisc3.dat'
+    model_filename = 'iterativedecomposition4.dat'
+    disc_filename = 'iterativedecompositiondisc4.dat'
+
 
     def train():
         hidden_channels = 512
@@ -320,24 +378,27 @@ def train_and_monitor(
             in_channels=1024,
             hidden_channels=hidden_channels).to(device)
 
-        # KLUDGE: Unless the same command line arguments are used, this will
-        # require manual intervention to delete old weights, e.g., if a different
-        # event generator is used
-        try:
-            model.load_state_dict(torch.load(model_filename))
-            print('loaded model weights')
-        except IOError:
-            print('No model weights to load')
+        disc = Discriminator(disc_type=disc_type).to(device)
+
+        loss_model = CorrelationLoss(n_elements=512).to(device)
+
+        if save_and_load_weights:
+            # KLUDGE: Unless the same command line arguments are used, this will
+            # require manual intervention to delete old weights, e.g., if a different
+            # event generator is used
+            try:
+                model.load_state_dict(torch.load(model_filename))
+                print('loaded model weights')
+            except IOError:
+                print('No model weights to load')
+
+            try:
+                disc.load_state_dict(torch.load(disc_filename))
+                print('loaded discriminator weights')
+            except IOError:
+                print('no discriminator weights to load')
 
         optim = Adam(model.parameters(), lr=1e-3)
-
-        disc = Discriminator(disc_type=disc_type).to(device)
-        try:
-            disc.load_state_dict(torch.load(disc_filename))
-            print('loaded discriminator weights')
-        except IOError:
-            print('no discriminator weights to load')
-
         disc_optim = Adam(disc.parameters(), lr=1e-3)
 
         for i, item in enumerate(iter(stream)):
@@ -353,6 +414,8 @@ def train_and_monitor(
             envelopes(max_norm(scheduling[0]))
             latents(max_norm(encoded[0]))
 
+            print(target.shape, recon.shape)
+
             loss = iterative_loss(target, recon, loss_transform)
             loss = loss + (torch.abs(encoded).sum() * 1e-4)
 
@@ -361,7 +424,9 @@ def train_and_monitor(
             j = disc.forward(for_disc)
             d_loss = torch.abs(1 - j).mean()
             print('G', d_loss.item())
-            loss = loss + (d_loss * 10)
+            loss = loss + (d_loss * 100)
+
+            loss = loss + loss_model.forward(target, recon_summed)
 
             loss.backward()
             optim.step()
@@ -383,11 +448,13 @@ def train_and_monitor(
                 rnd = max_norm(rnd)
                 random_audio(rnd)
 
-            if i % 100 == 0:
+
+            if save_and_load_weights and i % 100 == 0:
                 torch.save(model.state_dict(), model_filename)
                 torch.save(disc.state_dict(), disc_filename)
 
     train()
+
 
 
 if __name__ == '__main__':
@@ -407,7 +474,7 @@ if __name__ == '__main__':
         '--disc-type',
         type=str,
         default='dilated',
-        choices=['dilated', 'unet']
+        choices=['dilated', 'unet', 'multiband']
     )
     parser.add_argument(
         '--save-data',
@@ -426,6 +493,11 @@ if __name__ == '__main__':
         action='store_true',
         default=False
     )
+    parser.add_argument(
+        '--save-and-load-weights',
+        action='store_true',
+        default=False
+    )
 
     args = parser.parse_args()
     train_and_monitor(
@@ -434,4 +506,6 @@ if __name__ == '__main__':
         model_type=args.model_type,
         disc_type=args.disc_type,
         wipe_old_data=not args.save_data,
-        fine_positioning=bool(args.fine_positioning))
+        fine_positioning=bool(args.fine_positioning),
+        save_and_load_weights=args.save_and_load_weights
+    )

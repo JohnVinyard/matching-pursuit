@@ -12,7 +12,7 @@ from modules.reds import F0Resonance
 from modules.reverb import ReverbGenerator
 from modules.softmax import sparse_softmax
 from modules.transfer import gaussian_bandpass_filtered, make_waves
-from overfitresonance import DiracScheduler
+from overfitresonance import DiracScheduler, HierarchicalDiracModel
 from util.music import musical_scale_hz
 
 
@@ -222,15 +222,26 @@ class SplattingEventGenerator(nn.Module, EventGenerator):
             samplerate: int,
             n_resonance_octaves: int,
             n_frames: int,
-            hard_reverb_choice: bool = False):
+            hard_reverb_choice: bool = False,
+            hierarchical_scheduler: bool = False,
+            wavetable_resonance: bool = False):
+
         super().__init__()
         self.n_frames = n_frames
         self.n_samples = n_samples
         self.samplerate = samplerate
         self.n_resonance_octaves = n_resonance_octaves
         self.n_octaves = n_resonance_octaves
-        self.resonance_generator = F0Resonance(
-            n_resonance_octaves, n_samples, min_hz=20, max_hz=3000, samplerate=samplerate)
+        self.wavetable_resonance = wavetable_resonance
+
+        if wavetable_resonance:
+            self.resonance_generator = Resonance(
+                4096, n_samples, hard_choice=False, samplerate=samplerate)
+        else:
+            self.resonance_generator = F0Resonance(
+                n_resonance_octaves, n_samples, min_hz=20, max_hz=3000, samplerate=samplerate)
+
+        self.hierarchical_scheduler = hierarchical_scheduler
 
         self.noise_generator = BandPassFilteredNoise(n_samples)
         self.amp_envelope_generator = ExponentialDecayEnvelope(
@@ -244,7 +255,8 @@ class SplattingEventGenerator(nn.Module, EventGenerator):
 
         self.env_and_position = EnvelopeAndPosition(
             n_samples=n_samples,
-            envelope_type=EnvelopeType.Gaussian.value)
+            envelope_type=EnvelopeType.Gaussian.value,
+            gaussian_envelope_factor=0.5)
 
         self.mixer = Mixer()
 
@@ -256,10 +268,92 @@ class SplattingEventGenerator(nn.Module, EventGenerator):
             norm=nn.LayerNorm(4, ),
             hard_choice=hard_reverb_choice)
 
-        self.scheduler = DiracScheduler(
-            n_events=1, start_size=self.n_samples // 256, n_samples=self.n_samples)
+        if hierarchical_scheduler:
+            self.scheduler = HierarchicalDiracModel(
+                n_events=1, signal_size=self.n_samples)
+        else:
+            self.scheduler = DiracScheduler(
+                n_events=1, start_size=self.n_samples // 256, n_samples=self.n_samples)
 
-    def forward(
+    def forward(self, *args, **kwargs):
+        if self.wavetable_resonance:
+            return self.forward_wavetable(*args, **kwargs)
+        else:
+            return self.forward_f0(*args, **kwargs)
+
+    def forward_wavetable(self,
+                          env: torch.Tensor,
+                          mix: torch.Tensor,
+                          decay_choice: torch.Tensor,
+                          filter_decay: torch.Tensor,
+                          resonance_choice: torch.Tensor,
+                          noise_filter: torch.Tensor,
+                          resonance_filter_1: torch.Tensor,
+                          resonance_filter_2: torch.Tensor,
+                          amp: torch.Tensor,
+                          verb_params: torch.Tensor,
+                          times: torch.Tensor) -> torch.Tensor:
+
+        batch = env.shape[0]
+
+        overall_mix = torch.softmax(mix, dim=-1)
+
+        resonances = self.resonance_generator.forward(resonance_choice)
+
+        filtered_noise = self.noise_generator.forward(
+            noise_filter[:, :, 0],
+            (torch.abs(noise_filter[:, :, 1]) + 1e-12))
+
+        filtered_resonance, filt_res_2, filt_crossfade_stacked = self.evolving_resonance.forward(
+            resonances=resonances,
+            decays=filter_decay,
+            start_filter_means=torch.zeros_like(resonance_filter_1[:, :, 0]),
+            start_filter_stds=torch.abs(resonance_filter_1[:, :, 1]) + 1e-12,
+            end_filter_means=torch.zeros_like(resonance_filter_2[:, :, 0]),
+            end_filter_stds=torch.abs(resonance_filter_2[:, :, 1]) + 1e-12
+
+        )
+
+        decays = self.amp_envelope_generator.forward(decay_choice)
+
+        decaying_resonance = filtered_resonance * decays
+        decaying_resonance2 = filt_res_2 * decays
+
+        positioned_noise = self.env_and_position.forward(
+            signals=filtered_noise,
+            a=env[:, :, 0],
+            b=env[:, :, 1])
+
+        res = fft_convolve(
+            positioned_noise,
+            decaying_resonance)
+
+        res2 = fft_convolve(
+            positioned_noise,
+            decaying_resonance2
+
+        )
+
+        mixed = self.mixer.forward([res, res2], filt_crossfade_stacked)
+
+        final = self.mixer.forward([positioned_noise, mixed], overall_mix[:, :, None, :])
+        # assert final.shape == (1, n_atoms, exp.n_samples)
+
+        final = final.view(batch, -1, self.n_samples)
+        final = unit_norm(final, dim=-1)
+
+        amps = torch.abs(amp)
+        final = final * amps
+
+        final = self.scheduler.schedule(times, final)
+
+        # rm is a one-hot room choice
+        # mx is a two-element, softmax distribution
+        final = self.verb.forward(verb_params, final)
+
+        return final
+
+    def forward_f0(
             self,
             env: torch.Tensor,
             mix: torch.Tensor,
@@ -316,7 +410,6 @@ class SplattingEventGenerator(nn.Module, EventGenerator):
 
         mixed = self.mixer.forward([res, res2], filt_crossfade_stacked)
 
-
         final = self.mixer.forward([positioned_noise, mixed], overall_mix[:, :, None, :])
         # assert final.shape == (1, n_atoms, exp.n_samples)
 
@@ -336,186 +429,34 @@ class SplattingEventGenerator(nn.Module, EventGenerator):
 
     @property
     def shape_spec(self) -> ShapeSpec:
-        return dict(
-            env=(2,),
-            mix=(2,),
-            decay=(1,),
-            filter_decay=(1,),
-            f0_choice=(1,),
-            decay_choice=(1,),
-            freq_spacing=(1,),
-            noise_filter=(2,),
-            resonance_filter_1=(2,),
-            resonance_filter_2=(2,),
-            amp=(1,),
-            verb_params=(4,),
-        )
-
-
-# class Model(nn.Module):
-#     """
-#     A model representing audio with the following parameters
-#
-#     n_atoms * (env(2) + mix(2) + decay(1) + decay(1) + res_choice(1) + noise_filter(2) + res_filter(2) + res_filter2(2) + amps(1) + verb_choice(1) + verb_mix(1))
-#
-#     n_atoms * 16
-#     """
-#
-#     def __init__(self, n_resonance_octaves=64):
-#         super().__init__()
-#
-#         self.n_resonance_octaves = n_resonance_octaves
-#
-#         self.mixer = Mixer()
-#
-#         # reverb parameters
-#         self.rm: Optional[torch.Tensor] = None
-#         self.mx: Optional[torch.Tensor] = None
-#
-#         self.verb = ReverbGenerator(
-#             4, 2, exp.samplerate, exp.n_samples, norm=nn.LayerNorm(4, ), hard_choice=hard_reverb_choice)
-#
-#     # def get_parameters(self) -> torch.Tensor:
-#     #
-#     #     if self.rm is None or self.mx is None:
-#     #         standin = torch.zeros((1, n_atoms, exp.n_samples), device=self.amplitudes.device)
-#     #         _, rm, mx = self.verb.forward(self.verb_params, standin, return_parameters=True)
-#     #         self.rm = rm
-#     #         self.mx = mx
-#     #
-#     #     atoms = []
-#     #     for i in range(n_atoms):
-#     #         new_atom = [
-#     #
-#     #             # mean and std for the envelope
-#     #             self.env[0, i, 0].item(),
-#     #             self.env[0, i, 1].item(),
-#     #
-#     #             # unit value for shift
-#     #             float(torch.argmax(self.shifts[0, i], dim=-1).item() / self.shifts.shape[-1]),
-#     #
-#     #             # since the mix is two-elements and passed through softmax, the other element
-#     #             # can be derived
-#     #             self.mix[0, i, 0].item(),
-#     #
-#     #             # decay value for this atom
-#     #             self.decays[0, i, 0].item(),
-#     #
-#     #             # decay value that determines how we crossfade from one filter
-#     #             # to another
-#     #             self.filter_decays[0, i, 0].item(),
-#     #
-#     #             self.f0_choice[0, i, 0].item(),
-#     #             self.decay_choice[0, i, 0].item(),
-#     #             self.freq_spacing[0, i, 0].item(),
-#     #
-#     #             # unit value for resonance choice
-#     #             # float(torch.argmax(self.resonance_choice[0, i], dim=-1).item() / self.resonance_choice.shape[-1]),
-#     #
-#     #             # mean for noise filter
-#     #             self.noise_filter[0, i, 0].item(),
-#     #             # std for noise filter
-#     #             self.noise_filter[0, i, 1].item(),
-#     #
-#     #             # mean for resonance_filter
-#     #             self.resonance_filter[0, i, 0].item(),
-#     #             # std for resonance filter
-#     #             self.resonance_filter[0, i, 1].item(),
-#     #
-#     #             # atom amplitude
-#     #             self.amplitudes[0, i, 0].item(),
-#     #
-#     #             # unit value for reverb choice
-#     #             float(torch.argmax(self.rm[i], dim=-1).item() / self.verb.n_rooms),
-#     #
-#     #             # since the reverb mix is two elements passed through a softmax,
-#     #             # the other value can be derived
-#     #             self.mx[0, i, 0, 0].item()
-#     #
-#     #         ]
-#     #         new_atom = np.array(new_atom)
-#     #         new_atom = torch.from_numpy(new_atom)
-#     #         atoms.append(new_atom[None, ...])
-#     #
-#     #     atoms = torch.cat(atoms, dim=0)
-#     #     return atoms
-#
-#     def forward(self, x, return_unpositioned_atoms: bool = False):
-#         overall_mix = torch.softmax(self.mix, dim=-1)
-#
-#         if optimize_f0:
-#             resonances = self.resonance_generator.forward(
-#                 self.f0_choice, self.decay_choice, self.phase_offsets, self.freq_spacing)
-#         else:
-#             resonances = self.resonance_generator.forward(self.resonance_choice)
-#
-#         filtered_noise = self.noise_generator.forward(
-#             self.noise_filter[:, :, 0],
-#             (torch.abs(self.noise_filter[:, :, 1]) + 1e-12))
-#
-#         filtered_resonance, filt_res_2, filt_crossfade_stacked = self.evolving_resonance.forward(
-#             resonances=resonances,
-#             decays=self.filter_decays,
-#             start_filter_means=torch.zeros_like(self.resonance_filter[:, :, 0]),
-#             start_filter_stds=torch.abs(self.resonance_filter[:, :, 1]) + 1e-12,
-#             end_filter_means=torch.zeros_like(self.resonance_filter2[:, :, 0]),
-#             end_filter_stds=torch.abs(self.resonance_filter2[:, :, 1]) + 1e-12
-#         )
-#
-#         decays = self.amp_envelope_generator.forward(self.decays)
-#
-#         decaying_resonance = filtered_resonance * decays
-#         decaying_resonance2 = filt_res_2 * decays
-#
-#         if return_unpositioned_atoms:
-#             positioned_noise = self.env_and_position.forward(
-#                 signals=filtered_noise,
-#                 a=self.env[:, :, 0],
-#                 b=self.env[:, :, 1],
-#                 adjustment=None,
-#                 unit_shifts=None)
-#         else:
-#             positioned_noise = self.env_and_position.forward(
-#                 signals=filtered_noise,
-#                 a=self.env[:, :, 0],
-#                 b=self.env[:, :, 1],
-#                 adjustment=self.shifts if softmax_positioning else None,
-#                 unit_shifts=self.unit_shifts if use_unit_shifts else None)
-#
-#         res = fft_convolve(
-#             positioned_noise,
-#             decaying_resonance)
-#
-#         res2 = fft_convolve(
-#             positioned_noise,
-#             decaying_resonance2
-#         )
-#         # stacked = torch.cat([res[..., None], res2[..., None]], dim=-1)
-#         # mixed = torch.sum(filt_crossfade_stacked * stacked, dim=-1)
-#
-#         mixed = self.mixer.forward([res, res2], filt_crossfade_stacked)
-#
-#         # stacked = torch.cat([
-#         #     positioned_noise[..., None],
-#         #     mixed[..., None]], dim=-1)
-#
-#         # # TODO: This is a dot product
-#         # final = torch.sum(stacked * overall_mix[:, :, None, :], dim=-1)
-#
-#         final = self.mixer.forward([positioned_noise, mixed], overall_mix[:, :, None, :])
-#         assert final.shape == (1, n_atoms, exp.n_samples)
-#
-#         final = final.view(1, n_atoms, exp.n_samples)
-#         final = unit_norm(final, dim=-1)
-#
-#         amps = torch.abs(self.amplitudes)
-#         final = final * amps
-#
-#         # rm is a one-hot room choice
-#         # mx is a two-element, softmax distribution
-#         final, rm, mx = self.verb.forward(self.verb_params, final, return_parameters=True)
-#
-#         self.rm = rm
-#         self.mx = mx
-#
-#         return final, amps
+        if not self.wavetable_resonance:
+            return dict(
+                env=(2,),
+                mix=(2,),
+                decay=(1,),
+                filter_decay=(1,),
+                f0_choice=(1,),
+                decay_choice=(1,),
+                freq_spacing=(1,),
+                noise_filter=(2,),
+                resonance_filter_1=(2,),
+                resonance_filter_2=(2,),
+                amp=(1,),
+                verb_params=(4,),
+            )
+        else:
+            return dict(
+                env=(2,),
+                mix=(2,),
+                # decay=(1,),
+                filter_decay=(1,),
+                # f0_choice=(1,),
+                decay_choice=(1,),
+                # freq_spacing=(1,),
+                resonance_choice=(4096,),
+                noise_filter=(2,),
+                resonance_filter_1=(2,),
+                resonance_filter_2=(2,),
+                amp=(1,),
+                verb_params=(4,),
+            )

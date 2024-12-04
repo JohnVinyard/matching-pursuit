@@ -1,16 +1,28 @@
 import torch
 from torch.optim import Adam
-
+from matplotlib import pyplot as plt
 from conjure import LmdbCollection, serve_conjure, loggers
 from torch import nn
 
 from conjure.logger import encode_audio
-from data import AudioIterator
-from modules import unit_norm, sparsify2, stft, iterative_loss
-from modules.transfer import fft_convolve
+from data import AudioIterator, get_one_audio_segment
+from modules import unit_norm, sparsify2, stft, iterative_loss, fft_frequency_decompose, gammatone_filter_bank, \
+    max_norm, HyperNetworkLayer
+from modules.latent_loss import covariance
+from modules.overlap_add import overlap_add
+from modules.phase import windowed_audio, morlet_filter_bank
+from modules.transfer import fft_convolve, fft_shift
 from modules.matchingpursuit import dictionary_learning_step, sparse_code
+from torch.nn import functional as F
+from util import device, playable
+import numpy as np
 
-from util import device
+import matplotlib
+
+from util.music import musical_scale
+from util.playable import listen_to_sound
+
+matplotlib.use('Qt5Agg')
 
 
 class MatchingPursuit(nn.Module):
@@ -89,4 +101,38 @@ def train():
 
 
 if __name__ == '__main__':
-    train()
+    # train()
+
+    n_frames = 256
+    control_dim = 16
+
+    latent_dim = 32
+
+    fade_template = torch.linspace(0, 1, n_frames)
+
+    event_latent = torch.zeros(1, 1, latent_dim).uniform_(-0.01, 0.01)
+
+
+    to_fade = torch.zeros(latent_dim, control_dim).uniform_(-1, 1)
+    hyper = HyperNetworkLayer(latent_dim, 64, layer_in_channels=16, layer_out_channels=512)
+
+
+    control_plane = torch.zeros(1, n_frames, control_dim).bernoulli_(0.001)
+    fade = torch.softmax(event_latent @ to_fade, dim=-1) * 40
+
+    fade = fade_template.view(1, 1, 1, n_frames) ** fade.view(1, 1, control_dim, 1)
+    plt.matshow(fade.view(control_dim, n_frames))
+    plt.show()
+
+    delays = torch.eye(n_frames)
+    fades = fft_convolve(fade[..., None].repeat(1, 1, 1, 1, n_frames), delays.view(1, 1, 1, n_frames, n_frames))
+    plt.matshow(fades[0, 0, 0, :, :])
+    plt.show()
+
+    w, forward = hyper.forward(event_latent)
+    sig = forward(control_plane)
+
+    windowed = sig.view(1, 1, n_frames, 512)
+    signal = overlap_add(windowed, apply_window=True)
+    p = playable(signal, 22050, normalize=True)
+    listen_to_sound(p)

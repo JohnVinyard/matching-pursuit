@@ -465,10 +465,12 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
         # those impulses
         resonance = self.r.forward(resonances)
         res_filters = self.n.forward(res_filter)
+
         res_filters = torch.cat([
             res_filters,
             torch.zeros(*res_filters.shape[:-1], resonance.shape[-1] - res_filters.shape[-1], device=res_filters.device)
         ], dim=-1)
+
         resonance = fft_convolve(resonance, res_filters)
 
         # describe how we interpolate between different

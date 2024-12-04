@@ -20,6 +20,7 @@ def project_and_limit_norm(
 
     # project
     x = forward(vector)
+    return x
 
     # TODO: clamp norm should be a utility that lives in normalization
     # find the norm of the projection
