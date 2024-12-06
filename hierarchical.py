@@ -34,7 +34,6 @@ class OverfitHierarchicalEvents(nn.Module):
         self.samplerate = samplerate
         self.n_events = n_events
         self.context_dim = context_dim
-        # self.n_layers = n_layers
 
         event_levels = int(np.log2(n_events))
         total_levels = int(np.log2(n_samples))
@@ -42,24 +41,6 @@ class OverfitHierarchicalEvents(nn.Module):
         self.event_levels = event_levels
 
         starting_time_bits = total_levels - event_levels
-
-        # event_layers = event_levels - n_layers
-        # base_events = int(2 ** (event_levels - event_layers))
-
-        # print(event_levels, event_layers, base_events)
-
-        # layers = self.total_levels - self.n_layers
-        # base_scheduling_bits = layers
-
-        # print(
-        #     dict(
-        #         n_samples=n_samples,
-        #         n_layers=n_layers,
-        #         total_levels=self.total_levels,
-        #         layers=layers,
-        #         base_scheduling_bits=base_scheduling_bits
-        #     )
-        # )
 
         self.event_generator = SplattingEventGenerator(
             n_samples=n_samples,
@@ -80,9 +61,9 @@ class OverfitHierarchicalEvents(nn.Module):
             {str(i): torch.zeros(1, 2, self.context_dim).uniform_(-1, 1) for i in range(event_levels - 1)})
 
         self.times = nn.Parameter(
-            torch.zeros(1, n_events, starting_time_bits + 1, 2).uniform_(-1, 1))
+            torch.zeros(1, 2, total_levels, 2).uniform_(-1, 1))
         self.hierarchical_time_vectors = nn.ParameterDict(
-            {str(i): torch.zeros(1, n_events, 1, 2).uniform_(-1, 1) for i in range(event_levels - 1)})
+            {str(i): torch.zeros(1, (2 ** (i + 2)), total_levels, 2).uniform_(-1, 1) for i in range(event_levels - 1)})
 
         self.apply(initializer)
 
@@ -99,9 +80,10 @@ class OverfitHierarchicalEvents(nn.Module):
                 events.view(1, -1, 1, self.context_dim) \
                 + self.hierarchical_event_vectors[str(i)].view(1, 1, 2, self.context_dim)
             events = events.view(1, -1, self.context_dim)
-            times = torch.cat([times, self.hierarchical_time_vectors[str(i)]], dim=2)
-
-        print(events.shape, times.shape)
+            batch, n_events, n_bits, _ = times.shape
+            times = times.view(batch, n_events, 1, n_bits, 2).repeat(1, 1, 2, 1, 1).view(batch, n_events * 2, n_bits, 2)
+            times = times + self.hierarchical_time_vectors[str(i)]
+            # times = torch.cat([times, self.hierarchical_time_vectors[str(i)]], dim=2)
 
         params = self.transform.forward(events)
         events = self.event_generator.forward(**params, times=times)
@@ -168,7 +150,7 @@ def overfit():
 
         # loss = iterative_loss(target, recon, loss_transform, ratio_loss=True) #+ loss_model.forward(target, recon_summed)
 
-        loss = loss_model.forward(target, recon_summed)
+        loss = loss_model.noise_loss(target, recon_summed)
         # loss = reconstruction_loss(target, recon_summed)
         sparsity_loss = torch.abs(model.event_vectors).sum()
         loss = loss + sparsity_loss
