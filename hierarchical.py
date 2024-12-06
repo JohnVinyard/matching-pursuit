@@ -21,26 +21,45 @@ from util.music import musical_scale_hz
 
 initializer = make_initializer(0.05)
 
+
 class OverfitHierarchicalEvents(nn.Module):
     def __init__(
             self,
             n_samples: int,
             samplerate: int,
             n_events: int,
-            context_dim: int,
-            n_layers: int):
-
+            context_dim: int):
         super().__init__()
         self.n_samples = n_samples
         self.samplerate = samplerate
         self.n_events = n_events
         self.context_dim = context_dim
-        self.n_layers = n_layers
+        # self.n_layers = n_layers
 
-        self.total_levels = int(np.log2(n_samples))
+        event_levels = int(np.log2(n_events))
+        total_levels = int(np.log2(n_samples))
 
-        layers = self.total_levels - self.n_layers
-        base_scheduling_bits = layers
+        self.event_levels = event_levels
+
+        starting_time_bits = total_levels - event_levels
+
+        # event_layers = event_levels - n_layers
+        # base_events = int(2 ** (event_levels - event_layers))
+
+        # print(event_levels, event_layers, base_events)
+
+        # layers = self.total_levels - self.n_layers
+        # base_scheduling_bits = layers
+
+        # print(
+        #     dict(
+        #         n_samples=n_samples,
+        #         n_layers=n_layers,
+        #         total_levels=self.total_levels,
+        #         layers=layers,
+        #         base_scheduling_bits=base_scheduling_bits
+        #     )
+        # )
 
         self.event_generator = SplattingEventGenerator(
             n_samples=n_samples,
@@ -56,8 +75,14 @@ class OverfitHierarchicalEvents(nn.Module):
 
         self.event_time_dim = int(np.log2(self.n_samples))
 
-        self.event_vectors = nn.Parameter(torch.zeros(1, n_events, self.context_dim).uniform_(-1, 1))
-        self.times = nn.Parameter(torch.zeros(1, n_events, self.event_time_dim, 2).uniform_(-1, 1))
+        self.event_vectors = nn.Parameter(torch.zeros(1, 2, self.context_dim).uniform_(-1, 1))
+        self.hierarchical_event_vectors = nn.ParameterDict(
+            {str(i): torch.zeros(1, 2, self.context_dim).uniform_(-1, 1) for i in range(event_levels - 1)})
+
+        self.times = nn.Parameter(
+            torch.zeros(1, n_events, starting_time_bits + 1, 2).uniform_(-1, 1))
+        self.hierarchical_time_vectors = nn.ParameterDict(
+            {str(i): torch.zeros(1, n_events, 1, 2).uniform_(-1, 1) for i in range(event_levels - 1)})
 
         self.apply(initializer)
 
@@ -66,30 +91,21 @@ class OverfitHierarchicalEvents(nn.Module):
         return unit_norm(self.atoms, dim=-1)
 
     def forward(self) -> torch.Tensor:
+        events = self.event_vectors.clone()
+        times = self.times.clone()
 
+        for i in range(self.event_levels - 1):
+            events = \
+                events.view(1, -1, 1, self.context_dim) \
+                + self.hierarchical_event_vectors[str(i)].view(1, 1, 2, self.context_dim)
+            events = events.view(1, -1, self.context_dim)
+            times = torch.cat([times, self.hierarchical_time_vectors[str(i)]], dim=2)
 
-        params = self.transform.forward(self.event_vectors)
+        print(events.shape, times.shape)
 
-        events = self.event_generator.forward(**params, times=self.times)
-
-        # first, a hard choice of atom for this event, and pad to the correct size
-        # if self.soft:
-        #     ac = torch.softmax(self.atom_choice, dim=-1) @ self.normalized_atoms
-        # else:
-        #     ac = sparse_softmax(self.atom_choice, dim=-1, normalize=True) @ self.normalized_atoms
-        #
-        # ac = ac.view(-1, self.n_events, self.atom_samples)
-        # ac = F.pad(ac, (0, self.n_samples - self.atom_samples))
-
-        # apply amplitudes to the unit norm atoms
-        # amps = self.amplitudes ** 2
-        # with_amps = ac * amps
-
-        # produce the times from the hierarchical time vectors
-        # times = hierarchical_dirac(self.times, soft=self.soft)
-        # scheduled = fft_convolve(with_amps, times)
+        params = self.transform.forward(events)
+        events = self.event_generator.forward(**params, times=times)
         return events
-
 
 
 def loss_transform(x: torch.Tensor) -> torch.Tensor:
@@ -127,7 +143,6 @@ def overfit():
         encode_audio,
         collection)
 
-
     audio = get_one_audio_segment(n_samples, samplerate, device='cpu')
     target = audio.view(1, 1, n_samples).to(device)
 
@@ -139,10 +154,8 @@ def overfit():
     ], port=9999, n_workers=1)
     # end proposed helper function
 
-
-
     model = OverfitHierarchicalEvents(
-        n_samples, samplerate, n_events, context_dim=event_dim, n_layers=6).to(device)
+        n_samples, samplerate, n_events, context_dim=event_dim).to(device)
     optim = Adam(model.parameters(), lr=1e-3)
     loss_model = CorrelationLoss(n_elements=512).to(device)
 
@@ -155,10 +168,10 @@ def overfit():
 
         # loss = iterative_loss(target, recon, loss_transform, ratio_loss=True) #+ loss_model.forward(target, recon_summed)
 
-        loss = loss_model.noise_loss(target, recon_summed)
+        loss = loss_model.forward(target, recon_summed)
         # loss = reconstruction_loss(target, recon_summed)
-        # sparsity_loss = torch.abs(model.event_vectors).sum()
-        # loss = loss + sparsity_loss
+        sparsity_loss = torch.abs(model.event_vectors).sum()
+        loss = loss + sparsity_loss
 
         loss.backward()
         optim.step()

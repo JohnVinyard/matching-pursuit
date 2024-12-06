@@ -65,7 +65,7 @@ class CorrelationLoss(nn.Module):
         return norm_loss + noise_loss
 
 
-def forward(self, target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
+    def forward(self, target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
         batch, _, time = target.shape
 
         t_spec = stft_transform(target).reshape(batch, -1)
