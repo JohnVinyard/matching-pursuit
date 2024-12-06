@@ -2,7 +2,7 @@ from .unet import UNet
 from .decompose import fft_frequency_decompose, fft_frequency_recompose
 from .linear import LinearOutputStack
 from .stft import stft, log_stft, stft_relative_phase, short_time_transform
-from .pos_encode import pos_encoded, LearnedPosEncodings, hard_pos_encoding
+from .pos_encode import pos_encoded, LearnedPosEncodings, hard_pos_encoding, positional_encoding
 from .transformer import ForwardBlock, FourierMixer, Transformer
 from .reverb import NeuralReverb, ReverbGenerator
 from .pif import AuditoryImage

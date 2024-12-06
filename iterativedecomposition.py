@@ -26,7 +26,7 @@ import numpy as np
 n_samples = 2 ** 16
 samples_per_event = 2048
 n_events = n_samples // samples_per_event
-context_dim = 16
+context_dim = 32
 
 # the samplerate, in hz, of the audio signal
 samplerate = 22050
@@ -124,14 +124,14 @@ def iterative_loss2(
         for size, band in residual.items():
             r = recon[size][:, i: i + 1, :]
 
-            t_norm = torch.norm(band)
+            t_norm = torch.norm(band, dim=-1, keepdim=True)
 
-            residual = band - r
+            res = band - r
 
-            new_norm = torch.norm(residual)
-            residual[size] = residual
+            new_norm = torch.norm(res, dim=-1, keepdim=True)
+            residual[size] = res
 
-            loss = loss + (new_norm / t_norm)
+            loss = loss + (new_norm / t_norm).sum()
 
     return loss
 
@@ -403,7 +403,7 @@ def train_and_monitor(
 
         disc = Discriminator(disc_type=disc_type).to(device)
 
-        loss_model = CorrelationLoss(n_elements=512).to(device)
+        # loss_model = CorrelationLoss(n_elements=512).to(device)
 
         if save_and_load_weights:
             # KLUDGE: Unless the same command line arguments are used, this will
@@ -440,6 +440,8 @@ def train_and_monitor(
             print(target.shape, recon.shape)
 
             loss = iterative_loss(target, recon, loss_transform)
+            # loss = full_iterative_loss(target, recon)
+
             loss = loss + (torch.abs(encoded).sum() * 1e-4)
 
             mask = torch.zeros(target.shape[0], n_events, 1, device=recon.device).bernoulli_(p=0.5)
@@ -449,8 +451,7 @@ def train_and_monitor(
             print('G', d_loss.item())
             loss = loss + (d_loss * 100)
 
-            loss = loss + loss_model.forward(target, recon_summed)
-
+            # loss = loss + loss_model.forward(target, recon_summed)
             loss.backward()
             optim.step()
             print(i, loss.item())

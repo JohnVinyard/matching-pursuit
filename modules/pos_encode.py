@@ -5,6 +5,24 @@ import numpy as np
 
 # from modules.stft import morlet_filter_bank
 
+def positional_encoding(
+        sequence_length: int,
+        n_freqs: int,
+        geometric_freq_spacing: bool = False,
+        geometric_freq_decay: bool = False):
+
+    time = torch.linspace(-np.pi, np.pi, sequence_length)
+    freqs = torch.linspace(1, sequence_length // 2, n_freqs)
+    if geometric_freq_spacing:
+        freqs = freqs ** 2
+
+    scaling = torch.linspace(1, 1e-8, n_freqs)
+    if geometric_freq_decay:
+        scaling = scaling ** 2
+
+    x = torch.sin(time[None, :] * freqs[:, None]) * scaling[:, None]
+    return x
+
 def hard_pos_encoding(n_samples, device, operator=torch.eq):
     x = torch.arange(0, n_samples, device=device)
     n_bands = int(np.log2(n_samples))

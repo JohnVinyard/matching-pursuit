@@ -1,3 +1,5 @@
+from typing import Union, Literal
+
 import torch
 from torch.optim import Adam
 from matplotlib import pyplot as plt
@@ -37,12 +39,14 @@ class MatchingPursuit(nn.Module):
 
     @property
     def normalized_atoms(self):
-        a = torch.cat([self.atoms, torch.zeros(1, self.n_atoms, self.n_samples - self.atom_samples, device=self.atoms.device)], dim=-1)
+        a = torch.cat(
+            [self.atoms, torch.zeros(1, self.n_atoms, self.n_samples - self.atom_samples, device=self.atoms.device)],
+            dim=-1)
 
         return a
 
     def forward(self, audio: torch.Tensor) -> torch.Tensor:
-        batch, _ , time = audio.shape
+        batch, _, time = audio.shape
 
         residual = audio
 
@@ -64,6 +68,7 @@ class MatchingPursuit(nn.Module):
 def transform(x: torch.Tensor) -> torch.Tensor:
     spec = stft(x, 2048, 256, pad=True)
     return spec
+
 
 def train():
     collection = LmdbCollection(path='mp')
@@ -100,39 +105,70 @@ def train():
         optim.step()
 
 
+
+def positional_encoding(
+        sequence_length: int,
+        n_freqs: int,
+        geometric_freq_spacing: bool = False,
+        geometric_freq_decay: bool = False):
+
+    time = torch.linspace(-np.pi, np.pi, sequence_length)
+    freqs = torch.linspace(1, sequence_length // 2, n_freqs)
+    if geometric_freq_spacing:
+        freqs = freqs ** 2
+
+    scaling = torch.linspace(1, 1e-8, n_freqs)
+    if geometric_freq_decay:
+        scaling = scaling ** 2
+
+    x = torch.sin(time[None, :] * freqs[:, None]) * scaling[:, None]
+    return x
+
+
 if __name__ == '__main__':
     # train()
 
-    n_frames = 256
-    control_dim = 16
+    # n_frames = 256
+    # control_dim = 16
+    #
+    # latent_dim = 32
+    #
+    # fade_template = torch.linspace(0, 1, n_frames)
+    #
+    # event_latent = torch.zeros(1, 1, latent_dim).uniform_(-0.01, 0.01)
+    #
+    # to_fade = torch.zeros(latent_dim, control_dim).uniform_(-1, 1)
+    # hyper = HyperNetworkLayer(latent_dim, 64, layer_in_channels=16, layer_out_channels=512)
+    #
+    # control_plane = torch.zeros(1, n_frames, control_dim).bernoulli_(0.001)
+    # fade =  24 + (torch.softmax(event_latent @ to_fade, dim=-1) * 100)
+    #
+    # fade = fade_template.view(1, 1, 1, n_frames) ** fade.view(1, 1, control_dim, 1)
+    #
+    # delays = torch.eye(n_frames)
+    # fades = fft_convolve(fade[..., None].repeat(1, 1, 1, 1, n_frames), delays.view(1, 1, 1, n_frames, n_frames))
+    #
+    # orig_control_plane = control_plane
+    #
+    # # TODO: Create summaries of the past for each frame
+    # control_plane = control_plane.permute(0, 2, 1).view(1, 1, 16, 256, 1)
+    # control_plane = fades * control_plane
+    # control_plane = torch.sum(control_plane, dim=-2)
+    # control_plane = control_plane.view(1, 16, 256).permute(0, 2, 1)
+    #
+    # w, forward = hyper.forward(event_latent)
+    # sig = forward(control_plane + orig_control_plane)
+    #
+    # windowed = sig.view(1, 1, n_frames, 512)
+    # signal = overlap_add(windowed, apply_window=True)
+    # p = playable(signal, 22050, normalize=True)
+    # listen_to_sound(p)
 
-    latent_dim = 32
+    times = torch.zeros((4, 16, 256)).bernoulli_(p=0.01)
 
-    fade_template = torch.linspace(0, 1, n_frames)
+    pe = positional_encoding(256, n_freqs=32)
 
-    event_latent = torch.zeros(1, 1, latent_dim).uniform_(-0.01, 0.01)
+    x = times @ pe.T
 
-
-    to_fade = torch.zeros(latent_dim, control_dim).uniform_(-1, 1)
-    hyper = HyperNetworkLayer(latent_dim, 64, layer_in_channels=16, layer_out_channels=512)
-
-
-    control_plane = torch.zeros(1, n_frames, control_dim).bernoulli_(0.001)
-    fade = torch.softmax(event_latent @ to_fade, dim=-1) * 40
-
-    fade = fade_template.view(1, 1, 1, n_frames) ** fade.view(1, 1, control_dim, 1)
-    plt.matshow(fade.view(control_dim, n_frames))
+    plt.matshow(x[0])
     plt.show()
-
-    delays = torch.eye(n_frames)
-    fades = fft_convolve(fade[..., None].repeat(1, 1, 1, 1, n_frames), delays.view(1, 1, 1, n_frames, n_frames))
-    plt.matshow(fades[0, 0, 0, :, :])
-    plt.show()
-
-    w, forward = hyper.forward(event_latent)
-    sig = forward(control_plane)
-
-    windowed = sig.view(1, 1, n_frames, 512)
-    signal = overlap_add(windowed, apply_window=True)
-    p = playable(signal, 22050, normalize=True)
-    listen_to_sound(p)
