@@ -78,10 +78,14 @@ class OverfitHierarchicalEvents(nn.Module):
         times = self.times.clone()
 
         for i in range(self.event_levels - 1):
+            # TODO: consider bringing back scaling as we approach the leaves of the tree
             events = \
                 events.view(1, -1, 1, self.context_dim) \
                 + self.hierarchical_event_vectors[str(i)].view(1, 1, 2, self.context_dim)
             events = events.view(1, -1, self.context_dim)
+
+            # TODO: Consider masking lower bits as we approach the leaves of the tree, so that
+            # new levels can only _refine_, and not completely move entire branches
             batch, n_events, n_bits, _ = times.shape
             times = times.view(batch, n_events, 1, n_bits, 2).repeat(1, 1, 2, 1, 1).view(batch, n_events * 2, n_bits, 2)
             times = times + self.hierarchical_time_vectors[str(i)]
@@ -116,7 +120,7 @@ def to_numpy(x: torch.Tensor):
 
 
 def overfit():
-    n_samples = 2 ** 15
+    n_samples = 2 ** 16
     samplerate = 22050
     n_events = 64
     event_dim = 16
@@ -174,12 +178,13 @@ def overfit():
         recon_summed = torch.sum(recon, dim=1, keepdim=True)
         recon_audio(max_norm(recon_summed))
 
-        # loss = iterative_loss(target, recon, loss_transform, ratio_loss=True) #+ loss_model.forward(target, recon_summed)
+        loss = iterative_loss(target, recon, loss_transform, ratio_loss=False) #+ loss_model.forward(target, recon_summed)
 
-        loss = loss_model.noise_loss(target, recon_summed)
+        # loss = loss_model.forward(target, recon_summed)
+        # loss = loss_model.noise_loss(target, recon_summed)
         # loss = reconstruction_loss(target, recon_summed)
-        sparsity_loss = torch.abs(model.event_vectors).sum()
-        loss = loss + sparsity_loss
+        # sparsity_loss = torch.abs(model.event_vectors).sum()
+        # loss = loss + sparsity_loss
 
         loss.backward()
         optim.step()
