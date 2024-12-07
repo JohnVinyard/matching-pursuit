@@ -15,7 +15,7 @@ class OverfitRawAudio(nn.Module):
         return self.audio.data.cpu().numpy()
 
     def forward(self, _):
-        output = self.audio
+        output = self.audio.clone()
         if self.normalize:
             output = max_norm(output, dim=-1)
         return output

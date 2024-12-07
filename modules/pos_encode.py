@@ -9,14 +9,16 @@ def positional_encoding(
         sequence_length: int,
         n_freqs: int,
         geometric_freq_spacing: bool = False,
-        geometric_freq_decay: bool = False):
+        geometric_freq_decay: bool = False,
+        device = None):
 
-    time = torch.linspace(-np.pi, np.pi, sequence_length)
-    freqs = torch.linspace(1, sequence_length // 2, n_freqs)
+    time = torch.linspace(-np.pi, np.pi, sequence_length, device=device)
+    freqs = torch.linspace(1, sequence_length // 2, n_freqs, device=device)
+
     if geometric_freq_spacing:
         freqs = freqs ** 2
 
-    scaling = torch.linspace(1, 1e-8, n_freqs)
+    scaling = torch.linspace(1, 1e-8, n_freqs, device=device)
     if geometric_freq_decay:
         scaling = scaling ** 2
 

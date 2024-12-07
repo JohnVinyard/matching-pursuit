@@ -16,7 +16,7 @@ All training and model code can be
 
 Our goal is to decompose a musical audio signal into a small number of "events", roughly analogous to a musical score,
 but carrying information about the resonant characteristics of the instrument being played, and the room it is being
-played in.  Each event is represented by a low-dimensional (16, in this case) vector and a time at which the event
+played in.  Each event is represented by a low-dimensional (32, in this case) vector and a time at which the event
 occurs in the "score".
 
 We seek to achieve this goal by iteratively guessing at the next-most informative event, removing it from the original
@@ -107,24 +107,14 @@ If you'd like to cite this article, you can use the following [BibTeX block](htt
 
 """[markdown]
 
-# Sponsor this Work
-
-If this work seems interesting and worthwhile, and you want to see where it leads, 
-[sponsor me](https://github.com/sponsors/JohnVinyard) on GitHub and I'll keep chasing this down.
-
-"""
-
-"""[markdown]
-
 # Event Scatterplot
 
 Here is a scatterplot mapping events from four different audio segments onto a 2D plane using t-SNE.  
-Each 16-dimensional event vector encodes information about attack, resonance, and room impulse response.
+Each 32-dimensional event vector encodes information about attack, resonance, and room impulse response.
 
 """
 
 # large_scatterplot
-
 
 """[markdown]
 
@@ -542,7 +532,7 @@ n_samples = 2 ** 16
 samples_per_event = 2048
 n_events = n_samples // samples_per_event
 
-context_dim = 16
+context_dim = 32
 
 # the samplerate, in hz, of the audio signal
 samplerate = 22050
@@ -570,6 +560,7 @@ from data import get_one_audio_segment, AudioIterator
 from iterativedecomposition import Model as IterativeDecompositionModel
 from modules.eventgenerators.overfitresonance import OverfitResonanceModel
 
+
 remote_collection_name = 'iterative-decomposition-v3'
 
 
@@ -586,7 +577,6 @@ def process_events(
         vectors: torch.Tensor,
         times: torch.Tensor,
         total_seconds: float) -> Tuple:
-
     positions = torch.argmax(times, dim=-1, keepdim=True) / times.shape[-1]
     times = [float(x) for x in (positions * total_seconds).view(-1).data.cpu().numpy()]
 
@@ -606,7 +596,7 @@ def process_events(
     return points, times, colors
 
 
-def load_model() -> nn.Module:
+def load_model(wavetable_device: str = 'cpu') -> nn.Module:
     hidden_channels = 512
 
     model = IterativeDecompositionModel(
@@ -627,11 +617,11 @@ def load_model() -> nn.Module:
             n_frames=n_frames,
             samplerate=samplerate,
             hidden_channels=hidden_channels,
-            wavetable_device='cpu',
+            wavetable_device=wavetable_device,
             fine_positioning=True
         ))
 
-    with open('iterativedecomposition2.dat', 'rb') as f:
+    with open('iterativedecomposition4.dat', 'rb') as f:
         model.load_state_dict(torch.load(f, map_location=lambda storage, loc: storage))
 
     print('Total parameters', count_parameters(model))
@@ -639,6 +629,7 @@ def load_model() -> nn.Module:
     print('Decoder parameters', count_parameters(model.resonance))
 
     return model
+
 
 def scatterplot_section(logger: Logger) -> ScatterPlotComponent:
     model = load_model()
@@ -656,12 +647,10 @@ def scatterplot_section(logger: Logger) -> ScatterPlotComponent:
     total_seconds = n_samples / samplerate
 
     points, times, colors = process_events(vectors, times, total_seconds)
-    print(len(points), len(times), len(colors))
 
     events = events.view(-1, n_samples)
 
     events = {f'event{i}': events[i: i + 1, :] for i in range(events.shape[0])}
-    print(len(events))
 
     scatterplot_srcs = []
 
@@ -684,37 +673,6 @@ def scatterplot_section(logger: Logger) -> ScatterPlotComponent:
 
 
 def reconstruction_section(logger: Logger) -> CompositeComponent:
-    # hidden_channels = 512
-    #
-    # model = IterativeDecompositionModel(
-    #     in_channels=1024,
-    #     hidden_channels=hidden_channels,
-    #     resonance_model=OverfitResonanceModel(
-    #         n_noise_filters=32,
-    #         noise_expressivity=8,
-    #         noise_filter_samples=128,
-    #         noise_deformations=16,
-    #         instr_expressivity=8,
-    #         n_events=1,
-    #         n_resonances=4096,
-    #         n_envelopes=256,
-    #         n_decays=32,
-    #         n_deformations=32,
-    #         n_samples=n_samples,
-    #         n_frames=n_frames,
-    #         samplerate=samplerate,
-    #         hidden_channels=hidden_channels,
-    #         wavetable_device='cpu',
-    #         fine_positioning=True
-    #     ))
-    #
-    # with open('iterativedecomposition2.dat', 'rb') as f:
-    #     model.load_state_dict(torch.load(f, map_location=lambda storage, loc: storage))
-    #
-    # print('Total parameters', count_parameters(model))
-    # print('Encoder parameters', count_parameters(model.encoder))
-    # print('Decoder parameters', count_parameters(model.resonance))
-
     model = load_model()
 
     # get a random audio segment
@@ -742,7 +700,7 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
     for k, v in events.items():
         _, e = logger.log_sound(k, v)
         scatterplot_srcs.append(e.public_uri)
-        event_components[k] = AudioComponent(e.public_uri, height=35, controls=False)
+        event_components[k] = AudioComponent(e.public_uri, height=25, controls=False)
 
     scatterplot_component = ScatterPlotComponent(
         scatterplot_srcs,
@@ -753,7 +711,7 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
         times=times,
         colors=colors, )
 
-    _, event_vectors = logger.log_matrix('latents', vectors[0].T)
+    _, event_vectors = logger.log_matrix_with_cmap('latents', vectors[0].T, cmap='hot')
     latents = ImageComponent(event_vectors.public_uri, height=200, title='latent event vectors')
 
     composite = CompositeComponent(
@@ -801,21 +759,12 @@ def demo_page_dict() -> Dict[str, any]:
     example_4 = reconstruction_section(logger)
     example_5 = reconstruction_section(logger)
 
-
-    # @numpy_conjure(remote)
-    # def fetch_audio(url: str, start_sample: int) -> np.ndarray:
-    #     return get_audio_segment(
-    #         url,
-    #         target_samplerate=samplerate,
-    #         start_sample=start_sample,
-    #         duration_samples=n_samples)
-
     citation = CitationComponent(
         tag='johnvinyarditerativedecompositionv3',
         author='Vinyard, John',
         url='https://blog.cochlea.xyz/iterative-decomposition-v3.html',
         header='Iterative Decomposition V3',
-        year='2024'
+        year='2024',
     )
 
     return dict(

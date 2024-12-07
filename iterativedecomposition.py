@@ -8,7 +8,7 @@ from torch.optim import Adam
 from conjure import LmdbCollection, serve_conjure, loggers, SupportedContentType, NumpySerializer, NumpyDeserializer
 from data import AudioIterator
 from modules import stft, sparsify, sparsify_vectors, iterative_loss, max_norm, flattened_multiband_spectrogram, \
-    DownsamplingDiscriminator, sparse_softmax, fft_frequency_decompose
+    DownsamplingDiscriminator, sparse_softmax, fft_frequency_decompose, positional_encoding
 from modules.anticausal import AntiCausalAnalysis
 from modules.eventgenerators.convimpulse import ConvImpulseEventGenerator
 from modules.eventgenerators.generator import EventGenerator
@@ -215,6 +215,12 @@ class Model(nn.Module):
         )
 
         self.apply(initializer)
+
+    def embed_events(self, vectors: torch.Tensor, times: torch.Tensor) -> torch.Tensor:
+        pe = positional_encoding(sequence_length=n_frames, n_freqs=context_dim, device=vectors.device)
+        times = times @ pe.T
+        embeddings = torch.cat([vectors, times], dim=-1)
+        return embeddings
 
     def encode(self, transformed: torch.Tensor):
         n_events = 1
@@ -431,6 +437,7 @@ def train_and_monitor(
             target = item.view(batch_size, 1, n_samples).to(device)
             orig_audio(target)
             recon, encoded, scheduling = model.iterative(target)
+
             recon_summed = torch.sum(recon, dim=1, keepdim=True)
             recon_audio(max_norm(recon_summed))
 
