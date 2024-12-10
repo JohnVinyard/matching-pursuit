@@ -93,6 +93,7 @@ The decoder side of the model is very interesting, and all sorts of physical mod
 better, more realistic, and sparser renderings of the audio.
 
 """
+from torch.optim import Adam
 
 """[markdown]
 
@@ -560,7 +561,6 @@ from data import get_one_audio_segment, AudioIterator
 from iterativedecomposition import Model as IterativeDecompositionModel
 from modules.eventgenerators.overfitresonance import OverfitResonanceModel
 
-
 remote_collection_name = 'iterative-decomposition-v3'
 
 
@@ -672,12 +672,36 @@ def scatterplot_section(logger: Logger) -> ScatterPlotComponent:
     return scatterplot_component
 
 
+def generate_events(model: nn.Module, events: torch.Tensor, times: torch.Tensor) -> torch.Tensor:
+    pass
+
+def overfit_events(model: nn.Module, events: torch.Tensor, times: torch.Tensor) -> torch.Tensor:
+
+    class OverfitModel(nn.Module):
+
+        def __init__(self):
+            super().__init__()
+
+        def forward(self):
+            pass
+
+    model = OverfitModel()
+    optim = Adam(model.parameters(), lr=1e-3)
+
+
+
 def reconstruction_section(logger: Logger) -> CompositeComponent:
     model = load_model()
 
     # get a random audio segment
     samples = get_one_audio_segment(n_samples, samplerate, device='cpu').view(1, 1, n_samples)
     events, vectors, times = model.iterative(samples)
+
+    # generation_result = torch.cat(
+    #     [model.generate(vectors[:, i:i + 1, :], times[:, i:i + 1, :]) for i in range(vectors.shape[1])], dim=1)
+    # print(generation_result.shape)
+    # generation_result = torch.sum(generation_result, dim=1, keepdim=True)
+    # print(generation_result.shape)
 
     total_seconds = n_samples / samplerate
 
@@ -768,7 +792,7 @@ def demo_page_dict() -> Dict[str, any]:
     )
 
     return dict(
-        large_scatterplot=large_scatterplot,
+        # large_scatterplot=large_scatterplot,
         example_1=example_1,
         example_2=example_2,
         example_3=example_3,
