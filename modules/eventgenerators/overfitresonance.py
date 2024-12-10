@@ -9,7 +9,7 @@ from modules.eventgenerators.schedule import DiracScheduler
 from modules.iterative import TensorTransform
 from modules.multiheadtransform import ShapeSpec
 from modules.reds import F0Resonance
-from modules.transfer import fft_convolve, make_waves, make_waves_vectorized
+from modules.transfer import fft_convolve, make_waves, make_waves_vectorized, freq_domain_transfer_function_to_resonance
 from modules.upsample import upsample_with_holes
 from util import device
 import numpy as np
@@ -50,8 +50,6 @@ def fft_shift(a: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
     # samples = samples[..., :n_samples]
     # samples = torch.relu(samples)
     return samples
-
-
 
 
 class Lookup(nn.Module):
@@ -106,6 +104,24 @@ def flatten_envelope(x: torch.Tensor, kernel_size: int, step_size: int):
     return result
 
 
+class FFTResonanceLookup(Lookup):
+    def __init__(self, n_items: int, n_samples: int, window_size: int):
+        n_coeffs = window_size // 2 + 1
+        step_size = window_size // 2
+        super().__init__(n_items, n_coeffs)
+        self.window_size = window_size
+        self.n_coeffs = n_coeffs
+        self.step_size = step_size
+        self.n_frames = n_samples // self.step_size
+
+    def postprocess_results(self, items: torch.Tensor) -> torch.Tensor:
+        batch, n_events, expressivity, n_coeffs = items.shape
+        items = torch.sigmoid(items) * 0.9999
+        items = freq_domain_transfer_function_to_resonance(self.window_size, items, self.n_frames, apply_decay=False)
+        items = items.view(batch, n_events, expressivity, -1)
+        return items
+
+
 class F0ResonanceLookup(Lookup):
     def __init__(self, n_items: int, n_samples: int):
         super().__init__(n_items, n_samples=3)
@@ -134,14 +150,13 @@ class WavetableLookup(Lookup):
             n_resonances: int,
             samplerate: int,
             learnable: bool = False,
-            wavetable_device = None):
+            wavetable_device=None):
 
         super().__init__(n_items, n_resonances)
 
         # w = make_waves(n_samples, np.linspace(20, 4000, num=n_resonances // 4), samplerate)
 
         w = make_waves_vectorized(n_samples, np.linspace(20, 4000, num=n_resonances // 4), samplerate)
-
 
         if learnable:
             self.waves = nn.Parameter(w)
@@ -290,7 +305,6 @@ class Deformations(Lookup):
         return x
 
 
-
 class OverfitResonanceModel(nn.Module, EventGenerator):
 
     def __init__(
@@ -310,7 +324,7 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
             samplerate: int,
             hidden_channels: int,
             fine_positioning: bool = False,
-            wavetable_device = None):
+            wavetable_device=None):
         super().__init__()
 
         self.noise_filter_samples = noise_filter_samples
@@ -348,6 +362,8 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
         self.room_shape = (1, n_events, n_verbs)
 
         self.n_resonances = n_resonances
+
+        # self.r = FFTResonanceLookup(n_resonances, n_samples, 2048)
 
         self.r = WavetableLookup(
             n_resonances,
@@ -409,7 +425,6 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
             params['fine'] = (1,)
 
         return params
-
 
     def forward(
             self,

@@ -21,7 +21,7 @@ state_dim = 128
 
 is_complex = False
 
-max_efficiency = 0.9
+max_efficiency = 0.999
 
 windowing = True
 
@@ -38,7 +38,7 @@ from conjure import LmdbCollection, serve_conjure, SupportedContentType, loggers
 from data import get_one_audio_segment
 from modules import max_norm, flattened_multiband_spectrogram, limit_norm
 from modules.overlap_add import overlap_add
-from util import device, encode_audio
+from util import device, encode_audio, count_parameters
 
 
 def project_and_limit_norm(
@@ -116,6 +116,8 @@ class SSM(nn.Module):
             torch.zeros(input_dim, input_dim, dtype=torch.complex64 if complex else torch.float32).uniform_(-0.01, 0.01)
         )
 
+        self.param_count = count_parameters(self)
+
     def forward(self, control: torch.Tensor) -> torch.Tensor:
         batch, cpd, frames = control.shape
         assert cpd == self.control_plane_dim
@@ -180,6 +182,10 @@ class OverfitControlPlane(nn.Module):
             torch.zeros(1, control_plane_dim, self.n_frames).uniform_(-0.01, 0.01))
 
     @property
+    def param_count(self):
+        return self.ssm.param_count
+
+    @property
     def control_signal_display(self) -> np.ndarray:
         return self.control_signal.data.cpu().numpy().reshape((-1, self.n_frames))
 
@@ -239,7 +245,7 @@ def sparsity_loss(c: torch.Tensor) -> torch.Tensor:
     """
     Compute the l1 norm of the control signal
     """
-    return torch.abs(c).sum() * 0.1
+    return torch.abs(c).sum() * 0.2
 
 
 def to_numpy(x: torch.Tensor):
@@ -293,6 +299,8 @@ def train_and_monitor():
         state_space
     ], port=9999, n_workers=1)
 
+
+
     def train(target: torch.Tensor):
         model = construct_experiment_model()
         loss_model = CorrelationLoss(n_elements=1024).to(device)
@@ -304,9 +312,9 @@ def train_and_monitor():
             recon = model.forward()
             recon_audio(max_norm(recon))
             loss = \
-                reconstruction_loss(recon, target) \
-                + sparsity_loss(model.control_signal) \
-                + loss_model.forward(target, recon)
+                sparsity_loss(model.control_signal) \
+                + reconstruction_loss(recon, target)
+                # + loss_model.noise_loss(target, recon)
 
             non_zero = (model.control_signal > 0).sum()
             sparsity = (non_zero / model.control_signal.numel()).item()
@@ -318,7 +326,11 @@ def train_and_monitor():
             # clip_grad_value_(model.parameters(), 0.5)
 
             optim.step()
-            print(iteration, loss.item(), sparsity, non_zero)
+
+            encoding_samples = model.param_count + (non_zero.item() * 3)
+            compression_ratio = encoding_samples / n_samples
+
+            print(iteration, loss.item(), sparsity, non_zero.item(), compression_ratio)
 
             with torch.no_grad():
                 rnd = model.random()

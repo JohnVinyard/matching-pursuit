@@ -7,7 +7,7 @@ from torch.nn import functional as F
 from conjure.logger import encode_audio
 from data import get_one_audio_segment
 from modules import unit_norm, iterative_loss, flattened_multiband_spectrogram, sparse_softmax, max_norm, \
-    gammatone_filter_bank, stft
+    gammatone_filter_bank, stft, positional_encoding
 from itertools import count
 from torch.optim import Adam
 from typing import Tuple
@@ -35,12 +35,12 @@ class OverfitHierarchicalEvents(nn.Module):
         self.n_events = n_events
         self.context_dim = context_dim
 
+        self.n_frames = n_samples // 256
+
         event_levels = int(np.log2(n_events))
         total_levels = int(np.log2(n_samples))
 
         self.event_levels = event_levels
-
-        # starting_time_bits = total_levels - event_levels
 
         self.event_generator = SplattingEventGenerator(
             n_samples=n_samples,
@@ -69,6 +69,7 @@ class OverfitHierarchicalEvents(nn.Module):
 
         self.apply(initializer)
 
+
     @property
     def normalized_atoms(self):
         return unit_norm(self.atoms, dim=-1)
@@ -78,17 +79,21 @@ class OverfitHierarchicalEvents(nn.Module):
         times = self.times.clone()
 
         for i in range(self.event_levels - 1):
+
+            # scale = 1 / (i + 1)
+            scale = 1
+
             # TODO: consider bringing back scaling as we approach the leaves of the tree
             events = \
                 events.view(1, -1, 1, self.context_dim) \
-                + self.hierarchical_event_vectors[str(i)].view(1, 1, 2, self.context_dim)
+                + (self.hierarchical_event_vectors[str(i)].view(1, 1, 2, self.context_dim) * scale)
             events = events.view(1, -1, self.context_dim)
 
             # TODO: Consider masking lower bits as we approach the leaves of the tree, so that
             # new levels can only _refine_, and not completely move entire branches
             batch, n_events, n_bits, _ = times.shape
             times = times.view(batch, n_events, 1, n_bits, 2).repeat(1, 1, 2, 1, 1).view(batch, n_events * 2, n_bits, 2)
-            times = times + self.hierarchical_time_vectors[str(i)]
+            times = times + (self.hierarchical_time_vectors[str(i)] * scale)
 
         event_vectors = events
 
@@ -178,13 +183,16 @@ def overfit():
         recon_summed = torch.sum(recon, dim=1, keepdim=True)
         recon_audio(max_norm(recon_summed))
 
-        loss = iterative_loss(target, recon, loss_transform, ratio_loss=False) #+ loss_model.forward(target, recon_summed)
+        embedded = model.embedded()
+        print(embedded.shape)
+
+        # loss = iterative_loss(target, recon, loss_transform, ratio_loss=False) #+ loss_model.forward(target, recon_summed)
 
         # loss = loss_model.forward(target, recon_summed)
-        # loss = loss_model.noise_loss(target, recon_summed)
+        loss = loss_model.noise_loss(target, recon_summed)
         # loss = reconstruction_loss(target, recon_summed)
-        # sparsity_loss = torch.abs(model.event_vectors).sum()
-        # loss = loss + sparsity_loss
+        sparsity_loss = torch.abs(model.event_vectors).sum()
+        loss = loss + sparsity_loss
 
         loss.backward()
         optim.step()

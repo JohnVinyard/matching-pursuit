@@ -6,6 +6,10 @@ import boto3
 import torch
 from warnings import warn
 
+# thanks to https://discuss.pytorch.org/t/how-do-i-check-the-number-of-parameters-of-a-model/4325/9
+def count_parameters(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
 def load_trained_weights_for_inference(
     module_init_path: str, 
     model_constructor: Callable[[], nn.Module], 

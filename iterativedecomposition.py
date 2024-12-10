@@ -12,7 +12,7 @@ from modules import stft, sparsify, sparsify_vectors, iterative_loss, max_norm, 
 from modules.anticausal import AntiCausalAnalysis
 from modules.eventgenerators.convimpulse import ConvImpulseEventGenerator
 from modules.eventgenerators.generator import EventGenerator
-from modules.eventgenerators.overfitresonance import OverfitResonanceModel
+from modules.eventgenerators.overfitresonance import OverfitResonanceModel, FFTResonanceLookup
 from modules.eventgenerators.splat import SplattingEventGenerator
 from modules.eventgenerators.ssm import StateSpaceModelEventGenerator
 from modules.infoloss import CorrelationLoss
@@ -40,6 +40,7 @@ transform_step_size = 256
 n_frames = n_samples // transform_step_size
 
 initializer = make_initializer(0.05)
+
 
 def fft_shift(a: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
     # this is here to make the shift value interpretable
@@ -75,6 +76,7 @@ TODOs:
 
 """
 
+
 def transform(x: torch.Tensor):
     batch_size = x.shape[0]
     x = stft(x, transform_window_size, transform_step_size, pad=True)
@@ -105,17 +107,13 @@ def multiband_spectrogram(samples: torch.Tensor, min_size=512) -> Dict[int, torc
         spec = stft(band, ws=64, step=16, pad=True)
         specs[size] = spec
 
-
     return specs
-
-
 
 
 def iterative_loss2(
         target: Dict[int, torch.Tensor],
         recon: Dict[int, torch.Tensor],
         n_events: int) -> torch.Tensor:
-
     residual = {k: t.clone() for k, t in target.items()}
 
     loss = 0
@@ -135,10 +133,12 @@ def iterative_loss2(
 
     return loss
 
+
 def full_iterative_loss(target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
     spec = multiband_spectrogram(target)
     rspec = multiband_spectrogram(recon)
     return iterative_loss2(spec, rspec, n_events)
+
 
 # class MultibandDownsamplingDiscriminator(nn.Module):
 #
@@ -301,9 +301,8 @@ def train_and_monitor(
         model_type: str = 'conv',
         wipe_old_data: bool = True,
         fine_positioning: bool = False,
-        save_and_load_weights: bool = False):
-
-
+        save_and_load_weights: bool = False,
+        adversarial_loss: bool = True):
     stream = AudioIterator(
         batch_size=batch_size,
         n_samples=n_samples,
@@ -342,12 +341,12 @@ def train_and_monitor(
     ], port=9999, n_workers=1)
 
     print('==========================================')
-    print(f'training on {n_seconds} of audio and {n_events} events with {model_type} event generator and {disc_type} disc')
+    print(
+        f'training on {n_seconds} of audio and {n_events} events with {model_type} event generator and {disc_type} disc')
     print('==========================================')
 
     model_filename = 'iterativedecomposition4.dat'
     disc_filename = 'iterativedecompositiondisc4.dat'
-
 
     def train():
         hidden_channels = 512
@@ -447,29 +446,30 @@ def train_and_monitor(
             print(target.shape, recon.shape)
 
             loss = iterative_loss(target, recon, loss_transform)
-            # loss = full_iterative_loss(target, recon)
 
             loss = loss + (torch.abs(encoded).sum() * 1e-4)
 
-            mask = torch.zeros(target.shape[0], n_events, 1, device=recon.device).bernoulli_(p=0.5)
-            for_disc = torch.sum(recon * mask, dim=1, keepdim=True)
-            j = disc.forward(for_disc)
-            d_loss = torch.abs(1 - j).mean()
-            print('G', d_loss.item())
-            loss = loss + (d_loss * 100)
+            if adversarial_loss:
+                mask = torch.zeros(target.shape[0], n_events, 1, device=recon.device).bernoulli_(p=0.5)
+                for_disc = torch.sum(recon * mask, dim=1, keepdim=True)
+                j = disc.forward(for_disc)
+                d_loss = torch.abs(1 - j).mean()
+                print('G', d_loss.item())
+                loss = loss + (d_loss * 100)
 
             # loss = loss + loss_model.forward(target, recon_summed)
             loss.backward()
             optim.step()
             print(i, loss.item())
 
-            disc_optim.zero_grad()
-            r_j = disc.forward(target)
-            f_j = disc.forward(recon_summed.clone().detach())
-            d_loss = torch.abs(0 - f_j).mean() + torch.abs(1 - r_j).mean()
-            d_loss.backward()
-            print('D', d_loss.item())
-            disc_optim.step()
+            if adversarial_loss:
+                disc_optim.zero_grad()
+                r_j = disc.forward(target)
+                f_j = disc.forward(recon_summed.clone().detach())
+                d_loss = torch.abs(0 - f_j).mean() + torch.abs(1 - r_j).mean()
+                d_loss.backward()
+                print('D', d_loss.item())
+                disc_optim.step()
 
             with torch.no_grad():
                 # TODO: this should be collecting statistics from reconstructions
@@ -479,13 +479,11 @@ def train_and_monitor(
                 rnd = max_norm(rnd)
                 random_audio(rnd)
 
-
             if save_and_load_weights and i % 100 == 0:
                 torch.save(model.state_dict(), model_filename)
                 torch.save(disc.state_dict(), disc_filename)
 
     train()
-
 
 
 if __name__ == '__main__':
@@ -529,6 +527,11 @@ if __name__ == '__main__':
         action='store_true',
         default=False
     )
+    parser.add_argument(
+        '--no-adversarial-loss',
+        action='store_true',
+        default=False
+    )
 
     args = parser.parse_args()
     train_and_monitor(
@@ -537,6 +540,7 @@ if __name__ == '__main__':
         model_type=args.model_type,
         disc_type=args.disc_type,
         wipe_old_data=not args.save_data,
+        adversarial_loss=not args.no_adversarial_loss,
         fine_positioning=bool(args.fine_positioning),
         save_and_load_weights=args.save_and_load_weights
     )
