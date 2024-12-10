@@ -324,7 +324,8 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
             samplerate: int,
             hidden_channels: int,
             fine_positioning: bool = False,
-            wavetable_device=None):
+            wavetable_device=None,
+            fft_resonance: bool = False):
         super().__init__()
 
         self.noise_filter_samples = noise_filter_samples
@@ -363,15 +364,16 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
 
         self.n_resonances = n_resonances
 
-        # self.r = FFTResonanceLookup(n_resonances, n_samples, 2048)
-
-        self.r = WavetableLookup(
-            n_resonances,
-            n_samples,
-            n_resonances=4096,
-            samplerate=samplerate,
-            learnable=False,
-            wavetable_device=wavetable_device)
+        if fft_resonance:
+            self.r = FFTResonanceLookup(n_resonances, n_samples, 2048)
+        else:
+            self.r = WavetableLookup(
+                n_resonances,
+                n_samples,
+                n_resonances=4096,
+                samplerate=samplerate,
+                learnable=False,
+                wavetable_device=wavetable_device)
 
         # TODO: This is an issue because we have gradients for every sample, even though
         # they are largely redundant (think exponential vs.

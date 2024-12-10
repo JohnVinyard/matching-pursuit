@@ -95,6 +95,8 @@ better, more realistic, and sparser renderings of the audio.
 """
 from torch.optim import Adam
 
+from modules import max_norm, sparse_softmax
+
 """[markdown]
 
 # Cite this Article
@@ -146,8 +148,29 @@ Each 32-dimensional event vector encodes information about attack, resonance, an
 
 """[markdown]
 
-### Event Vectors
+### Randomized
 
+"""
+
+"""[markdown]
+
+Here, we generate random event vectors with the original event times.
+"""
+
+# example_1.random_events
+
+"""[markdown]
+
+Here we use the original event vectors, but generate random times.
+
+"""
+
+# example_1.random_times
+
+
+"""[markdown]
+
+### Event Vectors
 
  
 """
@@ -224,6 +247,29 @@ Events clustered using [t-SNE](https://scikit-learn.org/stable/modules/generated
 """
 
 # example_2.recon_audio
+
+"""[markdown]
+
+### Randomized
+
+"""
+
+"""[markdown]
+
+Here, we generate random event vectors with the original event times.
+"""
+
+# example_2.random_events
+
+"""[markdown]
+
+Here we use the original event vectors, but generate random times.
+
+"""
+
+# example_2.random_times
+
+
 
 """[markdown]
 
@@ -308,6 +354,28 @@ Events clustered using [t-SNE](https://scikit-learn.org/stable/modules/generated
 
 """[markdown]
 
+### Randomized
+
+"""
+
+"""[markdown]
+
+Here, we generate random event vectors with the original event times.
+"""
+
+# example_3.random_events
+
+"""[markdown]
+
+Here we use the original event vectors, but generate random times.
+
+"""
+
+# example_3.random_times
+
+
+"""[markdown]
+
 ### Event Vectors
 
 
@@ -389,6 +457,28 @@ Events clustered using [t-SNE](https://scikit-learn.org/stable/modules/generated
 
 """[markdown]
 
+### Randomized
+
+"""
+
+"""[markdown]
+
+Here, we generate random event vectors with the original event times.
+"""
+
+# example_4.random_events
+
+"""[markdown]
+
+Here we use the original event vectors, but generate random times.
+
+"""
+
+# example_4.random_times
+
+
+"""[markdown]
+
 ### Event Vectors
 
 
@@ -467,6 +557,28 @@ Events clustered using [t-SNE](https://scikit-learn.org/stable/modules/generated
 """
 
 # example_5.recon_audio
+
+"""[markdown]
+
+### Randomized
+
+"""
+
+"""[markdown]
+
+Here, we generate random event vectors with the original event times.
+"""
+
+# example_5.random_events
+
+"""[markdown]
+
+Here we use the original event vectors, but generate random times.
+
+"""
+
+# example_5.random_times
+
 
 """[markdown]
 
@@ -672,22 +784,48 @@ def scatterplot_section(logger: Logger) -> ScatterPlotComponent:
     return scatterplot_component
 
 
-def generate_events(model: nn.Module, events: torch.Tensor, times: torch.Tensor) -> torch.Tensor:
-    pass
+# def generate_events(model: nn.Module, events: torch.Tensor, times: torch.Tensor) -> torch.Tensor:
+#     pass
+#
+# def overfit_events(model: nn.Module, events: torch.Tensor, times: torch.Tensor) -> torch.Tensor:
+#     event_sim = model.event_similarity(events, times)
+#     print(event_sim.shape)
+#
+#     class OverfitModel(nn.Module):
+#
+#         def __init__(self):
+#             super().__init__()
+#             self.event_vectors = nn.Parameter(torch.zeros_like(events).uniform_(-1, 1))
+#             self.times = nn.Parameter(torch.zeros_like(times).uniform_(-1, 1))
+#
+#         def forward(self):
+#             pass
+#
+#     model = OverfitModel()
+#     optim = Adam(model.parameters(), lr=1e-3)
 
-def overfit_events(model: nn.Module, events: torch.Tensor, times: torch.Tensor) -> torch.Tensor:
 
-    class OverfitModel(nn.Module):
+def generate(
+        model: nn.Module,
+        vectors: torch.Tensor,
+        times: torch.Tensor,
+        randomize_events: bool,
+        randomize_times: bool) -> torch.Tensor:
 
-        def __init__(self):
-            super().__init__()
+    batch, n_events, _ = vectors.shape
 
-        def forward(self):
-            pass
+    if randomize_events:
+        vectors = torch.zeros_like(vectors).uniform_(vectors.min().item(), vectors.max().item())
 
-    model = OverfitModel()
-    optim = Adam(model.parameters(), lr=1e-3)
+    if randomize_times:
+        times = torch.zeros_like(times).uniform_(-1, 1)
+        times = sparse_softmax(times, dim=-1, normalize=True) * times
 
+    generation_result = torch.cat(
+        [model.generate(vectors[:, i:i + 1, :], times[:, i:i + 1, :]) for i in range(n_events)], dim=1)
+    generation_result = torch.sum(generation_result, dim=1, keepdim=True)
+    generation_result = max_norm(generation_result)
+    return generation_result
 
 
 def reconstruction_section(logger: Logger) -> CompositeComponent:
@@ -697,11 +835,16 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
     samples = get_one_audio_segment(n_samples, samplerate, device='cpu').view(1, 1, n_samples)
     events, vectors, times = model.iterative(samples)
 
-    # generation_result = torch.cat(
-    #     [model.generate(vectors[:, i:i + 1, :], times[:, i:i + 1, :]) for i in range(vectors.shape[1])], dim=1)
-    # print(generation_result.shape)
-    # generation_result = torch.sum(generation_result, dim=1, keepdim=True)
-    # print(generation_result.shape)
+    # generate audio with the same times, but randomized event vectors
+    randomized_events = generate(model, vectors, times, randomize_events=True, randomize_times=False)
+    _, random_events = logger.log_sound('randomizedevents', randomized_events)
+    random_events_component = AudioComponent(random_events.public_uri, height=200, controls=True)
+
+    # generate audio with the same events, but randomized times
+    randomized_times = generate(model, vectors, times, randomize_events=False, randomize_times=True)
+    _, random_times = logger.log_sound('randomizedtimes', randomized_times)
+    random_times_component = AudioComponent(random_times.public_uri, height=200, controls=True)
+
 
     total_seconds = n_samples / samplerate
 
@@ -738,11 +881,15 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
     _, event_vectors = logger.log_matrix_with_cmap('latents', vectors[0].T, cmap='hot')
     latents = ImageComponent(event_vectors.public_uri, height=200, title='latent event vectors')
 
+
+
     composite = CompositeComponent(
         orig_audio=orig_audio_component,
         recon_audio=recon_audio_component,
         latents=latents,
         scatterplot=scatterplot_component,
+        random_events=random_events_component,
+        random_times=random_times_component,
         **event_components
     )
 
@@ -792,7 +939,7 @@ def demo_page_dict() -> Dict[str, any]:
     )
 
     return dict(
-        # large_scatterplot=large_scatterplot,
+        large_scatterplot=large_scatterplot,
         example_1=example_1,
         example_2=example_2,
         example_3=example_3,

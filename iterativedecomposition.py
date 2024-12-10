@@ -15,11 +15,8 @@ from modules.eventgenerators.generator import EventGenerator
 from modules.eventgenerators.overfitresonance import OverfitResonanceModel, FFTResonanceLookup
 from modules.eventgenerators.splat import SplattingEventGenerator
 from modules.eventgenerators.ssm import StateSpaceModelEventGenerator
-from modules.infoloss import CorrelationLoss
 from modules.multiheadtransform import MultiHeadTransform
-from modules.unet import DownsamplingBlock
 from util import device, encode_audio, make_initializer
-from torch.nn import functional as F
 import numpy as np
 
 # the size, in samples of the audio segment we'll overfit
@@ -140,30 +137,6 @@ def full_iterative_loss(target: torch.Tensor, recon: torch.Tensor) -> torch.Tens
     return iterative_loss2(spec, rspec, n_events)
 
 
-# class MultibandDownsamplingDiscriminator(nn.Module):
-#
-#     def __init__(self, n_frames: int, in_channels: int, channels: int):
-#         super().__init__()
-#         self.channels = channels
-#         self.n_frames = n_frames
-#         self.in_channels = in_channels
-#
-#         self.proj = nn.Conv1d(self.in_channels, channels, 1, 1, 0)
-#         self.n_layers = int(np.log2(self.n_frames)) - 2
-#         self.downsample = nn.Sequential(*[DownsamplingBlock(channels) for i in range(self.n_layers)])
-#         self.judge = nn.Conv1d(channels, 1, 4, 4, 0)
-#
-#
-#     def forward(self, x: torch.Tensor) -> torch.Tensor:
-#         batch, _, time = x.shape
-#
-#         x = multiband_spectrogram(x, min_size=512)
-#         print(x.shape)
-#         x = self.proj(x)
-#         x = self.downsample(x)
-#         x = self.judge(x)
-#         return x
-
 
 class Discriminator(nn.Module):
     def __init__(self, disc_type='dilated'):
@@ -221,6 +194,11 @@ class Model(nn.Module):
         times = times @ pe.T
         embeddings = torch.cat([vectors, times], dim=-1)
         return embeddings
+
+    def event_similarity(self, vectors: torch.Tensor, times: torch.Tensor) -> torch.Tensor:
+        embeddings = self.embed_events(vectors, times)
+        self_sim = embeddings[:, :, None, :] - embeddings[:, :, None, :, None]
+        return self_sim
 
     def encode(self, transformed: torch.Tensor):
         n_events = 1
@@ -457,7 +435,6 @@ def train_and_monitor(
                 print('G', d_loss.item())
                 loss = loss + (d_loss * 100)
 
-            # loss = loss + loss_model.forward(target, recon_summed)
             loss.backward()
             optim.step()
             print(i, loss.item())
