@@ -93,9 +93,6 @@ The decoder side of the model is very interesting, and all sorts of physical mod
 better, more realistic, and sparser renderings of the audio.
 
 """
-from torch.optim import Adam
-
-from modules import max_norm, sparse_softmax
 
 """[markdown]
 
@@ -167,6 +164,17 @@ Here we use the original event vectors, but generate random times.
 
 # example_1.random_times
 
+"""[markdown]
+
+### Relationships
+
+Here we randomly initialize event vectors and times, and optimize such that they have the same _relationships_ or
+deltas, as the edges between (event, time) vectors in the original sound
+
+"""
+
+# example_1.amr
+
 
 """[markdown]
 
@@ -176,6 +184,24 @@ Here we use the original event vectors, but generate random times.
 """
 
 # example_1.latents
+
+
+"""[markdown]
+
+### Event Self-Similarity
+
+We concatenate:
+
+- the original event vector
+- the event times.  the dirac delta function, or spike, the describes event time is embedded via positional encodings
+
+Finally, we compute the l2 distance between each event vector pair.
+
+"""
+
+# example_1.self_sim
+
+
 
 """[markdown]
 
@@ -269,6 +295,17 @@ Here we use the original event vectors, but generate random times.
 
 # example_2.random_times
 
+"""[markdown]
+
+### Relationships
+
+Here we randomly initialize event vectors and times, and optimize such that they have the same _relationships_ or
+deltas, as the edges between (event, time) vectors in the original sound
+
+"""
+
+# example_2.amr
+
 
 
 """[markdown]
@@ -283,11 +320,29 @@ Here we use the original event vectors, but generate random times.
 
 """[markdown]
 
+### Event Self-Similarity
+
+We concatenate:
+
+- the original event vector
+- the event times.  the dirac delta function, or spike, the describes event time is embedded via positional encodings
+
+Finally, we compute the l2 distance between each event vector pair.
+
+"""
+
+# example_2.self_sim
+
+
+"""[markdown]
+
 ### Event Scatterplot
 
 Events clustered using [t-SNE](https://scikit-learn.org/stable/modules/generated/sklearn.manifold.TSNE.html)
 
 """
+
+
 
 # example_2.scatterplot
 
@@ -373,6 +428,17 @@ Here we use the original event vectors, but generate random times.
 
 # example_3.random_times
 
+"""[markdown]
+
+### Relationships
+
+Here we randomly initialize event vectors and times, and optimize such that they have the same _relationships_ or
+deltas, as the edges between (event, time) vectors in the original sound
+
+"""
+
+# example_3.amr
+
 
 """[markdown]
 
@@ -383,6 +449,21 @@ Here we use the original event vectors, but generate random times.
 """
 
 # example_3.latents
+
+"""[markdown]
+
+### Event Self-Similarity
+
+We concatenate:
+
+- the original event vector
+- the event times.  the dirac delta function, or spike, the describes event time is embedded via positional encodings
+
+Finally, we compute the l2 distance between each event vector pair.
+
+"""
+
+# example_3.self_sim
 
 """[markdown]
 
@@ -476,6 +557,17 @@ Here we use the original event vectors, but generate random times.
 
 # example_4.random_times
 
+"""[markdown]
+
+### Relationships
+
+Here we randomly initialize event vectors and times, and optimize such that they have the same _relationships_ or
+deltas, as the edges between (event, time) vectors in the original sound
+
+"""
+
+# example_4.amr
+
 
 """[markdown]
 
@@ -486,6 +578,21 @@ Here we use the original event vectors, but generate random times.
 """
 
 # example_4.latents
+
+"""[markdown]
+
+### Event Self-Similarity
+
+We concatenate:
+
+- the original event vector
+- the event times.  the dirac delta function, or spike, the describes event time is embedded via positional encodings
+
+Finally, we compute the l2 distance between each event vector pair.
+
+"""
+
+# example_4.self_sim
 
 """[markdown]
 
@@ -579,6 +686,17 @@ Here we use the original event vectors, but generate random times.
 
 # example_5.random_times
 
+"""[markdown]
+
+### Relationships
+
+Here we randomly initialize event vectors and times, and optimize such that they have the same _relationships_ or
+deltas, as the edges between (event, time) vectors in the original sound
+
+"""
+
+# example_5.amr
+
 
 """[markdown]
 
@@ -589,6 +707,21 @@ Here we use the original event vectors, but generate random times.
 """
 
 # example_5.latents
+
+"""[markdown]
+
+### Event Self-Similarity
+
+We concatenate:
+
+- the original event vector
+- the event times.  the dirac delta function, or spike, the describes event time is embedded via positional encodings
+
+Finally, we compute the l2 distance between each event vector pair.
+
+"""
+
+# example_5.self_sim
 
 """[markdown]
 
@@ -672,6 +805,9 @@ from conjure import S3Collection, \
 from data import get_one_audio_segment, AudioIterator
 from iterativedecomposition import Model as IterativeDecompositionModel
 from modules.eventgenerators.overfitresonance import OverfitResonanceModel
+from modules import max_norm, sparse_softmax
+from torch.optim import Adam
+
 
 remote_collection_name = 'iterative-decomposition-v3'
 
@@ -784,26 +920,17 @@ def scatterplot_section(logger: Logger) -> ScatterPlotComponent:
     return scatterplot_component
 
 
-# def generate_events(model: nn.Module, events: torch.Tensor, times: torch.Tensor) -> torch.Tensor:
-#     pass
-#
-# def overfit_events(model: nn.Module, events: torch.Tensor, times: torch.Tensor) -> torch.Tensor:
-#     event_sim = model.event_similarity(events, times)
-#     print(event_sim.shape)
-#
-#     class OverfitModel(nn.Module):
-#
-#         def __init__(self):
-#             super().__init__()
-#             self.event_vectors = nn.Parameter(torch.zeros_like(events).uniform_(-1, 1))
-#             self.times = nn.Parameter(torch.zeros_like(times).uniform_(-1, 1))
-#
-#         def forward(self):
-#             pass
-#
-#     model = OverfitModel()
-#     optim = Adam(model.parameters(), lr=1e-3)
+def generate_multiple_events(
+        model: nn.Module,
+        vectors: torch.Tensor,
+        times: torch.Tensor) -> torch.Tensor:
 
+    generation_result = torch.cat(
+        [model.generate(vectors[:, i:i + 1, :], times[:, i:i + 1, :]) for i in range(n_events)], dim=1)
+
+    generation_result = torch.sum(generation_result, dim=1, keepdim=True)
+    generation_result = max_norm(generation_result)
+    return generation_result
 
 def generate(
         model: nn.Module,
@@ -821,11 +948,46 @@ def generate(
         times = torch.zeros_like(times).uniform_(-1, 1)
         times = sparse_softmax(times, dim=-1, normalize=True) * times
 
-    generation_result = torch.cat(
-        [model.generate(vectors[:, i:i + 1, :], times[:, i:i + 1, :]) for i in range(n_events)], dim=1)
-    generation_result = torch.sum(generation_result, dim=1, keepdim=True)
-    generation_result = max_norm(generation_result)
+    generation_result = generate_multiple_events(model, vectors, times)
     return generation_result
+
+
+def match_graph_edges(model: nn.Module, vectors: torch.Tensor, times: torch.Tensor) -> torch.Tensor:
+    samples = get_one_audio_segment(n_samples, samplerate, device='cpu').view(1, 1, n_samples)
+    events, vectors, times = model.iterative(samples)
+    edges = model.event_similarity(vectors, times).clone().detach()
+
+    class OvefitModel(nn.Module):
+
+        def __init__(self):
+            super().__init__()
+            self.vectors = nn.Parameter(torch.zeros_like(vectors).uniform_(vectors.min().item(), vectors.max().item()))
+            self.times = nn.Parameter(torch.zeros_like(times).uniform_(-1, 1))
+
+        @property
+        def sparse_times(self):
+            return sparse_softmax(self.times, dim=-1, normalize=True)
+
+        def forward(self):
+            return model.event_similarity(self.vectors, self.sparse_times)
+
+        def generate(self):
+            return generate_multiple_events(model, self.vectors, self.sparse_times)
+
+    overfit = OvefitModel()
+    optim = Adam(overfit.parameters(), lr=1e-2)
+
+    for i in range(500):
+        optim.zero_grad()
+        recon = overfit.forward()
+        loss = torch.abs(recon - edges).sum()
+        loss.backward()
+        optim.step()
+        print(i, loss.item())
+
+    final = overfit.generate()
+    return final
+
 
 
 def reconstruction_section(logger: Logger) -> CompositeComponent:
@@ -835,15 +997,26 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
     samples = get_one_audio_segment(n_samples, samplerate, device='cpu').view(1, 1, n_samples)
     events, vectors, times = model.iterative(samples)
 
+    embeddings = model.embed_events(vectors, times)
+    diff = torch.cdist(embeddings, embeddings).view(n_events, n_events)
+
+    _, self_sim = logger.log_matrix_with_cmap('selfsim', diff, cmap='hot')
+    self_sim_component = ImageComponent(self_sim.public_uri, height=200, title='event self-similarity')
+
     # generate audio with the same times, but randomized event vectors
     randomized_events = generate(model, vectors, times, randomize_events=True, randomize_times=False)
     _, random_events = logger.log_sound('randomizedevents', randomized_events)
-    random_events_component = AudioComponent(random_events.public_uri, height=200, controls=True)
+    random_events_component = AudioComponent(random_events.public_uri, height=100, controls=True)
 
     # generate audio with the same events, but randomized times
     randomized_times = generate(model, vectors, times, randomize_events=False, randomize_times=True)
     _, random_times = logger.log_sound('randomizedtimes', randomized_times)
-    random_times_component = AudioComponent(random_times.public_uri, height=200, controls=True)
+    random_times_component = AudioComponent(random_times.public_uri, height=100, controls=True)
+
+
+    audio_matching_relationships = match_graph_edges(model, vectors, times)
+    _, amr = logger.log_sound('relationships', audio_matching_relationships)
+    amr_component = AudioComponent(amr.public_uri, height=100, controls=True)
 
 
     total_seconds = n_samples / samplerate
@@ -856,8 +1029,8 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
     _, original = logger.log_sound(f'original', samples)
     _, reconstruction = logger.log_sound(f'reconstruction', summed)
 
-    orig_audio_component = AudioComponent(original.public_uri, height=200)
-    recon_audio_component = AudioComponent(reconstruction.public_uri, height=200)
+    orig_audio_component = AudioComponent(original.public_uri, height=100)
+    recon_audio_component = AudioComponent(reconstruction.public_uri, height=100)
 
     events = {f'event{i}': events[:, i: i + 1, :] for i in range(events.shape[1])}
 
@@ -890,6 +1063,8 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
         scatterplot=scatterplot_component,
         random_events=random_events_component,
         random_times=random_times_component,
+        self_sim=self_sim_component,
+        amr=amr_component,
         **event_components
     )
 

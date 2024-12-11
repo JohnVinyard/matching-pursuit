@@ -323,8 +323,8 @@ def train_and_monitor(
         f'training on {n_seconds} of audio and {n_events} events with {model_type} event generator and {disc_type} disc')
     print('==========================================')
 
-    model_filename = 'iterativedecomposition4.dat'
-    disc_filename = 'iterativedecompositiondisc4.dat'
+    model_filename = 'iterativedecomposition5.dat'
+    disc_filename = 'iterativedecompositiondisc5.dat'
 
     def train():
         hidden_channels = 512
@@ -345,7 +345,8 @@ def train_and_monitor(
                 samplerate=samplerate,
                 hidden_channels=hidden_channels,
                 wavetable_device=device,
-                fine_positioning=fine_positioning
+                fine_positioning=fine_positioning,
+                fft_resonance=True
             )
         elif model_type == 'conv':
             resonance_model = ConvImpulseEventGenerator(
