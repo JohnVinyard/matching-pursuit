@@ -49,7 +49,7 @@ class OverfitHierarchicalEvents(nn.Module):
             n_frames=n_samples // 256,
             hard_reverb_choice=False,
             hierarchical_scheduler=True,
-            wavetable_resonance=True
+            wavetable_resonance=True,
         )
         self.transform = MultiHeadTransform(
             self.context_dim, hidden_channels=128, shapes=self.event_generator.shape_spec, n_layers=1)
@@ -183,14 +183,12 @@ def overfit():
         recon_summed = torch.sum(recon, dim=1, keepdim=True)
         recon_audio(max_norm(recon_summed))
 
-        embedded = model.embedded()
-        print(embedded.shape)
 
         # loss = iterative_loss(target, recon, loss_transform, ratio_loss=False) #+ loss_model.forward(target, recon_summed)
 
         # loss = loss_model.forward(target, recon_summed)
         loss = loss_model.noise_loss(target, recon_summed)
-        # loss = reconstruction_loss(target, recon_summed)
+        loss = loss + reconstruction_loss(target, recon_summed)
         sparsity_loss = torch.abs(model.event_vectors).sum()
         loss = loss + sparsity_loss
 

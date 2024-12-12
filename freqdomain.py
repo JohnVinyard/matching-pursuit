@@ -14,9 +14,9 @@ from modules import HyperNetworkLayer, limit_norm, flattened_multiband_spectrogr
 from modules.infoloss import CorrelationLoss
 from modules.overlap_add import overlap_add
 from modules.phase import windowed_audio
-from modules.transfer import fft_convolve
+from modules.transfer import fft_convolve, advance_one_frame
 from modules.upsample import upsample_with_holes
-from util import device, make_initializer
+from util import device, make_initializer, count_parameters
 from util.music import musical_scale_hz
 
 n_samples = 2 ** 17
@@ -68,6 +68,8 @@ def morlet_filter_bank(
     return torch.from_numpy(basis.real).float().to(device)
 
 
+
+
 class Block(nn.Module):
 
     def __init__(
@@ -87,6 +89,8 @@ class Block(nn.Module):
         self.control_plane_dim = control_plane_dim
         self.preserve_energy = preserve_energy
 
+        self.register_buffer('group_delay', torch.linspace(0, np.pi, self.n_coeffs))
+
         if filter_bank is not None:
             # TODO: validation code.  Filter bank should be (n_coeffs, window_size)
             self.register_buffer('filter_bank', torch.abs(torch.fft.rfft(filter_bank, dim=-1, norm='ortho')))
@@ -104,7 +108,7 @@ class Block(nn.Module):
         else:
             self.hyper = None
 
-        self.transfer = nn.Parameter(torch.zeros((self.control_plane_dim, self.n_coeffs,)))
+        self.transfer = nn.Parameter(torch.zeros((self.control_plane_dim, self.n_coeffs)))
         self.mixer_matrix = nn.Parameter(torch.eye(self.control_plane_dim))
 
         self.transfer.data[:] = transfer
@@ -262,7 +266,7 @@ class OverfitAudioNetwork(nn.Module):
         transfer_dim = window_size // 2 + 1
 
         self.control_plane = nn.Parameter(torch.zeros(1, control_plane_dim, n_frames).uniform_(0, 1e-8))
-        self.channel_decays = nn.Parameter(torch.zeros((control_plane_dim,)).uniform_(0, 1))
+        self.channel_decays = nn.Parameter(torch.zeros((control_plane_dim,)).uniform_(10, 50))
 
         msh = musical_scale_hz(start_midi=21, stop_midi=129, n_steps=transfer_dim)
 
@@ -299,6 +303,7 @@ class OverfitAudioNetwork(nn.Module):
             preserve_energy=preserve_energy
         )
 
+        self.param_count = count_parameters(self.network)
 
     @property
     def control_signal(self):
@@ -323,14 +328,14 @@ class OverfitAudioNetwork(nn.Module):
         return ls
 
     def _upsampled_control_plane(self, cp: torch.Tensor):
-        noise = torch.zeros((self.n_samples,), device=cp.device).uniform_(-1, 1)
+        # noise = torch.zeros((self.n_samples,), device=cp.device).uniform_(-1, 1)
         us = upsample_with_holes(cp, self.n_samples)
         ls = self._base_envelopes()
         ls = torch.cat(
             [ls, torch.zeros(1, self.control_plane_dim, self.n_samples - self.samples_per_frame, device=cp.device)],
             dim=-1)
         us = fft_convolve(us, ls)
-        us = us * noise
+        us = us * torch.zeros_like(us).uniform_(-1, 1)
         return us
 
     def random(self):
@@ -375,7 +380,7 @@ def sparsity_loss(c: torch.Tensor) -> torch.Tensor:
     """
     Compute the l1 norm of the control signal
     """
-    return torch.abs(c).sum() * 1e-2
+    return torch.abs(c).sum()
     # return l0_norm(c) * 100
 
 
@@ -453,7 +458,7 @@ def train_and_monitor_overfit_model(
             recon_audio(max_norm(recon.sum(dim=1, keepdim=True)))
 
             recon_loss = reconstruction_loss(recon, target)
-            recon_loss = recon_loss + loss_model.forward(target, recon)
+            # recon_loss = recon_loss + loss_model.noise_loss(target, recon)
 
             loss = recon_loss + sparsity_loss(control_signal)
 
@@ -467,8 +472,11 @@ def train_and_monitor_overfit_model(
 
             envelopes(max_norm(control_signal[0]))
 
+            encoding_samples = model.param_count + (non_zero.item() * 3)
+            compression_ratio = encoding_samples / n_samples
+
             optim.step()
-            print(iteration, loss.item(), sparsity, non_zero.item())
+            print(iteration, loss.item(), sparsity, non_zero.item(), compression_ratio)
 
             with torch.no_grad():
                 # log random output from the model

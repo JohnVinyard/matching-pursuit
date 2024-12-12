@@ -1,19 +1,19 @@
-import torch
-from torch import nn
 from typing import Union
 
+import numpy as np
+import torch
+from torch import nn
+from torch.nn import functional as F
+
 from config import Config
-from modules import interpolate_last_axis, sparse_softmax, select_items, NeuralReverb
+from modules import interpolate_last_axis, select_items, NeuralReverb, SSM, sparse_softmax
 from modules.eventgenerators.generator import EventGenerator
 from modules.eventgenerators.schedule import DiracScheduler
 from modules.iterative import TensorTransform
 from modules.multiheadtransform import ShapeSpec
 from modules.reds import F0Resonance
-from modules.transfer import fft_convolve, make_waves, make_waves_vectorized, freq_domain_transfer_function_to_resonance
-from modules.upsample import upsample_with_holes
+from modules.transfer import fft_convolve, make_waves_vectorized, freq_domain_transfer_function_to_resonance
 from util import device
-import numpy as np
-from torch.nn import functional as F
 
 
 def mix(dry: torch.Tensor, wet: torch.Tensor, mix: torch.Tensor) -> torch.Tensor:
@@ -102,6 +102,85 @@ def flatten_envelope(x: torch.Tensor, kernel_size: int, step_size: int):
     env = interpolate_last_axis(env, desired_size=x.shape[-1])
     result = normalized * env
     return result
+
+
+def project_and_limit_norm(
+        vector: torch.Tensor,
+        forward: TensorTransform,
+        max_efficiency: float = 0.999) -> torch.Tensor:
+
+    # get the original norm, this is the absolute max norm/energy we should arrive at,
+    # given a perfectly efficient physical system
+    original_norm = torch.norm(vector, dim=-1, keepdim=True)
+
+    # project
+    x = forward(vector)
+    return x
+
+    # TODO: clamp norm should be a utility that lives in normalization
+    # find the norm of the projection
+    new_norm = torch.norm(x, dim=-1, keepdim=True)
+
+    # clamp the norm between the allowed values
+    mx_value = original_norm.reshape(*new_norm.shape) * max_efficiency
+    clamped_norm = torch.clamp(new_norm, min=None, max=mx_value)
+
+    # give the projected vector the clamped norm, such that it
+    # can have lost some or all energy, but not _gained_ any
+    normalized = unit_norm(x, axis=-1)
+    x = normalized * clamped_norm
+    return x
+
+
+class MultiSSM(nn.Module, EventGenerator):
+
+    @property
+    def shape_spec(self) -> ShapeSpec:
+        return dict(
+            # model_choice=(1, self.n_models),
+            control_plane_choice=(1, self.n_control_planes)
+        )
+
+    def __init__(
+            self, context_dim: int,
+            control_plane_dim: int,
+            n_frames: int,
+            state_dim: int,
+            window_size: int,
+            n_models: int,
+            n_control_planes: int,
+            n_samples: int):
+
+        super().__init__()
+        self.context_dim = context_dim
+        self.control_plane_dim = control_plane_dim
+        self.n_frames = n_frames
+        self.state_dim = state_dim
+        self.window_size = window_size
+        self.n_control_planes = n_control_planes
+        self.n_models = n_models
+        self.n_samples = n_samples
+
+        self.control_plane_selection = Lookup(self.n_control_planes, n_samples=control_plane_dim * n_frames)
+        # self.models = nn.ModuleList(
+        #     [SSM(control_plane_dim, window_size, state_dim, windowed=True) for _ in range(n_models)])
+
+        self.ssm = SSM(control_plane_dim, window_size, state_dim, windowed=True)
+
+        self.scheduler = DiracScheduler(1, n_frames, n_samples)
+
+    def forward(self, control_plane_choice: torch.Tensor, times: torch.Tensor) -> torch.Tensor:
+        batch = control_plane_choice.shape[0]
+
+
+        cp = self.control_plane_selection\
+            .forward(control_plane_choice)\
+            .view(batch, self.control_plane_dim, self.n_frames)
+        cp = torch.relu(cp)
+
+        samples = self.ssm.forward(cp)
+        samples = self.scheduler.schedule(times, samples)
+        return samples
 
 
 class FFTResonanceLookup(Lookup):

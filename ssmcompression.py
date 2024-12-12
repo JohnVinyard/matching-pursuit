@@ -11,13 +11,13 @@ samplerate = 22050
 n_seconds = n_samples / samplerate
 
 # the size of each, half-lapped audio "frame"
-window_size = 2048
+window_size = 1024
 
 # the dimensionality of the control plane or control signal
 control_plane_dim = 32
 
 # the dimensionality of the state vector, or hidden state
-state_dim = 128
+state_dim = 64
 
 is_complex = False
 
@@ -74,7 +74,8 @@ class SSM(nn.Module):
     1D signal.
     """
 
-    def __init__(self, control_plane_dim: int, input_dim: int, state_matrix_dim: int, complex: bool = False):
+    def __init__(self, control_plane_dim: int, input_dim: int, state_matrix_dim: int, complex: bool = False,
+                 windowed: bool = True):
         super().__init__()
         self.state_matrix_dim = state_matrix_dim
         self.input_dim = input_dim
@@ -87,6 +88,8 @@ class SSM(nn.Module):
 
         self.input_dim = input_dim
         self.state_matrix_dim = state_matrix_dim
+
+
 
         # matrix mapping control signal to audio frame dimension
         self.proj = nn.Parameter(
@@ -245,7 +248,7 @@ def sparsity_loss(c: torch.Tensor) -> torch.Tensor:
     """
     Compute the l1 norm of the control signal
     """
-    return torch.abs(c).sum() * 0.2
+    return torch.abs(c).sum() * 1
 
 
 def to_numpy(x: torch.Tensor):
@@ -299,8 +302,6 @@ def train_and_monitor():
         state_space
     ], port=9999, n_workers=1)
 
-
-
     def train(target: torch.Tensor):
         model = construct_experiment_model()
         loss_model = CorrelationLoss(n_elements=1024).to(device)
@@ -313,8 +314,8 @@ def train_and_monitor():
             recon_audio(max_norm(recon))
             loss = \
                 sparsity_loss(model.control_signal) \
-                + reconstruction_loss(recon, target)
-                # + loss_model.noise_loss(target, recon)
+                + reconstruction_loss(recon, target) \
+                + loss_model.noise_loss(target, recon)
 
             non_zero = (model.control_signal > 0).sum()
             sparsity = (non_zero / model.control_signal.numel()).item()

@@ -2,9 +2,33 @@ from torch import nn
 import torch
 import numpy as np
 
-from modules import max_norm
+from modules import max_norm, unit_norm
 from modules.overlap_add import overlap_add
+from ssmcompression import max_efficiency
 
+max_efficiency = 0.999
+
+def project_and_limit_norm(
+        vector: torch.Tensor,
+        matrix: torch.Tensor,
+        max_efficiency: float = max_efficiency) -> torch.Tensor:
+    # get the original norm, this is the absolute max norm/energy we should arrive at,
+    # given a perfectly efficient physical system
+    original_norm = torch.norm(vector, dim=-1, keepdim=True)
+    # project
+    x = vector @ matrix
+
+    # TODO: clamp norm should be a utility that lives in normalization
+    # find the norm of the projection
+    new_norm = torch.norm(x, dim=-1, keepdim=True)
+    # clamp the norm between the allowed values
+    clamped_norm = torch.clamp(new_norm, min=None, max=original_norm * max_efficiency)
+
+    # give the projected vector the clamped norm, such that it
+    # can have lost some or all energy, but not _gained_ any
+    normalized = unit_norm(x, axis=-1)
+    x = normalized * clamped_norm
+    return x
 
 
 class SSM(nn.Module):
@@ -65,9 +89,24 @@ class SSM(nn.Module):
 
         for i in range(frames):
             inp = proj[:, i, :]
-            state_vec = (state_vec @ self.state_matrix) + (inp @ self.input_matrix)
-            output = (state_vec @ self.output_matrix) + (inp @ self.direct_matrix)
+
+            state_vec = project_and_limit_norm(state_vec, self.state_matrix)
+            b = project_and_limit_norm(inp, self.input_matrix)
+            c = project_and_limit_norm(state_vec, self.output_matrix)
+            d = project_and_limit_norm(inp, self.direct_matrix)
+
+            state_vec = state_vec + b
+            output = c + d
+
+            # state_vec = (state_vec @ self.state_matrix) + (inp @ self.input_matrix)
+            # output = (state_vec @ self.output_matrix) + (inp @ self.direct_matrix)
+
+            # state_vec = state_vec + b
+            # output = c + d
+            # state_vec = (state_vec @ self.state_matrix) + (inp @ self.input_matrix)
+            # output = (state_vec @ self.output_matrix) + (inp @ self.direct_matrix)
             results.append(output.view(batch, 1, self.input_dim))
+
 
         result = torch.cat(results, dim=1)
         result = result[:, None, :, :]

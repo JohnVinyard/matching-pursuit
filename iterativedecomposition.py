@@ -12,9 +12,10 @@ from modules import stft, sparsify, sparsify_vectors, iterative_loss, max_norm, 
 from modules.anticausal import AntiCausalAnalysis
 from modules.eventgenerators.convimpulse import ConvImpulseEventGenerator
 from modules.eventgenerators.generator import EventGenerator
-from modules.eventgenerators.overfitresonance import OverfitResonanceModel, FFTResonanceLookup
+from modules.eventgenerators.overfitresonance import OverfitResonanceModel, FFTResonanceLookup, MultiSSM
 from modules.eventgenerators.splat import SplattingEventGenerator
 from modules.eventgenerators.ssm import StateSpaceModelEventGenerator
+from modules.infoloss import CorrelationLoss
 from modules.multiheadtransform import MultiHeadTransform
 from util import device, encode_audio, make_initializer
 import numpy as np
@@ -63,15 +64,6 @@ def fft_shift(a: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
     # samples = torch.relu(samples)
     return samples
 
-
-"""
-TODOs: 
-
-- gather statistics
-- self-supervised learning
-    - distance metric between one-hot time vectors
-
-"""
 
 
 def transform(x: torch.Tensor):
@@ -361,20 +353,32 @@ def train_and_monitor(
                 n_samples=n_samples,
                 samplerate=samplerate,
                 n_resonance_octaves=64,
-                n_frames=n_frames
+                n_frames=n_frames,
+                wavetable_resonance=False,
+                hierarchical_scheduler=False
             )
         elif model_type == 'ssm':
             resonance_model = StateSpaceModelEventGenerator(
                 context_dim=context_dim,
-                control_plane_dim=16,
-                input_dim=512,
-                state_dim=32,
-                hypernetwork_dim=16,
-                hypernetwork_latent=16,
+                control_plane_dim=context_dim,
+                input_dim=1024,
+                state_dim=128,
+                hypernetwork_dim=32,
+                hypernetwork_latent=context_dim,
                 samplerate=samplerate,
                 n_samples=n_samples,
                 n_frames=n_frames,
             )
+            # resonance_model = MultiSSM(
+            #     context_dim=context_dim,
+            #     control_plane_dim=64,
+            #     n_frames=n_frames,
+            #     state_dim=512,
+            #     window_size=512,
+            #     n_models=8,
+            #     n_control_planes=512,
+            #     n_samples=n_samples
+            # )
         else:
             raise ValueError(f'Unknown model type {model_type}')
 
@@ -425,6 +429,7 @@ def train_and_monitor(
             print(target.shape, recon.shape)
 
             loss = iterative_loss(target, recon, loss_transform)
+            # loss = loss_model.noise_loss(target, recon_summed)
 
             loss = loss + (torch.abs(encoded).sum() * 1e-4)
 
@@ -460,6 +465,7 @@ def train_and_monitor(
             if save_and_load_weights and i % 100 == 0:
                 torch.save(model.state_dict(), model_filename)
                 torch.save(disc.state_dict(), disc_filename)
+
 
     train()
 

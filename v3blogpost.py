@@ -955,7 +955,11 @@ def generate(
 def match_graph_edges(model: nn.Module, vectors: torch.Tensor, times: torch.Tensor) -> torch.Tensor:
     samples = get_one_audio_segment(n_samples, samplerate, device='cpu').view(1, 1, n_samples)
     events, vectors, times = model.iterative(samples)
-    edges = model.event_similarity(vectors, times).clone().detach()
+
+    embeddings = model.embed_events(vectors, times)
+    diff = torch.cdist(embeddings, embeddings).view(n_events, n_events).clone().detach()
+
+    # edges = model.event_similarity(vectors, times).clone().detach()
 
     class OvefitModel(nn.Module):
 
@@ -969,7 +973,10 @@ def match_graph_edges(model: nn.Module, vectors: torch.Tensor, times: torch.Tens
             return sparse_softmax(self.times, dim=-1, normalize=True)
 
         def forward(self):
-            return model.event_similarity(self.vectors, self.sparse_times)
+            embedded = model.embed_events(self.vectors, self.sparse_times)
+            diff = torch.cdist(embedded, embedded).view(n_events, n_events)
+            # return model.event_similarity(self.vectors, self.sparse_times)
+            return diff
 
         def generate(self):
             return generate_multiple_events(model, self.vectors, self.sparse_times)
@@ -980,7 +987,7 @@ def match_graph_edges(model: nn.Module, vectors: torch.Tensor, times: torch.Tens
     for i in range(500):
         optim.zero_grad()
         recon = overfit.forward()
-        loss = torch.abs(recon - edges).sum()
+        loss = torch.abs(recon - diff).sum()
         loss.backward()
         optim.step()
         print(i, loss.item())
