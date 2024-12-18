@@ -14,9 +14,10 @@ def project_and_limit_norm(
         max_efficiency: float = max_efficiency) -> torch.Tensor:
     # get the original norm, this is the absolute max norm/energy we should arrive at,
     # given a perfectly efficient physical system
-    original_norm = torch.norm(vector, dim=-1, keepdim=True)
+    # original_norm = torch.norm(vector, dim=-1, keepdim=True)
     # project
     x = vector @ matrix
+    return x
 
     # TODO: clamp norm should be a utility that lives in normalization
     # find the norm of the projection

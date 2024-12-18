@@ -845,6 +845,9 @@ def process_events(
 
 
 def load_model(wavetable_device: str = 'cpu') -> nn.Module:
+
+
+
     hidden_channels = 512
 
     model = IterativeDecompositionModel(
@@ -858,18 +861,19 @@ def load_model(wavetable_device: str = 'cpu') -> nn.Module:
             instr_expressivity=8,
             n_events=1,
             n_resonances=4096,
-            n_envelopes=256,
+            n_envelopes=128,
             n_decays=32,
-            n_deformations=32,
+            n_deformations=16,
             n_samples=n_samples,
             n_frames=n_frames,
             samplerate=samplerate,
             hidden_channels=hidden_channels,
             wavetable_device=wavetable_device,
-            fine_positioning=True
+            fine_positioning=True,
+            fft_resonance=True
         ))
 
-    with open('iterativedecomposition4.dat', 'rb') as f:
+    with open('iterativedecomposition5.dat', 'rb') as f:
         model.load_state_dict(torch.load(f, map_location=lambda storage, loc: storage))
 
     print('Total parameters', count_parameters(model))

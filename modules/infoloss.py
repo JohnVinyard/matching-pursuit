@@ -21,7 +21,7 @@ def stft_transform(
     batch_size = x.shape[0]
     x = stft(x, transform_window_size, transform_step_size, pad=True)
     n_coeffs = transform_window_size // 2 + 1
-    x = x.view(batch_size, -1, n_coeffs)[..., :n_coeffs - 1].permute(0, 2, 1)
+    x = x.reshape(batch_size, -1, n_coeffs)[..., :n_coeffs - 1].permute(0, 2, 1)
     return x
 
 
@@ -31,13 +31,24 @@ class CorrelationLoss(nn.Module):
         super().__init__()
         self.n_elements = n_elements
 
-    def noise_loss(self, target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
+    def multiband_noise_loss(self, target: torch.Tensor, recon: torch.Tensor, window_size: int, step: int) -> torch.Tensor:
+        t = fft_frequency_decompose(target, 512)
+        r = fft_frequency_decompose(recon, 512)
+        loss = 0
+
+        for k, v in t.items():
+            loss = loss + self.noise_loss(v, r[k], window_size, step)
+
+        return loss
+
+
+    def noise_loss(self, target: torch.Tensor, recon: torch.Tensor, window_size: int = 2048, step_size: int = 256) -> torch.Tensor:
         batch, _, time = target.shape
 
         h, _, time = target.shape
 
-        t_spec = stft_transform(target).reshape(batch, -1)
-        r_spec = stft_transform(recon).reshape(batch, -1)
+        t_spec = stft_transform(target, window_size, step_size).reshape(batch, -1)
+        r_spec = stft_transform(recon, window_size, step_size).reshape(batch, -1)
         residual = t_spec - r_spec
         noise_spec = torch.zeros_like(residual).normal_(residual.mean().item(), residual.std().item() + 1e-8)
 
@@ -47,19 +58,7 @@ class CorrelationLoss(nn.Module):
         # ensure that the norm does not grow
         norm_loss = torch.clip(recon_norm - target_norm, min=0, max=np.inf).sum()
 
-        # choose a random subset of the indices
-        # indices = torch.randperm(t_spec.shape[-1], device=target.device)[:self.n_elements]
 
-        # t_spec = t_spec[:, indices]
-        # r_spec = r_spec[:, indices]
-        # residual = t_spec - r_spec
-        # n_spec = noise_spec[:, indices]
-
-        # The residual covariance should resemble/move toward noise
-        # t_cov = covariance(n_spec)
-        # r_cov = covariance(residual)
-
-        # cov_loss = torch.abs(t_cov - r_cov).sum()
         noise_loss = torch.abs(residual - noise_spec).sum()
 
         return norm_loss + noise_loss

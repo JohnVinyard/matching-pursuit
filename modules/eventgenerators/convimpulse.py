@@ -126,6 +126,7 @@ class ConvImpulseEventGenerator(EventGenerator, nn.Module):
             initial=waves,
             learnable_resonances=False)
 
+
         self.verb = ReverbGenerator(
             context_dim, 3, samplerate, n_samples, norm=nn.LayerNorm((self.context_dim,)))
 

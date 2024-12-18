@@ -13,9 +13,11 @@ from modules import unit_norm, sparsify2, stft, iterative_loss, fft_frequency_de
 from modules.latent_loss import covariance
 from modules.overlap_add import overlap_add
 from modules.phase import windowed_audio, morlet_filter_bank
-from modules.transfer import fft_convolve, fft_shift
+from modules.transfer import fft_convolve, fft_shift, freq_domain_transfer_function_to_resonance
 from modules.matchingpursuit import dictionary_learning_step, sparse_code
 from torch.nn import functional as F
+
+from modules.upsample import upsample_with_holes
 from util import device, playable
 import numpy as np
 
@@ -126,49 +128,48 @@ def positional_encoding(
 
 
 if __name__ == '__main__':
-    # train()
 
-    # n_frames = 256
-    # control_dim = 16
-    #
-    # latent_dim = 32
-    #
-    # fade_template = torch.linspace(0, 1, n_frames)
-    #
-    # event_latent = torch.zeros(1, 1, latent_dim).uniform_(-0.01, 0.01)
-    #
-    # to_fade = torch.zeros(latent_dim, control_dim).uniform_(-1, 1)
-    # hyper = HyperNetworkLayer(latent_dim, 64, layer_in_channels=16, layer_out_channels=512)
-    #
-    # control_plane = torch.zeros(1, n_frames, control_dim).bernoulli_(0.001)
-    # fade =  24 + (torch.softmax(event_latent @ to_fade, dim=-1) * 100)
-    #
-    # fade = fade_template.view(1, 1, 1, n_frames) ** fade.view(1, 1, control_dim, 1)
-    #
-    # delays = torch.eye(n_frames)
-    # fades = fft_convolve(fade[..., None].repeat(1, 1, 1, 1, n_frames), delays.view(1, 1, 1, n_frames, n_frames))
-    #
-    # orig_control_plane = control_plane
-    #
-    # # TODO: Create summaries of the past for each frame
-    # control_plane = control_plane.permute(0, 2, 1).view(1, 1, 16, 256, 1)
-    # control_plane = fades * control_plane
-    # control_plane = torch.sum(control_plane, dim=-2)
-    # control_plane = control_plane.view(1, 16, 256).permute(0, 2, 1)
-    #
-    # w, forward = hyper.forward(event_latent)
-    # sig = forward(control_plane + orig_control_plane)
-    #
-    # windowed = sig.view(1, 1, n_frames, 512)
-    # signal = overlap_add(windowed, apply_window=True)
-    # p = playable(signal, 22050, normalize=True)
-    # listen_to_sound(p)
+    window_size = 2048
+    n_coeffs = window_size // 2 + 1
+    n_samples = 2 ** 16
+    step_size = 256
+    n_frames = n_samples // step_size
+    control_plane_dim = 4
+    n_resonances = 16
+    n_deformations = 4
+    batch_size = 2
+    n_events = 3
 
-    times = torch.zeros((4, 16, 256)).bernoulli_(p=0.01)
+    resonances = torch.zeros(1, n_resonances, n_coeffs).uniform_(0.2, 0.9) * torch.zeros(1, 1, n_coeffs).bernoulli_(p=0.1)
+    resonance = freq_domain_transfer_function_to_resonance(window_size, resonances, n_samples // (window_size // 2), apply_decay=True)
 
-    pe = positional_encoding(256, n_freqs=32)
+    cp = torch.zeros(batch_size, n_events, control_plane_dim, n_frames).bernoulli_(p=0.005)
 
-    x = times @ pe.T
+    routing = torch.zeros(n_deformations, control_plane_dim, n_resonances).uniform_(-1, 1)
 
-    plt.matshow(x[0])
-    plt.show()
+
+
+    x = routing[None, None, :, :, :].permute(0, 1, 2, 4, 3) @ cp[:, :, None, :, :]
+    x = upsample_with_holes(x, desired_size=n_samples)
+    r = resonance.view(1, 1, 1, n_resonances, n_samples)
+    x = fft_convolve(x, r)
+
+    x = torch.sum(x, dim=3)
+
+
+    mixture = torch.zeros(1, 1, n_deformations, n_samples).uniform_(-1, 1)
+    mixture = torch.softmax(mixture, dim=2)
+    x = x * mixture
+
+
+
+    x = torch.sum(x, dim=2)
+
+
+    x = torch.tanh(x * 3)
+
+
+    x = max_norm(x)
+
+    p = playable(x[0, 0, :], 22050, normalize=True)
+    listen_to_sound(p)

@@ -21,7 +21,7 @@ from util import device, encode_audio, make_initializer
 import numpy as np
 
 # the size, in samples of the audio segment we'll overfit
-n_samples = 2 ** 16
+n_samples = 2 ** 17
 samples_per_event = 2048
 n_events = n_samples // samples_per_event
 context_dim = 32
@@ -85,48 +85,59 @@ def loss_transform(x: torch.Tensor) -> torch.Tensor:
         smallest_band_size=512)
 
 
-def multiband_spectrogram(samples: torch.Tensor, min_size=512) -> Dict[int, torch.Tensor]:
-    batch = samples.shape[0]
+def all_at_once_loss(target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
+    t = transform(target)
+    r = transform(recon)
+    return torch.abs(t - r).sum()
 
-    bands = fft_frequency_decompose(samples, min_size=min_size)
+# def loss_transform(x: torch.Tensor) -> torch.Tensor:
+#     batch, channels, time = x.shape
+#     spec = stft(x, 2048, 256, pad=True)
+#     spec = spec.view(batch, channels, -1)
+#     return spec
 
-    specs = {}
+# def multiband_spectrogram(samples: torch.Tensor, min_size=512) -> Dict[int, torch.Tensor]:
+#     batch = samples.shape[0]
+#
+#     bands = fft_frequency_decompose(samples, min_size=min_size)
+#
+#     specs = {}
+#
+#     for size, band in bands.items():
+#         spec = stft(band, ws=64, step=16, pad=True)
+#         specs[size] = spec
+#
+#     return specs
+#
+#
+# def iterative_loss2(
+#         target: Dict[int, torch.Tensor],
+#         recon: Dict[int, torch.Tensor],
+#         n_events: int) -> torch.Tensor:
+#     residual = {k: t.clone() for k, t in target.items()}
+#
+#     loss = 0
+#
+#     for i in range(n_events):
+#         for size, band in residual.items():
+#             r = recon[size][:, i: i + 1, :]
+#
+#             t_norm = torch.norm(band, dim=-1, keepdim=True)
+#
+#             res = band - r
+#
+#             new_norm = torch.norm(res, dim=-1, keepdim=True)
+#             residual[size] = res
+#
+#             loss = loss + (new_norm / t_norm).sum()
+#
+#     return loss
 
-    for size, band in bands.items():
-        spec = stft(band, ws=64, step=16, pad=True)
-        specs[size] = spec
 
-    return specs
-
-
-def iterative_loss2(
-        target: Dict[int, torch.Tensor],
-        recon: Dict[int, torch.Tensor],
-        n_events: int) -> torch.Tensor:
-    residual = {k: t.clone() for k, t in target.items()}
-
-    loss = 0
-
-    for i in range(n_events):
-        for size, band in residual.items():
-            r = recon[size][:, i: i + 1, :]
-
-            t_norm = torch.norm(band, dim=-1, keepdim=True)
-
-            res = band - r
-
-            new_norm = torch.norm(res, dim=-1, keepdim=True)
-            residual[size] = res
-
-            loss = loss + (new_norm / t_norm).sum()
-
-    return loss
-
-
-def full_iterative_loss(target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
-    spec = multiband_spectrogram(target)
-    rspec = multiband_spectrogram(recon)
-    return iterative_loss2(spec, rspec, n_events)
+# def full_iterative_loss(target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
+#     spec = multiband_spectrogram(target)
+#     rspec = multiband_spectrogram(recon)
+#     return iterative_loss2(spec, rspec, n_events)
 
 
 
@@ -319,19 +330,22 @@ def train_and_monitor(
     disc_filename = 'iterativedecompositiondisc5.dat'
 
     def train():
+
+        scaler = torch.cuda.amp.GradScaler()
+
         hidden_channels = 512
         if model_type == 'lookup':
             resonance_model = OverfitResonanceModel(
                 n_noise_filters=32,
-                noise_expressivity=8,
+                noise_expressivity=2,
                 noise_filter_samples=128,
                 noise_deformations=16,
-                instr_expressivity=8,
+                instr_expressivity=2,
                 n_events=1,
-                n_resonances=4096,
-                n_envelopes=256,
-                n_decays=32,
-                n_deformations=32,
+                n_resonances=2048,
+                n_envelopes=32,
+                n_decays=16,
+                n_deformations=16,
                 n_samples=n_samples,
                 n_frames=n_frames,
                 samplerate=samplerate,
@@ -354,31 +368,33 @@ def train_and_monitor(
                 samplerate=samplerate,
                 n_resonance_octaves=64,
                 n_frames=n_frames,
-                wavetable_resonance=False,
+                wavetable_resonance=True,
                 hierarchical_scheduler=False
             )
         elif model_type == 'ssm':
-            resonance_model = StateSpaceModelEventGenerator(
-                context_dim=context_dim,
-                control_plane_dim=context_dim,
-                input_dim=1024,
-                state_dim=128,
-                hypernetwork_dim=32,
-                hypernetwork_latent=context_dim,
-                samplerate=samplerate,
-                n_samples=n_samples,
-                n_frames=n_frames,
-            )
-            # resonance_model = MultiSSM(
+            # resonance_model = StateSpaceModelEventGenerator(
             #     context_dim=context_dim,
-            #     control_plane_dim=64,
+            #     control_plane_dim=context_dim,
+            #     input_dim=1024,
+            #     state_dim=128,
+            #     hypernetwork_dim=32,
+            #     hypernetwork_latent=context_dim,
+            #     samplerate=samplerate,
+            #     n_samples=n_samples,
             #     n_frames=n_frames,
-            #     state_dim=512,
-            #     window_size=512,
-            #     n_models=8,
-            #     n_control_planes=512,
-            #     n_samples=n_samples
             # )
+            window_size = 2048
+            step_size = window_size // 2
+            resonance_model = MultiSSM(
+                context_dim=context_dim,
+                control_plane_dim=64,
+                n_frames=n_samples // step_size,
+                state_dim=128,
+                window_size=window_size,
+                n_models=8,
+                n_control_planes=512,
+                n_samples=n_samples
+            )
         else:
             raise ValueError(f'Unknown model type {model_type}')
 
@@ -389,7 +405,7 @@ def train_and_monitor(
             in_channels=1024,
             hidden_channels=hidden_channels).to(device)
 
-        disc = Discriminator(disc_type=disc_type).to(device)
+        # disc = Discriminator(disc_type=disc_type).to(device)
 
         # loss_model = CorrelationLoss(n_elements=512).to(device)
 
@@ -410,49 +426,62 @@ def train_and_monitor(
                 print('no discriminator weights to load')
 
         optim = Adam(model.parameters(), lr=1e-3)
-        disc_optim = Adam(disc.parameters(), lr=1e-3)
+        # disc_optim = Adam(disc.parameters(), lr=1e-3)
+
+        loss_model = CorrelationLoss(n_elements=256).to(device)
 
         for i, item in enumerate(iter(stream)):
             optim.zero_grad()
-            disc_optim.zero_grad()
+            # disc_optim.zero_grad()
 
-            target = item.view(batch_size, 1, n_samples).to(device)
-            orig_audio(target)
-            recon, encoded, scheduling = model.iterative(target)
+            with torch.cuda.amp.autocast():
+                target = item.view(batch_size, 1, n_samples).to(device)
+                orig_audio(target)
+                recon, encoded, scheduling = model.iterative(target)
 
-            recon_summed = torch.sum(recon, dim=1, keepdim=True)
-            recon_audio(max_norm(recon_summed))
+                recon_summed = torch.sum(recon, dim=1, keepdim=True)
+                recon_audio(max_norm(recon_summed))
 
-            envelopes(max_norm(scheduling[0]))
-            latents(max_norm(encoded[0]))
+                envelopes(max_norm(scheduling[0]))
+                latents(max_norm(encoded[0]))
 
-            print(target.shape, recon.shape)
+                # print(target.shape, recon.shape)
 
-            loss = iterative_loss(target, recon, loss_transform)
-            # loss = loss_model.noise_loss(target, recon_summed)
+                # loss = all_at_once_loss(target, recon_summed)
+                # loss = iterative_loss(target, recon, loss_transform)
+                # loss = loss_model.noise_loss(target, recon_summed)
+                loss = loss_model.multiband_noise_loss(target, recon_summed, 128, 32)
 
-            loss = loss + (torch.abs(encoded).sum() * 1e-4)
+                # loss = loss + (torch.abs(encoded).sum() * 1e-4)
 
-            if adversarial_loss:
-                mask = torch.zeros(target.shape[0], n_events, 1, device=recon.device).bernoulli_(p=0.5)
-                for_disc = torch.sum(recon * mask, dim=1, keepdim=True)
-                j = disc.forward(for_disc)
-                d_loss = torch.abs(1 - j).mean()
-                print('G', d_loss.item())
-                loss = loss + (d_loss * 100)
+                # if adversarial_loss:
+                #     mask = torch.zeros(target.shape[0], n_events, 1, device=recon.device).bernoulli_(p=0.5)
+                #     for_disc = torch.sum(recon * mask, dim=1, keepdim=True)
+                #     j = disc.forward(for_disc)
+                #     d_loss = torch.abs(1 - j).mean()
+                #     print('G', d_loss.item())
+                #     loss = loss + (d_loss * 100)
 
-            loss.backward()
-            optim.step()
+            scaler.scale(loss).backward()
+            scaler.step(optim)
+            scaler.update()
+            # loss.backward()
+            # optim.step()
             print(i, loss.item())
 
-            if adversarial_loss:
-                disc_optim.zero_grad()
-                r_j = disc.forward(target)
-                f_j = disc.forward(recon_summed.clone().detach())
-                d_loss = torch.abs(0 - f_j).mean() + torch.abs(1 - r_j).mean()
-                d_loss.backward()
-                print('D', d_loss.item())
-                disc_optim.step()
+            # if adversarial_loss:
+            #     with torch.cuda.amp.autocast():
+            #         disc_optim.zero_grad()
+            #         r_j = disc.forward(target)
+            #         f_j = disc.forward(recon_summed.clone().detach())
+            #         d_loss = torch.abs(0 - f_j).mean() + torch.abs(1 - r_j).mean()
+            #
+            #     scaler.scale(d_loss).backward()
+            #     # d_loss.backward()
+            #     print('D', d_loss.item())
+            #     # disc_optim.step()
+            #     scaler.step(disc_optim)
+            #     scaler.update()
 
             with torch.no_grad():
                 # TODO: this should be collecting statistics from reconstructions
@@ -464,7 +493,7 @@ def train_and_monitor(
 
             if save_and_load_weights and i % 100 == 0:
                 torch.save(model.state_dict(), model_filename)
-                torch.save(disc.state_dict(), disc_filename)
+                # torch.save(disc.state_dict(), disc_filename)
 
 
     train()

@@ -111,7 +111,7 @@ def project_and_limit_norm(
 
     # get the original norm, this is the absolute max norm/energy we should arrive at,
     # given a perfectly efficient physical system
-    original_norm = torch.norm(vector, dim=-1, keepdim=True)
+    # original_norm = torch.norm(vector, dim=-1, keepdim=True)
 
     # project
     x = forward(vector)

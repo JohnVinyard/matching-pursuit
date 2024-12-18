@@ -170,6 +170,9 @@ def freq_domain_transfer_function_to_resonance(
         coeffs: torch.Tensor,
         n_frames: int,
         apply_decay: bool = True) -> torch.Tensor:
+
+    # batch, n_events, c = coeffs.shape
+
     step_size = window_size // 2
     total_samples = step_size * n_frames
 
@@ -198,6 +201,7 @@ def freq_domain_transfer_function_to_resonance(
     phase = torch.zeros_like(spec).uniform_(-np.pi, np.pi)
     phase[:, :, :, :] = group_delay[None, None, None, :]
     phase = torch.cumsum(phase, dim=2)
+    # phase = phase + torch.zeros(batch, n_events, 1, expected_coeffs).uniform_(-np.pi, np.pi)
 
     # convert from polar coordinates
     spec = spec * torch.exp(1j * phase)

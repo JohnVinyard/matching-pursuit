@@ -7,24 +7,28 @@ from modules import pos_encoded
 
 
 class AntiCausalConv(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, dilation):
+    def __init__(self, in_channels, out_channels, kernel_size, dilation, reverse_causality: bool = False):
         super().__init__()
         self.conv = nn.Conv1d(in_channels, out_channels, kernel_size, stride=1, dilation=dilation)
         self.kernel_size = kernel_size
         self.dilation = dilation
+        self.reverse_causality = reverse_causality
     
     def forward(self, x: torch.Tensor):
-        x = F.pad(x, (0, ((self.kernel_size * self.dilation) // 2)))
+        if self.reverse_causality:
+           x =  F.pad(x, (((self.kernel_size * self.dilation) // 2), 0))
+        else:
+            x = F.pad(x, (0, ((self.kernel_size * self.dilation) // 2)))
         x = self.conv.forward(x)
         return x
 
 
 class AntiCausalBlock(nn.Module):
-    def __init__(self, channels, kernel_size, dilation, do_norm: bool = False):
+    def __init__(self, channels, kernel_size, dilation, do_norm: bool = False, reverse_causality: bool = False):
         super().__init__()
         self.dilation = dilation
-        self.conv = AntiCausalConv(channels, channels, kernel_size, dilation)
-        self.gate = AntiCausalConv(channels, channels, kernel_size, dilation)
+        self.conv = AntiCausalConv(channels, channels, kernel_size, dilation, reverse_causality=reverse_causality)
+        self.gate = AntiCausalConv(channels, channels, kernel_size, dilation, reverse_causality=reverse_causality)
         self.norm = nn.BatchNorm1d(channels)
         self.do_norm = do_norm
     
@@ -42,10 +46,10 @@ class AntiCausalBlock(nn.Module):
 
 
 class AntiCausalStack(nn.Module):
-    def __init__(self, channels, kernel_size, dilations, do_norm: bool = False):
+    def __init__(self, channels, kernel_size, dilations, do_norm: bool = False, reverse_causality: bool = False):
         super().__init__()
         self.blocks = nn.ModuleList([
-            AntiCausalBlock(channels, kernel_size, d, do_norm=do_norm) for d in dilations])
+            AntiCausalBlock(channels, kernel_size, d, do_norm=do_norm, reverse_causality=reverse_causality) for d in dilations])
         self.ff = nn.Conv1d(channels, channels, 1, 1, 0)
     
     def forward(self, x):
@@ -68,7 +72,8 @@ class AntiCausalAnalysis(nn.Module):
             kernel_size: int, 
             dilations: List[int], 
             do_norm: bool = False,
-            pos_encodings: bool = False):
+            pos_encodings: bool = False,
+            reverse_causality: bool = False,):
         
         super().__init__()
         self.in_channels = in_channels
@@ -81,7 +86,7 @@ class AntiCausalAnalysis(nn.Module):
             self.pos_projection = nn.Conv1d(33, channels, 1, 1, 0)
 
         self.stack = AntiCausalStack(
-            channels, kernel_size, dilations, do_norm=do_norm)
+            channels, kernel_size, dilations, do_norm=do_norm, reverse_causality=reverse_causality)
 
     
     def forward(self, x: torch.Tensor):

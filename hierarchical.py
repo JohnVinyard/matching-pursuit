@@ -80,8 +80,8 @@ class OverfitHierarchicalEvents(nn.Module):
 
         for i in range(self.event_levels - 1):
 
-            # scale = 1 / (i + 1)
-            scale = 1
+            scale = 1 / (i + 1)
+            # scale = 1
 
             # TODO: consider bringing back scaling as we approach the leaves of the tree
             events = \

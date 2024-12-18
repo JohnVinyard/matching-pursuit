@@ -234,9 +234,11 @@ class SplattingEventGenerator(nn.Module, EventGenerator):
         self.n_octaves = n_resonance_octaves
         self.wavetable_resonance = wavetable_resonance
 
+        self.n_resonance = 2048
+
         if wavetable_resonance:
             self.resonance_generator = Resonance(
-                4096, n_samples, hard_choice=False, samplerate=samplerate)
+                self.n_resonance, n_samples, hard_choice=False, samplerate=samplerate)
         else:
             self.resonance_generator = F0Resonance(
                 n_resonance_octaves, n_samples, min_hz=20, max_hz=3000, samplerate=samplerate)
@@ -340,7 +342,7 @@ class SplattingEventGenerator(nn.Module, EventGenerator):
         # assert final.shape == (1, n_atoms, exp.n_samples)
 
         final = final.view(batch, -1, self.n_samples)
-        final = unit_norm(final, dim=-1)
+        # final = unit_norm(final, dim=-1)
 
         amps = torch.abs(amp)
         final = final * amps
@@ -453,7 +455,7 @@ class SplattingEventGenerator(nn.Module, EventGenerator):
                 # f0_choice=(1,),
                 decay_choice=(1,),
                 # freq_spacing=(1,),
-                resonance_choice=(4096,),
+                resonance_choice=(self.n_resonance,),
                 noise_filter=(2,),
                 resonance_filter_1=(2,),
                 resonance_filter_2=(2,),
