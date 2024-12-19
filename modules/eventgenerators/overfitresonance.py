@@ -6,7 +6,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from config import Config
-from modules import interpolate_last_axis, select_items, NeuralReverb, SSM, sparse_softmax
+from modules import interpolate_last_axis, select_items, NeuralReverb, SSM, sparse_softmax, sparsify
 from modules.eventgenerators.generator import EventGenerator
 from modules.eventgenerators.schedule import DiracScheduler
 from modules.iterative import TensorTransform
@@ -59,12 +59,15 @@ class Lookup(nn.Module):
             n_items: int,
             n_samples: int,
             initialize: Union[None, TensorTransform] = None,
-            fixed: bool = False):
+            fixed: bool = False,
+            selection_type: str = 'softmax'):
+
         super().__init__()
         self.n_items = n_items
         self.n_samples = n_samples
         data = torch.zeros(n_items, n_samples)
         self.fixed = fixed
+        self.selection_type = selection_type
         initialized = data.uniform_(-0.02, 0.02) if initialize is None else initialize(data)
 
         if self.fixed:
@@ -80,7 +83,7 @@ class Lookup(nn.Module):
 
     def forward(self, selections: torch.Tensor) -> torch.Tensor:
         items = self.preprocess_items(self.items)
-        selected = select_items(selections, items, selection_type='softmax')
+        selected = select_items(selections, items, selection_type=self.selection_type)
         processed = self.postprocess_results(selected)
         return processed
 
@@ -137,7 +140,6 @@ class MultiSSM(nn.Module, EventGenerator):
     @property
     def shape_spec(self) -> ShapeSpec:
         return dict(
-            # model_choice=(1, self.n_models),
             control_plane_choice=(1, self.n_control_planes)
         )
 
@@ -161,13 +163,19 @@ class MultiSSM(nn.Module, EventGenerator):
         self.n_models = n_models
         self.n_samples = n_samples
 
-        self.control_plane_selection = Lookup(self.n_control_planes, n_samples=control_plane_dim * n_frames)
+        self.control_plane_selection = Lookup(
+            self.n_control_planes,
+            n_samples=control_plane_dim * n_frames,
+            initialize=lambda x: torch.zeros_like(x).uniform_(-1, 1),
+            selection_type='sparse_softmax')
+
         # self.models = nn.ModuleList(
         #     [SSM(control_plane_dim, window_size, state_dim, windowed=True) for _ in range(n_models)])
 
         self.ssm = SSM(control_plane_dim, window_size, state_dim, windowed=True)
 
         self.scheduler = DiracScheduler(1, n_frames, n_samples)
+
 
     def forward(self, control_plane_choice: torch.Tensor, times: torch.Tensor) -> torch.Tensor:
         batch = control_plane_choice.shape[0]
@@ -176,7 +184,9 @@ class MultiSSM(nn.Module, EventGenerator):
         cp = self.control_plane_selection\
             .forward(control_plane_choice)\
             .view(batch, self.control_plane_dim, self.n_frames)
-        cp = torch.relu(cp)
+
+        cp = torch.softmax(cp.view(batch, -1), dim=-1).view(batch, self.control_plane_dim, self.n_frames)
+        cp = sparsify(cp, n_to_keep=8)
 
         samples = self.ssm.forward(cp)
         samples = self.scheduler.schedule(times, samples)

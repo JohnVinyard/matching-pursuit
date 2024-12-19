@@ -121,6 +121,7 @@ class SSM(nn.Module):
 
         self.param_count = count_parameters(self)
 
+
     def forward(self, control: torch.Tensor) -> torch.Tensor:
         batch, cpd, frames = control.shape
         assert cpd == self.control_plane_dim
@@ -320,7 +321,7 @@ def train_and_monitor():
             non_zero = (model.control_signal > 0).sum()
             sparsity = (non_zero / model.control_signal.numel()).item()
 
-            state_space(model.ssm.state_matrix)
+            state_space(torch.abs(torch.fft.rfft(model.ssm.state_matrix, dim=-1)))
             envelopes(model.control_signal.view(control_plane_dim, -1))
             loss.backward()
 

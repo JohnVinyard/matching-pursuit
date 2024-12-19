@@ -134,13 +134,13 @@ if __name__ == '__main__':
     n_samples = 2 ** 16
     step_size = 256
     n_frames = n_samples // step_size
-    control_plane_dim = 4
+    control_plane_dim = 16
     n_resonances = 16
     n_deformations = 4
     batch_size = 2
     n_events = 3
 
-    resonances = torch.zeros(1, n_resonances, n_coeffs).uniform_(0.2, 0.9) * torch.zeros(1, 1, n_coeffs).bernoulli_(p=0.1)
+    resonances = torch.zeros(1, n_resonances, n_coeffs).uniform_(0.2, 0.9) * torch.zeros(1, 1, n_coeffs).bernoulli_(p=0.01)
     resonance = freq_domain_transfer_function_to_resonance(window_size, resonances, n_samples // (window_size // 2), apply_decay=True)
 
     cp = torch.zeros(batch_size, n_events, control_plane_dim, n_frames).bernoulli_(p=0.005)
@@ -157,7 +157,9 @@ if __name__ == '__main__':
     x = torch.sum(x, dim=3)
 
 
-    mixture = torch.zeros(1, 1, n_deformations, n_samples).uniform_(-1, 1)
+    mixture = torch.zeros(1, n_deformations, n_samples).uniform_(-1, 1)
+
+    mixture = F.avg_pool1d(mixture, 4096, stride=1, padding=2048)[:, None, :, :-1]
     mixture = torch.softmax(mixture, dim=2)
     x = x * mixture
 

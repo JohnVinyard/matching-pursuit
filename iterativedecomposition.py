@@ -21,7 +21,7 @@ from util import device, encode_audio, make_initializer
 import numpy as np
 
 # the size, in samples of the audio segment we'll overfit
-n_samples = 2 ** 17
+n_samples = 2 ** 16
 samples_per_event = 2048
 n_events = n_samples // samples_per_event
 context_dim = 32
@@ -284,6 +284,9 @@ def train_and_monitor(
         fine_positioning: bool = False,
         save_and_load_weights: bool = False,
         adversarial_loss: bool = True):
+
+    torch.backends.cudnn.benchmark = True
+
     stream = AudioIterator(
         batch_size=batch_size,
         n_samples=n_samples,
@@ -383,7 +386,7 @@ def train_and_monitor(
             #     n_samples=n_samples,
             #     n_frames=n_frames,
             # )
-            window_size = 2048
+            window_size = 1024
             step_size = window_size // 2
             resonance_model = MultiSSM(
                 context_dim=context_dim,
@@ -447,10 +450,10 @@ def train_and_monitor(
 
                 # print(target.shape, recon.shape)
 
-                # loss = all_at_once_loss(target, recon_summed)
+                loss = all_at_once_loss(target, recon_summed)
                 # loss = iterative_loss(target, recon, loss_transform)
                 # loss = loss_model.noise_loss(target, recon_summed)
-                loss = loss_model.multiband_noise_loss(target, recon_summed, 128, 32)
+                # loss = loss_model.multiband_noise_loss(target, recon_summed, 128, 32)
 
                 # loss = loss + (torch.abs(encoded).sum() * 1e-4)
 

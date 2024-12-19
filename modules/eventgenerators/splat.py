@@ -234,7 +234,7 @@ class SplattingEventGenerator(nn.Module, EventGenerator):
         self.n_octaves = n_resonance_octaves
         self.wavetable_resonance = wavetable_resonance
 
-        self.n_resonance = 2048
+        self.n_resonance = 512
 
         if wavetable_resonance:
             self.resonance_generator = Resonance(
