@@ -6,7 +6,7 @@ from torch import nn
 from torch.optim import Adam
 
 from conjure import LmdbCollection, serve_conjure, loggers, SupportedContentType, NumpySerializer, NumpyDeserializer
-from data import AudioIterator
+from data import AudioIterator, get_one_audio_segment
 from modules import stft, sparsify, sparsify_vectors, iterative_loss, max_norm, flattened_multiband_spectrogram, \
     DownsamplingDiscriminator, sparse_softmax, fft_frequency_decompose, positional_encoding
 from modules.anticausal import AntiCausalAnalysis
@@ -18,12 +18,15 @@ from modules.eventgenerators.ssm import StateSpaceModelEventGenerator
 from modules.infoloss import CorrelationLoss
 from modules.multiheadtransform import MultiHeadTransform
 from util import device, encode_audio, make_initializer
+from torch.nn import functional as F
 import numpy as np
 
 # the size, in samples of the audio segment we'll overfit
-n_samples = 2 ** 16
+n_samples = 2 ** 17
 samples_per_event = 2048
-n_events = n_samples // samples_per_event
+
+# this is cut in half since we'll mask out the second half of encoder activations
+n_events = (n_samples // samples_per_event) // 2
 context_dim = 32
 
 # the samplerate, in hz, of the audio signal
@@ -65,12 +68,11 @@ def fft_shift(a: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
     return samples
 
 
-
 def transform(x: torch.Tensor):
     batch_size = x.shape[0]
     x = stft(x, transform_window_size, transform_step_size, pad=True)
     n_coeffs = transform_window_size // 2 + 1
-    x = x.view(batch_size, n_frames, n_coeffs)[..., :n_coeffs - 1].permute(0, 2, 1)
+    x = x.view(batch_size, -1, n_coeffs)[..., :n_coeffs - 1].permute(0, 2, 1)
     return x
 
 
@@ -86,9 +88,10 @@ def loss_transform(x: torch.Tensor) -> torch.Tensor:
 
 
 def all_at_once_loss(target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
-    t = transform(target)
-    r = transform(recon)
+    t = loss_transform(target)
+    r = loss_transform(recon)
     return torch.abs(t - r).sum()
+
 
 # def loss_transform(x: torch.Tensor) -> torch.Tensor:
 #     batch, channels, time = x.shape
@@ -140,16 +143,15 @@ def all_at_once_loss(target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
 #     return iterative_loss2(spec, rspec, n_events)
 
 
-
 class Discriminator(nn.Module):
     def __init__(self, disc_type='dilated'):
         super().__init__()
         if disc_type == 'dilated':
             self.disc = DownsamplingDiscriminator(
-                window_size=2048, step_size=256, n_samples=n_samples, channels=256)
+                window_size=2048, step_size=256, n_samples=n_samples // 2, channels=128)
         elif disc_type == 'unet':
             self.disc = DownsamplingDiscriminator(
-                2048, 256, n_samples=n_samples, channels=256)
+                2048, 256, n_samples=n_samples // 2, channels=128)
         # elif disc_type == 'multiband':
         #     self.disc = MultibandDownsamplingDiscriminator(n_frames=n_frames, in_channels=1160, channels=256)
         else:
@@ -158,7 +160,8 @@ class Discriminator(nn.Module):
         self.apply(initializer)
 
     def forward(self, transformed: torch.Tensor):
-        x = self.disc(transformed)
+        t = transformed.shape[-1]
+        x = self.disc(transformed[..., :t // 2])
         return x
 
 
@@ -220,6 +223,15 @@ class Model(nn.Module):
         event_switch = self.to_event_switch(encoded)
         attn = torch.relu(event_switch).permute(0, 2, 1).view(batch_size, 1, -1)
 
+        frame_count = attn.shape[-1]
+        half_frames = frame_count // 2
+
+        # we mask out the second half, so we're always choosing from the first
+        # half for the next event
+        mask = torch.ones_like(attn)
+        mask[:, :, half_frames:] = 0
+        attn = attn * mask
+
         attn, attn_indices, values = sparsify(attn, n_to_keep=n_events, return_indices=True)
 
         vecs, indices = sparsify_vectors(event_vecs.permute(0, 2, 1), attn, n_to_keep=n_events)
@@ -245,12 +257,49 @@ class Model(nn.Module):
         final = self.generate(vecs, times)
         return final
 
-    def iterative(self, audio: torch.Tensor):
+    def streaming(self, audio: torch.Tensor):
+        samps = audio.shape[-1]
+
+        window_size = n_samples
+        step_size = n_samples // 2
+
+        print('========================')
+        spec = transform(audio)
+        print(spec.shape)
+        batch, channels, time = spec.shape
+
+        frame_window_size = n_frames
+        frame_step_size = n_frames // 2
+
+        segments = torch.zeros(1, n_events, samps, device=audio.device, requires_grad=False)
+
+        for i in range(0, time - frame_window_size, frame_step_size):
+            print(f'streaming chunk {i}')
+
+            channels, vecs, schedules, residual_spec = self.iterative(
+                spec[:, :, i: i + frame_window_size], do_transform=False, return_residual=True)
+
+            spec[:, :, i: i + frame_window_size] = residual_spec
+
+            # KLUDGE: this step should be derived
+            start_sample = i * 256
+            end_sample = start_sample + window_size
+            segments[:, :, start_sample: end_sample] += channels
+
+        final = torch.sum(segments, dim=1, keepdim=True)
+        return final[..., :samps]
+
+    def iterative(self, audio: torch.Tensor, do_transform: bool = True, return_residual: bool = False):
         channels = []
         schedules = []
         vecs = []
 
-        spec = transform(audio)
+        if do_transform:
+            spec = transform(audio)
+        else:
+            spec = audio
+
+        print(f'iterative {spec.shape}')
 
         for i in range(n_events):
             v, sched = self.encode(spec)
@@ -265,7 +314,10 @@ class Model(nn.Module):
         vecs = torch.cat(vecs, dim=1)
         schedules = torch.cat(schedules, dim=1)
 
-        return channels, vecs, schedules
+        if return_residual:
+            return channels, vecs, schedules, spec
+        else:
+            return channels, vecs, schedules
 
     def forward(self, audio: torch.Tensor):
         raise NotImplementedError()
@@ -284,7 +336,6 @@ def train_and_monitor(
         fine_positioning: bool = False,
         save_and_load_weights: bool = False,
         adversarial_loss: bool = True):
-
     torch.backends.cudnn.benchmark = True
 
     stream = AudioIterator(
@@ -302,8 +353,8 @@ def train_and_monitor(
 
     collection = LmdbCollection(path='iterativedecomposition')
 
-    recon_audio, orig_audio, random_audio = loggers(
-        ['recon', 'orig', 'random'],
+    recon_audio, orig_audio, random_audio, streaming = loggers(
+        ['recon', 'orig', 'random', 'streaming'],
         'audio/wav',
         encode_audio,
         collection)
@@ -321,7 +372,8 @@ def train_and_monitor(
         recon_audio,
         random_audio,
         envelopes,
-        latents
+        latents,
+        streaming
     ], port=9999, n_workers=1)
 
     print('==========================================')
@@ -329,8 +381,8 @@ def train_and_monitor(
         f'training on {n_seconds} of audio and {n_events} events with {model_type} event generator and {disc_type} disc')
     print('==========================================')
 
-    model_filename = 'iterativedecomposition5.dat'
-    disc_filename = 'iterativedecompositiondisc5.dat'
+    model_filename = 'iterativedecomposition6.dat'
+    disc_filename = 'iterativedecompositiondisc6.dat'
 
     def train():
 
@@ -408,7 +460,7 @@ def train_and_monitor(
             in_channels=1024,
             hidden_channels=hidden_channels).to(device)
 
-        # disc = Discriminator(disc_type=disc_type).to(device)
+        disc = Discriminator(disc_type=disc_type).to(device)
 
         # loss_model = CorrelationLoss(n_elements=512).to(device)
 
@@ -429,62 +481,69 @@ def train_and_monitor(
                 print('no discriminator weights to load')
 
         optim = Adam(model.parameters(), lr=1e-3)
-        # disc_optim = Adam(disc.parameters(), lr=1e-3)
+        disc_optim = Adam(disc.parameters(), lr=1e-3)
 
         loss_model = CorrelationLoss(n_elements=256).to(device)
 
         for i, item in enumerate(iter(stream)):
             optim.zero_grad()
-            # disc_optim.zero_grad()
+            disc_optim.zero_grad()
 
             with torch.cuda.amp.autocast():
                 target = item.view(batch_size, 1, n_samples).to(device)
                 orig_audio(target)
                 recon, encoded, scheduling = model.iterative(target)
+                print(encoded.shape)
 
                 recon_summed = torch.sum(recon, dim=1, keepdim=True)
                 recon_audio(max_norm(recon_summed))
 
                 envelopes(max_norm(scheduling[0]))
-                latents(max_norm(encoded[0]))
+                latents(max_norm(encoded[0]).float())
 
                 # print(target.shape, recon.shape)
+
+                weighting = torch.ones_like(target)
+                weighting[..., n_samples // 2:] = torch.linspace(1, 0, n_samples // 2, device=weighting.device) ** 8
+
+                target = target * weighting
+                recon_summed = recon_summed * weighting
 
                 loss = all_at_once_loss(target, recon_summed)
                 # loss = iterative_loss(target, recon, loss_transform)
                 # loss = loss_model.noise_loss(target, recon_summed)
                 # loss = loss_model.multiband_noise_loss(target, recon_summed, 128, 32)
 
-                # loss = loss + (torch.abs(encoded).sum() * 1e-4)
+                loss = loss + (torch.abs(encoded).sum() * 1e-4)
 
-                # if adversarial_loss:
-                #     mask = torch.zeros(target.shape[0], n_events, 1, device=recon.device).bernoulli_(p=0.5)
-                #     for_disc = torch.sum(recon * mask, dim=1, keepdim=True)
-                #     j = disc.forward(for_disc)
-                #     d_loss = torch.abs(1 - j).mean()
-                #     print('G', d_loss.item())
-                #     loss = loss + (d_loss * 100)
+                if adversarial_loss:
+                    # mask half of the events, at random. Each event should be realistic
+                    # and stand on its own
+                    mask = torch.zeros(target.shape[0], n_events, 1, device=recon.device).bernoulli_(p=0.5)
+                    for_disc = torch.sum(recon * mask, dim=1, keepdim=True)
+                    j = disc.forward(for_disc)
+                    d_loss = torch.abs(1 - j).mean()
+                    print('G', d_loss.item())
+                    loss = loss + (d_loss * 1000)
 
             scaler.scale(loss).backward()
             scaler.step(optim)
             scaler.update()
-            # loss.backward()
-            # optim.step()
             print(i, loss.item())
 
-            # if adversarial_loss:
-            #     with torch.cuda.amp.autocast():
-            #         disc_optim.zero_grad()
-            #         r_j = disc.forward(target)
-            #         f_j = disc.forward(recon_summed.clone().detach())
-            #         d_loss = torch.abs(0 - f_j).mean() + torch.abs(1 - r_j).mean()
-            #
-            #     scaler.scale(d_loss).backward()
-            #     # d_loss.backward()
-            #     print('D', d_loss.item())
-            #     # disc_optim.step()
-            #     scaler.step(disc_optim)
-            #     scaler.update()
+            if adversarial_loss:
+                with torch.cuda.amp.autocast():
+                    disc_optim.zero_grad()
+                    r_j = disc.forward(target)
+                    f_j = disc.forward(recon_summed.clone().detach())
+                    d_loss = torch.abs(0 - f_j).mean() + torch.abs(1 - r_j).mean()
+
+                scaler.scale(d_loss).backward()
+                # d_loss.backward()
+                print('D', d_loss.item())
+                # disc_optim.step()
+                scaler.step(disc_optim)
+                scaler.update()
 
             with torch.no_grad():
                 # TODO: this should be collecting statistics from reconstructions
@@ -494,10 +553,16 @@ def train_and_monitor(
                 rnd = max_norm(rnd)
                 random_audio(rnd)
 
+            with torch.no_grad():
+                s = get_one_audio_segment(n_samples * 4, device=device)
+                s = s.view(1, 1, -1)
+                s = model.streaming(s)
+                print(s.shape)
+                streaming(max_norm(s))
+
             if save_and_load_weights and i % 100 == 0:
                 torch.save(model.state_dict(), model_filename)
-                # torch.save(disc.state_dict(), disc_filename)
-
+                torch.save(disc.state_dict(), disc_filename)
 
     train()
 
