@@ -12,7 +12,7 @@ from modules.eventgenerators.schedule import DiracScheduler
 from modules.iterative import TensorTransform
 from modules.multiheadtransform import ShapeSpec
 from modules.reds import F0Resonance
-from modules.transfer import fft_convolve, make_waves_vectorized, freq_domain_transfer_function_to_resonance
+from modules.transfer import fft_convolve, make_waves_vectorized, freq_domain_transfer_function_to_resonance, fft_shift
 from util import device
 
 
@@ -27,29 +27,29 @@ def mix(dry: torch.Tensor, wet: torch.Tensor, mix: torch.Tensor) -> torch.Tensor
     return x
 
 
-def fft_shift(a: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
-    # this is here to make the shift value interpretable
-    shift = (1 - shift)
-
-    n_samples = a.shape[-1]
-
-    shift_samples = (shift * n_samples * 0.5)
-
-    # a = F.pad(a, (0, n_samples * 2))
-
-    spec = torch.fft.rfft(a, dim=-1, norm='ortho')
-
-    n_coeffs = spec.shape[-1]
-    shift = (torch.arange(0, n_coeffs, device=a.device) * 2j * np.pi) / n_coeffs
-
-    shift = torch.exp(shift * shift_samples)
-
-    spec = spec * shift
-
-    samples = torch.fft.irfft(spec, dim=-1, norm='ortho')
-    # samples = samples[..., :n_samples]
-    # samples = torch.relu(samples)
-    return samples
+# def fft_shift(a: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
+#     # this is here to make the shift value interpretable
+#     shift = (1 - shift)
+#
+#     n_samples = a.shape[-1]
+#
+#     shift_samples = (shift * n_samples * 0.5)
+#
+#     # a = F.pad(a, (0, n_samples * 2))
+#
+#     spec = torch.fft.rfft(a, dim=-1, norm='ortho')
+#
+#     n_coeffs = spec.shape[-1]
+#     shift = (torch.arange(0, n_coeffs, device=a.device) * 2j * np.pi) / n_coeffs
+#
+#     shift = torch.exp(shift * shift_samples)
+#
+#     spec = spec * shift
+#
+#     samples = torch.fft.irfft(spec, dim=-1, norm='ortho')
+#     # samples = samples[..., :n_samples]
+#     # samples = torch.relu(samples)
+#     return samples
 
 
 class Lookup(nn.Module):

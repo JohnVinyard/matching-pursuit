@@ -381,8 +381,8 @@ def train_and_monitor(
         f'training on {n_seconds} of audio and {n_events} events with {model_type} event generator and {disc_type} disc')
     print('==========================================')
 
-    model_filename = 'iterativedecomposition6.dat'
-    disc_filename = 'iterativedecompositiondisc6.dat'
+    model_filename = 'iterativedecomposition7.dat'
+    disc_filename = 'iterativedecompositiondisc7.dat'
 
     def train():
 
@@ -392,15 +392,15 @@ def train_and_monitor(
         if model_type == 'lookup':
             resonance_model = OverfitResonanceModel(
                 n_noise_filters=32,
-                noise_expressivity=2,
+                noise_expressivity=4,
                 noise_filter_samples=128,
-                noise_deformations=16,
-                instr_expressivity=2,
+                noise_deformations=32,
+                instr_expressivity=4,
                 n_events=1,
-                n_resonances=2048,
-                n_envelopes=32,
-                n_decays=16,
-                n_deformations=16,
+                n_resonances=4096,
+                n_envelopes=64,
+                n_decays=32,
+                n_deformations=32,
                 n_samples=n_samples,
                 n_frames=n_frames,
                 samplerate=samplerate,
@@ -553,12 +553,13 @@ def train_and_monitor(
                 rnd = max_norm(rnd)
                 random_audio(rnd)
 
-            with torch.no_grad():
-                s = get_one_audio_segment(n_samples * 4, device=device)
-                s = s.view(1, 1, -1)
-                s = model.streaming(s)
-                print(s.shape)
-                streaming(max_norm(s))
+            if i % 50 == 0:
+                with torch.no_grad():
+                    s = get_one_audio_segment(n_samples * 4, device=device)
+                    s = s.view(1, 1, -1)
+                    s = model.streaming(s)
+                    print(s.shape)
+                    streaming(max_norm(s))
 
             if save_and_load_weights and i % 100 == 0:
                 torch.save(model.state_dict(), model_filename)
