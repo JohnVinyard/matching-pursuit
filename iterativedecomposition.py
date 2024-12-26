@@ -88,8 +88,8 @@ def loss_transform(x: torch.Tensor) -> torch.Tensor:
 
 
 def all_at_once_loss(target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
-    t = loss_transform(target)
-    r = loss_transform(recon)
+    t = transform(target)
+    r = transform(recon)
     return torch.abs(t - r).sum()
 
 
@@ -391,7 +391,7 @@ def train_and_monitor(
         hidden_channels = 512
         if model_type == 'lookup':
             resonance_model = OverfitResonanceModel(
-                n_noise_filters=32,
+                n_noise_filters=64,
                 noise_expressivity=4,
                 noise_filter_samples=128,
                 noise_deformations=32,
@@ -399,8 +399,8 @@ def train_and_monitor(
                 n_events=1,
                 n_resonances=4096,
                 n_envelopes=64,
-                n_decays=32,
-                n_deformations=32,
+                n_decays=64,
+                n_deformations=64,
                 n_samples=n_samples,
                 n_frames=n_frames,
                 samplerate=samplerate,
@@ -509,8 +509,8 @@ def train_and_monitor(
                 target = target * weighting
                 recon_summed = recon_summed * weighting
 
-                loss = all_at_once_loss(target, recon_summed)
-                # loss = iterative_loss(target, recon, loss_transform)
+                # loss = all_at_once_loss(target, recon_summed)
+                loss = iterative_loss(target, recon, loss_transform)
                 # loss = loss_model.noise_loss(target, recon_summed)
                 # loss = loss_model.multiband_noise_loss(target, recon_summed, 128, 32)
 

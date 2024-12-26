@@ -1,72 +1,35 @@
 """[markdown]
 
-# Iterative Decomposition V3 Model
+# Streaming Iterative Decomposition
 
-This article covers the continuation of work I've been pursuing in the area of sparse, interpretable audio models.
+This article covers the continuation of work I've been pursuing in the area of sparse, interpretable audio models.  Our
+goal is to decompose recordings of acoustic instruments (orchestral music from the
+[MusicNet dataset](https://zenodo.org/records/5120004#.Yhxr0-jMJBA) dataset) into constituent "events", which are encoded
+as low-dimensional vectors carrying information about attack envelopes and physical resonances of both the instrument being
+played and the room in which the performance occurs.
 
 Some previous iterations of this work:
 
 
-- [Iterative Decomposition Model V2](https://blog.cochlea.xyz/siam.html)
+- [Iterative Decomposition Model V4](https://blog.cochlea.xyz/v4blogpost.html)
 - [Gaussian/Gamma Splatting for Audio](https://blog.cochlea.xyz/gamma-audio-splat.html)
 
+
+**In this newest version, we introduce a streaming algorithm so that audio segments of arbitrary lengths can be decomposed into
+constituent events.**
 
 All training and model code can be
 [found here](https://github.com/JohnVinyard/matching-pursuit/blob/main/iterativedecomposition.py).
 
-Our goal is to decompose a musical audio signal into a small number of "events", roughly analogous to a musical score,
-but carrying information about the resonant characteristics of the instrument being played, and the room it is being
-played in.  Each event is represented by a low-dimensional (32, in this case) vector and a time at which the event
-occurs in the "score".
-
-We seek to achieve this goal by iteratively guessing at the next-most informative event, removing it from the original
-signal, and repeating the process, until no informative/interesting signal is remaining.
-
-This is very similar to the [matching pursuit](https://en.wikipedia.org/wiki/Matching_pursuit) algorithm, where we
-repeatedly convolve an audio signal with a dictionary of audio atoms, picking the most highly-correlated atom at each
-step, removing it, and the repeating the process until the norm of the original signal reaches some acceptable
-threshold.
-
-## The Algorithm
-
-In this work, we replace the convolution of a large dictionary of audio "atoms" with analysis via a "deep" neural
-network, which uses an STFT transform followed by
-[cascading dilated convolutions](https://github.com/JohnVinyard/matching-pursuit/blob/main/iterativedecomposition.py#L86)
-to efficiently analyze relatively long audio segments.  At each iteration, it proposes an **event vector** and a
-**time-of-occurrence**.  This event is then rendered by an event-generator network and scheduled, by convolving the
-rendered event with a dirac function (unit-valued spike) at the desired time.  It is subtracted from the original audio
-spectrogram[^1], and the process is repeated.  During training, this process runs for a fixed number of steps, but it's possible
-to imagine a modification whereby some other stopping condition is observed to improve efficiency.
-
-The decoder makes some simple physics-based assumptions about the underlying signal, and uses convolutions with long
-kernels to model the transfer functions of the instruments and the rooms in which they are performed.
-
-## The Training Process
-
-We train the model on ~three-second segments of audio from the
-[MusicNet dataset](https://zenodo.org/records/5120004#.Yhxr0-jMJBA), which represents approximately 33 hours of
-public-domain classical music.  We optimize the model via gradient descent using the following training objectives:
-
-1. An iterative reconstruction loss, which asks the model to maximize the energy it removes from the signal at each step
-2. A sparsity loss, which asks the model to minimize the l1 norm of the event vectors, ideally leading to a sparse (few event) solution
-3. An adversarial loss, which masks about 50% of events and asks a discriminator network (trained in parallel) to
-   judge them;  this is intended to encourage the events to be independent and stand on their own as believable, musical
-   events.
-
-
-## Improvements over the Previous Model
-
-While the previous model only operated on around 1.5 seconds of audio, this model doubles that window, ultimately
-driving toward a fully streaming algorithm that can handle signals of arbitrary length.  It also makes progress toward
-a much simpler decoder, which generates each event as a linear combination of lookup tables for the following elements:
-
-- a noisy impulse, or injection of energy into the system
-- some number of resonances, built by combining sine, sawtooth, triangle, and square waves
-- an interpolation between the resonances, representing the deformation of the system/instrument being played (e.g, the bending of a violin string as vibrato)
-- a pre-baked room impulse response, which is, in fact, _just another transfer function_, this time for the entire room or space in which the piece is played
-
 
 # Future Work
+
+## Better Perceptual Audio Losses
+
+Recent experiments use a greedy, per-event loss which maximizes the energy removed from the signal at each step, as well
+as a learned, adversarial loss.  Reconstruction quality will likely benefit from a more perceptually-aligned loss and a
+larger, more diverse dataset.
+
 
 ## Model Size, Training Time and Dataset
 
@@ -74,18 +37,7 @@ Firstly, this model is relatively small, weighing in at ~26M parameters (~117 MB
 around 24 hours, so it seems there is a lot of space to increase the model size, dataset size and training time to
 further improve.  The reconstruction quality of the examples on this page is not amazing, certainly not good enough
 even for a lossy audio codec, but the structure the model extracts seems like it could be used for many interesting
-applications.
-
-## Streaming and/or Arbitrary Lengths
-
-Ultimately, the model should be able to handle audio segments of arbitrary lengths, adhering to some event "budget" to
-find the sparsest-possible explanation of the audio segment.
-
-## A Better Sparsity Loss
-
-Some of the examples lead me to believe that my current sparsity loss is too aggressive;  the model sometimes prefers
-to leave events out entirely rather than get the "win" of reducing overall signal energy.  Using the l1 norm penalty
-seems like a sledgehammer, and a more nuanced loss would probably do better.
+applications.  The training data should be expanded beyond the MusicNet dataset.
 
 ## Different Event Generator Variants
 
@@ -112,9 +64,36 @@ If you'd like to cite this article, you can use the following [BibTeX block](htt
 Here is a scatterplot mapping events from four different audio segments onto a 2D plane using t-SNE.  
 Each 32-dimensional event vector encodes information about attack, resonance, and room impulse response.
 
+You can play around with a larger scatterplot of events sampled from MusicNet reconstructions [here](https://blog.cochlea.xyz/scatterv7.html).
+
 """
 
 # large_scatterplot
+
+"""[markdown]
+
+# Streaming Algorithm for Arbitrary-Length Audio Segments
+
+In this latest iteration of the work, we introduce a "streaming" algorithm so that we can decompose audio segments of
+arbitrary lengths.
+
+"""
+
+"""[markdown]
+
+## Original (Streaming) 
+
+"""
+
+# streaming.orig
+
+"""[markdown]
+
+## Reconstruction (Streaming) 
+
+"""
+
+# streaming.recon
 
 """[markdown]
 
@@ -164,17 +143,6 @@ Here we use the original event vectors, but generate random times.
 
 # example_1.random_times
 
-"""[markdown]
-
-### Relationships
-
-Here we randomly initialize event vectors and times, and optimize such that they have the same _relationships_ or
-deltas, as the edges between (event, time) vectors in the original sound
-
-"""
-
-# example_1.amr
-
 
 """[markdown]
 
@@ -184,22 +152,6 @@ deltas, as the edges between (event, time) vectors in the original sound
 """
 
 # example_1.latents
-
-
-"""[markdown]
-
-### Event Self-Similarity
-
-We concatenate:
-
-- the original event vector
-- the event times.  the dirac delta function, or spike, the describes event time is embedded via positional encodings
-
-Finally, we compute the l2 distance between each event vector pair.
-
-"""
-
-# example_1.self_sim
 
 
 
@@ -295,16 +247,6 @@ Here we use the original event vectors, but generate random times.
 
 # example_2.random_times
 
-"""[markdown]
-
-### Relationships
-
-Here we randomly initialize event vectors and times, and optimize such that they have the same _relationships_ or
-deltas, as the edges between (event, time) vectors in the original sound
-
-"""
-
-# example_2.amr
 
 
 
@@ -317,21 +259,6 @@ deltas, as the edges between (event, time) vectors in the original sound
 """
 
 # example_2.latents
-
-"""[markdown]
-
-### Event Self-Similarity
-
-We concatenate:
-
-- the original event vector
-- the event times.  the dirac delta function, or spike, the describes event time is embedded via positional encodings
-
-Finally, we compute the l2 distance between each event vector pair.
-
-"""
-
-# example_2.self_sim
 
 
 """[markdown]
@@ -428,16 +355,6 @@ Here we use the original event vectors, but generate random times.
 
 # example_3.random_times
 
-"""[markdown]
-
-### Relationships
-
-Here we randomly initialize event vectors and times, and optimize such that they have the same _relationships_ or
-deltas, as the edges between (event, time) vectors in the original sound
-
-"""
-
-# example_3.amr
 
 
 """[markdown]
@@ -450,20 +367,6 @@ deltas, as the edges between (event, time) vectors in the original sound
 
 # example_3.latents
 
-"""[markdown]
-
-### Event Self-Similarity
-
-We concatenate:
-
-- the original event vector
-- the event times.  the dirac delta function, or spike, the describes event time is embedded via positional encodings
-
-Finally, we compute the l2 distance between each event vector pair.
-
-"""
-
-# example_3.self_sim
 
 """[markdown]
 
@@ -557,17 +460,6 @@ Here we use the original event vectors, but generate random times.
 
 # example_4.random_times
 
-"""[markdown]
-
-### Relationships
-
-Here we randomly initialize event vectors and times, and optimize such that they have the same _relationships_ or
-deltas, as the edges between (event, time) vectors in the original sound
-
-"""
-
-# example_4.amr
-
 
 """[markdown]
 
@@ -579,20 +471,6 @@ deltas, as the edges between (event, time) vectors in the original sound
 
 # example_4.latents
 
-"""[markdown]
-
-### Event Self-Similarity
-
-We concatenate:
-
-- the original event vector
-- the event times.  the dirac delta function, or spike, the describes event time is embedded via positional encodings
-
-Finally, we compute the l2 distance between each event vector pair.
-
-"""
-
-# example_4.self_sim
 
 """[markdown]
 
@@ -686,16 +564,6 @@ Here we use the original event vectors, but generate random times.
 
 # example_5.random_times
 
-"""[markdown]
-
-### Relationships
-
-Here we randomly initialize event vectors and times, and optimize such that they have the same _relationships_ or
-deltas, as the edges between (event, time) vectors in the original sound
-
-"""
-
-# example_5.amr
 
 
 """[markdown]
@@ -708,20 +576,6 @@ deltas, as the edges between (event, time) vectors in the original sound
 
 # example_5.latents
 
-"""[markdown]
-
-### Event Self-Similarity
-
-We concatenate:
-
-- the original event vector
-- the event times.  the dirac delta function, or spike, the describes event time is embedded via positional encodings
-
-Finally, we compute the l2 distance between each event vector pair.
-
-"""
-
-# example_5.self_sim
 
 """[markdown]
 
@@ -773,11 +627,11 @@ Events clustered using [t-SNE](https://scikit-learn.org/stable/modules/generated
 # example_5.event31
 
 
-# the size, in samples of the audio segment we'll overfit
-n_samples = 2 ** 16
+n_samples = 2 ** 17
 samples_per_event = 2048
-n_events = n_samples // samples_per_event
 
+# this is cut in half since we'll mask out the second half of encoder activations
+n_events = (n_samples // samples_per_event) // 2
 context_dim = 32
 
 # the samplerate, in hz, of the audio signal
@@ -790,6 +644,7 @@ transform_window_size = 2048
 transform_step_size = 256
 
 n_frames = n_samples // transform_step_size
+
 
 from argparse import ArgumentParser
 from typing import Dict, Tuple
@@ -806,7 +661,6 @@ from data import get_one_audio_segment, AudioIterator
 from iterativedecomposition import Model as IterativeDecompositionModel
 from modules.eventgenerators.overfitresonance import OverfitResonanceModel
 from modules import max_norm, sparse_softmax
-from torch.optim import Adam
 
 
 remote_collection_name = 'iterative-decomposition-v3'
@@ -846,34 +700,32 @@ def process_events(
 
 def load_model(wavetable_device: str = 'cpu') -> nn.Module:
 
-
-
     hidden_channels = 512
 
     model = IterativeDecompositionModel(
         in_channels=1024,
         hidden_channels=hidden_channels,
         resonance_model=OverfitResonanceModel(
-            n_noise_filters=32,
-            noise_expressivity=8,
+            n_noise_filters=64,
+            noise_expressivity=4,
             noise_filter_samples=128,
-            noise_deformations=16,
-            instr_expressivity=8,
+            noise_deformations=32,
+            instr_expressivity=4,
             n_events=1,
             n_resonances=4096,
-            n_envelopes=128,
-            n_decays=32,
-            n_deformations=16,
+            n_envelopes=64,
+            n_decays=64,
+            n_deformations=64,
             n_samples=n_samples,
             n_frames=n_frames,
             samplerate=samplerate,
             hidden_channels=hidden_channels,
             wavetable_device=wavetable_device,
-            fine_positioning=True,
+            fine_positioning=False,
             fft_resonance=True
         ))
 
-    with open('iterativedecomposition5.dat', 'rb') as f:
+    with open('iterativedecomposition7.dat', 'rb') as f:
         model.load_state_dict(torch.load(f, map_location=lambda storage, loc: storage))
 
     print('Total parameters', count_parameters(model))
@@ -956,49 +808,23 @@ def generate(
     return generation_result
 
 
-def match_graph_edges(model: nn.Module, vectors: torch.Tensor, times: torch.Tensor) -> torch.Tensor:
-    samples = get_one_audio_segment(n_samples, samplerate, device='cpu').view(1, 1, n_samples)
-    events, vectors, times = model.iterative(samples)
+def streaming_section(logger: Logger) -> CompositeComponent:
+    model = load_model()
+    samples = get_one_audio_segment(n_samples * 4, samplerate, device='cpu').view(1, 1, -1)
 
-    embeddings = model.embed_events(vectors, times)
-    diff = torch.cdist(embeddings, embeddings).view(n_events, n_events).clone().detach()
+    with torch.no_grad():
+        recon = model.streaming(samples)
 
-    # edges = model.event_similarity(vectors, times).clone().detach()
+    _, orig = logger.log_sound(key='streamingorig', audio=samples)
+    orig = AudioComponent(orig.public_uri, height=100, controls=True, scale=4)
 
-    class OvefitModel(nn.Module):
+    _, recon = logger.log_sound(key='streamingrecon', audio=recon)
+    recon = AudioComponent(recon.public_uri, height=100, controls=True, scale=4)
 
-        def __init__(self):
-            super().__init__()
-            self.vectors = nn.Parameter(torch.zeros_like(vectors).uniform_(vectors.min().item(), vectors.max().item()))
-            self.times = nn.Parameter(torch.zeros_like(times).uniform_(-1, 1))
-
-        @property
-        def sparse_times(self):
-            return sparse_softmax(self.times, dim=-1, normalize=True)
-
-        def forward(self):
-            embedded = model.embed_events(self.vectors, self.sparse_times)
-            diff = torch.cdist(embedded, embedded).view(n_events, n_events)
-            # return model.event_similarity(self.vectors, self.sparse_times)
-            return diff
-
-        def generate(self):
-            return generate_multiple_events(model, self.vectors, self.sparse_times)
-
-    overfit = OvefitModel()
-    optim = Adam(overfit.parameters(), lr=1e-2)
-
-    for i in range(500):
-        optim.zero_grad()
-        recon = overfit.forward()
-        loss = torch.abs(recon - diff).sum()
-        loss.backward()
-        optim.step()
-        print(i, loss.item())
-
-    final = overfit.generate()
-    return final
-
+    return CompositeComponent(
+        orig=orig,
+        recon=recon,
+    )
 
 
 def reconstruction_section(logger: Logger) -> CompositeComponent:
@@ -1007,12 +833,6 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
     # get a random audio segment
     samples = get_one_audio_segment(n_samples, samplerate, device='cpu').view(1, 1, n_samples)
     events, vectors, times = model.iterative(samples)
-
-    embeddings = model.embed_events(vectors, times)
-    diff = torch.cdist(embeddings, embeddings).view(n_events, n_events)
-
-    _, self_sim = logger.log_matrix_with_cmap('selfsim', diff, cmap='hot')
-    self_sim_component = ImageComponent(self_sim.public_uri, height=200, title='event self-similarity')
 
     # generate audio with the same times, but randomized event vectors
     randomized_events = generate(model, vectors, times, randomize_events=True, randomize_times=False)
@@ -1023,12 +843,6 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
     randomized_times = generate(model, vectors, times, randomize_events=False, randomize_times=True)
     _, random_times = logger.log_sound('randomizedtimes', randomized_times)
     random_times_component = AudioComponent(random_times.public_uri, height=100, controls=True)
-
-
-    audio_matching_relationships = match_graph_edges(model, vectors, times)
-    _, amr = logger.log_sound('relationships', audio_matching_relationships)
-    amr_component = AudioComponent(amr.public_uri, height=100, controls=True)
-
 
     total_seconds = n_samples / samplerate
 
@@ -1074,8 +888,6 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
         scatterplot=scatterplot_component,
         random_events=random_events_component,
         random_times=random_times_component,
-        self_sim=self_sim_component,
-        amr=amr_component,
         **event_components
     )
 
@@ -1109,6 +921,9 @@ def demo_page_dict() -> Dict[str, any]:
     print('Creating large scatterplot')
     large_scatterplot = scatterplot_section(logger)
 
+    print('Creating streaming section')
+    streaming = streaming_section(logger)
+
     print('Creating reconstruction examples')
     example_1 = reconstruction_section(logger)
     example_2 = reconstruction_section(logger)
@@ -1126,6 +941,7 @@ def demo_page_dict() -> Dict[str, any]:
 
     return dict(
         large_scatterplot=large_scatterplot,
+        streaming=streaming,
         example_1=example_1,
         example_2=example_2,
         example_3=example_3,

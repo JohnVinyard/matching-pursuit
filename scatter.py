@@ -17,11 +17,12 @@ Click or tap to play individual events.
 # large_scatterplot
 
 
-# the size, in samples of the audio segment we'll overfit
-n_samples = 2 ** 16
-samples_per_event = 2048
-n_events = n_samples // samples_per_event
 
+n_samples = 2 ** 17
+samples_per_event = 2048
+
+# this is cut in half since we'll mask out the second half of encoder activations
+n_events = (n_samples // samples_per_event) // 2
 context_dim = 32
 
 # the samplerate, in hz, of the audio signal
@@ -34,6 +35,7 @@ transform_window_size = 2048
 transform_step_size = 256
 
 n_frames = n_samples // transform_step_size
+
 
 from argparse import ArgumentParser
 from typing import Dict, Tuple
@@ -89,25 +91,27 @@ def load_model(wavetable_device: str = 'cpu') -> nn.Module:
         in_channels=1024,
         hidden_channels=hidden_channels,
         resonance_model=OverfitResonanceModel(
-            n_noise_filters=32,
-            noise_expressivity=8,
+            n_noise_filters=64,
+            noise_expressivity=4,
             noise_filter_samples=128,
-            noise_deformations=16,
-            instr_expressivity=8,
+            noise_deformations=32,
+            instr_expressivity=4,
             n_events=1,
             n_resonances=4096,
-            n_envelopes=256,
-            n_decays=32,
-            n_deformations=32,
+            n_envelopes=64,
+            n_decays=64,
+            n_deformations=64,
             n_samples=n_samples,
             n_frames=n_frames,
             samplerate=samplerate,
             hidden_channels=hidden_channels,
             wavetable_device=wavetable_device,
-            fine_positioning=True
+            fine_positioning=False,
+            fft_resonance=True
         ))
 
-    with open('iterativedecomposition4.dat', 'rb') as f:
+
+    with open('iterativedecomposition7.dat', 'rb') as f:
         model.load_state_dict(torch.load(f, map_location=lambda storage, loc: storage))
 
     print('Total parameters', count_parameters(model))
