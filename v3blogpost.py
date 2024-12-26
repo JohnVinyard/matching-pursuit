@@ -934,8 +934,8 @@ def demo_page_dict() -> Dict[str, any]:
     citation = CitationComponent(
         tag='johnvinyarditerativedecompositionv3',
         author='Vinyard, John',
-        url='https://blog.cochlea.xyz/iterative-decomposition-v3.html',
-        header='Iterative Decomposition V3',
+        url='https://blog.cochlea.xyz/iterative-decomposition-v7.html',
+        header='Iterative Decomposition V7',
         year='2024',
     )
 
@@ -956,7 +956,7 @@ def generate_demo_page():
     conjure_article(
         __file__,
         'html',
-        title='Iterative Decomposition Model V3',
+        title='Iterative Decomposition Model V7',
         **display)
 
 
