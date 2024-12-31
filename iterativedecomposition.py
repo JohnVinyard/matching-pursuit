@@ -381,8 +381,8 @@ def train_and_monitor(
         f'training on {n_seconds} of audio and {n_events} events with {model_type} event generator and {disc_type} disc')
     print('==========================================')
 
-    model_filename = 'iterativedecomposition7.dat'
-    disc_filename = 'iterativedecompositiondisc7.dat'
+    model_filename = 'iterativedecomposition8.dat'
+    disc_filename = 'iterativedecompositiondisc8.dat'
 
     def train():
 
@@ -462,8 +462,6 @@ def train_and_monitor(
 
         disc = Discriminator(disc_type=disc_type).to(device)
 
-        # loss_model = CorrelationLoss(n_elements=512).to(device)
-
         if save_and_load_weights:
             # KLUDGE: Unless the same command line arguments are used, this will
             # require manual intervention to delete old weights, e.g., if a different
@@ -512,7 +510,7 @@ def train_and_monitor(
                 # loss = all_at_once_loss(target, recon_summed)
                 loss = iterative_loss(target, recon, loss_transform)
                 # loss = loss_model.noise_loss(target, recon_summed)
-                # loss = loss_model.multiband_noise_loss(target, recon_summed, 128, 32)
+                loss = loss + loss_model.multiband_noise_loss(target, recon_summed, 128, 32)
 
                 loss = loss + (torch.abs(encoded).sum() * 1e-4)
 
