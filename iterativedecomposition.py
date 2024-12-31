@@ -257,7 +257,7 @@ class Model(nn.Module):
         final = self.generate(vecs, times)
         return final
 
-    def streaming(self, audio: torch.Tensor):
+    def streaming(self, audio: torch.Tensor, return_event_vectors: bool = False):
         samps = audio.shape[-1]
 
         window_size = n_samples
@@ -273,11 +273,19 @@ class Model(nn.Module):
 
         segments = torch.zeros(1, n_events, samps, device=audio.device, requires_grad=False)
 
+        all_event_vectors = []
+        all_times = []
+        all_events = []
+
         for i in range(0, time - frame_window_size, frame_step_size):
             print(f'streaming chunk {i}')
 
             channels, vecs, schedules, residual_spec = self.iterative(
                 spec[:, :, i: i + frame_window_size], do_transform=False, return_residual=True)
+
+            all_events.append(channels)
+            all_event_vectors.append(vecs)
+            all_times.append(schedules)
 
             spec[:, :, i: i + frame_window_size] = residual_spec
 
@@ -287,7 +295,16 @@ class Model(nn.Module):
             segments[:, :, start_sample: end_sample] += channels
 
         final = torch.sum(segments, dim=1, keepdim=True)
-        return final[..., :samps]
+
+        if not return_event_vectors:
+            return final[..., :samps]
+        else:
+            x = final[..., :samps]
+            vecs = torch.cat(all_event_vectors, dim=1)
+            times = torch.cat(all_times, dim=1)
+            events = torch.cat(all_events, dim=1)
+
+            return x, vecs, times, events
 
     def iterative(self, audio: torch.Tensor, do_transform: bool = True, return_residual: bool = False):
         channels = []

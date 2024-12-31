@@ -16,6 +16,14 @@
 
 # streaming.recon
 
+"""[markdown]
+
+## Events
+
+"""
+
+# streaming.scatter
+
 
 n_samples = 2 ** 17
 samples_per_event = 2048
@@ -36,20 +44,20 @@ transform_step_size = 256
 n_frames = n_samples // transform_step_size
 
 from argparse import ArgumentParser
-from typing import Dict, Tuple
+from typing import Dict
 
-import numpy as np
 import torch
-from sklearn.manifold import TSNE
 from torch import nn
 
 from conjure import S3Collection, \
-    conjure_article, CitationComponent, AudioComponent, ImageComponent, \
+    conjure_article, CitationComponent, AudioComponent, \
     CompositeComponent, Logger, ScatterPlotComponent
-from data import get_one_audio_segment, AudioIterator
+from data import get_one_audio_segment
 from iterativedecomposition import Model as IterativeDecompositionModel
 from modules.eventgenerators.overfitresonance import OverfitResonanceModel
-from modules import max_norm, sparse_softmax
+import numpy as np
+from typing import Tuple
+from sklearn.manifold import TSNE
 
 remote_collection_name = 'streaming-report-v1'
 
@@ -63,27 +71,27 @@ def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
-# def process_events(
-#         vectors: torch.Tensor,
-#         times: torch.Tensor,
-#         total_seconds: float) -> Tuple:
-#     positions = torch.argmax(times, dim=-1, keepdim=True) / times.shape[-1]
-#     times = [float(x) for x in (positions * total_seconds).view(-1).data.cpu().numpy()]
-#
-#     normalized = vectors.data.cpu().numpy().reshape((-1, context_dim))
-#     normalized = normalized - normalized.min(axis=0, keepdims=True)
-#     normalized = normalized / (normalized.max(axis=0, keepdims=True) + 1e-8)
-#     tsne = TSNE(n_components=2)
-#     points = tsne.fit_transform(normalized)
-#     proj = np.random.uniform(0, 1, (2, 3))
-#     colors = points @ proj
-#     colors -= colors.min()
-#     colors /= (colors.max() + 1e-8)
-#     colors *= 255
-#     colors = colors.astype(np.uint8)
-#     colors = [f'rgb({c[0]} {c[1]} {c[2]})' for c in colors]
-#
-#     return points, times, colors
+def process_events(
+        vectors: torch.Tensor,
+        times: torch.Tensor,
+        total_seconds: float) -> Tuple:
+    positions = torch.argmax(times, dim=-1, keepdim=True) / times.shape[-1]
+    times = [float(x) for x in (positions * total_seconds).view(-1).data.cpu().numpy()]
+
+    normalized = vectors.data.cpu().numpy().reshape((-1, context_dim))
+    normalized = normalized - normalized.min(axis=0, keepdims=True)
+    normalized = normalized / (normalized.max(axis=0, keepdims=True) + 1e-8)
+    tsne = TSNE(n_components=2)
+    points = tsne.fit_transform(normalized)
+    proj = np.random.uniform(0, 1, (2, 3))
+    colors = points @ proj
+    colors -= colors.min()
+    colors /= (colors.max() + 1e-8)
+    colors *= 255
+    colors = colors.astype(np.uint8)
+    colors = [f'rgb({c[0]} {c[1]} {c[2]})' for c in colors]
+
+    return points, times, colors
 
 
 def load_model(wavetable_device: str = 'cpu') -> nn.Module:
@@ -122,76 +130,29 @@ def load_model(wavetable_device: str = 'cpu') -> nn.Module:
     return model
 
 
-# def scatterplot_section(logger: Logger) -> ScatterPlotComponent:
-#     model = load_model()
-#     ai = AudioIterator(
-#         batch_size=4,
-#         n_samples=n_samples,
-#         samplerate=22050,
-#         normalize=True,
-#         as_torch=True)
-#
-#     batch = next(iter(ai))
-#     batch = batch.view(-1, 1, n_samples).to('cpu')
-#     events, vectors, times = model.iterative(batch)
-#
-#     total_seconds = n_samples / samplerate
-#
-#     points, times, colors = process_events(vectors, times, total_seconds)
-#
-#     events = events.view(-1, n_samples)
-#
-#     events = {f'event{i}': events[i: i + 1, :] for i in range(events.shape[0])}
-#
-#     scatterplot_srcs = []
-#
-#     event_components = {}
-#     for k, v in events.items():
-#         _, e = logger.log_sound(k, v)
-#         scatterplot_srcs.append(e.public_uri)
-#         event_components[k] = AudioComponent(e.public_uri, height=35, controls=False)
-#
-#     scatterplot_component = ScatterPlotComponent(
-#         scatterplot_srcs,
-#         width=500,
-#         height=500,
-#         radius=0.3,
-#         points=points,
-#         times=times,
-#         colors=colors, )
-#
-#     return scatterplot_component
-#
+def scatterplot_section(logger: Logger, events, points, times, colors) -> ScatterPlotComponent:
+    events = events.view(-1, n_samples)
 
-# def generate_multiple_events(
-#         model: nn.Module,
-#         vectors: torch.Tensor,
-#         times: torch.Tensor) -> torch.Tensor:
-#     generation_result = torch.cat(
-#         [model.generate(vectors[:, i:i + 1, :], times[:, i:i + 1, :]) for i in range(n_events)], dim=1)
-#
-#     generation_result = torch.sum(generation_result, dim=1, keepdim=True)
-#     generation_result = max_norm(generation_result)
-#     return generation_result
-#
+    events = {f'event{i}': events[i: i + 1, :] for i in range(events.shape[0])}
 
-# def generate(
-#         model: nn.Module,
-#         vectors: torch.Tensor,
-#         times: torch.Tensor,
-#         randomize_events: bool,
-#         randomize_times: bool) -> torch.Tensor:
-#     batch, n_events, _ = vectors.shape
-#
-#     if randomize_events:
-#         vectors = torch.zeros_like(vectors).uniform_(vectors.min().item(), vectors.max().item())
-#
-#     if randomize_times:
-#         times = torch.zeros_like(times).uniform_(-1, 1)
-#         times = sparse_softmax(times, dim=-1, normalize=True) * times
-#
-#     generation_result = generate_multiple_events(model, vectors, times)
-#     return generation_result
+    scatterplot_srcs = []
+
+    event_components = {}
+    for k, v in events.items():
+        _, e = logger.log_sound(k, v)
+        scatterplot_srcs.append(e.public_uri)
+        event_components[k] = AudioComponent(e.public_uri, height=35, controls=False)
+
+    scatterplot_component = ScatterPlotComponent(
+        scatterplot_srcs,
+        width=500,
+        height=500,
+        radius=0.3,
+        points=points,
+        times=times,
+        colors=colors, )
+
+    return scatterplot_component
 
 
 def streaming_section(logger: Logger) -> CompositeComponent:
@@ -199,7 +160,11 @@ def streaming_section(logger: Logger) -> CompositeComponent:
     samples = get_one_audio_segment(n_samples * 4, samplerate, device='cpu').view(1, 1, -1)
 
     with torch.no_grad():
-        recon = model.streaming(samples)
+        recon, event_vectors, times, events = model.streaming(samples, return_event_vectors=True)
+
+    points, times, colors = process_events(event_vectors, times, n_seconds)
+
+    scatter = scatterplot_section(logger, events, points, times, colors)
 
     _, orig = logger.log_sound(key='streamingorig', audio=samples)
     orig = AudioComponent(orig.public_uri, height=100, controls=True, scale=4, samples=1024)
@@ -210,72 +175,8 @@ def streaming_section(logger: Logger) -> CompositeComponent:
     return CompositeComponent(
         orig=orig,
         recon=recon,
+        scatter=scatter
     )
-
-
-# def reconstruction_section(logger: Logger) -> CompositeComponent:
-#     model = load_model()
-#
-#     # get a random audio segment
-#     samples = get_one_audio_segment(n_samples, samplerate, device='cpu').view(1, 1, n_samples)
-#     events, vectors, times = model.iterative(samples)
-#
-#     # generate audio with the same times, but randomized event vectors
-#     randomized_events = generate(model, vectors, times, randomize_events=True, randomize_times=False)
-#     _, random_events = logger.log_sound('randomizedevents', randomized_events)
-#     random_events_component = AudioComponent(random_events.public_uri, height=100, controls=True)
-#
-#     # generate audio with the same events, but randomized times
-#     randomized_times = generate(model, vectors, times, randomize_events=False, randomize_times=True)
-#     _, random_times = logger.log_sound('randomizedtimes', randomized_times)
-#     random_times_component = AudioComponent(random_times.public_uri, height=100, controls=True)
-#
-#     total_seconds = n_samples / samplerate
-#
-#     points, times, colors = process_events(vectors, times, total_seconds)
-#
-#     # sum together all events
-#     summed = torch.sum(events, dim=1, keepdim=True)
-#
-#     _, original = logger.log_sound(f'original', samples)
-#     _, reconstruction = logger.log_sound(f'reconstruction', summed)
-#
-#     orig_audio_component = AudioComponent(original.public_uri, height=100)
-#     recon_audio_component = AudioComponent(reconstruction.public_uri, height=100)
-#
-#     events = {f'event{i}': events[:, i: i + 1, :] for i in range(events.shape[1])}
-#
-#     scatterplot_srcs = []
-#
-#     event_components = {}
-#     for k, v in events.items():
-#         _, e = logger.log_sound(k, v)
-#         scatterplot_srcs.append(e.public_uri)
-#         event_components[k] = AudioComponent(e.public_uri, height=25, controls=False)
-#
-#     scatterplot_component = ScatterPlotComponent(
-#         scatterplot_srcs,
-#         width=300,
-#         height=300,
-#         radius=0.04,
-#         points=points,
-#         times=times,
-#         colors=colors, )
-#
-#     _, event_vectors = logger.log_matrix_with_cmap('latents', vectors[0].T, cmap='hot')
-#     latents = ImageComponent(event_vectors.public_uri, height=200, title='latent event vectors')
-#
-#     composite = CompositeComponent(
-#         orig_audio=orig_audio_component,
-#         recon_audio=recon_audio_component,
-#         latents=latents,
-#         scatterplot=scatterplot_component,
-#         random_events=random_events_component,
-#         random_times=random_times_component,
-#         **event_components
-#     )
-#
-#     return composite
 
 
 """[markdown]
@@ -321,6 +222,7 @@ def generate_demo_page():
         'html',
         title='Streaming Iterative Decomposition Model',
         **display)
+
 
 if __name__ == '__main__':
     parser = ArgumentParser()
