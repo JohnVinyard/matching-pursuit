@@ -58,6 +58,9 @@ from modules.eventgenerators.overfitresonance import OverfitResonanceModel
 import numpy as np
 from typing import Tuple
 from sklearn.manifold import TSNE
+from modules import max_norm
+from util import device
+
 
 remote_collection_name = 'streaming-report-v1'
 
@@ -75,14 +78,21 @@ def process_events(
         vectors: torch.Tensor,
         times: torch.Tensor,
         total_seconds: float) -> Tuple:
+
+    # compute each event time in seconds
     positions = torch.argmax(times, dim=-1, keepdim=True) / times.shape[-1]
     times = [float(x) for x in (positions * total_seconds).view(-1).data.cpu().numpy()]
 
+    # normalize event vectors
     normalized = vectors.data.cpu().numpy().reshape((-1, context_dim))
     normalized = normalized - normalized.min(axis=0, keepdims=True)
     normalized = normalized / (normalized.max(axis=0, keepdims=True) + 1e-8)
+
+    # map normalized event vectors into  single dimension
     tsne = TSNE(n_components=2)
     points = tsne.fit_transform(normalized)
+
+
     proj = np.random.uniform(0, 1, (2, 3))
     colors = points @ proj
     colors -= colors.min()
@@ -91,10 +101,13 @@ def process_events(
     colors = colors.astype(np.uint8)
     colors = [f'rgb({c[0]} {c[1]} {c[2]})' for c in colors]
 
+    # t = np.array(times) / total_seconds
+    # points = np.concatenate([points.reshape((-1, 1)), t.reshape((-1, 1))], axis=-1)[:, ::-1]
+
     return points, times, colors
 
 
-def load_model(wavetable_device: str = 'cpu') -> nn.Module:
+def load_model(wavetable_device: str = 'gpu') -> nn.Module:
     hidden_channels = 512
 
     model = IterativeDecompositionModel(
@@ -115,13 +128,15 @@ def load_model(wavetable_device: str = 'cpu') -> nn.Module:
             n_frames=n_frames,
             samplerate=samplerate,
             hidden_channels=hidden_channels,
-            wavetable_device=wavetable_device,
+            wavetable_device=device,
             fine_positioning=True,
             fft_resonance=True
-        ))
+        )).to(device)
 
     with open('iterativedecomposition8.dat', 'rb') as f:
-        model.load_state_dict(torch.load(f, map_location=lambda storage, loc: storage))
+        model.load_state_dict(torch.load(f))
+
+    # model = model.eval()
 
     print('Total parameters', count_parameters(model))
     print('Encoder parameters', count_parameters(model.encoder))
@@ -157,14 +172,17 @@ def scatterplot_section(logger: Logger, events, points, times, colors) -> Scatte
 
 def streaming_section(logger: Logger) -> CompositeComponent:
     model = load_model()
-    samples = get_one_audio_segment(n_samples * 4, samplerate, device='cpu').view(1, 1, -1)
+    samples = get_one_audio_segment(n_samples * 8, samplerate).view(1, 1, -1).to(device)
+    # samples = max_norm(samples)
 
     with torch.no_grad():
         recon, event_vectors, times, events = model.streaming(samples, return_event_vectors=True)
+        # recon = model.streaming(samples, return_event_vectors=False)
+        recon = max_norm(recon)
 
-    points, times, colors = process_events(event_vectors, times, n_seconds)
+    # points, times, colors = process_events(event_vectors, times, n_seconds)
 
-    scatter = scatterplot_section(logger, events, points, times, colors)
+    # scatter = scatterplot_section(logger, events, points, times, colors)
 
     _, orig = logger.log_sound(key='streamingorig', audio=samples)
     orig = AudioComponent(orig.public_uri, height=100, controls=True, scale=4, samples=1024)
@@ -175,7 +193,7 @@ def streaming_section(logger: Logger) -> CompositeComponent:
     return CompositeComponent(
         orig=orig,
         recon=recon,
-        scatter=scatter
+        # scatter=scatter
     )
 
 

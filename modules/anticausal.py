@@ -2,6 +2,7 @@ from typing import List
 import torch
 from torch import nn
 from torch.nn import functional as F
+from torch.nn.utils.parametrizations import weight_norm
 
 from modules import pos_encoded
 
@@ -9,7 +10,8 @@ from modules import pos_encoded
 class AntiCausalConv(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, dilation, reverse_causality: bool = False):
         super().__init__()
-        self.conv = nn.Conv1d(in_channels, out_channels, kernel_size, stride=1, dilation=dilation)
+        conv = weight_norm(nn.Conv1d(in_channels, out_channels, kernel_size, stride=1, dilation=dilation))
+        self.conv = conv
         self.kernel_size = kernel_size
         self.dilation = dilation
         self.reverse_causality = reverse_causality
