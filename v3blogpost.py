@@ -1,6 +1,15 @@
 """[markdown]
 
-# Streaming Iterative Decomposition
+
+# Sparse Interpretable Audio Codec
+
+# Introduction
+
+# Previous Work
+
+# Model
+
+# Training Procedure
 
 This article covers the continuation of work I've been pursuing in the area of sparse, interpretable audio models.  Our
 goal is to decompose recordings of acoustic instruments (orchestral music from the
@@ -879,8 +888,7 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
         colors=colors, )
 
     _, event_vectors = logger.log_matrix_with_cmap('latents', vectors[0].T, cmap='hot')
-    latents = ImageComponent(event_vectors.public_uri, height=200, title='latent event vectors')
-
+    latents = ImageComponent(event_vectors.public_uri, height=200, title='latent event vectors', full_width=False)
 
 
     composite = CompositeComponent(
