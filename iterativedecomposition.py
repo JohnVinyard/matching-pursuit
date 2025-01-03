@@ -308,10 +308,17 @@ class Model(nn.Module):
 
             return x, vecs, times, events
 
-    def iterative(self, audio: torch.Tensor, do_transform: bool = True, return_residual: bool = False):
+    def iterative(
+            self,
+            audio: torch.Tensor,
+            do_transform: bool = True,
+            return_residual: bool = False,
+            return_all_residuals: bool = False):
+
         channels = []
         schedules = []
         vecs = []
+        residuals = []
 
         if do_transform:
             spec = transform(audio)
@@ -328,12 +335,16 @@ class Model(nn.Module):
             current = transform(ch)
             spec = (spec - current).clone().detach()
             channels.append(ch)
+            residuals.append(spec[:, None, :, :].clone().detach())
 
         channels = torch.cat(channels, dim=1)
         vecs = torch.cat(vecs, dim=1)
         schedules = torch.cat(schedules, dim=1)
+        residuals = torch.cat(residuals, dim=1)
 
-        if return_residual:
+        if return_all_residuals:
+            return channels, vecs, schedules, residuals
+        elif return_residual:
             return channels, vecs, schedules, spec
         else:
             return channels, vecs, schedules

@@ -1,6 +1,5 @@
 """[markdown]
 
-
 # Sparse Interpretable Audio Codec
 
 # Introduction
@@ -16,12 +15,6 @@ goal is to decompose recordings of acoustic instruments (orchestral music from t
 [MusicNet dataset](https://zenodo.org/records/5120004#.Yhxr0-jMJBA) dataset) into constituent "events", which are encoded
 as low-dimensional vectors carrying information about attack envelopes and physical resonances of both the instrument being
 played and the room in which the performance occurs.
-
-Some previous iterations of this work:
-
-
-- [Iterative Decomposition Model V4](https://blog.cochlea.xyz/v4blogpost.html)
-- [Gaussian/Gamma Splatting for Audio](https://blog.cochlea.xyz/gamma-audio-splat.html)
 
 
 **In this newest version, we introduce a streaming algorithm so that audio segments of arbitrary lengths can be decomposed into
@@ -133,6 +126,14 @@ arbitrary lengths.
 
 """[markdown]
 
+### Decomposition
+
+"""
+
+# example_1.decomposition
+
+"""[markdown]
+
 ### Randomized
 
 """
@@ -161,7 +162,6 @@ Here we use the original event vectors, but generate random times.
 """
 
 # example_1.latents
-
 
 
 """[markdown]
@@ -237,6 +237,15 @@ Events clustered using [t-SNE](https://scikit-learn.org/stable/modules/generated
 
 """[markdown]
 
+### Decomposition
+
+"""
+
+# example_2.decomposition
+
+
+"""[markdown]
+
 ### Randomized
 
 """
@@ -257,8 +266,6 @@ Here we use the original event vectors, but generate random times.
 # example_2.random_times
 
 
-
-
 """[markdown]
 
 ### Event Vectors
@@ -277,8 +284,6 @@ Here we use the original event vectors, but generate random times.
 Events clustered using [t-SNE](https://scikit-learn.org/stable/modules/generated/sklearn.manifold.TSNE.html)
 
 """
-
-
 
 # example_2.scatterplot
 
@@ -345,6 +350,15 @@ Events clustered using [t-SNE](https://scikit-learn.org/stable/modules/generated
 
 """[markdown]
 
+### Decomposition
+
+"""
+
+# example_3.decomposition
+
+
+"""[markdown]
+
 ### Randomized
 
 """
@@ -363,7 +377,6 @@ Here we use the original event vectors, but generate random times.
 """
 
 # example_3.random_times
-
 
 
 """[markdown]
@@ -447,6 +460,15 @@ Events clustered using [t-SNE](https://scikit-learn.org/stable/modules/generated
 """
 
 # example_4.recon_audio
+
+"""[markdown]
+
+### Decomposition
+
+"""
+
+# example_4.decomposition
+
 
 """[markdown]
 
@@ -554,6 +576,15 @@ Events clustered using [t-SNE](https://scikit-learn.org/stable/modules/generated
 
 """[markdown]
 
+### Decomposition
+
+"""
+
+# example_5.decomposition
+
+
+"""[markdown]
+
 ### Randomized
 
 """
@@ -572,7 +603,6 @@ Here we use the original event vectors, but generate random times.
 """
 
 # example_5.random_times
-
 
 
 """[markdown]
@@ -654,7 +684,6 @@ transform_step_size = 256
 
 n_frames = n_samples // transform_step_size
 
-
 from argparse import ArgumentParser
 from typing import Dict, Tuple
 
@@ -670,7 +699,6 @@ from data import get_one_audio_segment, AudioIterator
 from iterativedecomposition import Model as IterativeDecompositionModel
 from modules.eventgenerators.overfitresonance import OverfitResonanceModel
 from modules import max_norm, sparse_softmax
-
 
 remote_collection_name = 'iterative-decomposition-v3'
 
@@ -708,7 +736,6 @@ def process_events(
 
 
 def load_model(wavetable_device: str = 'cpu') -> nn.Module:
-
     hidden_channels = 512
 
     model = IterativeDecompositionModel(
@@ -789,7 +816,6 @@ def generate_multiple_events(
         model: nn.Module,
         vectors: torch.Tensor,
         times: torch.Tensor) -> torch.Tensor:
-
     generation_result = torch.cat(
         [model.generate(vectors[:, i:i + 1, :], times[:, i:i + 1, :]) for i in range(n_events)], dim=1)
 
@@ -797,13 +823,13 @@ def generate_multiple_events(
     generation_result = max_norm(generation_result)
     return generation_result
 
+
 def generate(
         model: nn.Module,
         vectors: torch.Tensor,
         times: torch.Tensor,
         randomize_events: bool,
         randomize_times: bool) -> torch.Tensor:
-
     batch, n_events, _ = vectors.shape
 
     if randomize_events:
@@ -842,7 +868,16 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
 
     # get a random audio segment
     samples = get_one_audio_segment(n_samples, samplerate, device='cpu').view(1, 1, n_samples)
-    events, vectors, times = model.iterative(samples)
+    events, vectors, times, residuals = model.iterative(samples, return_all_residuals=True)
+
+    residuals = residuals.view(n_events, 1024, -1).data.cpu().numpy()
+    residuals = residuals[:, ::-1, :]
+    residuals = np.log(np.clip(residuals, 0, np.inf) + 1e-6)
+    t = residuals.shape[-1]
+    residuals = residuals[..., :t // 2]
+
+    _, movie = logger.log_movie('decomposition', residuals, fps=2)
+    movie = ImageComponent(movie.public_uri, height=200, title='decomposition')
 
     # generate audio with the same times, but randomized event vectors
     randomized_events = generate(model, vectors, times, randomize_events=True, randomize_times=False)
@@ -887,9 +922,8 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
         times=times,
         colors=colors, )
 
-    _, event_vectors = logger.log_matrix_with_cmap('latents', vectors[0].T, cmap='hot')
+    _, event_vectors = logger.log_matrix_with_cmap('latents', vectors[0].T, cmap='viridis')
     latents = ImageComponent(event_vectors.public_uri, height=200, title='latent event vectors', full_width=False)
-
 
     composite = CompositeComponent(
         orig_audio=orig_audio_component,
@@ -898,6 +932,7 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
         scatterplot=scatterplot_component,
         random_events=random_events_component,
         random_times=random_times_component,
+        decomposition=movie,
         **event_components
     )
 
@@ -944,9 +979,9 @@ def demo_page_dict() -> Dict[str, any]:
     citation = CitationComponent(
         tag='johnvinyarditerativedecompositionv3',
         author='Vinyard, John',
-        url='https://blog.cochlea.xyz/iterative-decomposition-v7.html',
-        header='Iterative Decomposition V7',
-        year='2024',
+        url='https://blog.cochlea.xyz/sparse-interpretable-audio-codec-paper.html',
+        header='Sparse Interpretable Audio Codec',
+        year='2025',
     )
 
     return dict(
@@ -966,7 +1001,7 @@ def generate_demo_page():
     conjure_article(
         __file__,
         'html',
-        title='Iterative Decomposition Model V7',
+        title='Sparse Interpretable Audio Codec',
         **display)
 
 
