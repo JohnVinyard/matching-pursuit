@@ -1,7 +1,5 @@
 """[markdown]
 
-# Sparse Interpretable Audio Codec
-
 # Introduction
 
 # Previous Work
@@ -9,6 +7,8 @@
 # Model
 
 # Training Procedure
+
+# Streaming Algorithm
 
 This article covers the continuation of work I've been pursuing in the area of sparse, interpretable audio models.  Our
 goal is to decompose recordings of acoustic instruments (orchestral music from the
@@ -58,19 +58,6 @@ If you'd like to cite this article, you can use the following [BibTeX block](htt
 
 # citation
 
-
-"""[markdown]
-
-# Event Scatterplot
-
-Here is a scatterplot mapping events from four different audio segments onto a 2D plane using t-SNE.  
-Each 32-dimensional event vector encodes information about attack, resonance, and room impulse response.
-
-You can play around with a larger scatterplot of events sampled from MusicNet reconstructions [here](https://blog.cochlea.xyz/scatterv7.html).
-
-"""
-
-# large_scatterplot
 
 """[markdown]
 
@@ -174,45 +161,6 @@ Events clustered using [t-SNE](https://scikit-learn.org/stable/modules/generated
 
 # example_1.scatterplot
 
-"""[markdown]
-
-### Individual Audio Events
-
-"""
-
-# example_1.event0
-# example_1.event1
-# example_1.event2
-# example_1.event3
-# example_1.event4
-# example_1.event5
-# example_1.event6
-# example_1.event7
-# example_1.event8
-# example_1.event9
-# example_1.event10
-# example_1.event11
-# example_1.event12
-# example_1.event13
-# example_1.event14
-# example_1.event15
-# example_1.event16
-# example_1.event17
-# example_1.event18
-# example_1.event19
-# example_1.event20
-# example_1.event21
-# example_1.event22
-# example_1.event23
-# example_1.event24
-# example_1.event25
-# example_1.event26
-# example_1.event27
-# example_1.event28
-# example_1.event29
-# example_1.event30
-# example_1.event31
-
 
 """[markdown]
 
@@ -286,45 +234,6 @@ Events clustered using [t-SNE](https://scikit-learn.org/stable/modules/generated
 """
 
 # example_2.scatterplot
-
-"""[markdown]
-
-### Individual Audio Events
-
-"""
-
-# example_2.event0
-# example_2.event1
-# example_2.event2
-# example_2.event3
-# example_2.event4
-# example_2.event5
-# example_2.event6
-# example_2.event7
-# example_2.event8
-# example_2.event9
-# example_2.event10
-# example_2.event11
-# example_2.event12
-# example_2.event13
-# example_2.event14
-# example_2.event15
-# example_2.event16
-# example_2.event17
-# example_2.event18
-# example_2.event19
-# example_2.event20
-# example_2.event21
-# example_2.event22
-# example_2.event23
-# example_2.event24
-# example_2.event25
-# example_2.event26
-# example_2.event27
-# example_2.event28
-# example_2.event29
-# example_2.event30
-# example_2.event31
 
 
 """[markdown]
@@ -402,46 +311,6 @@ Events clustered using [t-SNE](https://scikit-learn.org/stable/modules/generated
 
 """[markdown]
 
-### Individual Audio Events
-
-"""
-
-# example_3.event0
-# example_3.event1
-# example_3.event2
-# example_3.event3
-# example_3.event4
-# example_3.event5
-# example_3.event6
-# example_3.event7
-# example_3.event8
-# example_3.event9
-# example_3.event10
-# example_3.event11
-# example_3.event12
-# example_3.event13
-# example_3.event14
-# example_3.event15
-# example_3.event16
-# example_3.event17
-# example_3.event18
-# example_3.event19
-# example_3.event20
-# example_3.event21
-# example_3.event22
-# example_3.event23
-# example_3.event24
-# example_3.event25
-# example_3.event26
-# example_3.event27
-# example_3.event28
-# example_3.event29
-# example_3.event30
-# example_3.event31
-
-
-"""[markdown]
-
 ## Example 4
 
 """
@@ -512,45 +381,6 @@ Events clustered using [t-SNE](https://scikit-learn.org/stable/modules/generated
 """
 
 # example_4.scatterplot
-
-"""[markdown]
-
-### Individual Audio Events
-
-"""
-
-# example_4.event0
-# example_4.event1
-# example_4.event2
-# example_4.event3
-# example_4.event4
-# example_4.event5
-# example_4.event6
-# example_4.event7
-# example_4.event8
-# example_4.event9
-# example_4.event10
-# example_4.event11
-# example_4.event12
-# example_4.event13
-# example_4.event14
-# example_4.event15
-# example_4.event16
-# example_4.event17
-# example_4.event18
-# example_4.event19
-# example_4.event20
-# example_4.event21
-# example_4.event22
-# example_4.event23
-# example_4.event24
-# example_4.event25
-# example_4.event26
-# example_4.event27
-# example_4.event28
-# example_4.event29
-# example_4.event30
-# example_4.event31
 
 
 """[markdown]
@@ -626,45 +456,6 @@ Events clustered using [t-SNE](https://scikit-learn.org/stable/modules/generated
 
 # example_5.scatterplot
 
-"""[markdown]
-
-### Individual Audio Events
-
-"""
-
-# example_5.event0
-# example_5.event1
-# example_5.event2
-# example_5.event3
-# example_5.event4
-# example_5.event5
-# example_5.event6
-# example_5.event7
-# example_5.event8
-# example_5.event9
-# example_5.event10
-# example_5.event11
-# example_5.event12
-# example_5.event13
-# example_5.event14
-# example_5.event15
-# example_5.event16
-# example_5.event17
-# example_5.event18
-# example_5.event19
-# example_5.event20
-# example_5.event21
-# example_5.event22
-# example_5.event23
-# example_5.event24
-# example_5.event25
-# example_5.event26
-# example_5.event27
-# example_5.event28
-# example_5.event29
-# example_5.event30
-# example_5.event31
-
 
 n_samples = 2 ** 17
 samples_per_event = 2048
@@ -722,15 +513,19 @@ def process_events(
     normalized = vectors.data.cpu().numpy().reshape((-1, context_dim))
     normalized = normalized - normalized.min(axis=0, keepdims=True)
     normalized = normalized / (normalized.max(axis=0, keepdims=True) + 1e-8)
-    tsne = TSNE(n_components=2)
+    tsne = TSNE(n_components=1)
     points = tsne.fit_transform(normalized)
-    proj = np.random.uniform(0, 1, (2, 3))
-    colors = points @ proj
+
+    proj = np.random.uniform(0, 1, (context_dim, 3))
+    colors = normalized @ proj
     colors -= colors.min()
     colors /= (colors.max() + 1e-8)
     colors *= 255
     colors = colors.astype(np.uint8)
     colors = [f'rgb({c[0]} {c[1]} {c[2]})' for c in colors]
+
+    t = np.array(times) / total_seconds
+    points = np.concatenate([points.reshape((-1, 1)), t.reshape((-1, 1))], axis=-1)
 
     return points, times, colors
 
@@ -802,9 +597,9 @@ def scatterplot_section(logger: Logger) -> ScatterPlotComponent:
 
     scatterplot_component = ScatterPlotComponent(
         scatterplot_srcs,
-        width=500,
-        height=500,
-        radius=0.3,
+        width=800,
+        height=400,
+        radius=0.02,
         points=points,
         times=times,
         colors=colors, )
@@ -911,11 +706,11 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
     for k, v in events.items():
         _, e = logger.log_sound(k, v)
         scatterplot_srcs.append(e.public_uri)
-        event_components[k] = AudioComponent(e.public_uri, height=25, controls=False)
+        event_components[k] = AudioComponent(e.public_uri, height=15, controls=False)
 
     scatterplot_component = ScatterPlotComponent(
         scatterplot_srcs,
-        width=300,
+        width=600,
         height=300,
         radius=0.04,
         points=points,
@@ -963,8 +758,8 @@ def demo_page_dict() -> Dict[str, any]:
 
     logger = Logger(remote)
 
-    print('Creating large scatterplot')
-    large_scatterplot = scatterplot_section(logger)
+    # print('Creating large scatterplot')
+    # large_scatterplot = scatterplot_section(logger)
 
     print('Creating streaming section')
     streaming = streaming_section(logger)
@@ -985,7 +780,7 @@ def demo_page_dict() -> Dict[str, any]:
     )
 
     return dict(
-        large_scatterplot=large_scatterplot,
+        # large_scatterplot=large_scatterplot,
         streaming=streaming,
         example_1=example_1,
         example_2=example_2,
