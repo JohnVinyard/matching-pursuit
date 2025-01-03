@@ -500,7 +500,7 @@ def train_and_monitor(
         optim = Adam(model.parameters(), lr=1e-4)
         disc_optim = Adam(disc.parameters(), lr=1e-3)
 
-        # loss_model = CorrelationLoss(n_elements=256).to(device)
+        loss_model = CorrelationLoss(n_elements=256).to(device)
 
         for i, item in enumerate(iter(stream)):
             optim.zero_grad()
@@ -529,7 +529,7 @@ def train_and_monitor(
                 # loss = all_at_once_loss(target, recon_summed)
                 loss = iterative_loss(target, recon, loss_transform)
                 # loss = loss_model.noise_loss(target, recon_summed)
-                # loss = loss + loss_model.multiband_noise_loss(target, recon_summed, 128, 32)
+                loss = loss + loss_model.multiband_noise_loss(target, recon_summed, 128, 32)
 
                 loss = loss + (torch.abs(encoded).sum() * 1e-4)
 

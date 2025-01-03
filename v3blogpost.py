@@ -721,11 +721,11 @@ def load_model(wavetable_device: str = 'cpu') -> nn.Module:
             samplerate=samplerate,
             hidden_channels=hidden_channels,
             wavetable_device=wavetable_device,
-            fine_positioning=False,
+            fine_positioning=True,
             fft_resonance=True
         ))
 
-    with open('iterativedecomposition7.dat', 'rb') as f:
+    with open('iterativedecomposition9.dat', 'rb') as f:
         model.load_state_dict(torch.load(f, map_location=lambda storage, loc: storage))
 
     print('Total parameters', count_parameters(model))
@@ -814,6 +814,7 @@ def streaming_section(logger: Logger) -> CompositeComponent:
 
     with torch.no_grad():
         recon = model.streaming(samples)
+        recon = max_norm(recon)
 
     _, orig = logger.log_sound(key='streamingorig', audio=samples)
     orig = AudioComponent(orig.public_uri, height=100, controls=True, scale=4)
@@ -850,6 +851,7 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
 
     # sum together all events
     summed = torch.sum(events, dim=1, keepdim=True)
+    summed = max_norm(summed)
 
     _, original = logger.log_sound(f'original', samples)
     _, reconstruction = logger.log_sound(f'reconstruction', summed)

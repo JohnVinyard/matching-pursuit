@@ -17,7 +17,6 @@ def stft_transform(
         x: torch.Tensor,
         transform_window_size: int = 2048,
         transform_step_size: int = 256):
-
     batch_size = x.shape[0]
     x = stft(x, transform_window_size, transform_step_size, pad=True)
     n_coeffs = transform_window_size // 2 + 1
@@ -31,7 +30,12 @@ class CorrelationLoss(nn.Module):
         super().__init__()
         self.n_elements = n_elements
 
-    def multiband_noise_loss(self, target: torch.Tensor, recon: torch.Tensor, window_size: int, step: int) -> torch.Tensor:
+    def multiband_noise_loss(
+            self,
+            target: torch.Tensor,
+            recon: torch.Tensor,
+            window_size: int,
+            step: int) -> torch.Tensor:
         t = fft_frequency_decompose(target, 512)
         r = fft_frequency_decompose(recon, 512)
         loss = 0
@@ -41,8 +45,13 @@ class CorrelationLoss(nn.Module):
 
         return loss
 
+    def noise_loss(
+            self,
+            target: torch.Tensor,
+            recon: torch.Tensor,
+            window_size: int = 2048,
+            step_size: int = 256) -> torch.Tensor:
 
-    def noise_loss(self, target: torch.Tensor, recon: torch.Tensor, window_size: int = 2048, step_size: int = 256) -> torch.Tensor:
         batch, _, time = target.shape
 
         h, _, time = target.shape
@@ -50,7 +59,7 @@ class CorrelationLoss(nn.Module):
         t_spec = stft_transform(target, window_size, step_size).reshape(batch, -1)
         r_spec = stft_transform(recon, window_size, step_size).reshape(batch, -1)
         residual = t_spec - r_spec
-        noise_spec = torch.zeros_like(residual).normal_(residual.mean().item(), residual.std().item() + 1e-8)
+        noise_spec = torch.zeros_like(residual).normal_(residual.mean().item(), residual.std().item() + 1e-6)
 
         target_norm = torch.norm(t_spec, dim=-1, keepdim=True)
         recon_norm = torch.norm(r_spec, dim=-1, keepdim=True)
@@ -58,11 +67,9 @@ class CorrelationLoss(nn.Module):
         # ensure that the norm does not grow
         norm_loss = torch.clip(recon_norm - target_norm, min=0, max=np.inf).sum()
 
-
         noise_loss = torch.abs(residual - noise_spec).sum()
 
         return norm_loss + noise_loss
-
 
     def forward(self, target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
         batch, _, time = target.shape
@@ -247,7 +254,6 @@ class SpectralInfoLoss(nn.Module):
         coarse_loss = F.mse_loss(fnorms, tnorms.detach()) * 1e-3
 
         return cat_loss + coarse_loss
-
 
     def encode(self, signal: torch.Tensor):
         if signal.shape[1] != 1:
