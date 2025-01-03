@@ -40,7 +40,7 @@ transform_step_size = 256
 
 n_frames = n_samples // transform_step_size
 
-initializer = make_initializer(0.05)
+initializer = make_initializer(0.1)
 
 
 def fft_shift(a: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
@@ -497,7 +497,7 @@ def train_and_monitor(
             except IOError:
                 print('no discriminator weights to load')
 
-        optim = Adam(model.parameters(), lr=1e-3)
+        optim = Adam(model.parameters(), lr=1e-4)
         disc_optim = Adam(disc.parameters(), lr=1e-3)
 
         # loss_model = CorrelationLoss(n_elements=256).to(device)
