@@ -539,8 +539,8 @@ def train_and_monitor(
 
                 # loss = all_at_once_loss(target, recon_summed)
                 loss = iterative_loss(target, recon, loss_transform)
-                # loss = loss_model.noise_loss(target, recon_summed)
-                loss = loss + loss_model.multiband_noise_loss(target, recon_summed, 128, 32)
+                # loss = loss + loss_model.noise_loss(target, recon_summed)
+                # loss = loss + loss_model.multiband_noise_loss(target, recon_summed, 128, 32)
 
                 loss = loss + (torch.abs(encoded).sum() * 1e-4)
 

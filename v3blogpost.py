@@ -2,27 +2,61 @@
 
 # Introduction
 
+Most widely-used modern audio codecs, such as Ogg Vorbis and MP3, as well as more recent "neural" codecs like
+[Meta's Encodec](https://arxiv.org/abs/2210.13438) or [Descript's](https://arxiv.org/abs/2306.06546) are based on
+block-coding;  audio is divided into overlapping, fixed-size "frames" which are then compressed.  While they produce
+excellent reproduction quality and can be used for downstream tasks such as text-to-audio, they do not produce an
+intuitive, directly-interpretable representation.
+
+In this work, we introduce a proof-of-concept audio encoder that seeks to encode audio as a sparse set of events and
+their times-of-occurrence.  Rudimentary physics-based assumptions are used to model attack and the physical resonance
+of both the instrument being played and the room in which a performance occurs, hopefully encouraging a sparse,
+parsimonious, and easy-to-interpret representation.
+
 # Previous Work
+
+This work takes inspiration from symbolic approaches, such as MIDI, iterative decomposition methods like matching pursuit
+and granular synthesis, which represents audio as a sparse set of "grains" or simple audio atoms.
 
 # Model
 
+## Encoder
+
+The encoder iteratively removes energy from the input spectrogram, producing an event vector and one-hot/dirac impulse
+representing the time of occurrence.
+
+## Decoder
+
+The decoder uses the 32-dimensional event vector to choose an attack envelope, evolving resonance, and room impulse
+response to model the acoustic event, and then "schedules" it by convolving the event with the one-hot/direc impulse.  Audio
+is not produced using typical upsampling convolutions, avoiding artifacts and producing more natural-sounding events.
+
+
+
 # Training Procedure
 
-# Streaming Algorithm
+We train on the [MusicNet dataset](https://zenodo.org/records/5120004#.Yhxr0-jMJBA) dataset) for ~48 hours, selecting
+random ~6 second audio segments sampled at 22050hz (mono) with a batch-size of 2.  The model takes the following steps
+for 32 iterations on each training sample:
 
-This article covers the continuation of work I've been pursuing in the area of sparse, interpretable audio models.  Our
-goal is to decompose recordings of acoustic instruments (orchestral music from the
-[MusicNet dataset](https://zenodo.org/records/5120004#.Yhxr0-jMJBA) dataset) into constituent "events", which are encoded
-as low-dimensional vectors carrying information about attack envelopes and physical resonances of both the instrument being
-played and the room in which the performance occurs.
+1. The encoder analyzes the STFT spectrogram of the signal, producing a single 32-dimensional event vector and a one-hot vector representing time-of-occurrence
+1. The decoder produces "raw" audio samples of the acoustic event
+1. an STFT spectrogram of the acoustic event is produced and subtracted from the input spectrogram
+1. The encoder analyzes the residual and the process is repeated
 
-
-**In this newest version, we introduce a streaming algorithm so that audio segments of arbitrary lengths can be decomposed into
-constituent events.**
+The model is trained to maximize the amount of energy removed from the original signal at each step, and to minimize
+an adversarial loss, produced by a small, convolutional down-sampling discriminator which is trained in parallel,
+analyzing both the real and reproduced signals in the STFT spectrogram domain.  Half of the generated events are
+masked/removed when analyzed by the discriminator, encouraging each event vector to stand on its own as a realistic
+event.
 
 All training and model code can be
 [found here](https://github.com/JohnVinyard/matching-pursuit/blob/main/iterativedecomposition.py).
 
+# Streaming Algorithm
+
+When encoding, the entire ~6-second spectrogram is analyzed, but its second-half is masked when choosing the next event.
+In this way, the model can slide along overlapping sections of audio and encode segments of arbitrary durations.
 
 # Future Work
 
@@ -35,8 +69,8 @@ larger, more diverse dataset.
 
 ## Model Size, Training Time and Dataset
 
-Firstly, this model is relatively small, weighing in at ~26M parameters (~117 MB on disk) and has only been trained for
-around 24 hours, so it seems there is a lot of space to increase the model size, dataset size and training time to
+Firstly, this model is relatively small, weighing in at ~14M parameters (~80 MB on disk) and has only been trained for
+around 48 hours, so it seems there is a lot of space to increase the model size, dataset size and training time to
 further improve.  The reconstruction quality of the examples on this page is not amazing, certainly not good enough
 even for a lossy audio codec, but the structure the model extracts seems like it could be used for many interesting
 applications.  The training data should be expanded beyond the MusicNet dataset.
@@ -86,7 +120,7 @@ arbitrary lengths.
 
 """[markdown]
 
-# Examples
+# Audio Examples
 
 """
 
@@ -107,6 +141,8 @@ arbitrary lengths.
 
 ### Reconstruction
 
+We mask the second half of the input audio to enable the streaming algorithm, so only the first half of the input audio is reproduced.
+
 """
 
 # example_1.recon_audio
@@ -114,6 +150,8 @@ arbitrary lengths.
 """[markdown]
 
 ### Decomposition
+
+We can see that while energy is removed at each step, removed segments do not map cleanly onto audio "events" as a human listener would typically conceive of them.  Future work will move toward fewer and more meaningul events via induced sparsity and/or clustering of events.
 
 """
 
@@ -145,6 +183,8 @@ Here we use the original event vectors, but generate random times.
 
 ### Event Vectors
 
+Different stopping conditions might be chosen during inference (e.g. norm of the residual) but during training, we remove energy for 32 steps.  Each event vector is of dimension 32.  The decoder generates an event from this vector, which is then scheduled.  
+
  
 """
 
@@ -155,7 +195,7 @@ Here we use the original event vectors, but generate random times.
 
 ### Event Scatterplot
 
-Events clustered using [t-SNE](https://scikit-learn.org/stable/modules/generated/sklearn.manifold.TSNE.html)
+Time is along the x-axis, and a 32D -> 1D projection of event vectors using t-SNE constitutes the distribution along the y-axis.  Colors are produced via a random projection from 32D -> 3D (RGB).  Here it becomes clear that there are many redundant/overlapping events.  Future work will stress more sparsity and less event overlap, hopefully increasing interpretability further.
 
 """
 
@@ -179,6 +219,8 @@ Events clustered using [t-SNE](https://scikit-learn.org/stable/modules/generated
 
 ### Reconstruction
 
+We mask the second half of the input audio to enable the streaming algorithm, so only the first half of the input audio is reproduced.
+
 """
 
 # example_2.recon_audio
@@ -186,6 +228,8 @@ Events clustered using [t-SNE](https://scikit-learn.org/stable/modules/generated
 """[markdown]
 
 ### Decomposition
+
+We can see that while energy is removed at each step, removed segments do not map cleanly onto audio "events" as a human listener would typically conceive of them.  Future work will move toward fewer and more meaningul events via induced sparsity and/or clustering of events.
 
 """
 
@@ -218,6 +262,8 @@ Here we use the original event vectors, but generate random times.
 
 ### Event Vectors
 
+Different stopping conditions might be chosen during inference (e.g. norm of the residual) but during training, we remove energy for 32 steps.  Each event vector is of dimension 32.  The decoder generates an event from this vector, which is then scheduled.  
+
 
 
 """
@@ -229,7 +275,7 @@ Here we use the original event vectors, but generate random times.
 
 ### Event Scatterplot
 
-Events clustered using [t-SNE](https://scikit-learn.org/stable/modules/generated/sklearn.manifold.TSNE.html)
+Time is along the x-axis, and a 32D -> 1D projection of event vectors using t-SNE constitutes the distribution along the y-axis.
 
 """
 
@@ -253,6 +299,8 @@ Events clustered using [t-SNE](https://scikit-learn.org/stable/modules/generated
 
 ### Reconstruction
 
+We mask the second half of the input audio to enable the streaming algorithm, so only the first half of the input audio is reproduced.
+
 """
 
 # example_3.recon_audio
@@ -260,6 +308,8 @@ Events clustered using [t-SNE](https://scikit-learn.org/stable/modules/generated
 """[markdown]
 
 ### Decomposition
+
+We can see that while energy is removed at each step, removed segments do not map cleanly onto audio "events" as a human listener would typically conceive of them.  Future work will move toward fewer and more meaningul events via induced sparsity and/or clustering of events.
 
 """
 
@@ -292,6 +342,8 @@ Here we use the original event vectors, but generate random times.
 
 ### Event Vectors
 
+Different stopping conditions might be chosen during inference (e.g. norm of the residual) but during training, we remove energy for 32 steps.  Each event vector is of dimension 32.  The decoder generates an event from this vector, which is then scheduled.  
+
 
 
 """
@@ -303,7 +355,7 @@ Here we use the original event vectors, but generate random times.
 
 ### Event Scatterplot
 
-Events clustered using [t-SNE](https://scikit-learn.org/stable/modules/generated/sklearn.manifold.TSNE.html)
+Time is along the x-axis, and a 32D -> 1D projection of event vectors using t-SNE constitutes the distribution along the y-axis.
 
 """
 
@@ -326,6 +378,8 @@ Events clustered using [t-SNE](https://scikit-learn.org/stable/modules/generated
 
 ### Reconstruction
 
+We mask the second half of the input audio to enable the streaming algorithm, so only the first half of the input audio is reproduced.
+
 """
 
 # example_4.recon_audio
@@ -333,6 +387,8 @@ Events clustered using [t-SNE](https://scikit-learn.org/stable/modules/generated
 """[markdown]
 
 ### Decomposition
+
+We can see that while energy is removed at each step, removed segments do not map cleanly onto audio "events" as a human listener would typically conceive of them.  Future work will move toward fewer and more meaningul events via induced sparsity and/or clustering of events.
 
 """
 
@@ -365,6 +421,8 @@ Here we use the original event vectors, but generate random times.
 
 ### Event Vectors
 
+Different stopping conditions might be chosen during inference (e.g. norm of the residual) but during training, we remove energy for 32 steps.  Each event vector is of dimension 32.  The decoder generates an event from this vector, which is then scheduled.  
+
 
 
 """
@@ -376,7 +434,7 @@ Here we use the original event vectors, but generate random times.
 
 ### Event Scatterplot
 
-Events clustered using [t-SNE](https://scikit-learn.org/stable/modules/generated/sklearn.manifold.TSNE.html)
+Time is along the x-axis, and a 32D -> 1D projection of event vectors using t-SNE constitutes the distribution along the y-axis.
 
 """
 
@@ -400,6 +458,8 @@ Events clustered using [t-SNE](https://scikit-learn.org/stable/modules/generated
 
 ### Reconstruction
 
+We mask the second half of the input audio to enable the streaming algorithm, so only the first half of the input audio is reproduced.
+
 """
 
 # example_5.recon_audio
@@ -407,6 +467,8 @@ Events clustered using [t-SNE](https://scikit-learn.org/stable/modules/generated
 """[markdown]
 
 ### Decomposition
+
+We can see that while energy is removed at each step, removed segments do not map cleanly onto audio "events" as a human listener would typically conceive of them.  Future work will move toward fewer and more meaningul events via induced sparsity and/or clustering of events.
 
 """
 
@@ -439,6 +501,8 @@ Here we use the original event vectors, but generate random times.
 
 ### Event Vectors
 
+Different stopping conditions might be chosen during inference (e.g. norm of the residual) but during training, we remove energy for 32 steps.  Each event vector is of dimension 32.  The decoder generates an event from this vector, which is then scheduled.  
+
 
 
 """
@@ -450,7 +514,7 @@ Here we use the original event vectors, but generate random times.
 
 ### Event Scatterplot
 
-Events clustered using [t-SNE](https://scikit-learn.org/stable/modules/generated/sklearn.manifold.TSNE.html)
+Time is along the x-axis, and a 32D -> 1D projection of event vectors using t-SNE constitutes the distribution along the y-axis.
 
 """
 
@@ -599,7 +663,7 @@ def scatterplot_section(logger: Logger) -> ScatterPlotComponent:
         scatterplot_srcs,
         width=800,
         height=400,
-        radius=0.02,
+        radius=0.01,
         points=points,
         times=times,
         colors=colors, )
@@ -712,7 +776,7 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
         scatterplot_srcs,
         width=600,
         height=300,
-        radius=0.04,
+        radius=0.01,
         points=points,
         times=times,
         colors=colors, )
@@ -742,11 +806,6 @@ This blog post is generated from a
 [Python script](https://github.com/JohnVinyard/matching-pursuit/blob/main/v3blogpost.py) using
 [conjure](https://github.com/JohnVinyard/conjure).
 
-[^1]:  While the STFT (short-time fourier transform) doesn't capture _everything_ of perceptual import, it does a fairly
-good job, better than the "raw", time-domain audio signal, at least.  In the time domain, we get into trouble when we
-begin to try to represent and remove the noisier parts of the signal;  here the statistics and relationships between
-different auditory bandpass filters become more important than the precise amplitude values.  
-
 """
 
 
@@ -775,12 +834,11 @@ def demo_page_dict() -> Dict[str, any]:
         tag='johnvinyarditerativedecompositionv3',
         author='Vinyard, John',
         url='https://blog.cochlea.xyz/sparse-interpretable-audio-codec-paper.html',
-        header='Sparse Interpretable Audio Codec',
+        header='Toward a Sparse Interpretable Audio Codec',
         year='2025',
     )
 
     return dict(
-        # large_scatterplot=large_scatterplot,
         streaming=streaming,
         example_1=example_1,
         example_2=example_2,
@@ -796,7 +854,7 @@ def generate_demo_page():
     conjure_article(
         __file__,
         'html',
-        title='Sparse Interpretable Audio Codec',
+        title='Toward a Sparse Interpretable Audio Codec',
         **display)
 
 
