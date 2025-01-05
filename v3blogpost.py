@@ -1,3 +1,36 @@
+# example_1.event0
+# example_1.event1
+# example_1.event2
+# example_1.event3
+# example_1.event4
+# example_1.event5
+# example_1.event6
+# example_1.event7
+# example_1.event8
+# example_1.event9
+# example_1.event10
+# example_1.event11
+# example_1.event12
+# example_1.event13
+# example_1.event14
+# example_1.event15
+# example_1.event16
+# example_1.event17
+# example_1.event18
+# example_1.event19
+# example_1.event20
+# example_1.event21
+# example_1.event22
+# example_1.event23
+# example_1.event24
+# example_1.event25
+# example_1.event26
+# example_1.event27
+# example_1.event28
+# example_1.event29
+# example_1.event30
+# example_1.event31
+
 """[markdown]
 
 # Introduction
@@ -731,7 +764,8 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
 
     residuals = residuals.view(n_events, 1024, -1).data.cpu().numpy()
     residuals = residuals[:, ::-1, :]
-    residuals = np.log(np.clip(residuals, 0, np.inf) + 1e-6)
+    print('RESIDUAL', residuals.min(), residuals.max())
+    residuals = np.log(residuals + 1e-6)
     t = residuals.shape[-1]
     residuals = residuals[..., :t // 2]
 
