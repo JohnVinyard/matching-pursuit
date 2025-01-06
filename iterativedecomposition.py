@@ -328,14 +328,31 @@ class Model(nn.Module):
         print(f'iterative {spec.shape}')
 
         for i in range(n_events):
+
+
+            # normalize current spectrogram
+            # mx = torch.amax(spec, dim=(1, 2), keepdim=True)
+            # spec = spec / (mx + 1e-8)
+
+
             v, sched = self.encode(spec)
             vecs.append(v)
             schedules.append(sched)
             ch = self.generate(v, sched)
             current = transform(ch)
+
+            # return spectrogram to original scale
+            # spec = spec * mx
+
+            # scale proposed "atom" by the same amount
+            # current = current * mx
+
             spec = (spec - current).clone().detach()
+
+
             channels.append(ch)
             residuals.append(spec[:, None, :, :].clone().detach())
+
 
         channels = torch.cat(channels, dim=1)
         vecs = torch.cat(vecs, dim=1)

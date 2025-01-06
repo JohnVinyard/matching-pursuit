@@ -58,6 +58,8 @@ and granular synthesis, which represents audio as a sparse set of "grains" or si
 The encoder iteratively removes energy from the input spectrogram, producing an event vector and one-hot/dirac impulse
 representing the time of occurrence.
 
+![Encoder Diagram](https://zounds-blog-media.s3.us-east-1.amazonaws.com/audio-codec.drawio.svg)
+
 ## Decoder
 
 The decoder uses the 32-dimensional event vector to choose an attack envelope, evolving resonance, and room impulse
