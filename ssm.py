@@ -11,10 +11,10 @@ can be thought of as the dynamics/resonances of the musical instrument and the r
 
 It's notable that in this experiment (unlike
 [my other recent work](https://blog.cochlea.xyz/sparse-interpretable-audio-codec-paper.html)), **there is no learned "encoder"**.  We simply "overfit"
-parameters to a single audio sample, by minimizing a combination of [reconstruction and sparsity losses](#Sparsity Loss).
+parameters to a single audio segment, by minimizing a combination of [reconstruction and sparsity losses](#Sparsity Loss).
 
 As a sneak-peek, here's a novel sound created by feeding a random, sparse control signal into
-a state-space model "extracted" from an audio segment from Beethoven's "Piano Sonata No 15 in D major".
+a state-space model "extracted" from an audio segment.
 
 Feel free to [jump ahead](#Examples) if you're curious to hear all the audio examples first!
 
@@ -372,9 +372,6 @@ Finally, some trained models to listen to!  Each example consists of the followi
 1. the reconstructed audio, produced using the sparse control signal and the learned state-space model
 1. a novel, random audio signal produced using the learned state-space model and a random control signal
 
-Just for fun, we attempt to learn the fourth example from a speech signal from the 
-[LJ Speech Dataset](https://keithito.com/LJ-Speech-Dataset/)
-
 """
 
 # example_1
@@ -384,6 +381,9 @@ Just for fun, we attempt to learn the fourth example from a speech signal from t
 # example_3
 
 # example_4
+
+# example_5
+
 
 """[markdown]
 
@@ -431,7 +431,17 @@ def demo_page_dict(n_iterations: int = 100) -> Dict[str, any]:
                 print('NaN detected, starting anew')
                 continue
 
-            return model.state_dict()
+            # total SSM parameters
+            model_param_count = count_parameters(model.ssm)
+            # non-zero control plane parameters
+            non_zero = torch.sum(model.control_signal > 0)
+            total_params = model_param_count + non_zero
+            compression_ratio = total_params / n_samples
+
+            print('COMPRESSION RATIO', compression_ratio * 100)
+
+
+        return model.state_dict()
 
     def encode(arr: np.ndarray) -> bytes:
         return encode_audio(arr)
@@ -443,6 +453,7 @@ def demo_page_dict(n_iterations: int = 100) -> Dict[str, any]:
         'audio', 'audio/wav', encode, remote)
 
     def train_model_for_segment_and_produce_artifacts(n_iterations: int):
+
 
         audio_tensor = get_one_audio_segment(n_samples).view(1, 1, n_samples)
         audio_tensor = max_norm(audio_tensor)
@@ -458,8 +469,8 @@ def demo_page_dict(n_iterations: int = 100) -> Dict[str, any]:
         _, random_audio = audio_logger.result_and_meta(random)
         _, control_plane = conj_logger.log_matrix_with_cmap('controlplane', hydrated.control_signal[0], cmap='hot')
         _, state_matrix = conj_logger.log_matrix_with_cmap('statematrix', hydrated.ssm.state_matrix, cmap='hot')
-        _, state_matrix_spec = conj_logger.log_matrix_with_cmap('statematrixspec', torch.abs(
-            torch.fft.rfft(hydrated.ssm.state_matrix, dim=-1)), cmap='hot')
+        _, state_matrix_spec = conj_logger.log_matrix_with_cmap(
+            'statematrixspec', torch.abs(torch.fft.rfft(hydrated.ssm.state_matrix, dim=-1)), cmap='hot')
 
         result = dict(
             orig=orig_audio,
@@ -538,6 +549,11 @@ def demo_page_dict(n_iterations: int = 100) -> Dict[str, any]:
         number=4
     )
 
+    example_5 = train_model_and_produce_content_section(
+        n_iterations=n_iterations,
+        number=5
+    )
+
     citation = CitationComponent(
         tag='johnvinyardstatespacemodels',
         author='Vinyard, John',
@@ -551,6 +567,7 @@ def demo_page_dict(n_iterations: int = 100) -> Dict[str, any]:
         example_2=example_2,
         example_3=example_3,
         example_4=example_4,
+        example_5=example_5,
         citation=citation,
     )
 
