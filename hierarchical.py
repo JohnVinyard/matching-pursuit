@@ -65,10 +65,10 @@ class OverfitHierarchicalEvents(nn.Module):
         self.times = nn.Parameter(
             torch.zeros(1, 2, total_levels, 2).uniform_(-rng, rng))
         self.hierarchical_time_vectors = nn.ParameterDict(
-            {str(i): torch.zeros(1, (2 ** (i + 2)), total_levels, 2).uniform_(-rng, rng) for i in range(event_levels - 1)})
+            {str(i): torch.zeros(1, (2 ** (i + 2)), total_levels, 2).uniform_(-rng, rng) for i in
+             range(event_levels - 1)})
 
         self.apply(initializer)
-
 
     @property
     def normalized_atoms(self):
@@ -79,7 +79,6 @@ class OverfitHierarchicalEvents(nn.Module):
         times = self.times.clone()
 
         for i in range(self.event_levels - 1):
-
             scale = 1 / (i + 1)
             # scale = 1
 
@@ -141,7 +140,6 @@ def overfit():
         encode_audio,
         collection)
 
-
     eventvectors, eventtimes = loggers(
         ['eventvectors', 'eventtimes'],
         SupportedContentType.Spectrogram.value,
@@ -182,7 +180,6 @@ def overfit():
 
         recon_summed = torch.sum(recon, dim=1, keepdim=True)
         recon_audio(max_norm(recon_summed))
-
 
         # loss = iterative_loss(target, recon, loss_transform, ratio_loss=False) #+ loss_model.forward(target, recon_summed)
 

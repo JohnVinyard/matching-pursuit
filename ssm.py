@@ -10,7 +10,7 @@ The control signal can be thought of as roughly corresponding to a musical score
 can be thought of as the dynamics/resonances of the musical instrument and the room in which it was played.
 
 It's notable that in this experiment (unlike
-[my other recent work](https://blog.cochlea.xyz/siam.html)), **there is no learned "encoder"**.  We simply "overfit"
+[my other recent work](https://blog.cochlea.xyz/sparse-interpretable-audio-codec-paper.html)), **there is no learned "encoder"**.  We simply "overfit"
 parameters to a single audio sample, by minimizing a combination of [reconstruction and sparsity losses](#Sparsity Loss).
 
 As a sneak-peek, here's a novel sound created by feeding a random, sparse control signal into
@@ -38,13 +38,13 @@ samplerate = 22050
 n_seconds = n_samples / samplerate
 
 # the size of each, half-lapped audio "frame"
-window_size = 512
+window_size = 1024
 
 # the dimensionality of the control plane or control signal
 control_plane_dim = 32
 
 # the dimensionality of the state vector, or hidden state
-state_dim = 128
+state_dim = 64
 
 """[markdown]
 
@@ -89,8 +89,7 @@ the exponential decay we observe in resonant objects emerges from our model.
 We'll build a [PyTorch](https://pytorch.org/) model that will learn the four matrices described 
 above, along with a sparse control signal, by "overfitting" the model to a single segment of ~12 seconds of audio drawn 
 from my favorite source for acoustic musical signals, the 
-[MusicNet dataset](https://zenodo.org/records/5120004#.Yhxr0-jMJBA) dataset.  For the final example, we'll try fitting
-a different kind of "natural" acoustic signal, human speech, just for funsies!
+[MusicNet dataset](https://zenodo.org/records/5120004#.Yhxr0-jMJBA) dataset.
 
 Even though we're _overfitting_ a single audio signal, the sparsity term serves 
 as a 
@@ -108,7 +107,6 @@ We'll start with some boring imports.
 
 """
 
-from io import BytesIO
 from typing import Dict, Union
 
 import numpy as np
@@ -125,13 +123,12 @@ from util import device, encode_audio
 
 from conjure import logger, LmdbCollection, serve_conjure, SupportedContentType, loggers, \
     NumpySerializer, NumpyDeserializer, S3Collection, \
-    conjure_article, CitationComponent, numpy_conjure, AudioComponent, pickle_conjure, ImageComponent, \
-    CompositeComponent
+    conjure_article, CitationComponent, AudioComponent, ImageComponent, \
+    CompositeComponent, Logger
 from torch.nn.utils.clip_grad import clip_grad_value_
 from argparse import ArgumentParser
-from matplotlib import pyplot as plt
 
-remote_collection_name = 'state-space-model-demo'
+remote_collection_name = 'state-space-model-demo-2'
 
 """[markdown]
 
@@ -186,8 +183,7 @@ class SSM(nn.Module):
             torch.zeros(input_dim, input_dim).uniform_(-0.01, 0.01)
         )
 
-
-
+    # @torch.jit.script
     def forward(self, control: torch.Tensor) -> torch.Tensor:
         batch, cpd, frames = control.shape
         assert cpd == self.control_plane_dim
@@ -227,6 +223,11 @@ and interpretable, but you might notice that the random audio samples produced u
 do seem to disentangle some characteristics of the instruments being played!
 
 """
+
+# thanks to https://discuss.pytorch.org/t/how-do-i-check-the-number-of-parameters-of-a-model/4325/9
+def count_parameters(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
 
 
 class OverfitControlPlane(nn.Module):
@@ -402,14 +403,6 @@ def demo_page_dict(n_iterations: int = 100) -> Dict[str, any]:
     remote = S3Collection(
         remote_collection_name, is_public=True, cors_enabled=True)
 
-    @numpy_conjure(remote)
-    def fetch_audio(url: str, start_sample: int) -> np.ndarray:
-        return get_audio_segment(
-            url,
-            target_samplerate=samplerate,
-            start_sample=start_sample,
-            duration_samples=n_samples)
-
     def train_model_for_segment(
             target: torch.Tensor,
             iterations: int):
@@ -443,41 +436,15 @@ def demo_page_dict(n_iterations: int = 100) -> Dict[str, any]:
     def encode(arr: np.ndarray) -> bytes:
         return encode_audio(arr)
 
-    def display_matrix(arr: Union[torch.Tensor, np.ndarray], cmap: str = 'gray') -> bytes:
-        if arr.ndim > 2:
-            raise ValueError('Only two-dimensional arrays are supported')
-
-        if isinstance(arr, torch.Tensor):
-            arr = arr.data.cpu().numpy()
-
-        arr = arr * -1
-
-        bio = BytesIO()
-        plt.matshow(arr, cmap=cmap)
-        plt.axis('off')
-        plt.margins(0, 0)
-        plt.savefig(bio, pad_inches=0, bbox_inches='tight')
-        plt.clf()
-        bio.seek(0)
-        return bio.read()
+    conj_logger = Logger(remote)
 
     # define loggers
     audio_logger = logger(
         'audio', 'audio/wav', encode, remote)
 
-    matrix_logger = logger(
-        'matrix', 'image/png', display_matrix, remote)
+    def train_model_for_segment_and_produce_artifacts(n_iterations: int):
 
-    @pickle_conjure(remote)
-    def train_model_for_segment_and_produce_artifacts(
-            url: str,
-            start_sample: int,
-            n_iterations: int):
-
-        print(f'Generating example for {url} with start sample {start_sample}')
-
-        audio_array = fetch_audio(url, start_sample)
-        audio_tensor = torch.from_numpy(audio_array).to(device).view(1, 1, n_samples)
+        audio_tensor = get_one_audio_segment(n_samples).view(1, 1, n_samples)
         audio_tensor = max_norm(audio_tensor)
         state_dict = train_model_for_segment(audio_tensor, n_iterations)
         hydrated = construct_experiment_model(state_dict)
@@ -486,49 +453,49 @@ def demo_page_dict(n_iterations: int = 100) -> Dict[str, any]:
             recon = hydrated.forward()
             random = hydrated.random()
 
-        _, orig_audio = audio_logger.result_and_meta(audio_array)
+        _, orig_audio = conj_logger.log_sound('orig', audio_tensor)
         _, recon_audio = audio_logger.result_and_meta(recon)
         _, random_audio = audio_logger.result_and_meta(random)
-        _, control_plane = matrix_logger.result_and_meta(hydrated.control_signal_display)
+        _, control_plane = conj_logger.log_matrix_with_cmap('controlplane', hydrated.control_signal[0], cmap='hot')
+        _, state_matrix = conj_logger.log_matrix_with_cmap('statematrix', hydrated.ssm.state_matrix, cmap='hot')
+        _, state_matrix_spec = conj_logger.log_matrix_with_cmap('statematrixspec', torch.abs(
+            torch.fft.rfft(hydrated.ssm.state_matrix, dim=-1)), cmap='hot')
 
         result = dict(
             orig=orig_audio,
             recon=recon_audio,
             control_plane=control_plane,
+            state_matrix=state_matrix,
+            state_matrix_spec=state_matrix_spec,
             random=random_audio,
         )
         return result
 
-    def train_model_and_produce_components(
-            url: str,
-            start_sample: int,
-            n_iterations: int):
+    def train_model_and_produce_components(n_iterations: int):
 
         """
         Produce artifacts/media for a single example section
         """
 
-        result_dict = train_model_for_segment_and_produce_artifacts(
-            url, start_sample, n_iterations)
+        result_dict = train_model_for_segment_and_produce_artifacts(n_iterations)
 
         orig = AudioComponent(result_dict['orig'].public_uri, height=200, samples=512)
         recon = AudioComponent(result_dict['recon'].public_uri, height=200, samples=512)
         random = AudioComponent(result_dict['random'].public_uri, height=200, samples=512)
         control = ImageComponent(result_dict['control_plane'].public_uri, height=200)
+        sm = ImageComponent(result_dict['state_matrix'].public_uri, height=200, full_width=False)
+        smspec = ImageComponent(result_dict['state_matrix_spec'].public_uri, height=200, full_width=False)
 
-        return dict(orig=orig, recon=recon,control=control, random=random)
+        return dict(
+            orig=orig, recon=recon, control=control, random=random, state_matrix=sm, state_matrix_spec=smspec)
 
-    def train_model_and_produce_content_section(
-            url: str,
-            start_sample: int,
-            n_iterations: int,
-            number: int) -> CompositeComponent:
+    def train_model_and_produce_content_section(n_iterations: int, number: int) -> CompositeComponent:
 
         """
         Produce a single "Examples" section for the post
         """
 
-        component_dict = train_model_and_produce_components(url, start_sample, n_iterations)
+        component_dict = train_model_and_produce_components(n_iterations)
         composite = CompositeComponent(
             header=f'## Example {number}',
             orig_header='### Original Audio',
@@ -542,34 +509,31 @@ def demo_page_dict(n_iterations: int = 100) -> Dict[str, any]:
             random_component=component_dict['random'],
             control_header='### Control Signal',
             control_text=f'Sparse control signal for the original audio after overfitting the model for {n_iterations} iterations',
-            control_component=component_dict['control']
+            control_component=component_dict['control'],
+            state_matrix_text=f'Input -> Hidden State Matrix',
+            state_matrix_component=component_dict['state_matrix'],
+            state_matrix_spec_text=f'FFT Transform of State Matrix',
+            state_matrix_spec_component=component_dict['state_matrix_spec']
+
         )
         return composite
 
     example_1 = train_model_and_produce_content_section(
-        'https://music-net.s3.amazonaws.com/2358',
-        start_sample=2 ** 16,
         n_iterations=n_iterations,
         number=1
     )
 
     example_2 = train_model_and_produce_content_section(
-        'https://music-net.s3.amazonaws.com/2296',
-        start_sample=2 ** 18,
         n_iterations=n_iterations,
         number=2
     )
 
     example_3 = train_model_and_produce_content_section(
-        'https://music-net.s3.amazonaws.com/2391',
-        start_sample=2 ** 18,
         n_iterations=n_iterations,
         number=3
     )
 
     example_4 = train_model_and_produce_content_section(
-        'https://lj-speech.s3.amazonaws.com/LJ019-0120.wav',
-        start_sample=0,
         n_iterations=n_iterations,
         number=4
     )
@@ -698,7 +662,7 @@ I'm looking forward to following this thread and beginning to find where the two
    [`scipy.signal.StateSpace`](https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.StateSpace.html) to
    derive a continuous-time formulation of the model?
 3. How would a model like this work as an event generator in my [sparse, interpretable audio model from other 
-   experiments?](https://blog.cochlea.xyz/machine-learning/2024/02/29/siam.html)
+   experiments?](https://blog.cochlea.xyz/sparse-interpretable-audio-codec-paper.html)
 4. Could we treat an entire, multi-instrument song as a single, large state-space model, learning a compressed 
    representation of the audio _and_ a "playable" instrument, all at the same time?
 
