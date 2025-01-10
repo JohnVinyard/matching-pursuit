@@ -4,6 +4,7 @@ import numpy as np
 
 from modules import max_norm, unit_norm
 from modules.overlap_add import overlap_add
+from ssm import control_plane_dim
 from ssmcompression import max_efficiency
 
 max_efficiency = 0.999
@@ -147,6 +148,13 @@ class OverfitControlPlane(nn.Module):
         cp = torch.zeros_like(self.control, device=self.control.device).bernoulli_(p=p)
         audio = self.forward(sig=cp)
         return max_norm(audio)
+
+    def rolled_control_plane(self):
+        indices = torch.randperm(control_plane_dim)
+        cp = self.control_signal[:, indices, :]
+        audio = self.forward(sig=cp)
+        return max_norm(audio)
+
 
     def forward(self, sig=None):
         """

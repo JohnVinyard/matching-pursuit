@@ -203,7 +203,7 @@ class AudioNetwork(nn.Module):
                 window_size,
                 control_plane_dim,
                 self.init_transfer(),
-                torch.zeros(1).uniform_(1, 50).item(),
+                torch.zeros(1).uniform_(1, 2).item(),
                 deformation_latent_shape=deformation_latent_dim,
                 filter_bank=filter_bank,
                 preserve_energy=preserve_energy)

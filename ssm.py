@@ -38,7 +38,7 @@ samplerate = 22050
 n_seconds = n_samples / samplerate
 
 # the size of each, half-lapped audio "frame"
-window_size = 1024
+window_size = 512
 
 # the dimensionality of the control plane or control signal
 control_plane_dim = 32
@@ -114,7 +114,7 @@ import torch
 from torch import nn
 from itertools import count
 
-from data import get_one_audio_segment, get_audio_segment
+from data import get_one_audio_segment
 from modules import max_norm, flattened_multiband_spectrogram
 from modules.overlap_add import overlap_add
 from torch.optim import Adam
@@ -258,6 +258,12 @@ class OverfitControlPlane(nn.Module):
         of energy into the system modelled by the `SSM`
         """
         cp = torch.zeros_like(self.control, device=self.control.device).bernoulli_(p=p)
+        audio = self.forward(sig=cp)
+        return max_norm(audio)
+
+    def rolled_control_plane(self):
+        indices = torch.randperm(control_plane_dim)
+        cp = self.control_signal[:, indices, :]
         audio = self.forward(sig=cp)
         return max_norm(audio)
 
@@ -439,6 +445,7 @@ def demo_page_dict(n_iterations: int = 100) -> Dict[str, any]:
             compression_ratio = total_params / n_samples
 
             print('COMPRESSION RATIO', compression_ratio * 100)
+            break
 
 
         return model.state_dict()
@@ -463,10 +470,12 @@ def demo_page_dict(n_iterations: int = 100) -> Dict[str, any]:
         with torch.no_grad():
             recon = hydrated.forward()
             random = hydrated.random()
+            rolled = hydrated.rolled_control_plane()
 
         _, orig_audio = conj_logger.log_sound('orig', audio_tensor)
         _, recon_audio = audio_logger.result_and_meta(recon)
         _, random_audio = audio_logger.result_and_meta(random)
+        _, rolled_audio = audio_logger.result_and_meta(rolled)
         _, control_plane = conj_logger.log_matrix_with_cmap('controlplane', hydrated.control_signal[0], cmap='hot')
         _, state_matrix = conj_logger.log_matrix_with_cmap('statematrix', hydrated.ssm.state_matrix, cmap='hot')
         _, state_matrix_spec = conj_logger.log_matrix_with_cmap(
@@ -479,6 +488,7 @@ def demo_page_dict(n_iterations: int = 100) -> Dict[str, any]:
             state_matrix=state_matrix,
             state_matrix_spec=state_matrix_spec,
             random=random_audio,
+            rolled=rolled_audio
         )
         return result
 
@@ -493,12 +503,20 @@ def demo_page_dict(n_iterations: int = 100) -> Dict[str, any]:
         orig = AudioComponent(result_dict['orig'].public_uri, height=200, samples=512)
         recon = AudioComponent(result_dict['recon'].public_uri, height=200, samples=512)
         random = AudioComponent(result_dict['random'].public_uri, height=200, samples=512)
+        rolled = AudioComponent(result_dict['rolled'].public_uri, height=200, samples=512)
         control = ImageComponent(result_dict['control_plane'].public_uri, height=200)
         sm = ImageComponent(result_dict['state_matrix'].public_uri, height=200, full_width=False)
         smspec = ImageComponent(result_dict['state_matrix_spec'].public_uri, height=200, full_width=False)
 
         return dict(
-            orig=orig, recon=recon, control=control, random=random, state_matrix=sm, state_matrix_spec=smspec)
+            orig=orig,
+            recon=recon,
+            control=control,
+            random=random,
+            state_matrix=sm,
+            state_matrix_spec=smspec,
+            rolled=rolled)
+
 
     def train_model_and_produce_content_section(n_iterations: int, number: int) -> CompositeComponent:
 
@@ -515,9 +533,15 @@ def demo_page_dict(n_iterations: int = 100) -> Dict[str, any]:
             recon_header='### Reconstruction',
             recon_text=f'Reconstruction of the original audio after overfitting the model for {n_iterations} iterations',
             recon_component=component_dict['recon'],
+
             random_header='### Random Audio',
             random_text=f'Signal produced by a random, sparse control signal after overfitting the model for {n_iterations} iterations',
             random_component=component_dict['random'],
+
+            rolled_header='### Random Permutation Along Control Plane Dimension',
+            rolled_text=f'',
+            rolled_component=component_dict['rolled'],
+
             control_header='### Control Signal',
             control_text=f'Sparse control signal for the original audio after overfitting the model for {n_iterations} iterations',
             control_component=component_dict['control'],

@@ -1,121 +1,16 @@
-# example_1.event0
-# example_1.event1
-# example_1.event2
-# example_1.event3
-# example_1.event4
-# example_1.event5
-# example_1.event6
-# example_1.event7
-# example_1.event8
-# example_1.event9
-# example_1.event10
-# example_1.event11
-# example_1.event12
-# example_1.event13
-# example_1.event14
-# example_1.event15
-# example_1.event16
-# example_1.event17
-# example_1.event18
-# example_1.event19
-# example_1.event20
-# example_1.event21
-# example_1.event22
-# example_1.event23
-# example_1.event24
-# example_1.event25
-# example_1.event26
-# example_1.event27
-# example_1.event28
-# example_1.event29
-# example_1.event30
-# example_1.event31
 
 """[markdown]
 
-# Introduction
+# Speech Samples
 
-Most widely-used modern audio codecs, such as Ogg Vorbis and MP3, as well as more recent "neural" codecs like
-[Meta's Encodec](https://arxiv.org/abs/2210.13438) or [Descript's](https://arxiv.org/abs/2306.06546) are based on
-block-coding;  audio is divided into overlapping, fixed-size "frames" which are then compressed.  While they produce
-excellent reproduction quality and can be used for downstream tasks such as text-to-audio, they do not produce an
-intuitive, directly-interpretable representation.
+Early samples (~24 hours of training) from the [LJ Speech Dataset](https://keithito.com/LJ-Speech-Dataset/).
 
-In this work, we introduce a proof-of-concept audio encoder that seeks to encode audio as a sparse set of events and
-their times-of-occurrence.  Rudimentary physics-based assumptions are used to model attack and the physical resonance
-of both the instrument being played and the room in which a performance occurs, hopefully encouraging a sparse,
-parsimonious, and easy-to-interpret representation.
+These samples elucidate a couple primary issues to be addressed:
 
-Early speech results from the LJ-Speech dataset can be found [here](https://blog.cochlea.xyz/sparse-interpretable-audio-codec-paper-speech.html).
+- The sparsity penalty is not high enough, resulting in redundant/overlapping events and attendant phase issues
+- Because the resonance model in the decoder is essentially wavetable synthesis, we'll need a way for the decoder to more directly control the "phase" of the read-head
 
-# Previous Work
-
-This work takes inspiration from symbolic approaches, such as MIDI, iterative decomposition methods like matching pursuit
-and granular synthesis, which represents audio as a sparse set of "grains" or simple audio atoms.
-
-# Model
-
-## Encoder
-
-The encoder iteratively removes energy from the input spectrogram, producing an event vector and one-hot/dirac impulse
-representing the time of occurrence.
-
-![Encoder Diagram](https://zounds-blog-media.s3.us-east-1.amazonaws.com/audio-codec.drawio.svg)
-
-## Decoder
-
-The decoder uses the 32-dimensional event vector to choose an attack envelope, evolving resonance, and room impulse
-response to model the acoustic event, and then "schedules" it by convolving the event with the one-hot/direc impulse.  Audio
-is not produced using typical upsampling convolutions, avoiding artifacts and producing more natural-sounding events.
-
-
-
-# Training Procedure
-
-We train on the [MusicNet dataset](https://zenodo.org/records/5120004#.Yhxr0-jMJBA) dataset) for ~76 hours, selecting
-random ~6 second audio segments sampled at 22050hz (mono) with a batch-size of 2.  The model takes the following steps
-for 32 iterations on each training sample:
-
-1. The encoder analyzes the STFT spectrogram of the signal, producing a single 32-dimensional event vector and a one-hot vector representing time-of-occurrence
-1. The decoder produces "raw" audio samples of the acoustic event
-1. an STFT spectrogram of the acoustic event is produced and subtracted from the input spectrogram
-1. The encoder analyzes the residual and the process is repeated
-
-The model is trained to maximize the amount of energy removed from the original signal at each step, and to minimize
-an adversarial loss, produced by a small, convolutional down-sampling discriminator which is trained in parallel,
-analyzing both the real and reproduced signals in the STFT spectrogram domain.  Half of the generated events are
-masked/removed when analyzed by the discriminator, encouraging each event vector to stand on its own as a realistic
-event.
-
-All training and model code can be
-[found here](https://github.com/JohnVinyard/matching-pursuit/blob/main/iterativedecomposition.py).
-
-# Streaming Algorithm
-
-When encoding, the entire ~6-second spectrogram is analyzed, but its second-half is masked when choosing the next event.
-In this way, the model can slide along overlapping sections of audio and encode segments of arbitrary durations.
-
-# Future Work
-
-## Better Perceptual Audio Losses
-
-Recent experiments use a greedy, per-event loss which maximizes the energy removed from the signal at each step, as well
-as a learned, adversarial loss.  Reconstruction quality will likely benefit from a more perceptually-aligned loss and a
-larger, more diverse dataset.
-
-
-## Model Size, Training Time and Dataset
-
-Firstly, this model is relatively small, weighing in at ~14M parameters (~80 MB on disk) and has only been trained for
-around 76 hours, so it seems there is a lot of space to increase the model size, dataset size and training time to
-further improve.  The reconstruction quality of the examples on this page is not amazing, certainly not good enough
-even for a lossy audio codec, but the structure the model extracts seems like it could be used for many interesting
-applications, and future work will improve perceptual audio quality.
-
-## Different Event Generator Variants
-
-The decoder side of the model is very interesting, and all sorts of physical modelling-like approaches could yield
-better, more realistic, and sparser renderings of the audio.
+Primary content about the model and classical musical examples can be found [here](https://blog.cochlea.xyz/sparse-interpretable-audio-codec-paper.html)
 
 """
 
@@ -129,31 +24,6 @@ If you'd like to cite this article, you can use the following [BibTeX block](htt
 
 # citation
 
-
-"""[markdown]
-
-# Streaming Algorithm for Arbitrary-Length Audio Segments
-
-In this latest iteration of the work, we introduce a "streaming" algorithm so that we can decompose audio segments of
-arbitrary lengths.
-
-"""
-
-"""[markdown]
-
-## Original (Streaming) 
-
-"""
-
-# streaming.orig
-
-"""[markdown]
-
-## Reconstruction (Streaming) 
-
-"""
-
-# streaming.recon
 
 """[markdown]
 
@@ -657,7 +527,7 @@ def load_model(wavetable_device: str = 'cpu') -> nn.Module:
             fft_resonance=True
         ))
 
-    with open('iterativedecomposition9.dat', 'rb') as f:
+    with open('iterativedecomposition_speech.dat', 'rb') as f:
         model.load_state_dict(torch.load(f, map_location=lambda storage, loc: storage))
 
     print('Total parameters', count_parameters(model))
@@ -877,7 +747,7 @@ def demo_page_dict() -> Dict[str, any]:
         tag='johnvinyarditerativedecompositionv3',
         author='Vinyard, John',
         url='https://blog.cochlea.xyz/sparse-interpretable-audio-codec-paper.html',
-        header='Toward a Sparse Interpretable Audio Codec',
+        header='Toward a Sparse Interpretable Audio Codec (Speech Examples)',
         year='2025',
     )
 
@@ -897,7 +767,7 @@ def generate_demo_page():
     conjure_article(
         __file__,
         'html',
-        title='Toward a Sparse Interpretable Audio Codec',
+        title='Toward a Sparse Interpretable Audio Codec (Speech Examples)',
         **display)
 
 

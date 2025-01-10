@@ -428,8 +428,8 @@ def train_and_monitor(
         f'training on {n_seconds} of audio and {n_events} events with {model_type} event generator and {disc_type} disc')
     print('==========================================')
 
-    model_filename = 'iterativedecomposition9.dat'
-    disc_filename = 'iterativedecompositiondisc9.dat'
+    model_filename = 'iterativedecomposition_speech.dat'
+    disc_filename = 'iterativedecompositiondisc_speech.dat'
 
     def train():
 
