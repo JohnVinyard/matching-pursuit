@@ -143,6 +143,31 @@ Note that there is a slight deviation from the canonical SSM in that we have a f
 
 """
 
+@torch.jit.script
+def state_space_operation(
+        batch: int,
+        input_dim: int,
+        state_vec: torch.Tensor,
+        results: torch.Tensor,
+        frames: int,
+        proj: torch.Tensor,
+        state_matrix:
+        torch.Tensor,
+        input_matrix: torch.Tensor,
+        output_matrix: torch.Tensor,
+        direct_matrix: torch.Tensor):
+
+    for i in range(frames):
+        inp = proj[:, i, :]
+        state_vec = (state_vec @ state_matrix) + (inp @ input_matrix)
+        output = (state_vec @ output_matrix) + (inp @ direct_matrix)
+        results[:, i: i + 1, :] = output.view(batch, 1, input_dim)
+        # results.append(output.view(batch, 1, self.input_dim))
+
+    # result = torch.cat(results, dim=1)
+    result = results[:, None, :, :]
+    return result
+
 
 class SSM(nn.Module):
     """
@@ -193,17 +218,22 @@ class SSM(nn.Module):
         proj = control @ self.proj
         assert proj.shape == (batch, frames, self.input_dim)
 
-        results = []
+        # results = []
+        results = torch.zeros(batch, frames, self.input_dim, device=control.device)
+
         state_vec = torch.zeros(batch, self.state_matrix_dim, device=control.device)
 
-        for i in range(frames):
-            inp = proj[:, i, :]
-            state_vec = (state_vec @ self.state_matrix) + (inp @ self.input_matrix)
-            output = (state_vec @ self.output_matrix) + (inp @ self.direct_matrix)
-            results.append(output.view(batch, 1, self.input_dim))
-
-        result = torch.cat(results, dim=1)
-        result = result[:, None, :, :]
+        # for i in range(frames):
+        #     inp = proj[:, i, :]
+        #     state_vec = (state_vec @ self.state_matrix) + (inp @ self.input_matrix)
+        #     output = (state_vec @ self.output_matrix) + (inp @ self.direct_matrix)
+        #     results[:, i, :] = output.view(batch, 1, self.input_dim)
+        #     # results.append(output.view(batch, 1, self.input_dim))
+        #
+        # # result = torch.cat(results, dim=1)
+        # result = results[:, None, :, :]
+        result = state_space_operation(
+            batch, self.input_dim, state_vec, results, frames, proj, self.state_matrix, self.input_matrix, self.output_matrix, self.direct_matrix)
 
         result = overlap_add(result)
         return result[..., :frames * (self.input_dim // 2)]

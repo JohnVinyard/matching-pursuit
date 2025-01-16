@@ -107,13 +107,11 @@ def train():
         optim.step()
 
 
-
 def positional_encoding(
         sequence_length: int,
         n_freqs: int,
         geometric_freq_spacing: bool = False,
         geometric_freq_decay: bool = False):
-
     time = torch.linspace(-np.pi, np.pi, sequence_length)
     freqs = torch.linspace(1, sequence_length // 2, n_freqs)
     if geometric_freq_spacing:
@@ -127,51 +125,56 @@ def positional_encoding(
     return x
 
 
-if __name__ == '__main__':
+def fft_shift(a, shift):
+    n_samples = a.shape[-1]
+    shift_samples = shift * n_samples
+    spec = torch.fft.rfft(a, dim=-1)
 
-    window_size = 2048
+    n_coeffs = spec.shape[-1]
+    shift = (torch.arange(0, n_coeffs, device=a.device) * 2j * np.pi) / n_coeffs
+    shift = torch.exp(-shift * shift_samples)
+
+    spec = spec * shift
+
+    samples = torch.fft.irfft(spec, dim=-1)
+    return samples
+
+
+if __name__ == '__main__':
+    window_size = 1024
+    step_size = window_size // 2
     n_coeffs = window_size // 2 + 1
     n_samples = 2 ** 16
-    step_size = 256
     n_frames = n_samples // step_size
+
+    batch_size = 3
     control_plane_dim = 16
-    n_resonances = 16
-    n_deformations = 4
-    batch_size = 2
-    n_events = 3
 
-    resonances = torch.zeros(1, n_resonances, n_coeffs).uniform_(0.2, 0.9) * torch.zeros(1, 1, n_coeffs).bernoulli_(p=0.01)
-    resonance = freq_domain_transfer_function_to_resonance(window_size, resonances, n_samples // (window_size // 2), apply_decay=True)
+    latent_space_dim = 128
 
-    cp = torch.zeros(batch_size, n_events, control_plane_dim, n_frames).bernoulli_(p=0.005)
+    cp_to_latent = torch.zeros(control_plane_dim, latent_space_dim).uniform_(-1, 1)
 
-    routing = torch.zeros(n_deformations, control_plane_dim, n_resonances).uniform_(-1, 1)
+    latent_to_samples = torch.zeros(latent_space_dim, window_size).uniform_(-1, 1)
+    latent_to_shift = torch.zeros(latent_space_dim, 1).uniform_(-1, 1)
 
+    cp = torch.zeros(batch_size, n_frames, control_plane_dim).bernoulli_(p=0.01) * torch.zeros(batch_size, n_frames, control_plane_dim).uniform_(0, 2)
 
+    decays = torch.zeros(batch_size, latent_space_dim).uniform_(0.2, 0.9)
+    latent = decays.view(batch_size, 1, latent_space_dim).repeat(1, n_frames, 1)
+    latent = torch.log(latent)
 
-    x = routing[None, None, :, :, :].permute(0, 1, 2, 4, 3) @ cp[:, :, None, :, :]
-    x = upsample_with_holes(x, desired_size=n_samples)
-    r = resonance.view(1, 1, 1, n_resonances, n_samples)
-    x = fft_convolve(x, r)
+    latent = latent + torch.relu(cp @ cp_to_latent)
 
-    x = torch.sum(x, dim=3)
+    # cumulative product in log-space
+    latent = torch.cumsum(latent, dim=1)
+    latent = torch.exp(latent)
 
+    samples = latent @ latent_to_samples
+    shifts = latent @ latent_to_shift
 
-    mixture = torch.zeros(1, n_deformations, n_samples).uniform_(-1, 1)
+    samples = fft_shift(samples, shifts)
 
-    mixture = F.avg_pool1d(mixture, 4096, stride=1, padding=2048)[:, None, :, :-1]
-    mixture = torch.softmax(mixture, dim=2)
-    x = x * mixture
+    final = overlap_add(samples[:, None, :, :], apply_window=True)
 
-
-
-    x = torch.sum(x, dim=2)
-
-
-    x = torch.tanh(x * 3)
-
-
-    x = max_norm(x)
-
-    p = playable(x[0, 0, :], 22050, normalize=True)
-    listen_to_sound(p)
+    samples = playable(final, 22050, normalize=True)
+    listen_to_sound(samples)

@@ -21,7 +21,14 @@ class DownsamplingBlock(nn.Module):
 
 class DownsamplingDiscriminator(nn.Module):
 
-    def __init__(self, window_size: int, step_size: int, n_samples: int, channels: int):
+    def __init__(
+            self,
+            window_size: int,
+            step_size: int,
+            n_samples: int,
+            channels: int,
+            complex_valued: bool = False):
+
         super().__init__()
         self.window_size = window_size
         self.step_size = step_size
@@ -29,8 +36,11 @@ class DownsamplingDiscriminator(nn.Module):
         self.n_frames = n_samples // step_size
         self.channels = channels
         self.n_coeffs = self.window_size // 2 + 1
+        self.complex_valued = complex_valued
 
-        self.proj = nn.Conv1d(self.n_coeffs, channels, 1, 1, 0)
+        self.input_channels = self.n_coeffs * 2 if self.complex_valued else self.n_coeffs
+
+        self.proj = nn.Conv1d(self.input_channels, channels, 1, 1, 0)
         self.n_layers = int(np.log2(self.n_frames)) - 2
         self.downsample = nn.Sequential(*[DownsamplingBlock(channels) for i in range(self.n_layers)])
         self.judge = nn.Conv1d(channels, 1, 4, 4, 0)
@@ -45,7 +55,10 @@ class DownsamplingDiscriminator(nn.Module):
             x,
             ws=self.window_size,
             step=self.step_size,
-            pad=True).view(batch, -1, self.n_coeffs).permute(0, 2, 1)
+            pad=True,
+            return_complex=self.complex_valued).view(batch, -1, self.input_channels).permute(0, 2, 1)
+
+        print('DISC', x.shape)
         x = self.proj(x)
         x = self.downsample(x)
         x = self.judge(x)

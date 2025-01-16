@@ -195,20 +195,31 @@ class MultiSSM(nn.Module, EventGenerator):
 
 class FFTResonanceLookup(Lookup):
     def __init__(self, n_items: int, n_samples: int, window_size: int):
-        n_coeffs = window_size // 2 + 1
+
+        n_coeffs = (window_size // 2 + 1) * 2
+
         step_size = window_size // 2
+
         super().__init__(n_items, n_coeffs)
+
         self.window_size = window_size
         self.n_coeffs = n_coeffs
         self.step_size = step_size
         self.n_frames = n_samples // self.step_size
 
     def postprocess_results(self, items: torch.Tensor) -> torch.Tensor:
+
         batch, n_events, expressivity, n_coeffs = items.shape
-        items = torch.sigmoid(items) * 0.9999
-        items = freq_domain_transfer_function_to_resonance(self.window_size, items, self.n_frames, apply_decay=False)
+
+        mags = torch.sigmoid(items[..., :n_coeffs // 2]) * 0.9999
+        phases = torch.tanh(items[..., n_coeffs // 2:]) * np.pi
+
+        items = freq_domain_transfer_function_to_resonance(
+            self.window_size, mags, self.n_frames, apply_decay=False, start_phase=phases)
+
         items = items.view(batch, n_events, expressivity, -1)
         return items
+
 
 
 class F0ResonanceLookup(Lookup):

@@ -24,6 +24,7 @@ def stft(
     x = torch.fft.rfft(x, norm='ortho')
 
     if return_complex:
+        x = torch.view_as_real(x)
         return x
 
     x = torch.abs(x)

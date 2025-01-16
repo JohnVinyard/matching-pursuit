@@ -1,6 +1,7 @@
 from argparse import ArgumentParser
-from typing import Union, Dict
+from typing import Union
 
+import numpy as np
 import torch
 from torch import nn
 from torch.optim import Adam
@@ -8,18 +9,14 @@ from torch.optim import Adam
 from conjure import LmdbCollection, serve_conjure, loggers, SupportedContentType, NumpySerializer, NumpyDeserializer
 from data import AudioIterator, get_one_audio_segment
 from modules import stft, sparsify, sparsify_vectors, iterative_loss, max_norm, flattened_multiband_spectrogram, \
-    DownsamplingDiscriminator, sparse_softmax, fft_frequency_decompose, positional_encoding
+    DownsamplingDiscriminator, sparse_softmax, positional_encoding
 from modules.anticausal import AntiCausalAnalysis
 from modules.eventgenerators.convimpulse import ConvImpulseEventGenerator
 from modules.eventgenerators.generator import EventGenerator
-from modules.eventgenerators.overfitresonance import OverfitResonanceModel, FFTResonanceLookup, MultiSSM
+from modules.eventgenerators.overfitresonance import OverfitResonanceModel, MultiSSM
 from modules.eventgenerators.splat import SplattingEventGenerator
-from modules.eventgenerators.ssm import StateSpaceModelEventGenerator
-from modules.infoloss import CorrelationLoss
 from modules.multiheadtransform import MultiHeadTransform
 from util import device, encode_audio, make_initializer
-from torch.nn import functional as F
-import numpy as np
 
 # the size, in samples of the audio segment we'll overfit
 n_samples = 2 ** 17
@@ -87,71 +84,24 @@ def loss_transform(x: torch.Tensor) -> torch.Tensor:
         smallest_band_size=512)
 
 
+
 def all_at_once_loss(target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
     t = transform(target)
     r = transform(recon)
     return torch.abs(t - r).sum()
 
 
-# def loss_transform(x: torch.Tensor) -> torch.Tensor:
-#     batch, channels, time = x.shape
-#     spec = stft(x, 2048, 256, pad=True)
-#     spec = spec.view(batch, channels, -1)
-#     return spec
-
-# def multiband_spectrogram(samples: torch.Tensor, min_size=512) -> Dict[int, torch.Tensor]:
-#     batch = samples.shape[0]
-#
-#     bands = fft_frequency_decompose(samples, min_size=min_size)
-#
-#     specs = {}
-#
-#     for size, band in bands.items():
-#         spec = stft(band, ws=64, step=16, pad=True)
-#         specs[size] = spec
-#
-#     return specs
-#
-#
-# def iterative_loss2(
-#         target: Dict[int, torch.Tensor],
-#         recon: Dict[int, torch.Tensor],
-#         n_events: int) -> torch.Tensor:
-#     residual = {k: t.clone() for k, t in target.items()}
-#
-#     loss = 0
-#
-#     for i in range(n_events):
-#         for size, band in residual.items():
-#             r = recon[size][:, i: i + 1, :]
-#
-#             t_norm = torch.norm(band, dim=-1, keepdim=True)
-#
-#             res = band - r
-#
-#             new_norm = torch.norm(res, dim=-1, keepdim=True)
-#             residual[size] = res
-#
-#             loss = loss + (new_norm / t_norm).sum()
-#
-#     return loss
-
-
-# def full_iterative_loss(target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
-#     spec = multiband_spectrogram(target)
-#     rspec = multiband_spectrogram(recon)
-#     return iterative_loss2(spec, rspec, n_events)
 
 
 class Discriminator(nn.Module):
     def __init__(self, disc_type='dilated'):
         super().__init__()
-        if disc_type == 'dilated':
+        # if disc_type == 'dilated':
+        #     self.disc = DownsamplingDiscriminator(
+        #         window_size=2048, step_size=256, n_samples=n_samples // 2, channels=128)
+        if disc_type == 'unet':
             self.disc = DownsamplingDiscriminator(
-                window_size=2048, step_size=256, n_samples=n_samples // 2, channels=128)
-        elif disc_type == 'unet':
-            self.disc = DownsamplingDiscriminator(
-                2048, 256, n_samples=n_samples // 2, channels=128)
+                2048, 256, n_samples=n_samples // 2, channels=128, complex_valued=True)
         # elif disc_type == 'multiband':
         #     self.disc = MultibandDownsamplingDiscriminator(n_frames=n_frames, in_channels=1160, channels=256)
         else:
@@ -160,6 +110,8 @@ class Discriminator(nn.Module):
         self.apply(initializer)
 
     def forward(self, transformed: torch.Tensor):
+        # ensure that the discriminator cannot depend on signal amplitude
+        transformed = max_norm(transformed)
         t = transformed.shape[-1]
         x = self.disc(transformed[..., :t // 2])
         return x
@@ -329,30 +281,16 @@ class Model(nn.Module):
 
         for i in range(n_events):
 
-
-            # normalize current spectrogram
-            # mx = torch.amax(spec, dim=(1, 2), keepdim=True)
-            # spec = spec / (mx + 1e-8)
-
-
             v, sched = self.encode(spec)
             vecs.append(v)
             schedules.append(sched)
             ch = self.generate(v, sched)
             current = transform(ch)
 
-            # return spectrogram to original scale
-            # spec = spec * mx
-
-            # scale proposed "atom" by the same amount
-            # current = current * mx
-
             spec = (spec - current).clone().detach()
-
 
             channels.append(ch)
             residuals.append(spec[:, None, :, :].clone().detach())
-
 
         channels = torch.cat(channels, dim=1)
         vecs = torch.cat(vecs, dim=1)
@@ -428,8 +366,8 @@ def train_and_monitor(
         f'training on {n_seconds} of audio and {n_events} events with {model_type} event generator and {disc_type} disc')
     print('==========================================')
 
-    model_filename = 'iterativedecomposition_speech.dat'
-    disc_filename = 'iterativedecompositiondisc_speech.dat'
+    model_filename = 'iterativedecomposition10.dat'
+    disc_filename = 'iterativedecompositiondisc10.dat'
 
     def train():
 
@@ -528,7 +466,7 @@ def train_and_monitor(
         optim = Adam(model.parameters(), lr=1e-4)
         disc_optim = Adam(disc.parameters(), lr=1e-3)
 
-        loss_model = CorrelationLoss(n_elements=256).to(device)
+        # loss_model = CorrelationLoss(n_elements=256).to(device)
 
         for i, item in enumerate(iter(stream)):
             optim.zero_grad()
@@ -539,6 +477,9 @@ def train_and_monitor(
                 orig_audio(target)
                 recon, encoded, scheduling = model.iterative(target)
                 print(encoded.shape)
+
+                norms = torch.norm(recon, dim=-1)
+                # print(norms.min().item(), norms.max().item(), norms.sum().item())
 
                 recon_summed = torch.sum(recon, dim=1, keepdim=True)
                 recon_audio(max_norm(recon_summed))
@@ -554,12 +495,17 @@ def train_and_monitor(
                 target = target * weighting
                 recon_summed = recon_summed * weighting
 
+                # TODO: consider the ratio alternative to iterative loss
+
                 # loss = all_at_once_loss(target, recon_summed)
                 loss = iterative_loss(target, recon, loss_transform)
                 # loss = loss + loss_model.noise_loss(target, recon_summed)
                 # loss = loss + loss_model.multiband_noise_loss(target, recon_summed, 128, 32)
 
-                loss = loss + (torch.abs(encoded).sum() * 1e-4)
+                # TODO: This should be based on the norm of the audio events, or maybe the amp parameter
+                # produced, it should be straightforward to determine how "loud" the event is from the vector
+                # loss = loss + (torch.abs(encoded).sum() * 1e-4)
+                loss = loss + norms.sum()
 
                 if adversarial_loss:
                     # mask half of the events, at random. Each event should be realistic

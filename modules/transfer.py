@@ -1,5 +1,5 @@
 from functools import reduce
-from typing import Collection, List, Sequence
+from typing import Collection, List, Sequence, Union
 import torch
 from torch import nn
 
@@ -14,8 +14,6 @@ from util import device
 import numpy as np
 from torch.nn import functional as F
 from scipy.signal import square, sawtooth
-
-
 
 
 class ExponentialTransform(nn.Module):
@@ -114,6 +112,7 @@ def gaussian_bandpass_filtered(
     filtered = torch.fft.irfft(spec)
     return filtered
 
+
 def make_waves_vectorized(n_samples: int, f0s: np.ndarray, samplerate: int):
     n_frequencies = len(f0s)
     total_atoms = n_frequencies * 4
@@ -169,9 +168,8 @@ def freq_domain_transfer_function_to_resonance(
         window_size: int,
         coeffs: torch.Tensor,
         n_frames: int,
-        apply_decay: bool = True) -> torch.Tensor:
-
-    # batch, n_events, c = coeffs.shape
+        apply_decay: bool = True,
+        start_phase: Union[None, torch.Tensor] = None) -> torch.Tensor:
 
     step_size = window_size // 2
     total_samples = step_size * n_frames
@@ -180,11 +178,6 @@ def freq_domain_transfer_function_to_resonance(
 
     group_delay = torch.linspace(0, np.pi, expected_coeffs)
 
-    # assert coeffs.shape[-1] == expected_coeffs
-    # noise = torch.zeros(window_size, device=coeffs.device).uniform_(-1, 1)
-    # initial = torch.abs(torch.fft.rfft(noise))[None, :] * coeffs
-    # initial = start_coeffs
-
     res = coeffs.view(-1, expected_coeffs, 1).repeat(1, 1, n_frames)
 
     if apply_decay:
@@ -192,22 +185,22 @@ def freq_domain_transfer_function_to_resonance(
         res = torch.cumsum(res, dim=-1)
         res = torch.exp(res)
 
-    # initial = initial.view(-1, expected_coeffs, 1)
-
     spec = res
-    # spec = initial * res
     spec = spec.view(-1, expected_coeffs, n_frames).permute(0, 2, 1).view(-1, 1, n_frames, expected_coeffs)
 
     phase = torch.zeros_like(spec).uniform_(-np.pi, np.pi)
-    phase[:, :, :, :] = group_delay[None, None, None, :]
+    gd = group_delay[None, None, None, :]
+    phase[:, :, :, :] = gd
     phase = torch.cumsum(phase, dim=2)
-    # phase = phase + torch.zeros(batch, n_events, 1, expected_coeffs).uniform_(-np.pi, np.pi)
+
+    if start_phase is not None:
+        # apply constant offset to each FFT bin
+        phase = phase + start_phase.view(-1, 1, 1, expected_coeffs)
 
     # convert from polar coordinates
     spec = spec * torch.exp(1j * phase)
 
     windowed = torch.fft.irfft(spec, dim=-1).view(-1, 1, n_frames, window_size)
-    # windowed = windowed * torch.hamming_window(window_size, device=coeffs.device)[None, None, None, :]
     audio = overlap_add(windowed, apply_window=True)[..., :total_samples]
     audio = audio.view(-1, 1, total_samples)
     audio = max_norm(audio)
