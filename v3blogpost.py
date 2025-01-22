@@ -86,6 +86,9 @@ applications, and future work will improve perceptual audio quality.
 The decoder side of the model is very interesting, and all sorts of physical modelling-like approaches could yield
 better, more realistic, and sparser renderings of the audio.
 
+For example, [simple RNNs](https://blog.cochlea.xyz/rnn.html) might serve as a natural alternative to the encoder used
+for the sound reproductions in this article.
+
 """
 
 """[markdown]
@@ -608,13 +611,7 @@ def process_events2(
 
     evts = {f'event{i}': events[:, i: i + 1, :] for i in range(events.shape[1])}
 
-    #
-    #
     event_components = {}
-    # for k, v in events.items():
-    #     _, e = logger.log_sound(k, v)
-    #     scatterplot_srcs.append(e.public_uri)
-    #     event_components[k] = AudioComponent(e.public_uri, height=15, controls=False)
 
     scatterplot_srcs = []
 
@@ -633,38 +630,6 @@ def process_events2(
         'eventEnvelope': envelopes[i].tolist(),
         'eventDuration': total_seconds,
     } for i in range(n_events)], event_components
-
-    # t = np.array(times) / total_seconds
-    # points = np.concatenate([points.reshape((-1, 1)), t.reshape((-1, 1))], axis=-1)
-    #
-    # return points, times, colors
-
-# def process_events(
-#         vectors: torch.Tensor,
-#         times: torch.Tensor,
-#         total_seconds: float) -> Tuple:
-#
-#     positions = torch.argmax(times, dim=-1, keepdim=True) / times.shape[-1]
-#     times = [float(x) for x in (positions * total_seconds).view(-1).data.cpu().numpy()]
-#
-#     normalized = vectors.data.cpu().numpy().reshape((-1, context_dim))
-#     normalized = normalized - normalized.min(axis=0, keepdims=True)
-#     normalized = normalized / (normalized.max(axis=0, keepdims=True) + 1e-8)
-#     tsne = TSNE(n_components=1)
-#     points = tsne.fit_transform(normalized)
-#
-#     proj = np.random.uniform(0, 1, (context_dim, 3))
-#     colors = normalized @ proj
-#     colors -= colors.min()
-#     colors /= (colors.max() + 1e-8)
-#     colors *= 255
-#     colors = colors.astype(np.uint8)
-#     colors = [f'rgba({c[0]}, {c[1]}, {c[2]}, 0.5)' for c in colors]
-#
-#     t = np.array(times) / total_seconds
-#     points = np.concatenate([points.reshape((-1, 1)), t.reshape((-1, 1))], axis=-1)
-#
-#     return points, times, colors
 
 
 def load_model(wavetable_device: str = 'cpu') -> nn.Module:
@@ -693,7 +658,7 @@ def load_model(wavetable_device: str = 'cpu') -> nn.Module:
             fft_resonance=True
         ))
 
-    with open('iterativedecomposition9.dat', 'rb') as f:
+    with open('iterativedecomposition11.dat', 'rb') as f:
         model.load_state_dict(torch.load(f, map_location=lambda storage, loc: storage))
 
     print('Total parameters', count_parameters(model))
@@ -701,49 +666,6 @@ def load_model(wavetable_device: str = 'cpu') -> nn.Module:
     print('Decoder parameters', count_parameters(model.resonance))
 
     return model
-
-
-# def scatterplot_section(logger: Logger) -> ScatterPlotComponent:
-#     model = load_model()
-#     ai = AudioIterator(
-#         batch_size=4,
-#         n_samples=n_samples,
-#         samplerate=22050,
-#         normalize=True,
-#         as_torch=True)
-#
-#     batch = next(iter(ai))
-#     batch = batch.view(-1, 1, n_samples).to('cpu')
-#     events, vectors, times = model.iterative(batch)
-#
-#     total_seconds = n_samples / samplerate
-#
-#     points, times, colors = process_events(vectors, times, total_seconds)
-#
-#     events = events.view(-1, n_samples)
-#
-#     events = {f'event{i}': events[i: i + 1, :] for i in range(events.shape[0])}
-#
-#     scatterplot_srcs = []
-#
-#     event_components = {}
-#     for k, v in events.items():
-#         _, e = logger.log_sound(k, v)
-#         scatterplot_srcs.append(e.public_uri)
-#         event_components[k] = AudioComponent(e.public_uri, height=35, controls=False)
-#
-#     scatterplot_component = ScatterPlotComponent(
-#         scatterplot_srcs,
-#         width=800,
-#         height=400,
-#         radius=0.01,
-#         points=points,
-#         times=times,
-#         colors=colors,
-#         with_duration=True)
-#     print(scatterplot_component, 'WITH_DURATION', scatterplot_component.with_duration)
-#
-#     return scatterplot_component
 
 
 def generate_multiple_events(
@@ -845,36 +767,12 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
     orig_audio_component = AudioComponent(original.public_uri, height=100)
     recon_audio_component = AudioComponent(reconstruction.public_uri, height=100)
 
-    # events = {f'event{i}': events[:, i: i + 1, :] for i in range(events.shape[1])}
-    #
-    # scatterplot_srcs = []
-    #
-    # event_components = {}
-    # for k, v in events.items():
-    #     _, e = logger.log_sound(k, v)
-    #     scatterplot_srcs.append(e.public_uri)
-    #     event_components[k] = AudioComponent(e.public_uri, height=15, controls=False)
-
-
-
     scatterplot_component = AudioTimelineComponent(
         duration=total_seconds,
         width=600,
         height=300,
         events=scatterplot_events
     )
-
-    # scatterplot_component = ScatterPlotComponent(
-    #     scatterplot_srcs,
-    #     width=600,
-    #     height=300,
-    #     radius=0.03,
-    #     points=points,
-    #     times=times,
-    #     colors=colors,
-    #     with_duration=False)
-
-    # print('WITH DURATION', scatterplot_component.with_duration)
 
     _, event_vectors = logger.log_matrix_with_cmap('latents', vectors[0].T, cmap='viridis')
     latents = ImageComponent(event_vectors.public_uri, height=200, title='latent event vectors', full_width=False)

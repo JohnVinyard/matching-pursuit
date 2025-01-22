@@ -6,16 +6,20 @@ import torch
 from torch import nn
 from torch.optim import Adam
 
+from config import Config
 from conjure import LmdbCollection, serve_conjure, loggers, SupportedContentType, NumpySerializer, NumpyDeserializer
 from data import AudioIterator, get_one_audio_segment
 from modules import stft, sparsify, sparsify_vectors, iterative_loss, max_norm, flattened_multiband_spectrogram, \
-    DownsamplingDiscriminator, sparse_softmax, positional_encoding
+    DownsamplingDiscriminator, sparse_softmax, positional_encoding, NeuralReverb
 from modules.anticausal import AntiCausalAnalysis
 from modules.eventgenerators.convimpulse import ConvImpulseEventGenerator
-from modules.eventgenerators.generator import EventGenerator
-from modules.eventgenerators.overfitresonance import OverfitResonanceModel, MultiSSM
+from modules.eventgenerators.generator import EventGenerator, ShapeSpec
+from modules.eventgenerators.overfitresonance import OverfitResonanceModel, MultiSSM, Lookup
+from modules.eventgenerators.schedule import DiracScheduler
 from modules.eventgenerators.splat import SplattingEventGenerator
 from modules.multiheadtransform import MultiHeadTransform
+from modules.overlap_add import overlap_add
+from modules.transfer import fft_convolve
 from util import device, encode_audio, make_initializer
 
 # the size, in samples of the audio segment we'll overfit
@@ -84,13 +88,10 @@ def loss_transform(x: torch.Tensor) -> torch.Tensor:
         smallest_band_size=512)
 
 
-
 def all_at_once_loss(target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
     t = transform(target)
     r = transform(recon)
     return torch.abs(t - r).sum()
-
-
 
 
 class Discriminator(nn.Module):
@@ -117,7 +118,175 @@ class Discriminator(nn.Module):
         return x
 
 
+class PhysicalModel(nn.Module):
+
+    def __init__(
+            self,
+            control_plane_dim: int = 16,
+            hidden_dim: int = 128,
+            max_active: int = 64,
+            window_size: int = 1024):
+        super().__init__()
+        self.control_plane_dim = control_plane_dim
+        self.hidden_dim = hidden_dim
+        self.max_active = max_active
+        self.window_size = window_size
+
+        self.net = nn.RNN(
+            input_size=window_size,
+            hidden_size=hidden_dim,
+            num_layers=1,
+            nonlinearity='tanh',
+            bias=False,
+            batch_first=True)
+
+        self.in_projection = nn.Linear(control_plane_dim, window_size, bias=False)
+        self.out_projection = nn.Linear(hidden_dim, window_size, bias=False)
+
+    def forward(self, control: torch.Tensor) -> torch.Tensor:
+        batch, cpd, frames = control.shape
+        control = control.permute(0, 2, 1)
+        control = sparsify(control, self.max_active)
+        control = torch.relu(control)
+        proj = self.in_projection(control)
+        result, hidden = self.net.forward(proj)
+        result = self.out_projection(result)
+        samples = result.view(batch, 1, -1, self.window_size)
+        result = overlap_add(samples, apply_window=True)
+        return result[..., :frames * (self.window_size // 2)]
+
+
+class MultiRNN(EventGenerator, nn.Module):
+
+    def __init__(
+            self,
+            n_voices: int = 8,
+            n_control_planes: int = 512,
+            control_plane_dim: int = 16,
+            hidden_dim: int = 128,
+            n_frames: int = 128,
+            control_plane_sparsity: int = 128,
+            window_size: int = 1024,
+            n_events: int = 1,
+            n_samples: int = n_samples,
+            fine_positioning: bool = False):
+        super().__init__()
+        self.n_voices = n_voices
+        self.n_control_planes = n_control_planes
+        self.control_plane_dim = control_plane_dim
+        self.n_frames = n_frames
+        self.fine_positioning = fine_positioning
+        self.n_events = n_events
+        self.n_samples = n_samples
+
+        self.samples_per_frame = n_samples // n_frames
+        self.frame_ratio = self.samples_per_frame / n_samples
+
+        verbs = NeuralReverb.tensors_from_directory(Config.impulse_response_path(), n_samples)
+        n_verbs = verbs.shape[0]
+        self.n_verbs = n_verbs
+
+        self.voices = nn.ModuleList([
+            PhysicalModel(
+                control_plane_dim=control_plane_dim,
+                hidden_dim=hidden_dim,
+                max_active=control_plane_sparsity,
+                window_size=window_size, ) for _ in range(self.n_voices)
+        ])
+
+        self.room_shape = (1, n_events, n_verbs)
+
+        self.control_planes = Lookup(n_control_planes, n_frames * control_plane_dim)
+
+        self.verb = Lookup(n_verbs, n_samples, initialize=lambda x: verbs, fixed=True)
+
+        self.scheduler = DiracScheduler(
+            self.n_events, start_size=n_frames, n_samples=self.n_samples, pre_sparse=True)
+
+    @property
+    def shape_spec(self) -> ShapeSpec:
+        params = dict(
+            voice=(self.n_voices,),
+            control_plane_choice=(self.n_control_planes,),
+            amplitudes=(1,),
+            room_choice=(self.n_verbs,),
+            room_mix=(2,),
+        )
+
+        if self.fine_positioning:
+            params['fine'] = (1,)
+
+        return params
+
+    def forward(
+            self,
+            voice: torch.Tensor,
+            control_plane_choice: torch.Tensor,
+            amplitudes: torch.Tensor,
+            room_choice: torch.Tensor,
+            room_mix: torch.Tensor,
+            times: torch.Tensor,
+            fine: torch.Tensor) -> torch.Tensor:
+
+        batch, n_events, _ = voice.shape
+
+        final_events = torch.zeros((batch, n_events, self.n_samples), device=voice.device)
+
+        hard_voice_choice = sparse_softmax(voice, normalize=True)
+        voice_indices = torch.argmax(hard_voice_choice, dim=-1, keepdim=True)
+
+        for b in range(batch):
+            for e in range(n_events):
+                active_voice = voice_indices[b, e]
+
+                cp = self\
+                    .control_planes.forward(control_plane_choice[b, e].view(1, 1, self.n_control_planes))\
+                    .view(1, self.control_plane_dim, self.n_frames)
+                print('CP', cp.shape)
+
+                samples = self.voices[active_voice.item()].forward(cp)
+                print('SAMPLES', samples.shape)
+
+                # as in switch transformer, multiply samples by winning (sparse) softmax element
+                # so gradients can flow through to the "router"
+                final = samples * hard_voice_choice[b, e, active_voice]
+                print('grad', final.shape)
+
+                # apply reverb
+                verb = self.verb.forward(room_choice[b: b + 1, e: e + 1, :])
+                print('VERB', verb.shape, final.shape)
+                wet = fft_convolve(verb, final.view(*verb.shape))
+                print('WET', wet.shape)
+                verb_mix = torch.softmax(room_mix[b: b + 1, e: e + 1, :], dim=-1)[:, :, None, :]
+                print('MIX', verb_mix.shape)
+                stacked = torch.stack([wet, final.view(*verb.shape)], dim=-1)
+                print('STACKED', stacked.shape)
+                stacked = stacked * verb_mix
+
+                final = stacked.sum(dim=-1)
+                print('verb', final.shape)
+
+                final = final * torch.abs(amplitudes[b, e])
+                print('amp', final.shape)
+
+                scheduled = self.scheduler.schedule(times[b: b + 1, e: e + 1], final)
+                print('coarse', scheduled.shape)
+
+                if fine is not None:
+                    fine_shifts = torch.tanh(fine) * self.frame_ratio
+                    scheduled = fft_shift(scheduled, fine_shifts[b: b + 1, e: e + 1, :])
+                    scheduled = scheduled[..., :self.n_samples]
+
+                print('fine', scheduled.shape)
+
+                final_events[b: b + 1, e: e + 1, :] = scheduled
+
+        return final_events
+
+
+
 class Model(nn.Module):
+
     def __init__(
             self,
             resonance_model: Union[EventGenerator, nn.Module],
@@ -280,7 +449,6 @@ class Model(nn.Module):
         print(f'iterative {spec.shape}')
 
         for i in range(n_events):
-
             v, sched = self.encode(spec)
             vecs.append(v)
             schedules.append(sched)
@@ -366,8 +534,8 @@ def train_and_monitor(
         f'training on {n_seconds} of audio and {n_events} events with {model_type} event generator and {disc_type} disc')
     print('==========================================')
 
-    model_filename = 'iterativedecomposition11.dat'
-    disc_filename = 'iterativedecompositiondisc11.dat'
+    model_filename = 'iterativedecomposition12.dat'
+    disc_filename = 'iterativedecompositiondisc12.dat'
 
     def train():
 
@@ -412,29 +580,20 @@ def train_and_monitor(
                 hierarchical_scheduler=False
             )
         elif model_type == 'ssm':
-            # resonance_model = StateSpaceModelEventGenerator(
-            #     context_dim=context_dim,
-            #     control_plane_dim=context_dim,
-            #     input_dim=1024,
-            #     state_dim=128,
-            #     hypernetwork_dim=32,
-            #     hypernetwork_latent=context_dim,
-            #     samplerate=samplerate,
-            #     n_samples=n_samples,
-            #     n_frames=n_frames,
-            # )
+            
             window_size = 1024
-            step_size = window_size // 2
-            resonance_model = MultiSSM(
-                context_dim=context_dim,
-                control_plane_dim=64,
-                n_frames=n_samples // step_size,
-                state_dim=128,
-                window_size=window_size,
-                n_models=8,
+            step = window_size // 2
+            rnn_frames = n_samples // step
+
+            resonance_model = MultiRNN(
+                n_voices=16,
                 n_control_planes=512,
-                n_samples=n_samples
-            )
+                control_plane_dim=16,
+                hidden_dim=64,
+                control_plane_sparsity=128,
+                window_size=window_size,
+                n_frames=rnn_frames,
+                fine_positioning=True)
         else:
             raise ValueError(f'Unknown model type {model_type}')
 
