@@ -276,8 +276,8 @@ class SSM(nn.Module):
         samples = result.view(batch, 1, -1, window_size)
 
         # result = torch.tanh(samples)
-        result = torch.sin(samples)
-        # result = samples
+        # result = torch.sin(samples)
+        result = samples
 
         # phase = self.out_phase(final)
 
@@ -740,7 +740,7 @@ def train_and_monitor():
                 loss_model.multiband_noise_loss(target, recon, window_size=32, step=16) \
                 + sparsity_loss(model.control_signal) \
                 + reconstruction_loss(recon, target)
-            
+
             # loss = reconstruction_loss(recon, target) + sparsity_loss(model.control_signal)
 
             non_zero = (model.control_signal > 0).sum()
