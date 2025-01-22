@@ -3,10 +3,10 @@
 This work attempts to reproduce a short segment of "natural" (i.e., produced by acoustic
 instruments or physical objects in the world) audio by decomposing it into two distinct pieces:
 
-1. A state-space model simulating the resonances of the system
+1. A single-layer RNN simulating the resonances of the system
 2. a sparse control signal, representing energy injected into the system.
 
-The control signal can be thought of as roughly corresponding to a musical score, and the state-space model
+The control signal can be thought of as roughly corresponding to a musical score, and the RNN
 can be thought of as the dynamics/resonances of the musical instrument and the room in which it was played.
 
 It's notable that in this experiment (unlike
@@ -19,7 +19,6 @@ a state-space model "extracted" from an audio segment.
 Feel free to [jump ahead](#Examples) if you're curious to hear all the audio examples first!
 
 """
-from modules.infoloss import CorrelationLoss
 
 # example_1.random_component
 
@@ -44,51 +43,18 @@ window_size = 1024
 # the dimensionality of the control plane or control signal
 control_plane_dim = 64
 
-# the dimensionality of the state vector, or hidden state
+# the dimensionality of the state vector, or hidden state for the RNN
 state_dim = 128
 
+
+
 """[markdown]
-
-# The Model
-
-State-Space models look a lot like 
-[RNNs (recurrent neural networks)](https://stanford.edu/~shervine/teaching/cs-230/cheatsheet-recurrent-neural-networks) 
-in that they are auto-regressive and have a hidden/inner state vector that represents
-something like the "memory" of the model.  In this example, I tend to think of the
-hidden state as the stored energy of the resonant object.  A human
-musician has injected energy into the system by striking, plucking, or dragging a bow and the instrument stores that 
-energy and "leaks" it out in ways that are (hopefully) pleasing to the ear.
-
-## Formula
-
-Formally, state space models take the following form (in pseudocode)
-
-First, we initialize the state/hidden vector
-
-`state_vector = zeros(state_dim)`
-
-Then, we transform the input and the _previous hidden state_ into a _new_ hidden state.  This is where the 
-"auto-regressive" or recursive nature of the model comes into view;  notice that `state-vector` is on both sides of the 
-equation.  **There's a feedback look happening here**, which is a hallmark of 
-[waveguide synthesis](https://www.osar.fr/notes/waveguides/) and other physical modelling synthesis.
-
-`state_vector = (state_vector * state_matrix) + (input * input_matrix)`
-
-Finally, we map the hidden state and the input into a new output
-
- `output_vector = (state_vector * output_matrix) + (input * direct_matrix)`
-
-This process is repeated until we have no more inputs to process.  The `direct_matrix` is a mapping from
-inputs directly to the output vector, rather like a "skip connection" in other neural network architectures.
-
-As long as we have something like conservation of energy happening (not enforced explicitly), it's easy to see how
-the exponential decay we observe in resonant objects emerges from our model. 
 
 
 ## The Experiment
 
-We'll build a [PyTorch](https://pytorch.org/) model that will learn the four matrices described 
-above, along with a sparse control signal, by "overfitting" the model to a single segment of ~12 seconds of audio drawn 
+We'll build a [PyTorch](https://pytorch.org/) model that will learn a system's resonances, along with a sparse control 
+signal, by "overfitting" the model to a single segment of ~12 seconds of audio drawn 
 from my favorite source for acoustic musical signals, the 
 [MusicNet dataset](https://zenodo.org/records/5120004#.Yhxr0-jMJBA) dataset.
 
@@ -98,7 +64,11 @@ as a
 that still forces the model to generalize in some way.  Our working theory is that the control signal must be _sparse_, 
 which places certain constraints on the type of matrices the model must learn to accurately reproduce the audio.  If I
 strike a piano key, the sound does not die away immediately and I do not have to continue to "drive" the sound by
-continually injecting energy;  the strings and the body of the piano continue to resonate for quite some time.  
+continually injecting energy;  the strings and the body of the piano continue to resonate for quite some time. 
+
+In this experiment, we use the l0 norm for the sparsity loss, and a straight-through estimator so that it remains
+roughly differentiable.
+ 
 
 While it hasn't showed up in the code we've seen so far, but we'll be using 
 [`conjure`](https://github.com/JohnVinyard/conjure) to monitor the training process while iterating on the code, and 
@@ -116,7 +86,7 @@ from torch import nn
 from itertools import count
 
 from data import get_one_audio_segment
-from modules import max_norm, flattened_multiband_spectrogram
+from modules import max_norm, flattened_multiband_spectrogram, sparsify2, sparsify
 from modules.overlap_add import overlap_add
 from torch.optim import Adam
 
@@ -128,6 +98,7 @@ from conjure import logger, LmdbCollection, serve_conjure, SupportedContentType,
     CompositeComponent, Logger
 from torch.nn.utils.clip_grad import clip_grad_value_
 from argparse import ArgumentParser
+from modules.infoloss import CorrelationLoss
 
 remote_collection_name = 'state-space-model-demo-2'
 
@@ -214,32 +185,10 @@ class SSM(nn.Module):
         )
 
         self.out_proj = nn.Linear(state_dim, window_size, bias=False)
-        self.out_phase = nn.Linear(state_dim, 1)
 
-
-        # state matrix mapping previous state vector to next state vector
-        self.state_matrix = nn.Parameter(
-            torch.zeros(state_matrix_dim, state_matrix_dim).uniform_(-0.01, 0.01))
-
-        #
-        # # matrix mapping audio frame to hidden/state vector dimension
-        # self.input_matrix = nn.Parameter(
-        #     torch.zeros(input_dim, state_matrix_dim).uniform_(-0.01, 0.01))
-        #
-        # # matrix mapping hidden/state vector to audio frame dimension
-        # self.output_matrix = nn.Parameter(
-        #     torch.zeros(state_matrix_dim, input_dim).uniform_(-0.01, 0.01)
-        # )
-        #
-        # # skip-connection-like matrix mapping input audio frame to next
-        # # output audio frame
-        # self.direct_matrix = nn.Parameter(
-        #     torch.zeros(input_dim, input_dim).uniform_(-0.01, 0.01)
-        # )
 
         self.apply(init_weights)
 
-    # @torch.jit.script
     def forward(self, control: torch.Tensor) -> torch.Tensor:
         batch, cpd, frames = control.shape
         assert cpd == self.control_plane_dim
@@ -248,45 +197,10 @@ class SSM(nn.Module):
 
         proj = control @ self.proj
         assert proj.shape == (batch, frames, self.input_dim)
-
-        # results = []
-        # results = torch.zeros(batch, frames, self.input_dim, device=control.device)
-
-        # state_vec = torch.zeros(batch, self.state_matrix_dim, device=control.device)
-
-        # for i in range(frames):
-        #     inp = proj[:, i, :]
-        #     state_vec = (state_vec @ self.state_matrix) + (inp @ self.input_matrix)
-        #     output = (state_vec @ self.output_matrix) + (inp @ self.direct_matrix)
-        #     results[:, i, :] = output.view(batch, 1, self.input_dim)
-        #     # results.append(output.view(batch, 1, self.input_dim))
-        #
-        # # result = torch.cat(results, dim=1)
-        # result = results[:, None, :, :]
-
-        # result = state_space_operation(
-        #     batch, self.input_dim, state_vec, results, frames, proj, self.state_matrix, self.input_matrix, self.output_matrix, self.direct_matrix)
-
         result, hidden = self.net.forward(proj)
-        final = result
-
         result = self.out_proj(result)
-
-        # print(result.shape, batch, frames, self.input_dim)
         samples = result.view(batch, 1, -1, window_size)
-
-        # result = torch.tanh(samples)
-        # result = torch.sin(samples)
         result = samples
-
-        # phase = self.out_phase(final)
-
-        # result = torch.sin(samples)
-        # phase = torch.tanh(phase)
-
-        # result = fft_shift(result, phase)
-
-
         result = overlap_add(result, apply_window=True)
         return result[..., :frames * (self.input_dim // 2)]
 
@@ -324,7 +238,7 @@ class OverfitControlPlane(nn.Module):
         self.n_frames = int(n_samples / (input_dim // 2))
 
         self.control = nn.Parameter(
-            torch.zeros(1, control_plane_dim, self.n_frames).uniform_(-0.01, 0.01))
+            torch.zeros(1, control_plane_dim, self.n_frames).uniform_(0, 1))
 
     @property
     def control_signal_display(self) -> np.ndarray:
@@ -332,7 +246,8 @@ class OverfitControlPlane(nn.Module):
 
     @property
     def control_signal(self) -> torch.Tensor:
-        return torch.relu(self.control)
+        s = sparsify(self.control, n_to_keep=256)
+        return torch.relu(s)
 
     def random(self, p=0.001):
         """
@@ -424,7 +339,7 @@ def sparsity_loss(c: torch.Tensor) -> torch.Tensor:
     """
     Compute the l1 norm of the control signal
     """
-    return torch.abs(c).sum() * 1e-5
+    return torch.abs(c).sum() * 1e-2
 
 
 def to_numpy(x: torch.Tensor):
@@ -495,6 +410,8 @@ def demo_page_dict(n_iterations: int = 100) -> Dict[str, any]:
             target: torch.Tensor,
             iterations: int):
 
+        loss_model = CorrelationLoss().to(device)
+
         while True:
             model = construct_experiment_model()
             optim = Adam(model.parameters(), lr=1e-3)
@@ -502,9 +419,9 @@ def demo_page_dict(n_iterations: int = 100) -> Dict[str, any]:
             for iteration in range(iterations):
                 optim.zero_grad()
                 recon = model.forward()
-                loss = reconstruction_loss(recon, target) + sparsity_loss(model.control_signal)
-                non_zero = (model.control_signal > 0).sum()
-                sparsity = (non_zero / model.control_signal.numel()).item()
+                loss = \
+                    loss_model.multiband_noise_loss(target, recon, window_size=32, step=16) \
+                    + reconstruction_loss(recon, target)
 
                 if torch.isnan(loss).any():
                     print(f'detected NaN at iteration {iteration}')
@@ -513,7 +430,7 @@ def demo_page_dict(n_iterations: int = 100) -> Dict[str, any]:
                 loss.backward()
                 clip_grad_value_(model.parameters(), 0.5)
                 optim.step()
-                print(iteration, loss.item(), sparsity)
+                print(iteration, loss.item())
 
             if iteration < n_iterations - 1:
                 print('NaN detected, starting anew')
@@ -559,16 +476,11 @@ def demo_page_dict(n_iterations: int = 100) -> Dict[str, any]:
         _, random_audio = audio_logger.result_and_meta(random)
         _, rolled_audio = audio_logger.result_and_meta(rolled)
         _, control_plane = conj_logger.log_matrix_with_cmap('controlplane', hydrated.control_signal[0], cmap='hot')
-        _, state_matrix = conj_logger.log_matrix_with_cmap('statematrix', hydrated.ssm.state_matrix, cmap='hot')
-        _, state_matrix_spec = conj_logger.log_matrix_with_cmap(
-            'statematrixspec', torch.abs(torch.fft.rfft(hydrated.ssm.state_matrix, dim=-1)), cmap='hot')
 
         result = dict(
             orig=orig_audio,
             recon=recon_audio,
             control_plane=control_plane,
-            state_matrix=state_matrix,
-            state_matrix_spec=state_matrix_spec,
             random=random_audio,
             rolled=rolled_audio
         )
@@ -587,16 +499,12 @@ def demo_page_dict(n_iterations: int = 100) -> Dict[str, any]:
         random = AudioComponent(result_dict['random'].public_uri, height=200, samples=512)
         rolled = AudioComponent(result_dict['rolled'].public_uri, height=200, samples=512)
         control = ImageComponent(result_dict['control_plane'].public_uri, height=200)
-        sm = ImageComponent(result_dict['state_matrix'].public_uri, height=200, full_width=False)
-        smspec = ImageComponent(result_dict['state_matrix_spec'].public_uri, height=200, full_width=False)
 
         return dict(
             orig=orig,
             recon=recon,
             control=control,
             random=random,
-            state_matrix=sm,
-            state_matrix_spec=smspec,
             rolled=rolled)
 
 
@@ -627,11 +535,6 @@ def demo_page_dict(n_iterations: int = 100) -> Dict[str, any]:
             control_header='### Control Signal',
             control_text=f'Sparse control signal for the original audio after overfitting the model for {n_iterations} iterations',
             control_component=component_dict['control'],
-            state_matrix_text=f'Input -> Hidden State Matrix',
-            state_matrix_component=component_dict['state_matrix'],
-            state_matrix_spec_text=f'FFT Transform of State Matrix',
-            state_matrix_spec_component=component_dict['state_matrix_spec']
-
         )
         return composite
 
@@ -664,7 +567,7 @@ def demo_page_dict(n_iterations: int = 100) -> Dict[str, any]:
         tag='johnvinyardstatespacemodels',
         author='Vinyard, John',
         url='https://blog.cochlea.xyz/ssm.html',
-        header='State Space Modelling for Sparse Decomposition of Audio',
+        header='RNN Resonance Modelling for Sparse Decomposition of Audio',
         year='2024'
     )
 
@@ -697,6 +600,17 @@ its progress during training.
 """
 
 
+# def l0_norm(x: torch.Tensor):
+#     mask = (x > 0).float()
+#
+#     forward = mask
+#     backward = x
+#
+#     y = backward + (forward - backward).detach()
+#
+#     return y.sum()
+
+
 def train_and_monitor():
     target = get_one_audio_segment(n_samples=n_samples, samplerate=samplerate)
     collection = LmdbCollection(path='ssm')
@@ -707,8 +621,8 @@ def train_and_monitor():
         encode_audio,
         collection)
 
-    envelopes, state_space = loggers(
-        ['envelopes', 'statespace'],
+    envelopes, = loggers(
+        ['envelopes'],
         SupportedContentType.Spectrogram.value,
         to_numpy,
         collection,
@@ -722,7 +636,6 @@ def train_and_monitor():
         recon_audio,
         envelopes,
         random_audio,
-        state_space
     ], port=9999, n_workers=1)
 
     loss_model = CorrelationLoss().to(device)
@@ -738,22 +651,15 @@ def train_and_monitor():
             recon_audio(max_norm(recon))
             loss = \
                 loss_model.multiband_noise_loss(target, recon, window_size=32, step=16) \
-                + sparsity_loss(model.control_signal) \
                 + reconstruction_loss(recon, target)
 
-            # loss = reconstruction_loss(recon, target) + sparsity_loss(model.control_signal)
-
-            non_zero = (model.control_signal > 0).sum()
-            sparsity = (non_zero / model.control_signal.numel()).item()
-
-            state_space(model.ssm.state_matrix)
             envelopes(model.control_signal.view(control_plane_dim, -1))
             loss.backward()
 
             clip_grad_value_(model.parameters(), 0.5)
 
             optim.step()
-            print(iteration, loss.item(), sparsity)
+            print(iteration, loss.item())
 
             with torch.no_grad():
                 rnd = model.random()
