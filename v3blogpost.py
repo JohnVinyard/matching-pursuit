@@ -581,7 +581,7 @@ def process_events2(
         total_seconds: float) -> Tuple[List[Dict], Dict]:
 
     # compute amplitude envelopes
-    envelopes = amplitude_envelope(events, 64).data.cpu().numpy().reshape((n_events, -1))
+    envelopes = amplitude_envelope(events, 128).data.cpu().numpy().reshape((n_events, -1))
 
     # compute event positions/times, in seconds
     positions = torch.argmax(times, dim=-1, keepdim=True) / times.shape[-1]

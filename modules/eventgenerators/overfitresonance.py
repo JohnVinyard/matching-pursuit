@@ -211,11 +211,18 @@ class FFTResonanceLookup(Lookup):
 
         batch, n_events, expressivity, n_coeffs = items.shape
 
+        # mags = torch.sigmoid(items) * 0.9999
+
         mags = torch.sigmoid(items[..., :n_coeffs // 2]) * 0.9999
         phases = torch.tanh(items[..., n_coeffs // 2:]) * np.pi
 
         items = freq_domain_transfer_function_to_resonance(
-            self.window_size, mags, self.n_frames, apply_decay=False, start_phase=phases)
+            self.window_size,
+            mags,
+            self.n_frames,
+            apply_decay=False,
+            start_phase=phases
+        )
 
         items = items.view(batch, n_events, expressivity, -1)
         return items

@@ -19,6 +19,7 @@ a state-space model "extracted" from an audio segment.
 Feel free to [jump ahead](#Examples) if you're curious to hear all the audio examples first!
 
 """
+from modules.infoloss import CorrelationLoss
 
 # example_1.random_component
 
@@ -38,13 +39,13 @@ samplerate = 22050
 n_seconds = n_samples / samplerate
 
 # the size of each, half-lapped audio "frame"
-window_size = 512
+window_size = 1024
 
 # the dimensionality of the control plane or control signal
-control_plane_dim = 32
+control_plane_dim = 64
 
 # the dimensionality of the state vector, or hidden state
-state_dim = 64
+state_dim = 128
 
 """[markdown]
 
@@ -119,7 +120,7 @@ from modules import max_norm, flattened_multiband_spectrogram
 from modules.overlap_add import overlap_add
 from torch.optim import Adam
 
-from util import device, encode_audio
+from util import device, encode_audio, make_initializer
 
 from conjure import logger, LmdbCollection, serve_conjure, SupportedContentType, loggers, \
     NumpySerializer, NumpyDeserializer, S3Collection, \
@@ -168,6 +169,21 @@ def state_space_operation(
     result = results[:, None, :, :]
     return result
 
+init_weights = make_initializer(0.05)
+
+def fft_shift(a, shift):
+    n_samples = a.shape[-1]
+    shift_samples = shift * n_samples
+    spec = torch.fft.rfft(a, dim=-1)
+
+    n_coeffs = spec.shape[-1]
+    shift = (torch.arange(0, n_coeffs, device=a.device) * 2j * np.pi) / n_coeffs
+    shift = torch.exp(-shift * shift_samples)
+
+    spec = spec * shift
+
+    samples = torch.fft.irfft(spec, dim=-1)
+    return samples
 
 class SSM(nn.Module):
     """
@@ -184,29 +200,44 @@ class SSM(nn.Module):
         self.input_dim = input_dim
         self.control_plane_dim = control_plane_dim
 
+        self.net = nn.RNN(
+            input_size=input_dim,
+            hidden_size=state_matrix_dim,
+            num_layers=1,
+            nonlinearity='tanh',
+            bias=False,
+            batch_first=True)
+
         # matrix mapping control signal to audio frame dimension
         self.proj = nn.Parameter(
             torch.zeros(control_plane_dim, input_dim).uniform_(-0.01, 0.01)
         )
 
+        self.out_proj = nn.Linear(state_dim, window_size, bias=False)
+        self.out_phase = nn.Linear(state_dim, 1)
+
+
         # state matrix mapping previous state vector to next state vector
         self.state_matrix = nn.Parameter(
             torch.zeros(state_matrix_dim, state_matrix_dim).uniform_(-0.01, 0.01))
 
-        # matrix mapping audio frame to hidden/state vector dimension
-        self.input_matrix = nn.Parameter(
-            torch.zeros(input_dim, state_matrix_dim).uniform_(-0.01, 0.01))
+        #
+        # # matrix mapping audio frame to hidden/state vector dimension
+        # self.input_matrix = nn.Parameter(
+        #     torch.zeros(input_dim, state_matrix_dim).uniform_(-0.01, 0.01))
+        #
+        # # matrix mapping hidden/state vector to audio frame dimension
+        # self.output_matrix = nn.Parameter(
+        #     torch.zeros(state_matrix_dim, input_dim).uniform_(-0.01, 0.01)
+        # )
+        #
+        # # skip-connection-like matrix mapping input audio frame to next
+        # # output audio frame
+        # self.direct_matrix = nn.Parameter(
+        #     torch.zeros(input_dim, input_dim).uniform_(-0.01, 0.01)
+        # )
 
-        # matrix mapping hidden/state vector to audio frame dimension
-        self.output_matrix = nn.Parameter(
-            torch.zeros(state_matrix_dim, input_dim).uniform_(-0.01, 0.01)
-        )
-
-        # skip-connection-like matrix mapping input audio frame to next
-        # output audio frame
-        self.direct_matrix = nn.Parameter(
-            torch.zeros(input_dim, input_dim).uniform_(-0.01, 0.01)
-        )
+        self.apply(init_weights)
 
     # @torch.jit.script
     def forward(self, control: torch.Tensor) -> torch.Tensor:
@@ -219,9 +250,9 @@ class SSM(nn.Module):
         assert proj.shape == (batch, frames, self.input_dim)
 
         # results = []
-        results = torch.zeros(batch, frames, self.input_dim, device=control.device)
+        # results = torch.zeros(batch, frames, self.input_dim, device=control.device)
 
-        state_vec = torch.zeros(batch, self.state_matrix_dim, device=control.device)
+        # state_vec = torch.zeros(batch, self.state_matrix_dim, device=control.device)
 
         # for i in range(frames):
         #     inp = proj[:, i, :]
@@ -232,10 +263,31 @@ class SSM(nn.Module):
         #
         # # result = torch.cat(results, dim=1)
         # result = results[:, None, :, :]
-        result = state_space_operation(
-            batch, self.input_dim, state_vec, results, frames, proj, self.state_matrix, self.input_matrix, self.output_matrix, self.direct_matrix)
 
-        result = overlap_add(result)
+        # result = state_space_operation(
+        #     batch, self.input_dim, state_vec, results, frames, proj, self.state_matrix, self.input_matrix, self.output_matrix, self.direct_matrix)
+
+        result, hidden = self.net.forward(proj)
+        final = result
+
+        result = self.out_proj(result)
+
+        # print(result.shape, batch, frames, self.input_dim)
+        samples = result.view(batch, 1, -1, window_size)
+
+        # result = torch.tanh(samples)
+        result = torch.sin(samples)
+        # result = samples
+
+        # phase = self.out_phase(final)
+
+        # result = torch.sin(samples)
+        # phase = torch.tanh(phase)
+
+        # result = fft_shift(result, phase)
+
+
+        result = overlap_add(result, apply_window=True)
         return result[..., :frames * (self.input_dim // 2)]
 
 
@@ -445,7 +497,7 @@ def demo_page_dict(n_iterations: int = 100) -> Dict[str, any]:
 
         while True:
             model = construct_experiment_model()
-            optim = Adam(model.parameters(), lr=1e-2)
+            optim = Adam(model.parameters(), lr=1e-3)
 
             for iteration in range(iterations):
                 optim.zero_grad()
@@ -673,16 +725,23 @@ def train_and_monitor():
         state_space
     ], port=9999, n_workers=1)
 
+    loss_model = CorrelationLoss().to(device)
+
     def train(target: torch.Tensor):
         model = construct_experiment_model()
 
-        optim = Adam(model.parameters(), lr=1e-2)
+        optim = Adam(model.parameters(), lr=1e-3)
 
         for iteration in count():
             optim.zero_grad()
             recon = model.forward()
             recon_audio(max_norm(recon))
-            loss = reconstruction_loss(recon, target) + sparsity_loss(model.control_signal)
+            loss = \
+                loss_model.multiband_noise_loss(target, recon, window_size=32, step=16) \
+                + sparsity_loss(model.control_signal) \
+                + reconstruction_loss(recon, target)
+            
+            # loss = reconstruction_loss(recon, target) + sparsity_loss(model.control_signal)
 
             non_zero = (model.control_signal > 0).sum()
             sparsity = (non_zero / model.control_signal.numel()).item()

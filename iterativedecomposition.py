@@ -366,8 +366,8 @@ def train_and_monitor(
         f'training on {n_seconds} of audio and {n_events} events with {model_type} event generator and {disc_type} disc')
     print('==========================================')
 
-    model_filename = 'iterativedecomposition10.dat'
-    disc_filename = 'iterativedecompositiondisc10.dat'
+    model_filename = 'iterativedecomposition11.dat'
+    disc_filename = 'iterativedecompositiondisc11.dat'
 
     def train():
 
@@ -478,7 +478,7 @@ def train_and_monitor(
                 recon, encoded, scheduling = model.iterative(target)
                 print(encoded.shape)
 
-                norms = torch.norm(recon, dim=-1)
+                # norms = torch.norm(recon, dim=-1)
                 # print(norms.min().item(), norms.max().item(), norms.sum().item())
 
                 recon_summed = torch.sum(recon, dim=1, keepdim=True)
@@ -505,13 +505,14 @@ def train_and_monitor(
                 # TODO: This should be based on the norm of the audio events, or maybe the amp parameter
                 # produced, it should be straightforward to determine how "loud" the event is from the vector
                 # loss = loss + (torch.abs(encoded).sum() * 1e-4)
-                loss = loss + norms.sum()
+                # loss = loss + norms.sum()
 
                 if adversarial_loss:
                     # mask half of the events, at random. Each event should be realistic
                     # and stand on its own
-                    mask = torch.zeros(target.shape[0], n_events, 1, device=recon.device).bernoulli_(p=0.5)
-                    for_disc = torch.sum(recon * mask, dim=1, keepdim=True)
+                    # mask = torch.zeros(target.shape[0], n_events, 1, device=recon.device).bernoulli_(p=0.5)
+                    # for_disc = torch.sum(recon * mask, dim=1, keepdim=True)
+                    for_disc = recon_summed
                     j = disc.forward(for_disc)
                     d_loss = torch.abs(1 - j).mean()
                     print('G', d_loss.item())

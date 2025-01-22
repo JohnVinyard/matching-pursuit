@@ -145,29 +145,29 @@ def load_model(wavetable_device: str = 'gpu') -> nn.Module:
     return model
 
 
-def scatterplot_section(logger: Logger, events, points, times, colors) -> ScatterPlotComponent:
-    events = events.view(-1, n_samples)
-
-    events = {f'event{i}': events[i: i + 1, :] for i in range(events.shape[0])}
-
-    scatterplot_srcs = []
-
-    event_components = {}
-    for k, v in events.items():
-        _, e = logger.log_sound(k, v)
-        scatterplot_srcs.append(e.public_uri)
-        event_components[k] = AudioComponent(e.public_uri, height=35, controls=False)
-
-    scatterplot_component = ScatterPlotComponent(
-        scatterplot_srcs,
-        width=500,
-        height=500,
-        radius=0.3,
-        points=points,
-        times=times,
-        colors=colors, )
-
-    return scatterplot_component
+# def scatterplot_section(logger: Logger, events, points, times, colors) -> ScatterPlotComponent:
+#     events = events.view(-1, n_samples)
+#
+#     events = {f'event{i}': events[i: i + 1, :] for i in range(events.shape[0])}
+#
+#     scatterplot_srcs = []
+#
+#     event_components = {}
+#     for k, v in events.items():
+#         _, e = logger.log_sound(k, v)
+#         scatterplot_srcs.append(e.public_uri)
+#         event_components[k] = AudioComponent(e.public_uri, height=35, controls=False)
+#
+#     scatterplot_component = ScatterPlotComponent(
+#         scatterplot_srcs,
+#         width=500,
+#         height=500,
+#         radius=0.3,
+#         points=points,
+#         times=times,
+#         colors=colors, )
+#
+#     return scatterplot_component
 
 
 def streaming_section(logger: Logger) -> CompositeComponent:
@@ -189,6 +189,8 @@ def streaming_section(logger: Logger) -> CompositeComponent:
 
     _, recon = logger.log_sound(key='streamingrecon', audio=recon)
     recon = AudioComponent(recon.public_uri, height=100, controls=True, scale=4, samples=1024)
+
+    # TODO: audio timeline version
 
     return CompositeComponent(
         orig=orig,

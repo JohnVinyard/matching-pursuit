@@ -70,21 +70,7 @@ If you'd like to cite this article, you can use the following [BibTeX block](htt
 
 # example_2
 
-"""[markdown]
 
-## Example 3
-
-"""
-
-# example_3
-
-"""[markdown]
-
-## Example 4
-
-"""
-
-# example_4
 
 
 import argparse
@@ -197,7 +183,7 @@ class OverfitHierarchicalEvents(nn.Module):
         events = self.event_vectors.clone()
         times = self.times.clone()
 
-        perturbation = torch.zeros_like(events).uniform_(-0.25, 0.25)
+        perturbation = torch.zeros_like(events).uniform_(-0.5, 0.5)
         return self._forward(events + perturbation, times)
 
     def forward(self) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -390,8 +376,14 @@ def reconstruction_section(logger: Logger, samplerate: int, context_dim: int, n_
         optim.zero_grad()
         recon, vectors, times = model.forward()
         recon_summed = torch.sum(recon, dim=1, keepdim=True)
-        loss = loss_model.multiband_noise_loss(target, recon_summed, 128, 32)
+
+        # loss = loss_model.multiband_noise_loss(target, recon_summed, 128, 32)
         # loss = iterative_loss(target, recon, loss_transform)
+
+        t = loss_transform(target)
+        r = loss_transform(recon_summed)
+        loss = torch.abs(t - r).sum()
+
         loss.backward()
         optim.step()
         print(i, loss.item())
@@ -457,14 +449,14 @@ def demo_page_dict() -> Dict[str, any]:
     remote = S3Collection('audio-splatting', is_public=True, cors_enabled=True)
     logger = Logger(remote)
 
-    n_iterations = 3000
+    n_iterations = 2000
     samplerate = 22050
     context_dim = 16
 
     example_1 = reconstruction_section(logger, samplerate, context_dim, n_iterations)
     example_2 = reconstruction_section(logger, samplerate, context_dim, n_iterations)
-    example_3 = reconstruction_section(logger, samplerate, context_dim, n_iterations)
-    example_4 = reconstruction_section(logger, samplerate, context_dim, n_iterations)
+    # example_3 = reconstruction_section(logger, samplerate, context_dim, n_iterations)
+    # example_4 = reconstruction_section(logger, samplerate, context_dim, n_iterations)
 
     citation = CitationComponent(
         tag='johnvinyardaudiosplatting',
@@ -477,8 +469,8 @@ def demo_page_dict() -> Dict[str, any]:
     return dict(
         example_1=example_1,
         example_2=example_2,
-        example_3=example_3,
-        example_4=example_4,
+        # example_3=example_3,
+        # example_4=example_4,
         citation=citation
     )
 
