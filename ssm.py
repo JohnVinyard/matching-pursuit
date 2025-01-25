@@ -38,7 +38,7 @@ samplerate = 22050
 n_seconds = n_samples / samplerate
 
 # the size of each, half-lapped audio "frame"
-window_size = 1024
+window_size = 128
 
 # the dimensionality of the control plane or control signal
 control_plane_dim = 64
@@ -46,6 +46,8 @@ control_plane_dim = 64
 # the dimensionality of the state vector, or hidden state for the RNN
 state_dim = 128
 
+# the number of (batch, control_plane_dim, frames) elements allowed to be non-zero
+n_active_sites = 256
 
 
 """[markdown]
@@ -86,8 +88,7 @@ from torch import nn
 from itertools import count
 
 from data import get_one_audio_segment
-from modules import max_norm, flattened_multiband_spectrogram, sparsify2, sparsify
-from modules.overlap_add import overlap_add
+from modules import max_norm, flattened_multiband_spectrogram, sparsify
 from torch.optim import Adam
 
 from util import device, encode_audio, make_initializer
@@ -99,6 +100,7 @@ from conjure import logger, LmdbCollection, serve_conjure, SupportedContentType,
 from torch.nn.utils.clip_grad import clip_grad_value_
 from argparse import ArgumentParser
 from modules.infoloss import CorrelationLoss
+from torch.nn import functional as F
 
 remote_collection_name = 'state-space-model-demo-2'
 
@@ -115,46 +117,8 @@ Note that there is a slight deviation from the canonical SSM in that we have a f
 
 """
 
-@torch.jit.script
-def state_space_operation(
-        batch: int,
-        input_dim: int,
-        state_vec: torch.Tensor,
-        results: torch.Tensor,
-        frames: int,
-        proj: torch.Tensor,
-        state_matrix:
-        torch.Tensor,
-        input_matrix: torch.Tensor,
-        output_matrix: torch.Tensor,
-        direct_matrix: torch.Tensor):
-
-    for i in range(frames):
-        inp = proj[:, i, :]
-        state_vec = (state_vec @ state_matrix) + (inp @ input_matrix)
-        output = (state_vec @ output_matrix) + (inp @ direct_matrix)
-        results[:, i: i + 1, :] = output.view(batch, 1, input_dim)
-        # results.append(output.view(batch, 1, self.input_dim))
-
-    # result = torch.cat(results, dim=1)
-    result = results[:, None, :, :]
-    return result
-
 init_weights = make_initializer(0.05)
 
-def fft_shift(a, shift):
-    n_samples = a.shape[-1]
-    shift_samples = shift * n_samples
-    spec = torch.fft.rfft(a, dim=-1)
-
-    n_coeffs = spec.shape[-1]
-    shift = (torch.arange(0, n_coeffs, device=a.device) * 2j * np.pi) / n_coeffs
-    shift = torch.exp(-shift * shift_samples)
-
-    spec = spec * shift
-
-    samples = torch.fft.irfft(spec, dim=-1)
-    return samples
 
 class SSM(nn.Module):
     """
@@ -179,30 +143,44 @@ class SSM(nn.Module):
             bias=False,
             batch_first=True)
 
+        print(self.net)
+
         # matrix mapping control signal to audio frame dimension
         self.proj = nn.Parameter(
             torch.zeros(control_plane_dim, input_dim).uniform_(-0.01, 0.01)
-        )
+        ) // 8
 
         self.out_proj = nn.Linear(state_dim, window_size, bias=False)
 
 
         self.apply(init_weights)
 
+
     def forward(self, control: torch.Tensor) -> torch.Tensor:
+        """
+        (batch, control_plane, time) -> (batch, window_size, time)
+        """
+
         batch, cpd, frames = control.shape
         assert cpd == self.control_plane_dim
 
         control = control.permute(0, 2, 1)
 
+        # try to ensure that the input signal only includes low-frequency info
         proj = control @ self.proj
+        # proj = F.interpolate(proj, size=self.input_dim, mode='linear')
+        # proj = proj * torch.zeros_like(proj).uniform_(-1, 1)
+        # proj = proj * torch.hann_window(self.input_dim, device=proj.device)
+
         assert proj.shape == (batch, frames, self.input_dim)
         result, hidden = self.net.forward(proj)
+
         result = self.out_proj(result)
-        samples = result.view(batch, 1, -1, window_size)
-        result = samples
-        result = overlap_add(result, apply_window=True)
-        return result[..., :frames * (self.input_dim // 2)]
+
+        result = result.view(batch, 1, -1)
+        result = torch.sin(result)
+        return result
+
 
 
 """[markdown]
@@ -231,11 +209,17 @@ class OverfitControlPlane(nn.Module):
     Encapsulates parameters for control signal and state-space model
     """
 
-    def __init__(self, control_plane_dim: int, input_dim: int, state_matrix_dim: int, n_samples: int):
+    def __init__(
+            self,
+            control_plane_dim: int,
+            input_dim: int,
+            state_matrix_dim: int,
+            n_samples: int):
+        
         super().__init__()
         self.ssm = SSM(control_plane_dim, input_dim, state_matrix_dim)
         self.n_samples = n_samples
-        self.n_frames = int(n_samples / (input_dim // 2))
+        self.n_frames = n_samples // input_dim
 
         self.control = nn.Parameter(
             torch.zeros(1, control_plane_dim, self.n_frames).uniform_(0, 1))
@@ -246,10 +230,11 @@ class OverfitControlPlane(nn.Module):
 
     @property
     def control_signal(self) -> torch.Tensor:
-        s = sparsify(self.control, n_to_keep=256)
+        s = sparsify(self.control, n_to_keep=n_active_sites)
         return torch.relu(s)
 
-    def random(self, p=0.001):
+    # TODO: This should depend on the time-dimension alone
+    def random(self, p=0.0001):
         """
         Produces a random, sparse control signal, emulating short, transient bursts
         of energy into the system modelled by the `SSM`
@@ -598,17 +583,6 @@ As I developed this model, I used the following code to pick a random audio segm
 its progress during training.
 
 """
-
-
-# def l0_norm(x: torch.Tensor):
-#     mask = (x > 0).float()
-#
-#     forward = mask
-#     backward = x
-#
-#     y = backward + (forward - backward).detach()
-#
-#     return y.sum()
 
 
 def train_and_monitor():

@@ -4,6 +4,7 @@ from typing import Union
 import numpy as np
 import torch
 from torch import nn
+from torch.nn.utils import clip_grad_value_
 from torch.optim import Adam
 
 from config import Config
@@ -17,6 +18,7 @@ from modules.eventgenerators.generator import EventGenerator, ShapeSpec
 from modules.eventgenerators.overfitresonance import OverfitResonanceModel, MultiSSM, Lookup
 from modules.eventgenerators.schedule import DiracScheduler
 from modules.eventgenerators.splat import SplattingEventGenerator
+from modules.infoloss import CorrelationLoss
 from modules.multiheadtransform import MultiHeadTransform
 from modules.overlap_add import overlap_add
 from modules.transfer import fft_convolve
@@ -41,7 +43,7 @@ transform_step_size = 256
 
 n_frames = n_samples // transform_step_size
 
-initializer = make_initializer(0.1)
+initializer = make_initializer(0.02)
 
 
 def fft_shift(a: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
@@ -89,8 +91,8 @@ def loss_transform(x: torch.Tensor) -> torch.Tensor:
 
 
 def all_at_once_loss(target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
-    t = transform(target)
-    r = transform(recon)
+    t = loss_transform(target)
+    r = loss_transform(recon)
     return torch.abs(t - r).sum()
 
 
@@ -146,8 +148,11 @@ class PhysicalModel(nn.Module):
     def forward(self, control: torch.Tensor) -> torch.Tensor:
         batch, cpd, frames = control.shape
         control = control.permute(0, 2, 1)
-        control = sparsify(control, self.max_active)
+        # control = sparsify(control, self.max_active)
         control = torch.relu(control)
+
+        # control = control[:, :, :frames // 4]
+
         proj = self.in_projection(control)
         result, hidden = self.net.forward(proj)
         result = self.out_projection(result)
@@ -196,7 +201,10 @@ class MultiRNN(EventGenerator, nn.Module):
 
         self.room_shape = (1, n_events, n_verbs)
 
-        self.control_planes = Lookup(n_control_planes, n_frames * control_plane_dim)
+        self.control_planes = Lookup(
+            n_control_planes,
+            n_frames * control_plane_dim,
+            initialize=lambda x: torch.zeros_like(x).uniform_(0, 1))
 
         self.verb = Lookup(n_verbs, n_samples, initialize=lambda x: verbs, fixed=True)
 
@@ -226,7 +234,7 @@ class MultiRNN(EventGenerator, nn.Module):
             room_choice: torch.Tensor,
             room_mix: torch.Tensor,
             times: torch.Tensor,
-            fine: torch.Tensor) -> torch.Tensor:
+            fine: Union[torch.Tensor, None] = None) -> torch.Tensor:
 
         batch, n_events, _ = voice.shape
 
@@ -242,42 +250,30 @@ class MultiRNN(EventGenerator, nn.Module):
                 cp = self\
                     .control_planes.forward(control_plane_choice[b, e].view(1, 1, self.n_control_planes))\
                     .view(1, self.control_plane_dim, self.n_frames)
-                print('CP', cp.shape)
 
                 samples = self.voices[active_voice.item()].forward(cp)
-                print('SAMPLES', samples.shape)
 
                 # as in switch transformer, multiply samples by winning (sparse) softmax element
                 # so gradients can flow through to the "router"
                 final = samples * hard_voice_choice[b, e, active_voice]
-                print('grad', final.shape)
 
                 # apply reverb
                 verb = self.verb.forward(room_choice[b: b + 1, e: e + 1, :])
-                print('VERB', verb.shape, final.shape)
                 wet = fft_convolve(verb, final.view(*verb.shape))
-                print('WET', wet.shape)
                 verb_mix = torch.softmax(room_mix[b: b + 1, e: e + 1, :], dim=-1)[:, :, None, :]
-                print('MIX', verb_mix.shape)
                 stacked = torch.stack([wet, final.view(*verb.shape)], dim=-1)
-                print('STACKED', stacked.shape)
                 stacked = stacked * verb_mix
-
                 final = stacked.sum(dim=-1)
-                print('verb', final.shape)
 
                 final = final * torch.abs(amplitudes[b, e])
-                print('amp', final.shape)
 
                 scheduled = self.scheduler.schedule(times[b: b + 1, e: e + 1], final)
-                print('coarse', scheduled.shape)
 
                 if fine is not None:
                     fine_shifts = torch.tanh(fine) * self.frame_ratio
                     scheduled = fft_shift(scheduled, fine_shifts[b: b + 1, e: e + 1, :])
                     scheduled = scheduled[..., :self.n_samples]
 
-                print('fine', scheduled.shape)
 
                 final_events[b: b + 1, e: e + 1, :] = scheduled
 
@@ -534,8 +530,8 @@ def train_and_monitor(
         f'training on {n_seconds} of audio and {n_events} events with {model_type} event generator and {disc_type} disc')
     print('==========================================')
 
-    model_filename = 'iterativedecomposition12.dat'
-    disc_filename = 'iterativedecompositiondisc12.dat'
+    model_filename = 'iterativedecomposition11.dat'
+    disc_filename = 'iterativedecompositiondisc11.dat'
 
     def train():
 
@@ -580,7 +576,7 @@ def train_and_monitor(
                 hierarchical_scheduler=False
             )
         elif model_type == 'ssm':
-            
+
             window_size = 1024
             step = window_size // 2
             rnn_frames = n_samples // step
@@ -593,7 +589,7 @@ def train_and_monitor(
                 control_plane_sparsity=128,
                 window_size=window_size,
                 n_frames=rnn_frames,
-                fine_positioning=True)
+                fine_positioning=False)
         else:
             raise ValueError(f'Unknown model type {model_type}')
 
@@ -625,7 +621,7 @@ def train_and_monitor(
         optim = Adam(model.parameters(), lr=1e-4)
         disc_optim = Adam(disc.parameters(), lr=1e-3)
 
-        # loss_model = CorrelationLoss(n_elements=256).to(device)
+        loss_model = CorrelationLoss(n_elements=256).to(device)
 
         for i, item in enumerate(iter(stream)):
             optim.zero_grad()
@@ -659,7 +655,14 @@ def train_and_monitor(
                 # loss = all_at_once_loss(target, recon_summed)
                 loss = iterative_loss(target, recon, loss_transform)
                 # loss = loss + loss_model.noise_loss(target, recon_summed)
-                # loss = loss + loss_model.multiband_noise_loss(target, recon_summed, 128, 32)
+
+                # try:
+                #     # TODO: Every once in a while this throws due to a totally zero (generated) input signal
+                #     # For now, just ignore these batches, so we don't interrupt training
+                #     loss = loss + loss_model.multiband_noise_loss(target, recon_summed, 128, 32)
+                # except:
+                #     print('WARNING: NOISE LOSS FAILED')
+                #     pass
 
                 # TODO: This should be based on the norm of the audio events, or maybe the amp parameter
                 # produced, it should be straightforward to determine how "loud" the event is from the vector
@@ -678,6 +681,10 @@ def train_and_monitor(
                     loss = loss + (d_loss * 1000)
 
             scaler.scale(loss).backward()
+
+            if model_type == 'ssm':
+                clip_grad_value_(model.parameters(), 0.5)
+
             scaler.step(optim)
             scaler.update()
             print(i, loss.item())

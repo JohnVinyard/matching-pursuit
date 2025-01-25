@@ -187,6 +187,14 @@ Here we use the original event vectors, but generate random times.
 
 # example_1.random_times
 
+"""[markdown]
+
+### Event Vector Perturbation
+
+"""
+
+# example_1.perturbed
+
 
 """[markdown]
 
@@ -265,6 +273,7 @@ Here we use the original event vectors, but generate random times.
 """
 
 # example_2.random_times
+
 
 
 """[markdown]
@@ -424,6 +433,7 @@ Here we use the original event vectors, but generate random times.
 """
 
 # example_4.random_times
+
 
 
 """[markdown]
@@ -733,21 +743,34 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
     t = residuals.shape[-1]
     residuals = residuals[..., :t // 2]
 
+    perturbation = torch.zeros(1, 1, context_dim).uniform_(-0.1, 0.1)
+    perturbed_vectors = vectors + perturbation
+
 
     # envelopes = amplitude_envelope(events, n_frames=64).data.cpu().numpy()
 
     _, movie = logger.log_movie('decomposition', residuals, fps=2)
     movie = ImageComponent(movie.public_uri, height=200, title='decomposition')
 
+    audio_color = 'rgba(100, 200, 150, 0.5)'
+
     # generate audio with the same times, but randomized event vectors
     randomized_events = generate(model, vectors, times, randomize_events=True, randomize_times=False)
     _, random_events = logger.log_sound('randomizedevents', randomized_events)
-    random_events_component = AudioComponent(random_events.public_uri, height=100, controls=True)
+    random_events_component = AudioComponent(
+        random_events.public_uri, height=100, controls=True, color=audio_color)
 
     # generate audio with the same events, but randomized times
     randomized_times = generate(model, vectors, times, randomize_events=False, randomize_times=True)
     _, random_times = logger.log_sound('randomizedtimes', randomized_times)
-    random_times_component = AudioComponent(random_times.public_uri, height=100, controls=True)
+    random_times_component = AudioComponent(
+        random_times.public_uri, height=100, controls=True, color=audio_color)
+
+    # generate audio with the same perturbation for all events
+    perturbed = generate(model, perturbed_vectors, times, randomize_events=False, randomize_times=False)
+    _, prt = logger.log_sound('perturbed', perturbed)
+    perturbed_component = AudioComponent(
+        prt.public_uri, height=100, controls=True, color=audio_color)
 
     total_seconds = n_samples / samplerate
 
@@ -764,8 +787,10 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
     _, original = logger.log_sound(f'original', samples)
     _, reconstruction = logger.log_sound(f'reconstruction', summed)
 
-    orig_audio_component = AudioComponent(original.public_uri, height=100)
-    recon_audio_component = AudioComponent(reconstruction.public_uri, height=100)
+    audio_color = 'rgba(100, 200, 150, 0.5)'
+
+    orig_audio_component = AudioComponent(original.public_uri, height=100, color=audio_color)
+    recon_audio_component = AudioComponent(reconstruction.public_uri, height=100, color=audio_color)
 
     scatterplot_component = AudioTimelineComponent(
         duration=total_seconds,
@@ -784,6 +809,7 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
         scatterplot=scatterplot_component,
         random_events=random_events_component,
         random_times=random_times_component,
+        perturbed=perturbed_component,
         decomposition=movie,
         **event_components
     )
