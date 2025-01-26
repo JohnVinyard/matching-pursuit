@@ -530,8 +530,8 @@ def train_and_monitor(
         f'training on {n_seconds} of audio and {n_events} events with {model_type} event generator and {disc_type} disc')
     print('==========================================')
 
-    model_filename = 'iterativedecomposition11.dat'
-    disc_filename = 'iterativedecompositiondisc11.dat'
+    model_filename = 'iterativedecomposition12.dat'
+    disc_filename = 'iterativedecompositiondisc12.dat'
 
     def train():
 
@@ -656,13 +656,13 @@ def train_and_monitor(
                 loss = iterative_loss(target, recon, loss_transform)
                 # loss = loss + loss_model.noise_loss(target, recon_summed)
 
-                # try:
-                #     # TODO: Every once in a while this throws due to a totally zero (generated) input signal
-                #     # For now, just ignore these batches, so we don't interrupt training
-                #     loss = loss + loss_model.multiband_noise_loss(target, recon_summed, 128, 32)
-                # except:
-                #     print('WARNING: NOISE LOSS FAILED')
-                #     pass
+                try:
+                    # TODO: Every once in a while this throws due to a totally zero (generated) input signal
+                    # For now, just ignore these batches, so we don't interrupt training
+                    loss = loss + loss_model.multiband_noise_loss(target, recon_summed, 128, 32)
+                except:
+                    print('WARNING: NOISE LOSS FAILED')
+                    pass
 
                 # TODO: This should be based on the norm of the audio events, or maybe the amp parameter
                 # produced, it should be straightforward to determine how "loud" the event is from the vector

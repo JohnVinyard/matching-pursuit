@@ -58,6 +58,8 @@ hierarchical
 mp
 spiking
 
+rnn.dat
+
 iterativedecomposition.dat
 iterativedecomposition2.dat
 iterativedecomposition3.dat
@@ -69,6 +71,8 @@ iterativedecomposition8.dat
 iterativedecomposition9.dat
 iterativedecomposition10.dat
 iterativedecomposition11.dat
+iterativedecomposition12.dat
+
 iterativedecomposition_speech.dat
 
 iterativedecompositiondisc2.dat
@@ -81,6 +85,8 @@ iterativedecompositiondisc8.dat
 iterativedecompositiondisc9.dat
 iterativedecompositiondisc10.dat
 iterativedecompositiondisc11.dat
+iterativedecompositiondisc12.dat
+
 iterativedecompositiondisc_speech.dat
 
 

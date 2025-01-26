@@ -1,5 +1,5 @@
 # the size, in samples of the audio segment we'll overfit
-from ssm import n_active_sites
+from fontTools.ttLib.tables.D_S_I_G_ import b64encode
 
 n_samples = 2 ** 18
 
@@ -18,6 +18,11 @@ control_plane_dim = 64
 # the dimensionality of the state vector, or hidden state for the RNN
 state_dim = 128
 
+# the number of (batch, control_plane_dim, frames) elements allowed to be non-zero
+n_active_sites = 256
+
+from base64 import b64encode
+
 from itertools import count
 from typing import Union
 
@@ -33,8 +38,8 @@ from data import get_one_audio_segment
 from modules import max_norm, flattened_multiband_spectrogram, sparsify, sparse_softmax
 from modules.infoloss import CorrelationLoss
 from util import device, encode_audio, make_initializer
-from torch.nn import functional as F
-
+from argparse import ArgumentParser
+import json
 
 init_weights = make_initializer(0.05)
 
@@ -109,7 +114,6 @@ class OverfitControlPlane(nn.Module):
             state_matrix_dim: int,
             n_samples: int,
             n_events: int):
-
         super().__init__()
         self.ssm = SSM(control_plane_dim, input_dim, state_matrix_dim)
         self.n_samples = n_samples
@@ -118,7 +122,6 @@ class OverfitControlPlane(nn.Module):
 
         self.control = nn.Parameter(
             torch.zeros(1, control_plane_dim, self.n_frames).uniform_(0, 0.1))
-
 
     @property
     def control_signal_display(self) -> np.ndarray:
@@ -253,7 +256,13 @@ def train_and_monitor():
     loss_model = CorrelationLoss().to(device)
 
     def train(target: torch.Tensor):
-        model = construct_experiment_model()
+
+        try:
+            sd = torch.load('rnn.dat')
+        except IOError:
+            sd = None
+
+        model = construct_experiment_model(state_dict=sd)
 
         optim = Adam(model.parameters(), lr=1e-3)
 
@@ -274,14 +283,83 @@ def train_and_monitor():
             clip_grad_value_(model.parameters(), 0.5)
 
             optim.step()
-            print(iteration, loss.item(), active)
+            print(
+                iteration,
+                loss.item(),
+                active,
+                model.control_signal.min().item(),
+                model.control_signal.max().item()
+            )
 
             with torch.no_grad():
                 rnd = model.random()
                 random_audio(rnd)
 
+            if iteration % 100 == 0:
+                torch.save(model.state_dict(), 'rnn.dat')
+
     train(target)
 
 
 if __name__ == '__main__':
-    train_and_monitor()
+    parser = ArgumentParser()
+    parser.add_argument('--mode', choices=['train', 'serialize'])
+    args = parser.parse_args()
+
+    if args.mode == 'train':
+        train_and_monitor()
+    elif args.mode == 'serialize':
+        '''
+        procedure:
+        - build dict with b64-encoded npy-serialized arrays
+        - save to disk
+        - move this to web-components to and load in the constructor of the rnn worklet
+        - Math.sin map
+        - dot product in javascript on Float32Array
+        -
+        '''
+        model = OverfitControlPlane(
+            control_plane_dim=control_plane_dim,
+            input_dim=window_size,
+            state_matrix_dim=state_dim,
+            n_samples=n_samples,
+            n_events=n_active_sites
+        ).to(device)
+
+        model.load_state_dict(torch.load('rnn.dat'))
+
+        serializer = NumpySerializer()
+
+        print('CONTROL SIGNAL', model.control_signal.shape)
+        params = dict()
+
+        print('PARAMETERS ==================================')
+        # note, I'm transposing here to avoid the messiness of dealing with the transpose in Javascript, for now
+        print('IN PROJ', model.ssm.proj.shape, model.ssm.proj.dtype)
+        params['in_projection'] = b64encode(serializer.to_bytes(model.ssm.proj.data.cpu().numpy().T)).decode()
+
+        print('OUT PROJ', model.ssm.out_proj.weight.shape, model.ssm.out_proj.weight.dtype)
+        params['out_projection'] = b64encode(
+            serializer.to_bytes(model.ssm.out_proj.weight.data.cpu().numpy().T)).decode()
+
+        print(list(model.ssm.net.named_parameters()))
+
+        named_params = dict(model.ssm.net.named_parameters())
+
+        params['rnn_in_projection'] = b64encode(serializer.to_bytes(named_params['weight_ih_l0'].data.cpu().numpy().T)).decode()
+        params['rnn_out_projection'] = b64encode(serializer.to_bytes(named_params['weight_hh_l0'].data.cpu().numpy().T)).decode()
+
+        # for group in model.ssm.net.all_weights:
+        #     for i, w in enumerate(group):
+        #         print('RNN', w.shape, w.dtype)
+        #         if i == 0:
+        #             params['rnn_in_projection'] = b64encode(serializer.to_bytes(w.data.cpu().numpy().T)).decode()
+        #         elif i == 1:
+        #             params['rnn_out_projection'] = b64encode(serializer.to_bytes(w.data.cpu().numpy().T)).decode()
+
+        with open('rnn_weights.json', 'w') as f:
+            json.dump(params, f)
+
+    else:
+        raise ValueError('Unknown mode')
+

@@ -189,7 +189,10 @@ Here we use the original event vectors, but generate random times.
 
 """[markdown]
 
-### Event Vector Perturbation
+### Random Perturbations
+
+Each event vector is "perturbed" or moved in the same direction in event space by adding a random event vector with
+small magnitude
 
 """
 
@@ -204,6 +207,7 @@ Different stopping conditions might be chosen during inference (e.g. norm of the
 
  
 """
+
 
 # example_1.latents
 
@@ -274,7 +278,16 @@ Here we use the original event vectors, but generate random times.
 
 # example_2.random_times
 
+"""[markdown]
 
+### Random Perturbations
+
+Each event vector is "perturbed" or moved in the same direction in event space by adding a random event vector with
+small magnitude
+
+"""
+
+# example_2.perturbed
 
 """[markdown]
 
@@ -355,6 +368,17 @@ Here we use the original event vectors, but generate random times.
 
 # example_3.random_times
 
+"""[markdown]
+
+### Random Perturbations
+
+Each event vector is "perturbed" or moved in the same direction in event space by adding a random event vector with
+small magnitude
+
+"""
+
+# example_3.perturbed
+
 
 """[markdown]
 
@@ -434,7 +458,16 @@ Here we use the original event vectors, but generate random times.
 
 # example_4.random_times
 
+"""[markdown]
 
+### Random Perturbations
+
+Each event vector is "perturbed" or moved in the same direction in event space by adding a random event vector with
+small magnitude
+
+"""
+
+# example_4.perturbed
 
 """[markdown]
 
@@ -515,6 +548,16 @@ Here we use the original event vectors, but generate random times.
 
 # example_5.random_times
 
+"""[markdown]
+
+### Random Perturbations
+
+Each event vector is "perturbed" or moved in the same direction in event space by adding a random event vector with
+small magnitude
+
+"""
+
+# example_5.perturbed
 
 """[markdown]
 
@@ -743,7 +786,7 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
     t = residuals.shape[-1]
     residuals = residuals[..., :t // 2]
 
-    perturbation = torch.zeros(1, 1, context_dim).uniform_(-0.1, 0.1)
+    perturbation = torch.zeros(1, n_events, context_dim).uniform_(-10, 10)
     perturbed_vectors = vectors + perturbation
 
 
