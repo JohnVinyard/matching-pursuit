@@ -10,16 +10,30 @@ block-coding;  audio is divided into overlapping, fixed-size "frames" which are 
 excellent reproduction quality and can be used for downstream tasks such as text-to-audio, they do not produce an
 intuitive, directly-interpretable representation.
 
-In this work, we introduce a proof-of-concept audio encoder that seeks to encode audio as a sparse set of events and
+In this work, we introduce a proof-of-concept audio encoder that encodes audio as a sparse set of events and
 their times-of-occurrence.  Rudimentary physics-based assumptions are used to model attack and the physical resonance
 of both the instrument being played and the room in which a performance occurs, hopefully encouraging a sparse,
 parsimonious, and easy-to-interpret representation.
+
+We imagine a near-future audio codec where **some types of musical composition could take place directly
+in the audio codec space**.  Text-to-audio is an excellent interface for non-musicians creating background music for
+movies, advertisements or social media content, but it is our view that experienced musicians and composers work in a
+"space" not fully captured by language and will prefer a much finer-grained representation that affords an
+effectively infinite range of possible sounds.
+
+This work clearly does not _replace_ current music generation models, but could serve as the underlying encoding on which
+generative models are trained.  It is the authors' intuition that models trained on this rich, symbolic representation
+might have a much deeper "understanding" of the content they produce, given the point-cloud-like nature of the signal.
+Instead of predicting the next frame, the generative model would be predicting the _relationships_ between "events".
+Long-term coherence in musical generation has always been a difficult problem, and we speculate that many models spend
+enormous shares of their capacity learning to reproduce physical resonance, rather than the human forces that drive
+them in interesting, musical directions.
 
 Early speech results from the LJ-Speech dataset can be found [here](https://blog.cochlea.xyz/sparse-interpretable-audio-codec-paper-speech.html).
 
 # Previous Work
 
-This work takes inspiration from symbolic approaches, such as MIDI, iterative decomposition methods like matching pursuit
+This work takes inspiration from symbolic approaches, such as MIDI, iterative decomposition methods like matching pursuit,
 and granular synthesis, which represents audio as a sparse set of "grains" or simple audio atoms.
 
 # Model
@@ -27,7 +41,8 @@ and granular synthesis, which represents audio as a sparse set of "grains" or si
 ## Encoder
 
 The encoder iteratively removes energy from the input spectrogram, producing an event vector and one-hot/dirac impulse
-representing the time of occurrence.
+representing the time of occurrence.  Other representations of time are possible, e.g., a scalar value of seconds, or
+a binary vector representing the frame number with `log2(n_samples` dimensionality.
 
 ![Encoder Diagram](https://zounds-blog-media.s3.us-east-1.amazonaws.com/audio-codec.drawio.svg)
 
@@ -207,7 +222,6 @@ Different stopping conditions might be chosen during inference (e.g. norm of the
 
  
 """
-
 
 # example_1.latents
 
@@ -635,7 +649,6 @@ def process_events2(
         vectors: torch.Tensor,
         times: torch.Tensor,
         total_seconds: float) -> Tuple[List[Dict], Dict]:
-
     # compute amplitude envelopes
     envelopes = amplitude_envelope(events, 128).data.cpu().numpy().reshape((n_events, -1))
 
@@ -672,7 +685,6 @@ def process_events2(
         _, e = logger.log_sound(k, v)
         scatterplot_srcs.append(e.public_uri)
         event_components[k] = AudioComponent(e.public_uri, height=15, controls=False)
-
 
     return [{
         'eventTime': times[i],
@@ -788,7 +800,6 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
 
     perturbation = torch.zeros(1, n_events, context_dim).uniform_(-10, 10)
     perturbed_vectors = vectors + perturbation
-
 
     # envelopes = amplitude_envelope(events, n_frames=64).data.cpu().numpy()
 

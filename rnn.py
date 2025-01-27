@@ -1,6 +1,4 @@
 # the size, in samples of the audio segment we'll overfit
-from fontTools.ttLib.tables.D_S_I_G_ import b64encode
-
 n_samples = 2 ** 18
 
 # the samplerate, in hz, of the audio signal
@@ -32,8 +30,8 @@ from torch import nn
 from torch.nn.utils.clip_grad import clip_grad_value_
 from torch.optim import Adam
 
-from conjure import LmdbCollection, serve_conjure, SupportedContentType, loggers, \
-    NumpySerializer, NumpyDeserializer
+from conjure import LmdbCollection, S3Collection, serve_conjure, SupportedContentType, loggers, \
+    NumpySerializer, NumpyDeserializer, Logger
 from data import get_one_audio_segment
 from modules import max_norm, flattened_multiband_spectrogram, sparsify, sparse_softmax
 from modules.infoloss import CorrelationLoss
@@ -88,6 +86,7 @@ class SSM(nn.Module):
 
         # try to ensure that the input signal only includes low-frequency info
         proj = control @ self.proj
+
         # proj = F.interpolate(proj, size=self.input_dim, mode='linear')
         # proj = proj * torch.zeros_like(proj).uniform_(-1, 1)
         # proj = proj * torch.hann_window(self.input_dim, device=proj.device)
@@ -318,6 +317,10 @@ if __name__ == '__main__':
         - dot product in javascript on Float32Array
         -
         '''
+
+        remote = S3Collection('rnn-instrument-weights', is_public=True, cors_enabled=True)
+        logger = Logger(remote)
+
         model = OverfitControlPlane(
             control_plane_dim=control_plane_dim,
             input_dim=window_size,
@@ -346,20 +349,14 @@ if __name__ == '__main__':
 
         named_params = dict(model.ssm.net.named_parameters())
 
-        params['rnn_in_projection'] = b64encode(serializer.to_bytes(named_params['weight_ih_l0'].data.cpu().numpy().T)).decode()
-        params['rnn_out_projection'] = b64encode(serializer.to_bytes(named_params['weight_hh_l0'].data.cpu().numpy().T)).decode()
+        params['rnn_in_projection'] = b64encode(
+            serializer.to_bytes(named_params['weight_ih_l0'].data.cpu().numpy().T)).decode()
+        params['rnn_out_projection'] = b64encode(
+            serializer.to_bytes(named_params['weight_hh_l0'].data.cpu().numpy().T)).decode()
 
-        # for group in model.ssm.net.all_weights:
-        #     for i, w in enumerate(group):
-        #         print('RNN', w.shape, w.dtype)
-        #         if i == 0:
-        #             params['rnn_in_projection'] = b64encode(serializer.to_bytes(w.data.cpu().numpy().T)).decode()
-        #         elif i == 1:
-        #             params['rnn_out_projection'] = b64encode(serializer.to_bytes(w.data.cpu().numpy().T)).decode()
+        _, meta = logger.log_json('rnn-weights', params)
 
-        with open('rnn_weights.json', 'w') as f:
-            json.dump(params, f)
+        print(f'Stored weights at {meta.public_uri.geturl()}')
 
     else:
         raise ValueError('Unknown mode')
-

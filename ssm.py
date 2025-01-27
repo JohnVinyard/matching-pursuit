@@ -49,7 +49,6 @@ state_dim = 128
 # the number of (batch, control_plane_dim, frames) elements allowed to be non-zero
 n_active_sites = 256
 
-
 """[markdown]
 
 
@@ -96,11 +95,11 @@ from util import device, encode_audio, make_initializer
 from conjure import logger, LmdbCollection, serve_conjure, SupportedContentType, loggers, \
     NumpySerializer, NumpyDeserializer, S3Collection, \
     conjure_article, CitationComponent, AudioComponent, ImageComponent, \
-    CompositeComponent, Logger
+    CompositeComponent, Logger, MetaData, InstrumentComponent
 from torch.nn.utils.clip_grad import clip_grad_value_
 from argparse import ArgumentParser
 from modules.infoloss import CorrelationLoss
-from torch.nn import functional as F
+from base64 import b64encode
 
 remote_collection_name = 'state-space-model-demo-2'
 
@@ -148,13 +147,11 @@ class SSM(nn.Module):
         # matrix mapping control signal to audio frame dimension
         self.proj = nn.Parameter(
             torch.zeros(control_plane_dim, input_dim).uniform_(-0.01, 0.01)
-        ) // 8
+        )
 
         self.out_proj = nn.Linear(state_dim, window_size, bias=False)
 
-
         self.apply(init_weights)
-
 
     def forward(self, control: torch.Tensor) -> torch.Tensor:
         """
@@ -182,7 +179,6 @@ class SSM(nn.Module):
         return result
 
 
-
 """[markdown]
 
 # The `OverfitControlPlane` Class
@@ -198,10 +194,10 @@ do seem to disentangle some characteristics of the instruments being played!
 
 """
 
+
 # thanks to https://discuss.pytorch.org/t/how-do-i-check-the-number-of-parameters-of-a-model/4325/9
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
-
 
 
 class OverfitControlPlane(nn.Module):
@@ -215,7 +211,6 @@ class OverfitControlPlane(nn.Module):
             input_dim: int,
             state_matrix_dim: int,
             n_samples: int):
-        
         super().__init__()
         self.ssm = SSM(control_plane_dim, input_dim, state_matrix_dim)
         self.n_samples = n_samples
@@ -255,6 +250,25 @@ class OverfitControlPlane(nn.Module):
         into the system modelled by `SSM`
         """
         return self.ssm.forward(sig if sig is not None else self.control_signal)
+
+
+def generate_param_dict(
+        key: str,
+        model: OverfitControlPlane,
+        logger: Logger) -> [dict, MetaData]:
+    serializer = NumpySerializer()
+    params = dict()
+    # note, I'm transposing here to avoid the messiness of dealing with the transpose in Javascript, for now
+    params['in_projection'] = b64encode(serializer.to_bytes(model.ssm.proj.data.cpu().numpy().T)).decode()
+    params['out_projection'] = b64encode(
+        serializer.to_bytes(model.ssm.out_proj.weight.data.cpu().numpy().T)).decode()
+    named_params = dict(model.ssm.net.named_parameters())
+    params['rnn_in_projection'] = b64encode(
+        serializer.to_bytes(named_params['weight_ih_l0'].data.cpu().numpy().T)).decode()
+    params['rnn_out_projection'] = b64encode(
+        serializer.to_bytes(named_params['weight_hh_l0'].data.cpu().numpy().T)).decode()
+    _, meta = logger.log_json(key, params)
+    return params, meta
 
 
 """[markdown]
@@ -423,6 +437,7 @@ def demo_page_dict(n_iterations: int = 100) -> Dict[str, any]:
 
             # total SSM parameters
             model_param_count = count_parameters(model.ssm)
+
             # non-zero control plane parameters
             non_zero = torch.sum(model.control_signal > 0)
             total_params = model_param_count + non_zero
@@ -430,7 +445,6 @@ def demo_page_dict(n_iterations: int = 100) -> Dict[str, any]:
 
             print('COMPRESSION RATIO', compression_ratio * 100)
             break
-
 
         return model.state_dict()
 
@@ -443,8 +457,8 @@ def demo_page_dict(n_iterations: int = 100) -> Dict[str, any]:
     audio_logger = logger(
         'audio', 'audio/wav', encode, remote)
 
-    def train_model_for_segment_and_produce_artifacts(n_iterations: int):
-
+    def train_model_for_segment_and_produce_artifacts(
+            key: str, n_iterations: int):
 
         audio_tensor = get_one_audio_segment(n_samples).view(1, 1, n_samples)
         audio_tensor = max_norm(audio_tensor)
@@ -461,45 +475,50 @@ def demo_page_dict(n_iterations: int = 100) -> Dict[str, any]:
         _, random_audio = audio_logger.result_and_meta(random)
         _, rolled_audio = audio_logger.result_and_meta(rolled)
         _, control_plane = conj_logger.log_matrix_with_cmap('controlplane', hydrated.control_signal[0], cmap='hot')
+        params, param_meta = generate_param_dict(key, hydrated, conj_logger)
 
         result = dict(
             orig=orig_audio,
             recon=recon_audio,
             control_plane=control_plane,
             random=random_audio,
-            rolled=rolled_audio
+            rolled=rolled_audio,
+            params=param_meta
         )
         return result
 
-    def train_model_and_produce_components(n_iterations: int):
+    def train_model_and_produce_components(key: str, n_iterations: int):
 
         """
         Produce artifacts/media for a single example section
         """
 
-        result_dict = train_model_for_segment_and_produce_artifacts(n_iterations)
+        result_dict = train_model_for_segment_and_produce_artifacts(key, n_iterations)
 
         orig = AudioComponent(result_dict['orig'].public_uri, height=200, samples=512)
         recon = AudioComponent(result_dict['recon'].public_uri, height=200, samples=512)
         random = AudioComponent(result_dict['random'].public_uri, height=200, samples=512)
         rolled = AudioComponent(result_dict['rolled'].public_uri, height=200, samples=512)
         control = ImageComponent(result_dict['control_plane'].public_uri, height=200)
+        instr = InstrumentComponent(result_dict['params'].public_uri)
 
         return dict(
             orig=orig,
             recon=recon,
             control=control,
             random=random,
-            rolled=rolled)
+            rolled=rolled,
+            instr=instr
+        )
 
-
-    def train_model_and_produce_content_section(n_iterations: int, number: int) -> CompositeComponent:
+    def train_model_and_produce_content_section(
+            n_iterations: int, number: int) -> CompositeComponent:
 
         """
         Produce a single "Examples" section for the post
         """
 
-        component_dict = train_model_and_produce_components(n_iterations)
+        component_dict = train_model_and_produce_components(f'rnnweights{number}', n_iterations)
         composite = CompositeComponent(
             header=f'## Example {number}',
             orig_header='### Original Audio',
@@ -520,6 +539,11 @@ def demo_page_dict(n_iterations: int = 100) -> Dict[str, any]:
             control_header='### Control Signal',
             control_text=f'Sparse control signal for the original audio after overfitting the model for {n_iterations} iterations',
             control_component=component_dict['control'],
+
+            instr_header='### Interactive Instrument',
+            instr_text='We project the 2D coordinates of the click site to the 64-dimension control-plane dimension and trigger an event',
+            instr_component=component_dict['instr'],
+
         )
         return composite
 
