@@ -7,3 +7,4 @@ lmdb
 conjure
 requests
 matplotlib
+sklearn

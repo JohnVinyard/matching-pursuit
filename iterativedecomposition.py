@@ -148,7 +148,8 @@ class PhysicalModel(nn.Module):
     def forward(self, control: torch.Tensor) -> torch.Tensor:
         batch, cpd, frames = control.shape
         control = control.permute(0, 2, 1)
-        # control = sparsify(control, self.max_active)
+
+        control = sparsify(control, self.max_active)
         control = torch.relu(control)
 
         # control = control[:, :, :frames // 4]
@@ -156,9 +157,10 @@ class PhysicalModel(nn.Module):
         proj = self.in_projection(control)
         result, hidden = self.net.forward(proj)
         result = self.out_projection(result)
-        samples = result.view(batch, 1, -1, self.window_size)
-        result = overlap_add(samples, apply_window=True)
-        return result[..., :frames * (self.window_size // 2)]
+
+        samples = result.view(batch, -1, n_samples)
+        samples = torch.sin(samples)
+        return samples
 
 
 class MultiRNN(EventGenerator, nn.Module):
@@ -530,8 +532,8 @@ def train_and_monitor(
         f'training on {n_seconds} of audio and {n_events} events with {model_type} event generator and {disc_type} disc')
     print('==========================================')
 
-    model_filename = 'iterativedecomposition12.dat'
-    disc_filename = 'iterativedecompositiondisc12.dat'
+    model_filename = 'iterativedecomposition13.dat'
+    disc_filename = 'iterativedecompositiondisc13.dat'
 
     def train():
 
@@ -577,15 +579,14 @@ def train_and_monitor(
             )
         elif model_type == 'ssm':
 
-            window_size = 1024
-            step = window_size // 2
-            rnn_frames = n_samples // step
+            window_size = 128
+            rnn_frames = n_samples // window_size
 
             resonance_model = MultiRNN(
                 n_voices=16,
                 n_control_planes=512,
-                control_plane_dim=16,
-                hidden_dim=64,
+                control_plane_dim=32,
+                hidden_dim=128,
                 control_plane_sparsity=128,
                 window_size=window_size,
                 n_frames=rnn_frames,
@@ -653,16 +654,16 @@ def train_and_monitor(
                 # TODO: consider the ratio alternative to iterative loss
 
                 # loss = all_at_once_loss(target, recon_summed)
-                loss = iterative_loss(target, recon, loss_transform)
+                loss = iterative_loss(target, recon, loss_transform, ratio_loss=True)
                 # loss = loss + loss_model.noise_loss(target, recon_summed)
 
-                try:
-                    # TODO: Every once in a while this throws due to a totally zero (generated) input signal
-                    # For now, just ignore these batches, so we don't interrupt training
-                    loss = loss + loss_model.multiband_noise_loss(target, recon_summed, 128, 32)
-                except:
-                    print('WARNING: NOISE LOSS FAILED')
-                    pass
+                # try:
+                #     # TODO: Every once in a while this throws due to a totally zero (generated) input signal
+                #     # For now, just ignore these batches, so we don't interrupt training
+                #     loss = loss + loss_model.multiband_noise_loss(target, recon_summed, 128, 32)
+                # except:
+                #     print('WARNING: NOISE LOSS FAILED')
+                #     pass
 
                 # TODO: This should be based on the norm of the audio events, or maybe the amp parameter
                 # produced, it should be straightforward to determine how "loud" the event is from the vector

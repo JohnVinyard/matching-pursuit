@@ -22,6 +22,8 @@ Feel free to [jump ahead](#Examples) if you're curious to hear all the audio exa
 
 # example_1.random_component
 
+# example_1.instr_component
+
 """[markdown]
 
 First, we'll set up high-level parameters for the experiment
@@ -59,10 +61,8 @@ signal, by "overfitting" the model to a single segment of ~12 seconds of audio d
 from my favorite source for acoustic musical signals, the 
 [MusicNet dataset](https://zenodo.org/records/5120004#.Yhxr0-jMJBA) dataset.
 
-Even though we're _overfitting_ a single audio signal, the sparsity term serves 
-as a 
-[regularizer](https://www.reddit.com/r/learnmachinelearning/comments/w7yrog/what_regularization_does_to_a_machine_learning/) 
-that still forces the model to generalize in some way.  Our working theory is that the control signal must be _sparse_, 
+Even though we're _overfitting_ a single audio signal, the imposition of sparsity forces the model to generalize in some ways.  
+Our working theory is that the control signal must be _sparse_, 
 which places certain constraints on the type of matrices the model must learn to accurately reproduce the audio.  If I
 strike a piano key, the sound does not die away immediately and I do not have to continue to "drive" the sound by
 continually injecting energy;  the strings and the body of the piano continue to resonate for quite some time. 
@@ -100,12 +100,13 @@ from torch.nn.utils.clip_grad import clip_grad_value_
 from argparse import ArgumentParser
 from modules.infoloss import CorrelationLoss
 from base64 import b64encode
+from sklearn.decomposition import PCA
 
 remote_collection_name = 'state-space-model-demo-2'
 
 """[markdown]
 
-# The `SSM` Class
+# The `InstrumentModel` Class
 
 Now, for the good stuff!  We'll define our simple State-Space Model as an 
 [`nn.Module`](https://pytorch.org/docs/stable/generated/torch.nn.Module.html)-derived class with four parameters 
@@ -119,7 +120,7 @@ Note that there is a slight deviation from the canonical SSM in that we have a f
 init_weights = make_initializer(0.05)
 
 
-class SSM(nn.Module):
+class InstrumentModel(nn.Module):
     """
     A state-space model-like module, with one additional matrix, used to project the control
     signal into the shape of each audio frame.
@@ -183,7 +184,7 @@ class SSM(nn.Module):
 
 # The `OverfitControlPlane` Class
 
-This model encapsulates an `SSM` instance, and also has a parameter for the sparse "control plane" that will serve
+This model encapsulates an `InstrumentModel` instance, and also has a parameter for the sparse "control plane" that will serve
 as the input energy for our resonant model.  I think of this as a time-series of vectors that describe the different
 ways that energy can be injected into the model, e.g., you might have individual dimensions representing different
 keys on a piano, or strings on a cello.  
@@ -212,12 +213,36 @@ class OverfitControlPlane(nn.Module):
             state_matrix_dim: int,
             n_samples: int):
         super().__init__()
-        self.ssm = SSM(control_plane_dim, input_dim, state_matrix_dim)
+        self.ssm = InstrumentModel(control_plane_dim, input_dim, state_matrix_dim)
         self.n_samples = n_samples
         self.n_frames = n_samples // input_dim
+        self.control_plane_dim = control_plane_dim
 
         self.control = nn.Parameter(
             torch.zeros(1, control_plane_dim, self.n_frames).uniform_(0, 1))
+
+    def _get_mapping(self, n_components: int) -> np.ndarray:
+        # cs = self.control_signal.data.cpu().numpy() \
+        #     .reshape(self.control_plane_dim, self.n_frames).T
+        # pca = PCA(n_components=n_components)
+        # pca.fit(cs)
+        # # this will be of shape (n_components, control_plane_dim)
+        # return pca.components_
+        return np.random.uniform(-1, 1, (n_components, self.control_plane_dim))
+
+    def get_control_plane_mapping(self) -> np.ndarray:
+        mapping = self._get_mapping(n_components=2)
+        print(mapping.shape)
+        rnd = np.random.uniform(0, 1, (27, 2))
+        cp = rnd @ mapping
+        print(cp.shape)
+        print(cp)
+        print(cp.min(), self.control_signal.min())
+        print(cp.max(), self.control_signal.max())
+        return mapping
+
+    def get_accelerometer_mapping(self) -> np.ndarray:
+        return self._get_mapping(n_components=3)
 
     @property
     def control_signal_display(self) -> np.ndarray:
@@ -239,6 +264,10 @@ class OverfitControlPlane(nn.Module):
         return max_norm(audio)
 
     def rolled_control_plane(self):
+        """
+        Randomly permute the input control signal, so that the overall pattern of energy injection
+        is somewhat realistic, but energy is injected differently than in the original performance.
+        """
         indices = torch.randperm(control_plane_dim)
         cp = self.control_signal[:, indices, :]
         audio = self.forward(sig=cp)
@@ -267,6 +296,8 @@ def generate_param_dict(
         serializer.to_bytes(named_params['weight_ih_l0'].data.cpu().numpy().T)).decode()
     params['rnn_out_projection'] = b64encode(
         serializer.to_bytes(named_params['weight_hh_l0'].data.cpu().numpy().T)).decode()
+    params['control_plane_mapping'] = b64encode(serializer.to_bytes(model.get_control_plane_mapping().T)).decode()
+    params['accelerometer_mapping'] = b64encode(serializer.to_bytes(model.get_accelerometer_mapping().T)).decode()
     _, meta = logger.log_json(key, params)
     return params, meta
 
@@ -274,8 +305,8 @@ def generate_param_dict(
 """[markdown]
 # The Training Process
 
-To train the `OverfitControlPlane` model, we randomly initialize parameters for `SSM` and the learned
-control signal, and minimize a loss that consists of a reconstruction term and a sparsity term via gradient
+To train the `OverfitControlPlane` model, we randomly initialize parameters for `InstrumentModels` and the learned
+control signal, and minimize a reconstruction loss via gradient
 descent.  For this experiment, we're using the [`Adam`](https://pytorch.org/docs/stable/generated/torch.optim.Adam.html)
 optimizer with a learning rate of `1e-2`.
 
@@ -318,7 +349,7 @@ def reconstruction_loss(recon: torch.Tensor, target: torch.Tensor) -> torch.Tens
 
 """[markdown]
 
-## Sparsity Loss
+## Imposed Sparsity
 
 Ideally, we want the model to resonate, or store and "leak" energy slowly in the way that an
 acoustic instrument might.  This means that the control signal is not dense and continually "driving" the instrument, 
@@ -328,7 +359,9 @@ I'm not fully satisfied with this approach. e.g. it tends to pull away from what
 natural control signal for a violin or other bowed instrument.  In my mind, this might look like a sub-20hz sawtooth 
 wave that would "drive" the string, continually catching and releasing as the bow drags across the string.
 
-For now, the sparsity term _does_ seem to encourage models that resonate, but my intuition is that
+Instead of a sparsity loss via l1 or l2 norm, we only keep the top 256 active elements in the control plane.
+
+For now, the imposition of sparsity _does_ seem to encourage models that resonate, but my intuition is that
 there is a better, more nuanced approach that could handle bowed string instruments and wind instruments, 
 in addition to percussive instruments, where this approach really seems to shine.
 """
