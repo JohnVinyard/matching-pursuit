@@ -8,3 +8,4 @@ conjure
 requests
 matplotlib
 sklearn
+selenium==4.27.1

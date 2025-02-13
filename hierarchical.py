@@ -42,6 +42,7 @@ All code for this experiment can be found
 [here](https://github.com/JohnVinyard/matching-pursuit/blob/main/hierarchical.py).
 
 """
+from spiking import AutocorrelationLoss
 
 """[markdown]
 
@@ -218,7 +219,7 @@ def to_numpy(x: torch.Tensor):
 def overfit():
     n_samples = 2 ** 16
     samplerate = 22050
-    n_events = 64
+    n_events = 32
     event_dim = 16
 
     # Begin: this would be a nice little helper to wrap up
@@ -258,7 +259,9 @@ def overfit():
     model = OverfitHierarchicalEvents(
         n_samples, samplerate, n_events, context_dim=event_dim).to(device)
     optim = Adam(model.parameters(), lr=1e-3)
-    loss_model = CorrelationLoss(n_elements=512).to(device)
+    # loss_model = CorrelationLoss(n_elements=512).to(device)
+
+    loss_model = AutocorrelationLoss(16, 32).to(device)
 
     for i in count():
         optim.zero_grad()
@@ -278,7 +281,11 @@ def overfit():
         perturbed_summed = torch.sum(perturbed, dim=1, keepdim=True)
         perturbed_summed = max_norm(perturbed_summed)
         perturbed_audio(perturbed_summed)
-        loss = loss_model.multiband_noise_loss(target, recon_summed, 128, 32)
+
+        t = loss_model.forward(target)
+        r = loss_model.forward(recon_summed)
+        loss = torch.abs(t - r).sum()
+        # loss = loss_model.multiband_noise_loss(target, recon_summed, 128, 32)
 
         loss.backward()
         optim.step()

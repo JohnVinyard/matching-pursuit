@@ -6,6 +6,7 @@ from modules.transfer import fft_convolve
 def rectified_filter_bank(
     signal: torch.Tensor,
     filters: torch.Tensor,
+    do_log_compression: bool = False,
 ):
     n_samples = signal.shape[-1]
 
@@ -17,6 +18,10 @@ def rectified_filter_bank(
 
     # half-wave rectification
     spec = torch.relu(spec)
+
+    if do_log_compression:
+        spec = torch.log(spec + 1e-8)
+
     return spec
 
 

@@ -11,17 +11,16 @@ from config import Config
 from conjure import LmdbCollection, serve_conjure, loggers, SupportedContentType, NumpySerializer, NumpyDeserializer
 from data import AudioIterator, get_one_audio_segment
 from modules import stft, sparsify, sparsify_vectors, iterative_loss, max_norm, flattened_multiband_spectrogram, \
-    DownsamplingDiscriminator, sparse_softmax, positional_encoding, NeuralReverb
+    sparse_softmax, positional_encoding, NeuralReverb
 from modules.anticausal import AntiCausalAnalysis
 from modules.eventgenerators.convimpulse import ConvImpulseEventGenerator
 from modules.eventgenerators.generator import EventGenerator, ShapeSpec
-from modules.eventgenerators.overfitresonance import OverfitResonanceModel, MultiSSM, Lookup
+from modules.eventgenerators.overfitresonance import OverfitResonanceModel, Lookup
 from modules.eventgenerators.schedule import DiracScheduler
 from modules.eventgenerators.splat import SplattingEventGenerator
-from modules.infoloss import CorrelationLoss
 from modules.multiheadtransform import MultiHeadTransform
-from modules.overlap_add import overlap_add
 from modules.transfer import fft_convolve
+from spiking import AutocorrelationLoss
 from util import device, encode_audio, make_initializer
 
 # the size, in samples of the audio segment we'll overfit
@@ -80,45 +79,28 @@ def transform(x: torch.Tensor):
 
 
 def loss_transform(x: torch.Tensor) -> torch.Tensor:
-    return flattened_multiband_spectrogram(
-        x,
-        stft_spec={
-            'long': (128, 64),
-            'short': (64, 32),
-            'xs': (16, 8),
-        },
-        smallest_band_size=512)
+    batch, n_events, time = x.shape
+
+    # return flattened_multiband_spectrogram(
+    #     x,
+    #     stft_spec={
+    #         'long': (128, 64),
+    #         'short': (64, 32),
+    #         'xs': (16, 8),
+    #     },
+    #     smallest_band_size=512)
+
+    x = stft(x, transform_window_size, transform_step_size, pad=True)
+    x = x.view(batch, n_events, -1)
+    return x
+
 
 
 def all_at_once_loss(target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
     t = loss_transform(target)
     r = loss_transform(recon)
-    return torch.abs(t - r).sum()
-
-
-class Discriminator(nn.Module):
-    def __init__(self, disc_type='dilated'):
-        super().__init__()
-        # if disc_type == 'dilated':
-        #     self.disc = DownsamplingDiscriminator(
-        #         window_size=2048, step_size=256, n_samples=n_samples // 2, channels=128)
-        if disc_type == 'unet':
-            self.disc = DownsamplingDiscriminator(
-                2048, 256, n_samples=n_samples // 2, channels=128, complex_valued=True)
-        # elif disc_type == 'multiband':
-        #     self.disc = MultibandDownsamplingDiscriminator(n_frames=n_frames, in_channels=1160, channels=256)
-        else:
-            raise ValueError(f'Unknown discriminator type: {disc_type}')
-
-        self.apply(initializer)
-
-    def forward(self, transformed: torch.Tensor):
-        # ensure that the discriminator cannot depend on signal amplitude
-        transformed = max_norm(transformed)
-        t = transformed.shape[-1]
-        x = self.disc(transformed[..., :t // 2])
-        return x
-
+    loss = torch.abs(t - r).sum()
+    return loss
 
 class PhysicalModel(nn.Module):
 
@@ -481,12 +463,10 @@ def to_numpy(x: torch.Tensor):
 def train_and_monitor(
         batch_size: int = 8,
         overfit: bool = False,
-        disc_type: str = 'dilated',
         model_type: str = 'conv',
         wipe_old_data: bool = True,
         fine_positioning: bool = False,
-        save_and_load_weights: bool = False,
-        adversarial_loss: bool = True):
+        save_and_load_weights: bool = False):
     torch.backends.cudnn.benchmark = True
 
     stream = AudioIterator(
@@ -529,11 +509,10 @@ def train_and_monitor(
 
     print('==========================================')
     print(
-        f'training on {n_seconds} of audio and {n_events} events with {model_type} event generator and {disc_type} disc')
+        f'training on {n_seconds} of audio and {n_events} events with {model_type} event generator')
     print('==========================================')
 
-    model_filename = 'iterativedecomposition13.dat'
-    disc_filename = 'iterativedecompositiondisc13.dat'
+    model_filename = 'iterativedecomposition14.dat'
 
     def train():
 
@@ -601,7 +580,7 @@ def train_and_monitor(
             in_channels=1024,
             hidden_channels=hidden_channels).to(device)
 
-        disc = Discriminator(disc_type=disc_type).to(device)
+        # disc = Discriminator(disc_type=disc_type).to(device)
 
         if save_and_load_weights:
             # KLUDGE: Unless the same command line arguments are used, this will
@@ -613,29 +592,19 @@ def train_and_monitor(
             except IOError:
                 print('No model weights to load')
 
-            try:
-                disc.load_state_dict(torch.load(disc_filename))
-                print('loaded discriminator weights')
-            except IOError:
-                print('no discriminator weights to load')
 
         optim = Adam(model.parameters(), lr=1e-4)
-        disc_optim = Adam(disc.parameters(), lr=1e-3)
 
-        loss_model = CorrelationLoss(n_elements=256).to(device)
+        # loss_model = AutocorrelationLoss(n_channels=128, filter_size=128).to(device)
 
         for i, item in enumerate(iter(stream)):
             optim.zero_grad()
-            disc_optim.zero_grad()
+            # disc_optim.zero_grad()
 
             with torch.cuda.amp.autocast():
                 target = item.view(batch_size, 1, n_samples).to(device)
                 orig_audio(target)
                 recon, encoded, scheduling = model.iterative(target)
-                print(encoded.shape)
-
-                # norms = torch.norm(recon, dim=-1)
-                # print(norms.min().item(), norms.max().item(), norms.sum().item())
 
                 recon_summed = torch.sum(recon, dim=1, keepdim=True)
                 recon_audio(max_norm(recon_summed))
@@ -643,7 +612,6 @@ def train_and_monitor(
                 envelopes(max_norm(scheduling[0]))
                 latents(max_norm(encoded[0]).float())
 
-                # print(target.shape, recon.shape)
 
                 weighting = torch.ones_like(target)
                 weighting[..., n_samples // 2:] = torch.linspace(1, 0, n_samples // 2, device=weighting.device) ** 8
@@ -653,33 +621,12 @@ def train_and_monitor(
 
                 # TODO: consider the ratio alternative to iterative loss
 
-                # loss = all_at_once_loss(target, recon_summed)
                 loss = iterative_loss(target, recon, loss_transform, ratio_loss=True)
-                # loss = loss + loss_model.noise_loss(target, recon_summed)
+                # loss = loss + (all_at_once_loss(target, recon_summed) * 1e-4)
 
-                # try:
-                #     # TODO: Every once in a while this throws due to a totally zero (generated) input signal
-                #     # For now, just ignore these batches, so we don't interrupt training
-                #     loss = loss + loss_model.multiband_noise_loss(target, recon_summed, 128, 32)
-                # except:
-                #     print('WARNING: NOISE LOSS FAILED')
-                #     pass
+                # loss = loss_model.compute_loss(target, recon_summed)
+                # loss = loss_model.compute_multiband_loss(target, recon_summed)
 
-                # TODO: This should be based on the norm of the audio events, or maybe the amp parameter
-                # produced, it should be straightforward to determine how "loud" the event is from the vector
-                # loss = loss + (torch.abs(encoded).sum() * 1e-4)
-                # loss = loss + norms.sum()
-
-                if adversarial_loss:
-                    # mask half of the events, at random. Each event should be realistic
-                    # and stand on its own
-                    # mask = torch.zeros(target.shape[0], n_events, 1, device=recon.device).bernoulli_(p=0.5)
-                    # for_disc = torch.sum(recon * mask, dim=1, keepdim=True)
-                    for_disc = recon_summed
-                    j = disc.forward(for_disc)
-                    d_loss = torch.abs(1 - j).mean()
-                    print('G', d_loss.item())
-                    loss = loss + (d_loss * 1000)
 
             scaler.scale(loss).backward()
 
@@ -690,19 +637,6 @@ def train_and_monitor(
             scaler.update()
             print(i, loss.item())
 
-            if adversarial_loss:
-                with torch.cuda.amp.autocast():
-                    disc_optim.zero_grad()
-                    r_j = disc.forward(target)
-                    f_j = disc.forward(recon_summed.clone().detach())
-                    d_loss = torch.abs(0 - f_j).mean() + torch.abs(1 - r_j).mean()
-
-                scaler.scale(d_loss).backward()
-                # d_loss.backward()
-                print('D', d_loss.item())
-                # disc_optim.step()
-                scaler.step(disc_optim)
-                scaler.update()
 
             with torch.no_grad():
                 # TODO: this should be collecting statistics from reconstructions
@@ -722,7 +656,7 @@ def train_and_monitor(
 
             if save_and_load_weights and i % 100 == 0:
                 torch.save(model.state_dict(), model_filename)
-                torch.save(disc.state_dict(), disc_filename)
+                # torch.save(disc.state_dict(), disc_filename)
 
     train()
 
@@ -740,12 +674,6 @@ if __name__ == '__main__':
         type=str,
         required=True,
         choices=['lookup', 'conv', 'splat', 'ssm'])
-    parser.add_argument(
-        '--disc-type',
-        type=str,
-        default='dilated',
-        choices=['dilated', 'unet', 'multiband']
-    )
     parser.add_argument(
         '--save-data',
         required=False,
@@ -768,20 +696,13 @@ if __name__ == '__main__':
         action='store_true',
         default=False
     )
-    parser.add_argument(
-        '--no-adversarial-loss',
-        action='store_true',
-        default=False
-    )
 
     args = parser.parse_args()
     train_and_monitor(
         batch_size=1 if args.overfit else args.batch_size,
         overfit=args.overfit,
         model_type=args.model_type,
-        disc_type=args.disc_type,
         wipe_old_data=not args.save_data,
-        adversarial_loss=not args.no_adversarial_loss,
         fine_positioning=bool(args.fine_positioning),
         save_and_load_weights=args.save_and_load_weights
     )

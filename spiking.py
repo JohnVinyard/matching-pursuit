@@ -4,7 +4,7 @@ from torch.nn import functional as F
 from torch.optim import Adam
 
 from data import get_one_audio_segment
-from modules import gammatone_filter_bank, max_norm, unit_norm
+from modules import gammatone_filter_bank, max_norm, unit_norm, fft_frequency_decompose
 from modules.overfitraw import OverfitRawAudio
 from modules.transfer import fft_convolve
 from conjure import LmdbCollection, Logger, loggers, serve_conjure
@@ -13,6 +13,7 @@ from itertools import count
 from torch.nn.utils.clip_grad import clip_grad_norm_, clip_grad_value_
 
 n_samples = 2 ** 17
+
 
 
 class SpikingModel(nn.Module):
@@ -54,15 +55,8 @@ class SpikingModel(nn.Module):
         channels = torch.relu(channels)
 
         # compression
-        # channels = torch.log(channels)
+        channels = torch.log(channels)
 
-        # print(channels.shape)
-
-        # inhibition via recent-average subtraction
-        # (this should eventually include neighboring channel inhibition as well)
-        m = F.pad(self.memory, (0, n_samples - self.memory_size))
-
-        # print(m.shape)
 
         pooled = fft_convolve(m, channels)
         normalized = channels - pooled
@@ -100,17 +94,83 @@ class SpikingModel(nn.Module):
 
         return y
 
+class AutocorrelationLoss(nn.Module):
+    def __init__(self, n_channels, filter_size):
+        super().__init__()
+        self.n_channels = n_channels
+        self.filter_size = filter_size
+
+        gfb = gammatone_filter_bank(
+            n_filters=self.n_channels,
+            size=self.filter_size,
+            device='cpu',
+            band_spacing='geometric').view(
+                1,
+               self.n_channels,
+               self.filter_size)
+
+        gfb = unit_norm(gfb)
+
+        self.register_buffer('gammatone', gfb, persistent=False)
+
+
+    def multiband_forward(self, audio: torch.Tensor):
+        bands = fft_frequency_decompose(audio, 512)
+        return {k: self.forward(v, 512, 256) for k, v in bands.items()}
+
+    def compute_multiband_loss(self, target: torch.Tensor, recon: torch.Tensor):
+        tb = self.multiband_forward(target)
+        rb = self.multiband_forward(recon)
+        loss = 0
+        for k, v in rb.items():
+            loss = loss + torch.abs(v - tb[k]).sum()
+        return loss
+
+
+    def forward(self, audio: torch.Tensor, window_size: int = 1024, step_size: int = 512):
+        batch = audio.shape[-1]
+
+        n_samples = audio.shape[-1]
+        audio = audio.view(-1, 1, n_samples)
+
+        # convolve with gammatone filters
+        g = F.pad(self.gammatone, (0, n_samples - self.filter_size))
+        channels = fft_convolve(audio, g)
+
+        # half-wave rectification
+        channels = torch.relu(channels)
+
+        channels = channels.unfold(-1, window_size, step_size)
+        spec = torch.fft.rfft(channels, dim=-1)
+
+        corr = spec[:, :, :, 1:] * spec[:, :, :, :-1]
+        corr = torch.abs(corr)
+
+        corr2 = spec[:, :, 1:, :] * spec[:, :, :-1, :]
+        corr2 = torch.abs(corr2)
+
+        x = torch.cat([corr.view(-1), corr2.view(-1)])
+        return x
+
+    def compute_loss(self, target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
+        t = self.forward(target)
+        r = self.forward(recon)
+        return torch.abs(t - r).sum()
+
+
 
 def overfit_model():
     target = get_one_audio_segment(n_samples).to(device).view(1, 1, n_samples)
     target = max_norm(target)
 
-    loss_model = SpikingModel(
-        n_channels=128,
-        filter_size=128,
-        periodicity_size=128,
-        memory_size=64,
-        frame_memory_size=8).to(device)
+    # loss_model = SpikingModel(
+    #     n_channels=128,
+    #     filter_size=128,
+    #     periodicity_size=128,
+    #     memory_size=64,
+    #     frame_memory_size=8).to(device)
+
+    loss_model = AutocorrelationLoss(n_channels=36, filter_size=128).to(device)
 
     overfit_model = OverfitRawAudio(target.shape, std=0.01, normalize=True).to(device)
     optim = Adam(overfit_model.parameters(), lr=1e-3)

@@ -3,7 +3,8 @@ from torch import nn
 from torch.optim import Adam
 import numpy as np
 
-from modules import pos_encoded
+from data import get_one_audio_segment
+from modules import pos_encoded, stft
 from matplotlib import pyplot as plt
 
 from modules.fft import fft_convolve
@@ -292,8 +293,31 @@ if __name__ == '__main__':
     # experiment()
     # look_at_gradients()
 
+    audio = get_one_audio_segment(2**17).to('cpu')
+    audio = audio.view(1, 1, -1)
+    spec = stft(audio, 2048, 256, pad=True)
 
-    experiment_hierarchical_dirac()
+    print(spec.min(), spec.max())
+    plt.matshow(spec.view(-1, 1025))
+    plt.show()
+
+    th = torch.tanh(spec)
+    print(th.min(), th.max())
+    plt.matshow(th.view(-1, 1025))
+    plt.show()
+
+    sqrt = torch.sqrt(spec)
+    print(sqrt.min(), sqrt.max())
+    plt.matshow(sqrt.view(-1, 1025))
+    plt.show()
+
+    lspec = torch.log(spec + 1e-8)
+    print(lspec.min(), lspec.max())
+    plt.matshow(lspec.view(-1, 1025))
+    plt.show()
+
+
+    # experiment_hierarchical_dirac()
     # experiment_hieararchical_fft_shift()
     
     
