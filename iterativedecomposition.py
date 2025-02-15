@@ -40,6 +40,8 @@ n_seconds = n_samples / samplerate
 transform_window_size = 2048
 transform_step_size = 256
 
+# log_amplitude = True
+
 n_frames = n_samples // transform_step_size
 
 initializer = make_initializer(0.02)
@@ -73,6 +75,10 @@ def fft_shift(a: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
 def transform(x: torch.Tensor):
     batch_size = x.shape[0]
     x = stft(x, transform_window_size, transform_step_size, pad=True)
+
+    # if log_amplitude:
+    #     x = torch.relu(torch.log(x + 1e-8) + 27)
+
     n_coeffs = transform_window_size // 2 + 1
     x = x.view(batch_size, -1, n_coeffs)[..., :n_coeffs - 1].permute(0, 2, 1)
     return x
@@ -512,7 +518,7 @@ def train_and_monitor(
         f'training on {n_seconds} of audio and {n_events} events with {model_type} event generator')
     print('==========================================')
 
-    model_filename = 'iterativedecomposition14.dat'
+    model_filename = 'iterativedecomposition15.dat'
 
     def train():
 
@@ -595,7 +601,7 @@ def train_and_monitor(
 
         optim = Adam(model.parameters(), lr=1e-4)
 
-        # loss_model = AutocorrelationLoss(n_channels=128, filter_size=128).to(device)
+        loss_model = AutocorrelationLoss(n_channels=64, filter_size=64).to(device)
 
         for i, item in enumerate(iter(stream)):
             optim.zero_grad()
@@ -619,9 +625,9 @@ def train_and_monitor(
                 target = target * weighting
                 recon_summed = recon_summed * weighting
 
-                # TODO: consider the ratio alternative to iterative loss
 
-                loss = iterative_loss(target, recon, loss_transform, ratio_loss=True)
+                loss = loss_model.compute_multiband_loss(target, recon_summed)
+                # loss = iterative_loss(target, recon, loss_transform, ratio_loss=True)
                 # loss = loss + (all_at_once_loss(target, recon_summed) * 1e-4)
 
                 # loss = loss_model.compute_loss(target, recon_summed)

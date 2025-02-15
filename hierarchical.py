@@ -261,7 +261,7 @@ def overfit():
     optim = Adam(model.parameters(), lr=1e-3)
     # loss_model = CorrelationLoss(n_elements=512).to(device)
 
-    loss_model = AutocorrelationLoss(16, 32).to(device)
+    loss_model = AutocorrelationLoss(64, 64).to(device)
 
     for i in count():
         optim.zero_grad()
@@ -282,9 +282,10 @@ def overfit():
         perturbed_summed = max_norm(perturbed_summed)
         perturbed_audio(perturbed_summed)
 
-        t = loss_model.forward(target)
-        r = loss_model.forward(recon_summed)
-        loss = torch.abs(t - r).sum()
+        # t = loss_model.forward(target)
+        # r = loss_model.forward(recon_summed)
+        # loss = torch.abs(t - r).sum()
+        loss = loss_model.compute_multiband_loss(target, recon_summed)
         # loss = loss_model.multiband_noise_loss(target, recon_summed, 128, 32)
 
         loss.backward()

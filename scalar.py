@@ -301,17 +301,17 @@ if __name__ == '__main__':
     plt.matshow(spec.view(-1, 1025))
     plt.show()
 
-    th = torch.tanh(spec)
-    print(th.min(), th.max())
-    plt.matshow(th.view(-1, 1025))
-    plt.show()
+    # th = torch.tanh(spec * 100)
+    # print(th.min(), th.max())
+    # plt.matshow(th.view(-1, 1025))
+    # plt.show()
 
-    sqrt = torch.sqrt(spec)
-    print(sqrt.min(), sqrt.max())
-    plt.matshow(sqrt.view(-1, 1025))
-    plt.show()
-
-    lspec = torch.log(spec + 1e-8)
+    # sqrt = torch.sqrt(spec)
+    # print(sqrt.min(), sqrt.max())
+    # plt.matshow(sqrt.view(-1, 1025))
+    # plt.show()
+    #
+    lspec = torch.relu(torch.log(spec + 1e-8) + 28)
     print(lspec.min(), lspec.max())
     plt.matshow(lspec.view(-1, 1025))
     plt.show()

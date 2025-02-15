@@ -127,8 +127,8 @@ class AutocorrelationLoss(nn.Module):
         return loss
 
 
-    def forward(self, audio: torch.Tensor, window_size: int = 1024, step_size: int = 512):
-        batch = audio.shape[-1]
+    def forward(self, audio: torch.Tensor, window_size: int = 128, step_size: int = 64):
+        batch = audio.shape[0]
 
         n_samples = audio.shape[-1]
         audio = audio.view(-1, 1, n_samples)
@@ -139,17 +139,25 @@ class AutocorrelationLoss(nn.Module):
 
         # half-wave rectification
         channels = torch.relu(channels)
+        # channels = torch.log(channels + 1e-8) + 27
+
 
         channels = channels.unfold(-1, window_size, step_size)
         spec = torch.fft.rfft(channels, dim=-1)
+        spec = torch.abs(spec)
 
-        corr = spec[:, :, :, 1:] * spec[:, :, :, :-1]
-        corr = torch.abs(corr)
+        x = spec.view(batch, -1)
+        # corr = spec[:, :, :, 1:] * spec[:, :, :, :-1]
+        # corr = torch.abs(corr)
+        # corr = unit_norm(corr, dim=-1)
+        # corr = torch.relu(torch.log(corr + 1e-8) + 27)
 
-        corr2 = spec[:, :, 1:, :] * spec[:, :, :-1, :]
-        corr2 = torch.abs(corr2)
+        # corr2 = spec[:, :, 1:, :] * spec[:, :, :-1, :]
+        # corr2 = torch.abs(corr2)
+        # corr2 = unit_norm(corr2, dim=-1)
+        # corr2 = torch.relu(torch.log(corr2 + 1e-8) + 27)
 
-        x = torch.cat([corr.view(-1), corr2.view(-1)])
+        # x = torch.cat([corr.view(-1), corr2.view(-1)])
         return x
 
     def compute_loss(self, target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
