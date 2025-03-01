@@ -295,10 +295,13 @@ def simulate(entry_coord, entry_block, sampling_coord, width, height):
 
     n_coeffs = (entry_block.shape[-1] // 2) + 1
 
+    # block-wise transfer functions in the frequency domain
     transfer_functions = torch.zeros(
         1, 2, n_coeffs, width, height).fill_(1,)
+    # reshape
     transfer_functions = torch.complex(
         transfer_functions[:, 0, ...], transfer_functions[:, 1, ...])
+    # apply a frequency-wise exponential slope across frequencies
     transfer_functions *= (torch.linspace(0.285, 0, n_coeffs)
                            ** 2)[None, :, None, None]
 
@@ -317,10 +320,14 @@ def simulate(entry_coord, entry_block, sampling_coord, width, height):
 
     for i in range(100):
 
+        # take the real FFT of the room sample blocks
         spec = torch.fft.rfft(room_state, dim=1, norm='ortho')
+        # apply the transfer functions
         spec = spec * transfer_functions
+        # transform back into the time domain
         state = torch.fft.irfft(spec, dim=1, norm='ortho')
 
+        # propagate energy
         state = F.pad(state, [1, 1, 1, 1], mode='reflect')
 
         windowed = F.unfold(

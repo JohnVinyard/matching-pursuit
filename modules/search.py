@@ -1,6 +1,7 @@
-from typing import List
+from typing import List, Tuple
 import torch
 from torch.nn.init import orthogonal_
+import numpy as np
 
 def k_nearest(
         query: torch.Tensor, 
@@ -32,6 +33,15 @@ class BruteForceSearch(object):
             embeddings.shape[-1], visualization_dim, device=embeddings.device)
         orthogonal_(proj)
         self.projection = proj
+
+    def __len__(self):
+        return len(self.keys)
+
+    def choose_random(self) -> Tuple[str, torch.Tensor]:
+        index = np.random.randint(len(self))
+        key = self.keys[index]
+        embedding = self.embeddings[index]
+        return key, embedding
     
     def visualization(self):
         proj = self.embeddings @ self.projection

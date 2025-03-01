@@ -7,11 +7,21 @@ import os
 import librosa
 from matplotlib import pyplot as plt
 from time import sleep
+import requests
+
 
 # https://github.com/password123456/setup-selenium-with-chrome-driver-on-ubuntu_debian
 
 def get_shadow_root(driver: WebDriver, element: WebElement) -> WebElement:
     return driver.execute_script('return arguments[0].shadowRoot', element)
+
+
+def upload_pattern(api_host, api_key: str):
+    # get a random musicnet segment
+    # encode it
+    # transform the encoding into a sequencer pattern
+    # push to the API
+    raise NotImplementedError()
 
 
 def download_render(pattern_uri: str, download_path: str) -> np.ndarray:
@@ -25,14 +35,14 @@ def download_render(pattern_uri: str, download_path: str) -> np.ndarray:
         driver.get(pattern_uri)
         driver.implicitly_wait(5)
 
-        custom = driver.find_element(by=By.CSS_SELECTOR, value='sampler-test')
-        custom = get_shadow_root(driver, custom)
-        render_button = custom.find_element(by=By.CSS_SELECTOR, value='#render')
+        # custom = driver.find_element(by=By.CSS_SELECTOR, value='sampler-test')
+        # custom = get_shadow_root(driver, custom)
+        render_button = driver.find_element(by=By.CSS_SELECTOR, value='.render-pattern')
         render_button.click()
 
         # TODO: This should be a wait condition in a loop
         driver.implicitly_wait(5)
-        download_button = custom.find_element(by=By.CSS_SELECTOR, value='#rendered-audio')
+        download_button = driver.find_element(by=By.CSS_SELECTOR, value='.download-pattern')
         download_button.click()
 
         # driver.implicitly_wait(10)
@@ -67,7 +77,7 @@ def download_render(pattern_uri: str, download_path: str) -> np.ndarray:
 
 if __name__ == '__main__':
     samples = download_render(
-        "https://blog.cochlea.xyz/acc2.html",
+        "http://localhost:3000/presets/500",
         '/home/john/workspace/matching-pursuit')
     plt.plot(samples)
     plt.show()

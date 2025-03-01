@@ -116,12 +116,13 @@ class AutocorrelationLoss(nn.Module):
 
     def multiband_forward(self, audio: torch.Tensor):
         bands = fft_frequency_decompose(audio, 512)
-        return {k: self.forward(v, 512, 256) for k, v in bands.items()}
+        return {k: self.forward(v, 128, 64) for k, v in bands.items()}
 
     def compute_multiband_loss(self, target: torch.Tensor, recon: torch.Tensor):
         tb = self.multiband_forward(target)
         rb = self.multiband_forward(recon)
         loss = 0
+        print('=======================')
         for k, v in rb.items():
             loss = loss + torch.abs(v - tb[k]).sum()
         return loss
@@ -141,11 +142,11 @@ class AutocorrelationLoss(nn.Module):
         channels = torch.relu(channels)
         # channels = torch.log(channels + 1e-8) + 27
 
-
+        channels = F.pad(channels, (0, step_size))
         channels = channels.unfold(-1, window_size, step_size)
         spec = torch.fft.rfft(channels, dim=-1)
         spec = torch.abs(spec)
-
+        print(n_samples, spec.shape)
         x = spec.view(batch, -1)
         # corr = spec[:, :, :, 1:] * spec[:, :, :, :-1]
         # corr = torch.abs(corr)

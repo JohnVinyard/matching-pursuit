@@ -15,10 +15,9 @@ def karplus_strong_synth(
         filter_vector: torch.Tensor,
         decay: torch.Tensor,
         n_samples: int):
-
     batch, _, n_frames = impulse_env.shape
     batch, max_delay = delay_vector.shape
-    
+
     # ensure decay is in the range [0 - 1]
     decay = torch.sigmoid(decay)
     delay_vector = torch.sigmoid(delay_vector, dim=-1)
@@ -37,12 +36,12 @@ def karplus_strong_synth(
             delay, filter_vector.view(1, 1, max_delay), padding=max_delay // 2)[..., :max_delay]
         decayed = filtered * decay.view(-1, 1, 1)
         signal[:, :, i] = signal[:, :, i] + decayed.sum(dim=-1, keepdim=True)
-    
+
     return signal
 
 
 class WaveguideSynth(nn.Module):
-    def __init__(self, max_delay=512, n_samples=2**15, filter_kernel_size=512):
+    def __init__(self, max_delay=512, n_samples=2 ** 15, filter_kernel_size=512):
         super().__init__()
 
         self.n_delays = max_delay
@@ -165,8 +164,8 @@ class TransferFunctionSegmentGenerator(nn.Module):
 
         tf = torch.fft.irfft(tf, dim=1, norm='ortho')
         tf = tf.permute(0, 2, 1).view(-1, 1, self.n_frames, self.window_size) * \
-            torch.hamming_window(self.window_size, device=tf.device)[
-            None, None, None, :]
+             torch.hamming_window(self.window_size, device=tf.device)[
+             None, None, None, :]
 
         # TODO: Option to cut off in overlap add
         tf = overlap_add(tf)[..., :self.n_samples]
@@ -184,7 +183,6 @@ def waveguide_synth(
         delay: np.ndarray,
         damping: np.ndarray,
         filter_size: int) -> np.ndarray:
-
     n_samples = impulse.shape[0]
 
     output = impulse.copy()

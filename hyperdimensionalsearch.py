@@ -1,10 +1,20 @@
+import pickle
+from random import choice
+
+import librosa
+import zounds
+
 from config import Config
-from data.datastore import iter_audio_segments
+from data.datastore import iter_audio_segments, load_audio_chunk
 import os
 import torch
 from iterativedecomposition import Model as IterativeDecompositionModel
+from modules import max_norm
 from modules.eventgenerators.overfitresonance import OverfitResonanceModel
 import numpy as np
+
+from modules.search import BruteForceSearch
+from util.playable import listen_to_sound
 
 n_samples = 2 ** 17
 samples_per_event = 2048
@@ -31,6 +41,12 @@ proj = np.random.uniform(-1, 1, (context_dim, 8192))
 
 def project_event_vectors(vectors: torch.Tensor) -> np.ndarray:
     x = vectors.data.cpu().numpy().reshape((-1, context_dim))
+
+    # compute graph edges
+    x = x[:, None, :] - x[:, :, None]
+
+    x = x.reshape((-1, context_dim))
+
     x = x @ proj
     indices = np.argsort(x, axis=-1)[:, -8:]
 
@@ -57,6 +73,27 @@ def filepath_from_key(key: str) -> str:
 def slice_from_key(key: str) -> slice:
     _id, start, end = key.split('_')
     return slice(int(start), int(end))
+
+def play_index_entry(key: str) -> None:
+    sl = slice_from_key(key)
+    fp = filepath_from_key(key)
+
+    print('Playing', key)
+
+    # samples, sr = librosa.load(fp)
+    # samples = torch.from_numpy(samples)
+
+
+    samples = load_audio_chunk(fp, sl, device='cpu')
+
+
+    samples = max_norm(samples)
+    # print(samples.shape)
+    # samples = samples[sl]
+    # print(fp, sl, samples.shape, samples)
+
+    samples = zounds.AudioSamples(samples.data.cpu().numpy(), zounds.SR22050())
+    listen_to_sound(samples, wait_for_user_input=True)
 
 
 def iter_chunks():
@@ -102,9 +139,53 @@ def iter_encodings():
         channels, vectors, schedules = model.iterative(chunk)
 
         x = project_event_vectors(vectors)
-        yield key, chunk, vectors
+        yield key, chunk, x
 
+def build_index():
+    keys = []
+    vecs = []
+
+    for key, chunk, vectors in iter_encodings():
+        keys.append(key)
+        vecs.append(torch.from_numpy(vectors)[None, :])
+        print(key, vectors.shape, vectors)
+        print(f'Nascent index has {len(keys)} entries')
+
+        if len(keys) > 0 and len(keys) % 64 == 0:
+            index_vecs = torch.cat(vecs, dim=0)
+            search = BruteForceSearch(index_vecs, keys, n_results=16, visualization_dim=2)
+            with open('hyperdimensionalindex.dat', 'wb') as f:
+                pickle.dump(search, f, pickle.HIGHEST_PROTOCOL)
+            print('Storing index', keys, index_vecs.shape)
+
+    index_vecs = torch.cat(vecs, dim=0)
+    search = BruteForceSearch(index_vecs, keys, n_results=16, visualization_dim=2)
+    with open('hyperdimensionalindex.dat', 'wb') as f:
+        pickle.dump(search, f, pickle.HIGHEST_PROTOCOL)
+
+
+def evaluate_index():
+    with open('hyperdimensionalindex.dat', 'rb') as f:
+        index: BruteForceSearch = pickle.load(f)
+        index.embeddings = index.embeddings.to(torch.float32)
+
+
+    while True:
+        print('=============================')
+
+        key, embedding = index.choose_random()
+        print('Here is the query')
+        play_index_entry(key)
+
+        keys, embeddings = index.search(embedding)
+        print(len(keys))
+
+        for i, key in enumerate(keys):
+            print(f'Here is the {i}th most similar')
+            play_index_entry(key)
+
+        input('Next example...')
 
 if __name__ == '__main__':
-    for key, chunk, vectors in iter_encodings():
-        print(key, chunk.shape, vectors.shape)
+    # build_index()
+    evaluate_index()

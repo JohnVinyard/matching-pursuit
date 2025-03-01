@@ -518,7 +518,7 @@ def train_and_monitor(
         f'training on {n_seconds} of audio and {n_events} events with {model_type} event generator')
     print('==========================================')
 
-    model_filename = 'iterativedecomposition15.dat'
+    model_filename = 'iterativedecomposition14.dat'
 
     def train():
 
@@ -626,8 +626,8 @@ def train_and_monitor(
                 recon_summed = recon_summed * weighting
 
 
-                loss = loss_model.compute_multiband_loss(target, recon_summed)
-                # loss = iterative_loss(target, recon, loss_transform, ratio_loss=True)
+                # _ = loss_model.compute_multiband_loss(target, recon_summed)
+                loss = iterative_loss(target, recon, loss_transform, ratio_loss=True)
                 # loss = loss + (all_at_once_loss(target, recon_summed) * 1e-4)
 
                 # loss = loss_model.compute_loss(target, recon_summed)
