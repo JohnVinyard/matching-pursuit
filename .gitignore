@@ -94,5 +94,7 @@ iterativedecompositiondisc13.dat
 iterativedecompositiondisc_speech.dat
 
 hyperdimensionalindex.dat
+worker_state.json
+worker_config.json
 
 *.html
