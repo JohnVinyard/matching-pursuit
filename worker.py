@@ -1,9 +1,12 @@
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
+from random import choice
 from typing import List, Generator, Union, Tuple
 
 from selenium import webdriver
+from selenium.common import NoSuchElementException
+from selenium.webdriver.chrome.webdriver import WebDriver
 from selenium.webdriver.common.by import By
 import numpy as np
 import os
@@ -11,25 +14,23 @@ import librosa
 from time import sleep
 import requests
 import torch
+from selenium.webdriver.support.wait import WebDriverWait
+from sympy.abc import lamda
 from torch import nn
-
+from argparse import ArgumentParser
+from config import Config
+from modules import max_norm
 from modules.eventgenerators.overfitresonance import OverfitResonanceModel
 from iterativedecomposition import Model as IterativeDecompositionModel
+from selenium.webdriver.support import expected_conditions as EC
 
 
 @dataclass
-class SynthPreset:
-    id: int
+class CreateSynthPreset:
     synth_id: int
     parameters: dict
     created_by: int
-    created_on: datetime
-
-
-@dataclass
-class PresetFeed:
-    items: List[SynthPreset]
-    next_offset: Union[None, int]
+    created_on: str
 
 
 @dataclass
@@ -39,6 +40,22 @@ class CreateIndexRenderChunk:
     start_seconds: float
     duration_seconds: float
     version: int
+
+@dataclass
+class SynthPreset:
+    id: int
+    synth_id: int
+    parameters: dict
+    created_by: int
+    created_on: datetime
+    chunks: List[CreateIndexRenderChunk] = field(default_factory=list)
+
+
+@dataclass
+class PresetFeed:
+    items: List[SynthPreset]
+    next_offset: Union[None, int]
+
 
 n_samples = 2 ** 17
 samples_per_event = 2048
@@ -58,6 +75,7 @@ transform_step_size = 256
 
 n_frames = n_samples // transform_step_size
 
+# TODO: This needs to be stateful between runs
 proj = np.random.uniform(-1, 1, (context_dim, 8192))
 
 
@@ -115,6 +133,7 @@ def iter_chunks(samples: np.ndarray) -> Generator[Tuple[np.ndarray, float, float
         start_seconds = i / samplerate
         yield chunk.astype(np.float32), start_seconds, duration_seconds
 
+
 def project_event_vectors(vectors: torch.Tensor) -> np.ndarray:
     x = vectors.data.cpu().numpy().reshape((-1, context_dim))
 
@@ -127,7 +146,7 @@ def project_event_vectors(vectors: torch.Tensor) -> np.ndarray:
     indices = np.argsort(x, axis=-1)[:, -8:]
 
     sparse = np.zeros_like(x, dtype=np.bool8)
-    np.put_along_axis(sparse, indices, values=np.ones_like(indices, dtype=np.bool8), axis=-1,)
+    np.put_along_axis(sparse, indices, values=np.ones_like(indices, dtype=np.bool8), axis=-1, )
 
     sparse = np.logical_or.reduce(sparse, axis=0)
 
@@ -139,6 +158,17 @@ class CochleaClient:
         super().__init__()
         self.base_url = base_url
         self.api_key = api_key
+
+    def create_preset(self, model: CreateSynthPreset):
+        resp = requests.post(
+            f'{self.base_url}/synths/{model.synth_id}/presets',
+            headers={'x-api-key': self.api_key},
+            json=model.parameters
+        )
+        print(resp)
+        print(resp.headers['location'])
+        # data = resp.json()
+        # return SynthPreset(**data)
 
     def preset_feed(self, offset: int = 0, limit: int = 100) -> PresetFeed:
         resp = requests.get(
@@ -152,7 +182,6 @@ class CochleaClient:
         data = resp.json()
         presets = [SynthPreset(**x) for x in data['items']]
         return PresetFeed(items=presets, next_offset=data['next_offset'])
-
 
     def push_index_chunk(self, indexed_chunk: CreateIndexRenderChunk) -> None:
         resp = requests.post(
@@ -227,10 +256,12 @@ class StatefulClient:
         for preset, samples in self.listen_for_preset_renders():
             for chunk, start_seconds, duration_seconds in iter_chunks(samples):
                 chunk = torch.from_numpy(chunk).view(1, 1, n_samples)
+                chunk = max_norm(chunk)
                 channels, vectors, schedules = model.iterative(chunk)
                 projection = project_event_vectors(vectors)
 
-                print(f'Computed index chunk preset {preset.id}, {start_seconds}, {duration_seconds}, {projection.tolist()}')
+                print(
+                    f'Computed index chunk preset {preset.id}, {start_seconds}, {duration_seconds}, {projection.tolist()}')
                 index_chunk = CreateIndexRenderChunk(
                     preset_id=preset.id,
                     embedding=projection.tolist(),
@@ -242,12 +273,47 @@ class StatefulClient:
                 self.client.push_index_chunk(index_chunk)
 
 
-def upload_pattern(api_host, api_key: str):
+def upload_pattern(api_host, api_key: str, n_samples: int):
     # get a random musicnet segment
     # encode it
     # transform the encoding into a sequencer pattern
     # push to the API
-    raise NotImplementedError()
+
+    # https://music-net.s3.amazonaws.com/1919
+
+    samples_dir = Config.audio_path()
+    files = os.listdir(samples_dir)
+    chosen = choice(files)
+    music_net_id, ext = os.path.splitext(chosen)
+    url = f'https://music-net.s3.amazonaws.com/{music_net_id}'
+    print(f'creating pattern with {url}')
+    samples, sr = librosa.load(os.path.join(samples_dir, chosen))
+    total_samples = samples.shape[0]
+    start_sample = np.random.randint(0, total_samples - n_samples)
+    start_second = start_sample / sr
+    duration = n_samples / sr
+
+    client = CochleaClient(api_host, api_key)
+    model = CreateSynthPreset(
+        synth_id=1,
+        parameters=dict(
+            type='sampler',
+            url=url,
+            start_seconds=start_second,
+            duration_seconds=duration),
+        created_by=1,
+        created_on=datetime.utcnow().isoformat())
+    created = client.create_preset(model)
+    print(created)
+
+
+def pattern_uploader_process():
+    with open('worker_config.json', 'r') as f:
+        config = json.load(f)
+
+    while True:
+        upload_pattern(config['base_url'], config['api_key'], n_samples)
+        sleep(5)
 
 
 def download_render(pattern_uri: str, download_path: str) -> np.ndarray:
@@ -257,14 +323,33 @@ def download_render(pattern_uri: str, download_path: str) -> np.ndarray:
 
     driver = webdriver.Chrome(options=options)
 
+    def element_exists(d: WebDriver, selector: str) -> bool:
+        try:
+            element = d.find_element(By.CSS_SELECTOR, selector)
+            return True
+        except NoSuchElementException:
+            return False
+
+    def element_is_enabled(d: WebDriver, selector: str) -> bool:
+        try:
+            element = d.find_element(By.CSS_SELECTOR, selector)
+            return not bool(element.get_attribute('disabled'))
+        except NoSuchElementException:
+            return False
+
     try:
         driver.get(pattern_uri)
-        driver.implicitly_wait(5)
+
+        WebDriverWait(driver, timeout=30)\
+            .until(lambda d: element_exists(d, '.render-pattern'))
         render_button = driver.find_element(by=By.CSS_SELECTOR, value='.render-pattern')
+
+        WebDriverWait(driver, timeout=30) \
+            .until(lambda d: element_is_enabled(d, '.render-pattern'))
         render_button.click()
 
-        # TODO: This should be a wait condition in a loop
-        driver.implicitly_wait(5)
+        WebDriverWait(driver, timeout=30) \
+            .until(lambda d: element_exists(d, '.download-pattern'))
         download_button = driver.find_element(by=By.CSS_SELECTOR, value='.download-pattern')
         download_button.click()
 
@@ -296,5 +381,14 @@ def download_render(pattern_uri: str, download_path: str) -> np.ndarray:
 
 
 if __name__ == '__main__':
-    client = StatefulClient()
-    client.listen_and_index()
+    parser = ArgumentParser()
+    parser.add_argument('--mode', choices=['listen', 'upload'], required=True)
+    args = parser.parse_args()
+
+    if args.mode == 'listen':
+        client = StatefulClient()
+        client.listen_and_index()
+    elif args.mode == 'upload':
+        pattern_uploader_process()
+    else:
+        raise RuntimeError(f'Unknown mode {args.mode}')
