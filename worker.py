@@ -249,6 +249,11 @@ class StatefulClient:
         while True:
             sleep(5)
             for preset, samples in self.iter_preset_renders():
+
+                if samples is None or len(samples) == 0:
+                    print(f'Warning: preset {preset.id} has no samples')
+                    continue
+
                 yield preset, samples
 
     def listen_and_index(self):
