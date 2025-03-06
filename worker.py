@@ -2,7 +2,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from random import choice
-from typing import List, Generator, Union, Tuple
+from typing import List, Generator, Union, Tuple, Dict
 
 from selenium import webdriver
 from selenium.common import NoSuchElementException
@@ -15,14 +15,18 @@ from time import sleep
 import requests
 import torch
 from selenium.webdriver.support.wait import WebDriverWait
-from sympy.abc import lamda
 from torch import nn
 from argparse import ArgumentParser
 from config import Config
-from modules import max_norm
+from modules import max_norm, amplitude_envelope
 from modules.eventgenerators.overfitresonance import OverfitResonanceModel
 from iterativedecomposition import Model as IterativeDecompositionModel
-from selenium.webdriver.support import expected_conditions as EC
+
+from conjure import S3Collection, Logger
+from scratchpad.diffindex import synth
+
+collection = S3Collection('cochlea-web-app', is_public=True, cors_enabled=True)
+logger = Logger(collection)
 
 
 @dataclass
@@ -165,6 +169,7 @@ class CochleaClient:
             headers={'x-api-key': self.api_key},
             json=model.parameters
         )
+        print('CREATED PRESET WITH SYNTH ID ', model.synth_id)
         print(resp)
         print(resp.headers['location'])
         # data = resp.json()
@@ -262,7 +267,16 @@ class StatefulClient:
             for chunk, start_seconds, duration_seconds in iter_chunks(samples):
                 chunk = torch.from_numpy(chunk).view(1, 1, n_samples)
                 chunk = max_norm(chunk)
+
                 channels, vectors, schedules = model.iterative(chunk)
+
+                if preset.synth_id == 1:
+                    print('Creating decomposition')
+                    params = process_events2(logger, channels, vectors, schedules, n_samples / samplerate)
+                    # for samples, push a sequencer pattern that decomposes them
+                    self.client.create_preset(
+                        CreateSynthPreset(synth_id=2, parameters=params, created_by=1, created_on=''))
+
                 projection = project_event_vectors(vectors)
 
                 print(
@@ -276,6 +290,81 @@ class StatefulClient:
                 )
 
                 self.client.push_index_chunk(index_chunk)
+
+
+def process_events2(
+        logger: Logger,
+        events: torch.Tensor,
+        vectors: torch.Tensor,
+        times: torch.Tensor,
+        total_seconds: float) -> dict:
+
+    # compute amplitude envelopes
+    # envelopes = amplitude_envelope(events, 128).data.cpu().numpy().reshape((n_events, -1))
+
+    # compute event positions/times, in seconds
+    positions = torch.argmax(times, dim=-1, keepdim=True) / times.shape[-1]
+    times = [float(x) for x in (positions * total_seconds).view(-1).data.cpu().numpy()]
+
+    # normalize event vectors and map onto the y dimension
+    # normalized = vectors.data.cpu().numpy().reshape((-1, context_dim))
+    # normalized = normalized - normalized.min(axis=0, keepdims=True)
+    # normalized = normalized / (normalized.max(axis=0, keepdims=True) + 1e-8)
+    # tsne = TSNE(n_components=1)
+    # points = tsne.fit_transform(normalized)
+    # points = points - points.min()
+    # points = points / (points.max() + 1e-8)
+    # print(points)
+
+    # create a random projection to map colors
+    # proj = np.random.uniform(0, 1, (context_dim, 3))
+    # colors = normalized @ proj
+    # colors -= colors.min()
+    # colors /= (colors.max() + 1e-8)
+    # colors *= 255
+    # colors = colors.astype(np.uint8)
+    # colors = [f'rgba({c[0]}, {c[1]}, {c[2]}, 0.5)' for c in colors]
+
+    evts = {f'event{i}': events[:, i: i + 1, :] for i in range(events.shape[1])}
+
+
+    scatterplot_srcs = []
+
+    for k, v in evts.items():
+        _, e = logger.log_sound(k, v)
+        scatterplot_srcs.append(e.public_uri)
+
+    musical_events = []
+    for i in range(n_events):
+        e = {
+            'time_seconds': times[i],
+            'type': 'sampler',
+            'params': {
+                'type': 'sampler',
+                'url': scatterplot_srcs[i].geturl(),
+                'start_seconds': times[i],
+                'duration_seconds': total_seconds
+            }
+        }
+        musical_events.append(e)
+
+    sequencer_params = {
+        'type': 'sequencer',
+        'events': musical_events,
+        'speed': 1
+    }
+
+    return sequencer_params
+
+    # return [{
+    #     'eventTime': times[i],
+    #     'offset': times[i],
+    #     'y': float(points[i]),
+    #     'color': colors[i],
+    #     'audioUrl': scatterplot_srcs[i].geturl(),
+    #     'eventEnvelope': envelopes[i].tolist(),
+    #     'eventDuration': total_seconds,
+    # } for i in range(n_events)], event_components
 
 
 def upload_pattern(api_host, api_key: str, n_samples: int):
