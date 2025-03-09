@@ -518,7 +518,7 @@ def train_and_monitor(
         f'training on {n_seconds} of audio and {n_events} events with {model_type} event generator')
     print('==========================================')
 
-    model_filename = 'iterativedecomposition14.dat'
+    model_filename = 'iterativedecomposition15.dat'
 
     def train():
 

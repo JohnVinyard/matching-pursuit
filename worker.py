@@ -22,7 +22,7 @@ from modules import max_norm, amplitude_envelope
 from modules.eventgenerators.overfitresonance import OverfitResonanceModel
 from iterativedecomposition import Model as IterativeDecompositionModel
 
-from conjure import S3Collection, Logger
+from conjure import S3Collection, Logger, numpy_conjure
 from scratchpad.diffindex import synth
 
 collection = S3Collection('cochlea-web-app', is_public=True, cors_enabled=True)
@@ -80,8 +80,14 @@ transform_step_size = 256
 n_frames = n_samples // transform_step_size
 
 # TODO: This needs to be stateful between runs
-proj = np.random.uniform(-1, 1, (context_dim, 8192))
+# proj = np.random.uniform(-1, 1, (context_dim, 8192))
 
+@numpy_conjure(collection)
+def make_random_projection_matrix(version: str) -> np.ndarray:
+    proj = np.random.uniform(-1, 1, (context_dim, 8192))
+    return proj
+
+proj = make_random_projection_matrix(version='1')
 
 def load_model() -> nn.Module:
     hidden_channels = 512
@@ -476,13 +482,18 @@ def download_render(pattern_uri: str, download_path: str) -> np.ndarray:
 
 if __name__ == '__main__':
     parser = ArgumentParser()
-    parser.add_argument('--mode', choices=['listen', 'upload'], required=True)
+    parser.add_argument('--mode', choices=['listen', 'upload', 'projection'], required=True)
     args = parser.parse_args()
 
     if args.mode == 'listen':
         client = StatefulClient()
+        print(f'listening and indexing at {client.base_url}')
         client.listen_and_index()
     elif args.mode == 'upload':
+        print(f'uploading')
         pattern_uploader_process()
+    elif args.mode == 'projection':
+        print('PROJECTION')
+        print(proj)
     else:
         raise RuntimeError(f'Unknown mode {args.mode}')
