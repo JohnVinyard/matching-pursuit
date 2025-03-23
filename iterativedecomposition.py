@@ -11,7 +11,7 @@ from config import Config
 from conjure import LmdbCollection, serve_conjure, loggers, SupportedContentType, NumpySerializer, NumpyDeserializer
 from data import AudioIterator, get_one_audio_segment
 from modules import stft, sparsify, sparsify_vectors, iterative_loss, max_norm, flattened_multiband_spectrogram, \
-    sparse_softmax, positional_encoding, NeuralReverb
+    sparse_softmax, positional_encoding, NeuralReverb, fft_frequency_decompose
 from modules.anticausal import AntiCausalAnalysis
 from modules.eventgenerators.convimpulse import ConvImpulseEventGenerator
 from modules.eventgenerators.generator import EventGenerator, ShapeSpec
@@ -20,7 +20,6 @@ from modules.eventgenerators.schedule import DiracScheduler
 from modules.eventgenerators.splat import SplattingEventGenerator
 from modules.multiheadtransform import MultiHeadTransform
 from modules.transfer import fft_convolve
-from spiking import AutocorrelationLoss
 from util import device, encode_audio, make_initializer
 
 # the size, in samples of the audio segment we'll overfit
@@ -76,9 +75,6 @@ def transform(x: torch.Tensor):
     batch_size = x.shape[0]
     x = stft(x, transform_window_size, transform_step_size, pad=True)
 
-    # if log_amplitude:
-    #     x = torch.relu(torch.log(x + 1e-8) + 27)
-
     n_coeffs = transform_window_size // 2 + 1
     x = x.view(batch_size, -1, n_coeffs)[..., :n_coeffs - 1].permute(0, 2, 1)
     return x
@@ -86,16 +82,6 @@ def transform(x: torch.Tensor):
 
 def loss_transform(x: torch.Tensor) -> torch.Tensor:
     batch, n_events, time = x.shape
-
-    # return flattened_multiband_spectrogram(
-    #     x,
-    #     stft_spec={
-    #         'long': (128, 64),
-    #         'short': (64, 32),
-    #         'xs': (16, 8),
-    #     },
-    #     smallest_band_size=512)
-
     x = stft(x, transform_window_size, transform_step_size, pad=True)
     x = x.view(batch, n_events, -1)
     return x
@@ -422,6 +408,8 @@ class Model(nn.Module):
             return_residual: bool = False,
             return_all_residuals: bool = False):
 
+        batch_size = audio.shape[0]
+
         channels = []
         schedules = []
         vecs = []
@@ -435,13 +423,24 @@ class Model(nn.Module):
         print(f'iterative {spec.shape}')
 
         for i in range(n_events):
+
+            # flat_spec = spec.reshape(batch_size, -1)
+            # mx, _ = torch.max(torch.abs(flat_spec), dim=-1, keepdim=True)
+            # mx = mx.view(batch_size, 1, 1)
+            # normalized_spec = spec / (mx + 1e-6)
+
             v, sched = self.encode(spec)
             vecs.append(v)
             schedules.append(sched)
             ch = self.generate(v, sched)
+
+            # scale the channel
+            # ch = ch * mx
+
+            # perform transform and scale proportionally
             current = transform(ch)
 
-            spec = (spec - current).clone().detach()
+            spec = (spec - current)#.clone().detach()
 
             channels.append(ch)
             residuals.append(spec[:, None, :, :].clone().detach())
@@ -601,7 +600,9 @@ def train_and_monitor(
 
         optim = Adam(model.parameters(), lr=1e-4)
 
-        loss_model = AutocorrelationLoss(n_channels=64, filter_size=64).to(device)
+        # loss_model = AutocorrelationLoss(n_channels=64, filter_size=64).to(device)
+
+        # loss_model = CorrelationLoss(n_elements=512)
 
         for i, item in enumerate(iter(stream)):
             optim.zero_grad()
@@ -625,13 +626,7 @@ def train_and_monitor(
                 target = target * weighting
                 recon_summed = recon_summed * weighting
 
-
-                # _ = loss_model.compute_multiband_loss(target, recon_summed)
                 loss = iterative_loss(target, recon, loss_transform, ratio_loss=True)
-                # loss = loss + (all_at_once_loss(target, recon_summed) * 1e-4)
-
-                # loss = loss_model.compute_loss(target, recon_summed)
-                # loss = loss_model.compute_multiband_loss(target, recon_summed)
 
 
             scaler.scale(loss).backward()

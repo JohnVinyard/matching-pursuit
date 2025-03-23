@@ -104,7 +104,7 @@ class AutocorrelationLoss(nn.Module):
             n_filters=self.n_channels,
             size=self.filter_size,
             device='cpu',
-            band_spacing='geometric').view(
+            band_spacing='linear').view(
                 1,
                self.n_channels,
                self.filter_size)
@@ -114,13 +114,19 @@ class AutocorrelationLoss(nn.Module):
         self.register_buffer('gammatone', gfb, persistent=False)
 
 
-    def multiband_forward(self, audio: torch.Tensor):
+    def multiband_forward(self, audio: torch.Tensor, window_size: int, step_size: int):
         bands = fft_frequency_decompose(audio, 512)
-        return {k: self.forward(v, 128, 64) for k, v in bands.items()}
+        return {k: self.forward(v, window_size, step_size) for k, v in bands.items()}
 
-    def compute_multiband_loss(self, target: torch.Tensor, recon: torch.Tensor):
-        tb = self.multiband_forward(target)
-        rb = self.multiband_forward(recon)
+    def compute_multiband_loss(
+            self,
+            target: torch.Tensor,
+            recon: torch.Tensor,
+            window_size: int,
+            step_size: int):
+
+        tb = self.multiband_forward(target, window_size, step_size)
+        rb = self.multiband_forward(recon, window_size, step_size)
         loss = 0
         print('=======================')
         for k, v in rb.items():
@@ -144,21 +150,25 @@ class AutocorrelationLoss(nn.Module):
 
         channels = F.pad(channels, (0, step_size))
         channels = channels.unfold(-1, window_size, step_size)
+
         spec = torch.fft.rfft(channels, dim=-1)
-        spec = torch.abs(spec)
-        print(n_samples, spec.shape)
-        x = spec.view(batch, -1)
-        # corr = spec[:, :, :, 1:] * spec[:, :, :, :-1]
-        # corr = torch.abs(corr)
+        # spec = torch.abs(spec)
+
+        # within-channel correlation
+        corr = spec[:, :, :, 1:] * spec[:, :, :, :-1]
+        # corr = torch.fft.irfft(corr, dim=-1)
+        corr = torch.abs(corr)
         # corr = unit_norm(corr, dim=-1)
         # corr = torch.relu(torch.log(corr + 1e-8) + 27)
 
-        # corr2 = spec[:, :, 1:, :] * spec[:, :, :-1, :]
-        # corr2 = torch.abs(corr2)
+        # neighboring channel correlation
+        corr2 = spec[:, :, 1:, :] * spec[:, :, :-1, :]
+        # corr2 = torch.fft.irfft(corr2, dim=-1)
+        corr2 = torch.abs(corr2)
         # corr2 = unit_norm(corr2, dim=-1)
         # corr2 = torch.relu(torch.log(corr2 + 1e-8) + 27)
 
-        # x = torch.cat([corr.view(-1), corr2.view(-1)])
+        x = torch.cat([corr.view(-1), corr2.view(-1)])
         return x
 
     def compute_loss(self, target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
@@ -179,7 +189,7 @@ def overfit_model():
     #     memory_size=64,
     #     frame_memory_size=8).to(device)
 
-    loss_model = AutocorrelationLoss(n_channels=36, filter_size=128).to(device)
+    loss_model = AutocorrelationLoss(n_channels=64, filter_size=64).to(device)
 
     overfit_model = OverfitRawAudio(target.shape, std=0.01, normalize=True).to(device)
     optim = Adam(overfit_model.parameters(), lr=1e-3)
@@ -199,7 +209,7 @@ def overfit_model():
         recon_audio,
     ], port=9999, n_workers=1)
 
-    target_features = loss_model.forward(target)
+    # target_features = loss_model.forward(target)
 
     for i in count():
         optim.zero_grad()
@@ -207,9 +217,9 @@ def overfit_model():
         recon = max_norm(recon)
         recon_audio(max_norm(recon))
 
-        recon_features = loss_model.forward(recon)
+        loss = loss_model.compute_multiband_loss(target, recon, 64, 16)
 
-        loss = torch.abs(target_features - recon_features).sum()
+        # loss = torch.abs(target_features - recon_features).sum()
         loss.backward()
         # clip_grad_value_(overfit_model.parameters(), 0.1)
         optim.step()

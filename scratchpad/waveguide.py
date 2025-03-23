@@ -1,19 +1,15 @@
 import numpy as np
 import zounds
-from matplotlib import pyplot as plt
 import torch
 from torch.nn import functional as F
 from torch import nn
-from modules.ddsp import overlap_add
-from modules.normal_pdf import pdf
-from modules.phase import STFT, AudioCodec, MelScale
-from modules.pif import AuditoryImage
-from train.optim import optimizer
-from util import device, playable
-from modules.stft import stft
-from librosa import load
-from modules.psychoacoustic import PsychoacousticFeature
-from modules.stft import stft
+from subprocess import Popen, PIPE
+
+# from modules.ddsp import overlap_add
+# from modules.phase import STFT, AudioCodec, MelScale
+# from modules.pif import AuditoryImage
+# from util import device, playable
+# from modules.psychoacoustic import PsychoacousticFeature
 
 """
 noise- + --------> output /\/\/\/\/\/\/\/
@@ -25,62 +21,62 @@ samplerate = zounds.SR22050()
 
 piano_samples = None
 
-pif = PsychoacousticFeature().to(device)
-print(pif.band_sizes)
-
-mel_scale = MelScale()
-codec = AudioCodec(mel_scale)
+# pif = PsychoacousticFeature().to(device)
+# print(pif.band_sizes)
+#
+# mel_scale = MelScale()
+# codec = AudioCodec(mel_scale)
 
 n_bands = 512
 kernel_size = 512
 
-band = zounds.FrequencyBand(40, samplerate.nyquist)
-scale = zounds.MelScale(band, n_bands)
-fb = zounds.learn.FilterBank(
-    samplerate,
-    kernel_size,
-    scale,
-    0.01,
-    normalize_filters=True,
-    a_weighting=False).to(device)
+# band = zounds.FrequencyBand(40, samplerate.nyquist)
+# scale = zounds.MelScale(band, n_bands)
+# fb = zounds.learn.FilterBank(
+#     samplerate,
+#     kernel_size,
+#     scale,
+#     0.01,
+#     normalize_filters=True,
+#     a_weighting=False).to(device)
 
-aim = AuditoryImage(512, 128, do_windowing=False, check_cola=False).to(device)
-
-
-def perceptual_feature(x):
-    # x = x.view(1, 1, 2**15)
-    # spec = stft(x, 512, 256, log_amplitude=True)
-    # return spec
-
-    # x = torch.abs(fb.convolve(x))
-    # x = fb.temporal_pooling(x, 512, 256)
-
-    # x = fb.forward(x, normalize=False)
-    # x = aim.forward(x)
-
-    bands = pif.compute_feature_dict(x.view(1, 1, -1))
-    bands = torch.cat(list(bands.values()), dim=-1)
-    return bands
-
-    # env = torch.abs(x).view(1, 1, -1)
-    # env = F.avg_pool1d(env, 64, 32)
-
-    # x = codec.to_frequency_domain(x.view(1, -1))
-    # x = torch.abs(mel_scale.to_frequency_domain(x.view(1, -1)))
-    # x = torch.cat([
-    #     # spec.view(-1),
-    #     bands.view(-1),
-    #     # env.view(-1)
-    # ])
-    return x
+# aim = AuditoryImage(512, 128, do_windowing=False, check_cola=False).to(device)
 
 
-def perceptual_loss(a, b):
-    a = perceptual_feature(a)
-    b = perceptual_feature(b)
-    loss = F.mse_loss(a, b)
-    # loss = torch.abs(a - b).sum() / a.shape[0]
-    return loss
+# def perceptual_feature(x):
+#     # x = x.view(1, 1, 2**15)
+#     # spec = stft(x, 512, 256, log_amplitude=True)
+#     # return spec
+#
+#     # x = torch.abs(fb.convolve(x))
+#     # x = fb.temporal_pooling(x, 512, 256)
+#
+#     # x = fb.forward(x, normalize=False)
+#     # x = aim.forward(x)
+#
+#     bands = pif.compute_feature_dict(x.view(1, 1, -1))
+#     bands = torch.cat(list(bands.values()), dim=-1)
+#     return bands
+#
+#     # env = torch.abs(x).view(1, 1, -1)
+#     # env = F.avg_pool1d(env, 64, 32)
+#
+#     # x = codec.to_frequency_domain(x.view(1, -1))
+#     # x = torch.abs(mel_scale.to_frequency_domain(x.view(1, -1)))
+#     # x = torch.cat([
+#     #     # spec.view(-1),
+#     #     bands.view(-1),
+#     #     # env.view(-1)
+#     # ])
+#     return x
+
+
+# def perceptual_loss(a, b):
+#     a = perceptual_feature(a)
+#     b = perceptual_feature(b)
+#     loss = F.mse_loss(a, b)
+#     # loss = torch.abs(a - b).sum() / a.shape[0]
+#     return loss
 
 
 class LayeredTransferFunctionModel(nn.Module):
@@ -272,7 +268,19 @@ def karplus_strong(total_samples, delay_samples, filter_memory_size, damping):
     return zounds.AudioSamples(np.array(output), zounds.SR22050())
 
 
-def simulate(entry_coord, entry_block, sampling_coord, width, height):
+# TODO: It might be nice to move this into zounds
+def listen_to_sound(samples: zounds.AudioSamples, wait_for_user_input: bool = True) -> None:
+    proc = Popen(f'aplay', shell=True, stdin=PIPE)
+
+    if proc.stdin is not None:
+        proc.stdin.write(samples.encode().read())
+        proc.communicate()
+
+    if wait_for_user_input:
+        input('Next')
+
+
+def simulate(entry_coord, entry_block, sampling_coord, width, height, n_steps=128):
     """
     room properties = (B, filter coeffs, width, height)
 
@@ -318,7 +326,7 @@ def simulate(entry_coord, entry_block, sampling_coord, width, height):
         [1, 1, 1]
     ], dtype=np.float32)).view(1, 1, 3, 3, 1, 1)
 
-    for i in range(100):
+    for i in range(n_steps):
 
         # take the real FFT of the room sample blocks
         spec = torch.fft.rfft(room_state, dim=1, norm='ortho')
@@ -347,90 +355,20 @@ def simulate(entry_coord, entry_block, sampling_coord, width, height):
         print(f'completed step {i}, room_state, {room_state.std().item()}')
 
     samples = torch.cat(output_blocks).data.cpu().numpy()
+    samples /= np.abs(samples.max()) + 1e-8
     samples = zounds.AudioSamples(samples, zounds.SR22050()).pad_with_silence()
 
     all_states = torch.cat(states, dim=0).data.cpu().numpy()
     return samples, all_states
 
 
-samples, _ = load('/home/john/workspace/audio-data/piano.wav')
-
-if samples.shape[0] < 2**15:
-    samples = np.pad(samples, [(0, 2**15 - len(samples))])
-else:
-    samples = samples[:2**15]
-
-samples = zounds.AudioSamples(samples, zounds.SR22050())
-piano_samples = samples.shape[0]
-print(samples.shape)
-
-# model = KarplusStrong(256, 2**15).to(device)
-# model = SuperSimpleSourceExcitationModel(2**15)
-
-model = LayeredTransferFunctionModel(2**15)
-optim = optimizer(model, lr=1e-2)
 
 if __name__ == '__main__':
-    app = zounds.ZoundsApp(locals=locals(), globals=globals())
-    app.start_in_thread()
-
-    # samples = karplus_strong(2**15, 57, 4, 0.99)
-    # samples = zounds.AudioSamples.from_file(
-    #     '/home/john/workspace/audio-data/piano.wav')
-
-    # z = pdf(
-    #     torch.linspace(0, 1, 1024)[None, :],
-    #     torch.zeros(512, 1).fill_(0.5),
-    #     torch.zeros(1, 1).fill_(0.01))
-    # print(z.shape)
-
-    target = torch.from_numpy(samples).float().to(device)
-
-    def real_spec():
-        return np.abs(zounds.spectral.stft(samples))
-
-    def fake_spec():
-        return np.abs(zounds.spectral.stft(listen()))
-
-    def listen():
-        return playable(recon, samplerate)
-
-    def excitation():
-        return np.abs(model.excitation_env.data.cpu().numpy().squeeze())[:-2]
-
-    def env():
-        return np.abs(model.env.data.cpu().numpy().squeeze())
-
-    def impulse():
-        return model.impulse.data.cpu().numpy().squeeze()
-
-    while True:
-        optim.zero_grad()
-        recon = model.forward(None)
-
-        # using a noise burst instead of a learned impulse means it's
-        # near impossible for the model to reproduce the phase correctly,
-        # so raw sample loss also requires a learned impulse to match phase
-        # t = stft(target, 512, 256, log_amplitude=True)
-        # r = stft(recon, 512, 256, log_amplitude=True)
-
-        # r = codec.to_frequency_domain(recon.view(1, -1))
-        # t = codec.to_frequency_domain(target.view(1, -1))
-
-        # t, _ = pif.forward(target)
-        # r, _ = pif.forward(recon)
-
-        # loss = F.mse_loss(r, t)
-
-        loss = perceptual_loss(recon, target)
-
-        loss.backward()
-        optim.step()
-        print(loss.item())
-
-    # impulse = torch.zeros(512).uniform_(-10, 10)
-
-    # samples, all_states = simulate(
-    #     (10, 10), impulse.view(1, 512), (12, 12), 100, 100)
-
-    input('waiting...')
+    s, ast = simulate(
+        entry_coord=[1, 1],
+        entry_block=torch.zeros(128).uniform_(-1, 1),
+        sampling_coord=[8, 8],
+        width=12,
+        height=12,
+        n_steps=512)
+    listen_to_sound(s)

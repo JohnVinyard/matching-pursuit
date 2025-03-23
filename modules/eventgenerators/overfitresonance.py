@@ -477,7 +477,7 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
             self.r = WavetableLookup(
                 n_resonances,
                 n_samples,
-                n_resonances=4096,
+                n_resonances=n_resonances,
                 samplerate=samplerate,
                 learnable=False,
                 wavetable_device=wavetable_device)
@@ -500,7 +500,7 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
 
         self.n_decays = n_decays
 
-        self.d = Decays(n_decays, n_frames, n_samples)
+        self.d = Decays(n_decays, n_frames, n_samples, base_resonance=0.5)
         self.warp = Deformations(n_deformations, instr_expressivity, n_frames, n_samples)
 
         self.noise_warp = Deformations(noise_deformations, noise_expressivity, n_frames, n_samples)

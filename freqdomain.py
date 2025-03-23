@@ -21,7 +21,7 @@ from util.music import musical_scale_hz
 
 n_samples = 2 ** 17
 transform_window_size = 2048
-transform_step_size = 256
+transform_step_size = 1024
 samplerate = 22050
 n_frames = n_samples // transform_step_size
 

@@ -31,13 +31,17 @@ class AntiCausalBlock(nn.Module):
         self.dilation = dilation
         self.conv = AntiCausalConv(channels, channels, kernel_size, dilation, reverse_causality=reverse_causality)
         self.gate = AntiCausalConv(channels, channels, kernel_size, dilation, reverse_causality=reverse_causality)
+
+        self.tanh_weight = nn.Parameter(torch.zeros(1).fill_(0.5))
+        self.sigmoid_weight = nn.Parameter(torch.zeros(1).fill_(0.5))
+
         self.norm = nn.BatchNorm1d(channels)
         self.do_norm = do_norm
     
     def forward(self, x):
         skip = x
-        a = torch.tanh(self.conv(x))
-        b = torch.sigmoid(self.gate(x))
+        a = torch.tanh(self.conv(x) * self.tanh_weight)
+        b = torch.sigmoid(self.gate(x) * self.sigmoid_weight)
 
         x = a * b
         x = x + skip
