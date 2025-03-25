@@ -385,6 +385,7 @@ def upload_pattern(api_host, api_key: str, n_samples: int):
     files = os.listdir(samples_dir)
     chosen = choice(files)
     music_net_id, ext = os.path.splitext(chosen)
+    # https://music-net.s3.amazonaws.com/1727
     url = f'https://music-net.s3.amazonaws.com/{music_net_id}'
     print(f'creating pattern with {url}')
     samples, sr = librosa.load(os.path.join(samples_dir, chosen))

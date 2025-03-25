@@ -263,7 +263,8 @@ class Model(nn.Module):
             self,
             resonance_model: Union[EventGenerator, nn.Module],
             in_channels: int = 1024,
-            hidden_channels: int = 256):
+            hidden_channels: int = 256,
+            with_activation_norm: bool = False):
 
         super().__init__()
         self.in_channels = in_channels
@@ -275,7 +276,8 @@ class Model(nn.Module):
             kernel_size=2,
             dilations=[1, 2, 4, 8, 16, 32, 64, 1],
             pos_encodings=False,
-            do_norm=False)
+            do_norm=False,
+            with_activation_norm=with_activation_norm)
 
         self.to_event_vectors = nn.Conv1d(hidden_channels, context_dim, 1, 1, 0)
         self.to_event_switch = nn.Conv1d(hidden_channels, 1, 1, 1, 0)
@@ -285,7 +287,7 @@ class Model(nn.Module):
             latent_dim=context_dim,
             hidden_channels=hidden_channels,
             n_layers=2,
-            shapes=self.resonance.shape_spec
+            shapes=self.resonance.shape_spec,
         )
 
         self.apply(initializer)
@@ -583,7 +585,8 @@ def train_and_monitor(
         model = Model(
             resonance_model=resonance_model,
             in_channels=1024,
-            hidden_channels=hidden_channels).to(device)
+            hidden_channels=hidden_channels,
+            with_activation_norm=True).to(device)
 
         # disc = Discriminator(disc_type=disc_type).to(device)
 
