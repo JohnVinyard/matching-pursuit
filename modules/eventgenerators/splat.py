@@ -247,7 +247,7 @@ class SplattingEventGenerator(nn.Module, EventGenerator):
 
         self.noise_generator = BandPassFilteredNoise(n_samples)
         self.amp_envelope_generator = ExponentialDecayEnvelope(
-            base_resonance=0.02,
+            base_resonance=0.5,
             n_frames=n_frames,
             n_samples=n_samples)
         self.evolving_resonance = EvolvingFilteredResonance(

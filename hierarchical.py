@@ -88,7 +88,7 @@ from conjure import LmdbCollection, loggers, serve_conjure, SupportedContentType
 from conjure.logger import encode_audio, Logger
 from data import get_one_audio_segment
 from modules import unit_norm, flattened_multiband_spectrogram, sparse_softmax, max_norm, amplitude_envelope, \
-    iterative_loss
+    iterative_loss, stft
 from modules.eventgenerators.splat import SplattingEventGenerator
 from modules.infoloss import CorrelationLoss
 from modules.multiheadtransform import MultiHeadTransform
@@ -124,11 +124,11 @@ class OverfitHierarchicalEvents(nn.Module):
         self.event_generator = SplattingEventGenerator(
             n_samples=n_samples,
             samplerate=samplerate,
-            n_resonance_octaves=64,
+            n_resonance_octaves=16,
             n_frames=n_samples // 256,
             hard_reverb_choice=False,
             hierarchical_scheduler=True,
-            wavetable_resonance=True,
+            wavetable_resonance=False,
         )
         self.transform = MultiHeadTransform(
             self.context_dim, hidden_channels=128, shapes=self.event_generator.shape_spec, n_layers=1)
@@ -203,7 +203,7 @@ def loss_transform(x: torch.Tensor) -> torch.Tensor:
             'xs': (16, 8),
         },
         smallest_band_size=512)
-
+    # return stft(x, 2048, 256, pad=True)
 
 def reconstruction_loss(target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
     target_spec = loss_transform(target)
@@ -282,10 +282,13 @@ def overfit():
         perturbed_summed = max_norm(perturbed_summed)
         perturbed_audio(perturbed_summed)
 
+        loss = iterative_loss(target, recon, loss_transform, ratio_loss=False)
+
+        # loss = reconstruction_loss(target, recon_summed)
         # t = loss_model.forward(target)
         # r = loss_model.forward(recon_summed)
         # loss = torch.abs(t - r).sum()
-        loss = loss_model.compute_multiband_loss(target, recon_summed)
+        # loss = loss_model.compute_multiband_loss(target, recon_summed, 64, 16)
         # loss = loss_model.multiband_noise_loss(target, recon_summed, 128, 32)
 
         loss.backward()
