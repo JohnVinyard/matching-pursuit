@@ -105,7 +105,7 @@ For example, [simple RNNs](https://blog.cochlea.xyz/rnn.html) might serve as a n
 for the sound reproductions in this article.
 
 """
-import librosa
+
 
 """[markdown]
 
@@ -646,11 +646,12 @@ from torch import nn
 
 from conjure import S3Collection, \
     conjure_article, CitationComponent, AudioComponent, ImageComponent, \
-    CompositeComponent, Logger, ScatterPlotComponent, AudioTimelineComponent
-from data import get_one_audio_segment, AudioIterator
+    CompositeComponent, Logger, AudioTimelineComponent
+from data import get_one_audio_segment
 from iterativedecomposition import Model as IterativeDecompositionModel
 from modules.eventgenerators.overfitresonance import OverfitResonanceModel
 from modules import max_norm, sparse_softmax, amplitude_envelope
+import librosa
 
 remote_collection_name = 'iterative-decomposition-v4'
 
