@@ -16,6 +16,7 @@ from modules.overlap_add import overlap_add
 from modules.phase import windowed_audio
 from modules.transfer import fft_convolve, advance_one_frame
 from modules.upsample import upsample_with_holes
+from spiking import SpikingModel
 from util import device, make_initializer, count_parameters
 from util.music import musical_scale_hz
 
@@ -116,15 +117,15 @@ def run_layer(
     x = fft_convolve(x, decays)
     x = (out_mapping @ x) + orig
 
-    shift = shift @ x
+    # shift = shift @ x
 
     cp = torch.tanh(x * gains.view(batch_size, control_plane_dim, 1))
 
     audio = audio_mapping @ cp
     # shift = shift.repeat(1, audio.shape[1], 1)
     # print(audio.shape, shift.shape)
-    audio = fft_shift(audio.permute(0, 2, 1), shift.permute(0, 2, 1))
-    audio = audio.permute(0, 2, 1)
+    # audio = fft_shift(audio.permute(0, 2, 1), shift.permute(0, 2, 1))
+    # audio = audio.permute(0, 2, 1)
 
     # TODO: This should be mapped to audio outside of this layer, probably
     # each layer by a single mapping network
@@ -584,6 +585,8 @@ def to_numpy(x: torch.Tensor):
     return x.data.cpu().numpy()
 
 
+
+
 def train_and_monitor_overfit_model(
         n_samples: int,
         samplerate: int = 22050,
@@ -619,6 +622,7 @@ def train_and_monitor_overfit_model(
     ], port=9999, n_workers=1)
 
     loss_model = CorrelationLoss(n_elements=2048).to(device)
+    # loss_model = SpikingModel(64, 64, 64, 64).to(device)
 
     def train(target: torch.Tensor):
         model = construct_experiment_model(n_samples=n_samples)
@@ -631,7 +635,8 @@ def train_and_monitor_overfit_model(
 
             recon_audio(max_norm(recon.sum(dim=1, keepdim=True)))
 
-            loss = loss_model.multiband_noise_loss(target, recon, 128, 32)
+            # loss = loss_model.compute_multiband_loss(target, recon)
+            loss = loss_model.multiband_noise_loss(target, recon, 64, 16)
             # loss = reconstruction_loss(recon, target)
             # recon_loss = recon_loss + loss_model.noise_loss(target, recon)
             # loss = loss + sparsity_loss(control_signal)

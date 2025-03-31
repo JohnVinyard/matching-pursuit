@@ -25,7 +25,7 @@ def stft(
 
     if return_complex:
         x = torch.view_as_real(x)
-        return x
+        return x[:, :, :frames, :, :]
 
     x = torch.abs(x)
 

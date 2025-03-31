@@ -42,7 +42,7 @@ All code for this experiment can be found
 [here](https://github.com/JohnVinyard/matching-pursuit/blob/main/hierarchical.py).
 
 """
-from spiking import AutocorrelationLoss
+from spiking import AutocorrelationLoss, SpikingModel
 
 """[markdown]
 
@@ -259,9 +259,11 @@ def overfit():
     model = OverfitHierarchicalEvents(
         n_samples, samplerate, n_events, context_dim=event_dim).to(device)
     optim = Adam(model.parameters(), lr=1e-3)
-    # loss_model = CorrelationLoss(n_elements=512).to(device)
+    loss_model = CorrelationLoss(n_elements=512).to(device)
 
-    loss_model = AutocorrelationLoss(64, 64).to(device)
+    # loss_model = AutocorrelationLoss(64, 64).to(device)
+    # loss_model = SpikingModel(64, 64, 64, memory_size=16).to(device)
+    loss_model = CorrelationLoss(512).to(device)
 
     for i in count():
         optim.zero_grad()
@@ -282,7 +284,10 @@ def overfit():
         perturbed_summed = max_norm(perturbed_summed)
         perturbed_audio(perturbed_summed)
 
-        loss = iterative_loss(target, recon, loss_transform, ratio_loss=False)
+        # loss = loss_model.compute_multiband_loss(target, recon)
+        loss = loss_model.multiband_noise_loss(target, recon_summed, 64, 16)
+
+        # loss = iterative_loss(target, recon, loss_transform, ratio_loss=False)
 
         # loss = reconstruction_loss(target, recon_summed)
         # t = loss_model.forward(target)

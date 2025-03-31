@@ -49,7 +49,7 @@ control_plane_dim = 64
 state_dim = 128
 
 # the number of (batch, control_plane_dim, frames) elements allowed to be non-zero
-n_active_sites = 256
+n_active_sites = 128
 
 sparse_events = False
 

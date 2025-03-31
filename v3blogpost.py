@@ -105,6 +105,7 @@ For example, [simple RNNs](https://blog.cochlea.xyz/rnn.html) might serve as a n
 for the sound reproductions in this article.
 
 """
+import librosa
 
 """[markdown]
 
@@ -161,6 +162,8 @@ arbitrary lengths.
 """
 # example_1.orig_audio
 
+# example_1.orig_spec
+
 """[markdown]
 
 ### Reconstruction
@@ -170,6 +173,8 @@ We mask the second half of the input audio to enable the streaming algorithm, so
 """
 
 # example_1.recon_audio
+
+# example_1.recon_spec
 
 """[markdown]
 
@@ -250,6 +255,8 @@ Time is along the x-axis, and a 32D -> 1D projection of event vectors using t-SN
 """
 # example_2.orig_audio
 
+# example_2.orig_spec
+
 """[markdown]
 
 ### Reconstruction
@@ -259,6 +266,8 @@ We mask the second half of the input audio to enable the streaming algorithm, so
 """
 
 # example_2.recon_audio
+
+# example_2.recon_spec
 
 """[markdown]
 
@@ -340,6 +349,8 @@ Time is along the x-axis, and a 32D -> 1D projection of event vectors using t-SN
 """
 # example_3.orig_audio
 
+# example_3.orig_spec
+
 """[markdown]
 
 ### Reconstruction
@@ -349,6 +360,8 @@ We mask the second half of the input audio to enable the streaming algorithm, so
 """
 
 # example_3.recon_audio
+
+# example_3.recon_spec
 
 """[markdown]
 
@@ -430,6 +443,8 @@ Time is along the x-axis, and a 32D -> 1D projection of event vectors using t-SN
 """
 # example_4.orig_audio
 
+# example_4.orig_spec
+
 """[markdown]
 
 ### Reconstruction
@@ -439,6 +454,8 @@ We mask the second half of the input audio to enable the streaming algorithm, so
 """
 
 # example_4.recon_audio
+
+# example_4.recon_spec
 
 """[markdown]
 
@@ -520,6 +537,8 @@ Time is along the x-axis, and a 32D -> 1D projection of event vectors using t-SN
 """
 # example_5.orig_audio
 
+# example_5.orig_spec
+
 """[markdown]
 
 ### Reconstruction
@@ -529,6 +548,8 @@ We mask the second half of the input audio to enable the streaming algorithm, so
 """
 
 # example_5.recon_audio
+
+# example_5.recon_spec
 
 """[markdown]
 
@@ -631,7 +652,7 @@ from iterativedecomposition import Model as IterativeDecompositionModel
 from modules.eventgenerators.overfitresonance import OverfitResonanceModel
 from modules import max_norm, sparse_softmax, amplitude_envelope
 
-remote_collection_name = 'iterative-decomposition-v3'
+remote_collection_name = 'iterative-decomposition-v4'
 
 
 def to_numpy(x: torch.Tensor):
@@ -666,11 +687,11 @@ def process_events2(
     points = points / (points.max() + 1e-8)
     print(points)
 
-    # create a random projection to map colors
-    proj = np.random.uniform(0, 1, (context_dim, 3))
-    colors = normalized @ proj
-    colors -= colors.min()
-    colors /= (colors.max() + 1e-8)
+    # TODO: Use t-SNE for colors as well
+    color_tsne = TSNE(n_components=3)
+    colors = color_tsne.fit_transform(normalized)
+    colors = colors - colors.min()
+    colors = colors / (colors.max() + 1e-8)
     colors *= 255
     colors = colors.astype(np.uint8)
     colors = [f'rgba({c[0]}, {c[1]}, {c[2]}, 0.5)' for c in colors]
@@ -703,6 +724,7 @@ def load_model(wavetable_device: str = 'cpu') -> nn.Module:
     model = IterativeDecompositionModel(
         in_channels=1024,
         hidden_channels=hidden_channels,
+        with_activation_norm=True,
         resonance_model=OverfitResonanceModel(
             n_noise_filters=64,
             noise_expressivity=4,
@@ -723,7 +745,7 @@ def load_model(wavetable_device: str = 'cpu') -> nn.Module:
             fft_resonance=True
         ))
 
-    with open('iterativedecomposition14.dat', 'rb') as f:
+    with open('iterativedecomposition15.dat', 'rb') as f:
         model.load_state_dict(torch.load(f, map_location=lambda storage, loc: storage))
 
     print('Total parameters', count_parameters(model))
@@ -841,6 +863,16 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
     _, original = logger.log_sound(f'original', samples)
     _, reconstruction = logger.log_sound(f'reconstruction', summed)
 
+    # TODO: These three lines are an incredibly common pattern, they should be at most 2
+    n_bins = 84
+    original_spec = librosa.cqt(samples.data.cpu().numpy().reshape((-1,)), n_bins=n_bins)
+    _, original_spec = logger.log_matrix_with_cmap('origspec', np.flipud(np.abs(original_spec)), cmap='hot')
+    original_spec = ImageComponent(original_spec.public_uri, height=200, title='Original')
+
+    recon_spec = librosa.cqt(summed.data.cpu().numpy().reshape((-1,)), n_bins=n_bins)
+    _, recon_spec = logger.log_matrix_with_cmap('reconspec', np.flipud(np.abs(recon_spec)), cmap='hot')
+    recon_spec = ImageComponent(recon_spec.public_uri, height=200, title='Reconstruction')
+
     audio_color = 'rgba(100, 200, 150, 0.5)'
 
     orig_audio_component = AudioComponent(original.public_uri, height=100, color=audio_color)
@@ -865,6 +897,8 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
         random_times=random_times_component,
         perturbed=perturbed_component,
         decomposition=movie,
+        orig_spec=original_spec,
+        recon_spec=recon_spec,
         **event_components
     )
 

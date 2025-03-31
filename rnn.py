@@ -128,7 +128,7 @@ class OverfitControlPlane(nn.Module):
 
     @property
     def control_signal(self) -> torch.Tensor:
-        s = sparsify(self.control, n_to_keep=256)
+        s = sparsify(self.control, n_to_keep=128)
         return torch.relu(s)
 
     # TODO: probability should scale with time _only_, so control plane size does not matter

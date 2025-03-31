@@ -1,19 +1,117 @@
+from typing import Dict
+
 import torch
 from torch import nn
 from torch.nn import functional as F
 from torch.optim import Adam
 
-from data import get_one_audio_segment
-from modules import gammatone_filter_bank, max_norm, unit_norm, fft_frequency_decompose
+from data import get_one_audio_segment, AudioIterator
+from modules import gammatone_filter_bank, max_norm, unit_norm, fft_frequency_decompose, stft
 from modules.overfitraw import OverfitRawAudio
+from modules.overlap_add import overlap_add
 from modules.transfer import fft_convolve
 from conjure import LmdbCollection, Logger, loggers, serve_conjure
-from util import device, encode_audio
+from util import device, encode_audio, make_initializer
 from itertools import count
 from torch.nn.utils.clip_grad import clip_grad_norm_, clip_grad_value_
+from torch.nn.utils import weight_norm
+
+import matplotlib
+
+matplotlib.use('Qt5Agg')
+from matplotlib import pyplot as plt
+import numpy as np
 
 n_samples = 2 ** 17
 
+init = make_initializer(0.1)
+
+
+class LayerNorm(nn.Module):
+    def __init__(self, dim):
+        super(LayerNorm, self).__init__()
+        # self.ln = torch.nn.LayerNorm(dim)
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        orig_shape = input.shape
+        batch_size = orig_shape[0]
+        input = input.view(batch_size, -1)
+        mx, _ = torch.max(input, dim=-1, keepdim=True)
+        input = input / (mx + 1e-8)
+        x = input.view(*orig_shape)
+        return x
+
+
+class AutoEncoder(nn.Module):
+    def __init__(self, channels: int, bottleneck_size: int, bottleneck_frames: int):
+        super().__init__()
+
+        self.channels = channels
+        self.bottleneck_size = bottleneck_size
+
+        self.window_size = 512
+        self.step_size = 256
+        self.n_frames = n_samples // self.step_size
+        self.n_coeffs = self.window_size // 2 + 1
+
+        self.start_size = self.n_frames
+        self.end_size = bottleneck_frames
+
+        self.layers = int(np.emath.logn(4, self.start_size) - np.emath.logn(4, self.end_size))
+
+        self.encoder = nn.Sequential(*[nn.Sequential(
+            weight_norm(nn.Conv1d(self.n_coeffs * 2 if i == 0 else self.channels, self.channels, 7, 4, 3)),
+            nn.LeakyReLU(0.2),
+            # LayerNorm(self.channels),
+            # nn.BatchNorm1d(self.channels),
+            # nn.GroupNorm(num_groups=16, num_channels=self.channels),
+        )
+            for i in range(self.layers)
+        ])
+
+        self.bottleneck = nn.Conv1d(self.channels, self.bottleneck_size, 1, 1, 0)
+        self.up_bottleneck = nn.Conv1d(self.bottleneck_size, self.channels, 1, 1, 0)
+
+        self.decoder = nn.Sequential(*[
+            nn.Sequential(
+                weight_norm(nn.ConvTranspose1d(self.channels, self.channels, 8, 4, 2)),
+                # nn.Upsample(scale_factor=4, mode='nearest'),
+                # weight_norm(nn.Conv1d(self.channels, self.channels, 7, 1, 3)),
+                nn.LeakyReLU(0.2),
+                # LayerNorm(self.channels),
+                # nn.BatchNorm1d(self.channels),
+                # nn.GroupNorm(num_groups=16, num_channels=self.channels),
+            )
+            for i in range(self.layers)
+        ])
+
+        self.to_samples = nn.Conv1d(self.channels, self.n_coeffs * 2, 1, 1, 0)
+
+        self.apply(init)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        orig = x
+        batch_size = x.shape[0]
+        x = stft(x, self.window_size, self.step_size, pad=True, return_complex=True)
+        print('ORIG', x.shape)
+        x = x.view(batch_size, self.n_frames, self.n_coeffs, 2)
+        x = x.permute(0, 2, 1, 3)
+        x = x.reshape(batch_size, -1, self.n_frames)
+        x = self.encoder(x)
+        x = self.bottleneck(x)
+        print('BOTTLENECK', orig.numel() / x.numel())
+        x = self.up_bottleneck(x)
+        x = self.decoder(x)
+        x = self.to_samples(x)
+        x = x.view(batch_size, self.n_coeffs, 2, self.n_frames)
+        x = x.permute(0, 3, 1, 2)
+        x = torch.view_as_complex(x.contiguous())
+        x = torch.fft.irfft(x)
+        x = overlap_add(x[:, None, :, :], apply_window=False)[..., :n_samples]
+        # x = torch.tanh(x)
+        # x = max_norm(x)
+        # x = torch.sin(x)
+        return x
 
 
 class SpikingModel(nn.Module):
@@ -24,9 +122,10 @@ class SpikingModel(nn.Module):
         self.periodicity_size = periodicity_size
 
         gfb = gammatone_filter_bank(
-            n_filters=self.n_channels, size=self.filter_size, device='cpu', band_spacing='geometric').view(1,
-                                                                                                           self.n_channels,
-                                                                                                           self.filter_size)
+            n_filters=self.n_channels,
+            size=self.filter_size,
+            device='cpu',
+            band_spacing='linear').view(1, self.n_channels, self.filter_size)
         gfb = unit_norm(gfb)
 
         self.register_buffer('gammatone', gfb, persistent=False)
@@ -34,12 +133,45 @@ class SpikingModel(nn.Module):
         self.memory_size = memory_size
         self.periodicity_memory_size = frame_memory_size
 
-        memory = (torch.linspace(0, 1, self.memory_size) ** 2).view(1, 1, self.memory_size)
+        memory = (torch.linspace(0, 1, steps=self.memory_size))[None, :]
+        decay = torch.linspace(10, 100, steps=n_channels)[:, None]
+        memory = memory ** decay
+
+        # plt.matshow(memory.data.cpu().numpy())
+        # plt.show()
+        #
+        #
+        # plt.matshow(gfb.data.cpu().numpy()[0, :, :])
+        # plt.show()
+
         self.register_buffer('memory', memory, persistent=False)
 
-        periodicity_memory = (torch.linspace(0, 1, self.periodicity_memory_size) ** 2).view(1, 1,
-                                                                                            self.periodicity_memory_size)
+        periodicity_memory = \
+            (torch.linspace(0, 1, self.periodicity_memory_size) ** 2) \
+                .view(1, 1, self.periodicity_memory_size)
+
         self.register_buffer('periodicity_memory', periodicity_memory, persistent=False)
+
+    def multiband(self, audio: torch.Tensor) -> Dict[int, torch.Tensor]:
+
+        # audio = torch.cat([torch.zeros_like(audio).uniform_(audio.min().item(), audio.max().item()), audio], dim=-1)
+        bands = fft_frequency_decompose(audio, 512)
+        bands = {size: self.forward(band) for size, band in bands.items()}
+        return bands
+
+    def compute_multiband_loss(self, target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
+        loss = 0
+        target_bands = self.multiband(target)
+        recon_bands = self.multiband(recon)
+        for size, band in target_bands.items():
+            loss = loss + torch.abs(band - recon_bands[size]).sum()
+        return loss
+
+    def compute_loss(self, target: torch.Tensor, recon: torch.Tensor):
+        t = self.forward(target)
+        r = self.forward(recon)
+        loss = torch.abs(t - r).sum()
+        return loss
 
     def forward(self, audio: torch.Tensor):
         batch = audio.shape[-1]
@@ -55,44 +187,48 @@ class SpikingModel(nn.Module):
         channels = torch.relu(channels)
 
         # compression
-        channels = torch.log(channels)
+        # channels = torch.log(channels + 1e-8)
+        channels = channels ** 2
 
-
+        m = F.pad(self.memory, (0, n_samples - self.memory_size))
         pooled = fft_convolve(m, channels)
         normalized = channels - pooled
         normalized = torch.relu(normalized)
 
-        fwd = (channels > normalized).float()
+        fwd = (normalized > 0).float()
+
+        # plt.matshow(fwd[0].data.cpu().numpy())
+        # plt.show()
+
         back = normalized
+
         # layer one of spiking response.  Unit responses propagate forward,
         # initial real-values propagate backward
+
         y = back + (fwd - back).detach()
+
+        # print(f'Channel {audio.shape[-1]} with sparsity {(fwd.sum() / fwd.numel())} and {fwd.sum()} non-zero elements')
+
+        # TODO: Figure out mask here
 
         # compute periodicity
-        y = F.pad(y, (0, self.periodicity_size // 2))
-        y = y.unfold(-1, self.periodicity_size, self.periodicity_size // 2)
-        y = torch.abs(torch.fft.rfft(y, dim=-1))
-        # y = torch.log(y)
-
-        # y will be (batch, channels, time, coeffs)
-
-        n_frames = y.shape[2]
-
-        pm = self.periodicity_memory.view(1, 1, self.periodicity_memory_size)
-        pm = F.pad(pm, (0, n_frames - self.periodicity_memory_size))
-        pm = pm.view(1, 1, 1, -1)
-
-        y = y.permute(0, 1, 3, 2)
-
-        pooled = fft_convolve(y, pm)
-        normalized = y - pooled
-        normalized = torch.relu(normalized)
-
-        fwd = (normalized > 0).float()
-        back = normalized
-        y = back + (fwd - back).detach()
+        # y = F.pad(y, (0, self.periodicity_size // 4))
+        # y = y.unfold(-1, self.periodicity_size, self.periodicity_size // 4)
+        # y = torch.abs(torch.fft.rfft(y, dim=-1))
+        # y = y - torch.mean(y, dim=-1, keepdim=True)
+        # # y = y[:, :, 1:, :] - y[:, :, :-1, :]
+        # y = torch.relu(y)
+        #
+        # fwd = (y > 0).float()
+        # back = y
+        #
+        # # layer one of spiking response.  Unit responses propagate forward,
+        # # initial real-values propagate backward
+        #
+        # y = back + (fwd - back).detach()
 
         return y
+
 
 class AutocorrelationLoss(nn.Module):
     def __init__(self, n_channels, filter_size):
@@ -105,14 +241,13 @@ class AutocorrelationLoss(nn.Module):
             size=self.filter_size,
             device='cpu',
             band_spacing='linear').view(
-                1,
-               self.n_channels,
-               self.filter_size)
+            1,
+            self.n_channels,
+            self.filter_size)
 
         gfb = unit_norm(gfb)
 
         self.register_buffer('gammatone', gfb, persistent=False)
-
 
     def multiband_forward(self, audio: torch.Tensor, window_size: int, step_size: int):
         bands = fft_frequency_decompose(audio, 512)
@@ -124,7 +259,6 @@ class AutocorrelationLoss(nn.Module):
             recon: torch.Tensor,
             window_size: int,
             step_size: int):
-
         tb = self.multiband_forward(target, window_size, step_size)
         rb = self.multiband_forward(recon, window_size, step_size)
         loss = 0
@@ -132,7 +266,6 @@ class AutocorrelationLoss(nn.Module):
         for k, v in rb.items():
             loss = loss + torch.abs(v - tb[k]).sum()
         return loss
-
 
     def forward(self, audio: torch.Tensor, window_size: int = 128, step_size: int = 64):
         batch = audio.shape[0]
@@ -177,19 +310,77 @@ class AutocorrelationLoss(nn.Module):
         return torch.abs(t - r).sum()
 
 
+def train_resource_constrained_autoencoder():
+    loss_model = SpikingModel(
+        n_channels=64,
+        filter_size=64,
+        periodicity_size=64,
+        memory_size=64,
+        frame_memory_size=8).to(device)
+
+    ae = AutoEncoder(
+        channels=64,
+        bottleneck_size=64,
+        bottleneck_frames=16).to(device)
+
+    optim = Adam(ae.parameters(), lr=1e-3)
+    collection = LmdbCollection('spiking')
+
+    # TODO: Figure out how to set up a server prior to using logger
+    recon_audio, orig_audio = loggers(
+        ['recon', 'orig'],
+        'audio/wav',
+        encode_audio,
+        collection)
+
+    # orig_audio(target)
+
+    serve_conjure([
+        orig_audio,
+        recon_audio,
+    ], port=9999, n_workers=1)
+
+    stream = AudioIterator(
+        batch_size=8,
+        n_samples=n_samples,
+        samplerate=22050,
+        normalize=True,
+        overfit=True)
+
+    for i, item in enumerate(iter(stream)):
+        optim.zero_grad()
+        target = item.view(-1, 1, n_samples)
+        recon = ae.forward(target)
+
+        # target_env = F.max_pool1d(target, kernel_size=512, stride=256, padding=256)
+        # recon_env = F.max_pool1d(recon, kernel_size=512, stride=256, padding=256)
+        # env_loss = torch.abs(target_env - recon_env).sum()
+        loss = loss_model.compute_multiband_loss(target, recon) #+ env_loss
+
+        # loss = torch.abs(
+        #     stft(target, 2048, 256, pad=True) \
+        #     - stft(recon, 2048, 256, pad=True)).sum()
+        loss.backward()
+        optim.step()
+        orig_audio(target)
+        recon_audio(max_norm(recon))
+        print(i, loss.item())
+
 
 def overfit_model():
     target = get_one_audio_segment(n_samples).to(device).view(1, 1, n_samples)
     target = max_norm(target)
 
-    # loss_model = SpikingModel(
-    #     n_channels=128,
-    #     filter_size=128,
-    #     periodicity_size=128,
-    #     memory_size=64,
-    #     frame_memory_size=8).to(device)
+    loss_model = SpikingModel(
+        n_channels=64,
+        filter_size=64,
+        periodicity_size=64,
+        memory_size=64,
+        frame_memory_size=8).to(device)
 
-    loss_model = AutocorrelationLoss(n_channels=64, filter_size=64).to(device)
+    # ae = AutoEncoder(2048, 256, 32).to(device)
+
+    # loss_model = AutocorrelationLoss(n_channels=64, filter_size=64).to(device)
 
     overfit_model = OverfitRawAudio(target.shape, std=0.01, normalize=True).to(device)
     optim = Adam(overfit_model.parameters(), lr=1e-3)
@@ -217,7 +408,10 @@ def overfit_model():
         recon = max_norm(recon)
         recon_audio(max_norm(recon))
 
-        loss = loss_model.compute_multiband_loss(target, recon, 64, 16)
+        # ae.forward(target)
+
+
+        loss = loss_model.compute_multiband_loss(target, recon)
 
         # loss = torch.abs(target_features - recon_features).sum()
         loss.backward()
@@ -228,14 +422,5 @@ def overfit_model():
 
 
 if __name__ == '__main__':
-    overfit_model()
-
-    # samples = get_one_audio_segment(n_samples, device='cpu')
-    # samples = samples.view(1, 1, n_samples).to('cpu')
-    # print(samples.device)
-    #
-    # model = SpikingModel(n_channels=128, filter_size=128, periodicity_size=256)
-    # binary = model.forward(samples)
-    # active = (binary > 0).sum()
-    # sparsity = active / binary.numel()
-    # print(binary.shape, binary.max().item(), binary.min().item(), sparsity, active.item())
+    # overfit_model()
+    train_resource_constrained_autoencoder()

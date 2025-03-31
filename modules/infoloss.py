@@ -94,8 +94,10 @@ class CorrelationLoss(nn.Module):
         n_spec = noise_spec[:, indices]
 
         # The residual covariance should resemble/move toward noise
-        t_cov = covariance(n_spec)
-        r_cov = covariance(residual)
+        # t_cov = covariance(n_spec)
+        # r_cov = covariance(residual)
+        t_cov = torch.corrcoef(n_spec)
+        r_cov = torch.corrcoef(residual)
 
         cov_loss = torch.abs(t_cov - r_cov).sum()
 
