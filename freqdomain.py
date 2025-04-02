@@ -10,15 +10,19 @@ from torch.optim import Adam
 from conjure import LmdbCollection, loggers, serve_conjure, SupportedContentType, NumpySerializer, NumpyDeserializer
 from conjure.logger import encode_audio
 from data import get_one_audio_segment
-from modules import HyperNetworkLayer, limit_norm, flattened_multiband_spectrogram, max_norm, stft, sparsify
+from modules import flattened_multiband_spectrogram, max_norm, stft, sparsify, \
+    gammatone_filter_bank
 from modules.infoloss import CorrelationLoss
-from modules.overlap_add import overlap_add
-from modules.phase import windowed_audio
-from modules.transfer import fft_convolve, advance_one_frame
+from modules.transfer import fft_convolve, freq_domain_transfer_function_to_resonance
 from modules.upsample import upsample_with_holes
-from spiking import SpikingModel
-from util import device, make_initializer, count_parameters
-from util.music import musical_scale_hz
+from util import device, make_initializer, count_parameters, playable
+
+import matplotlib
+
+from util.playable import listen_to_sound
+
+matplotlib.use('Qt5Agg')
+from matplotlib import pyplot as plt
 
 n_samples = 2 ** 17
 transform_window_size = 2048
@@ -117,7 +121,7 @@ def run_layer(
     x = fft_convolve(x, decays)
     x = (out_mapping @ x) + orig
 
-    # shift = shift @ x
+    # shift = torch.tanh(shift @ x)
 
     cp = torch.tanh(x * gains.view(batch_size, control_plane_dim, 1))
 
@@ -382,7 +386,85 @@ class Stack(nn.Module):
 #         return mixed
 
 
+class ResonanceLayer(nn.Module):
+    def __init__(
+            self,
+            n_frames: int,
+            n_samples: int,
+            control_plane_dim: int,
+            n_resonances: int,
+            n_deformations: int,
+            window_size: int,
+            max_gain: float = 10,
+            base_resonance: float = 0.01,
+    ):
 
+        super().__init__()
+        self.n_deformations = n_deformations
+        self.n_resonances = n_resonances
+        self.control_plane_dim = control_plane_dim
+        self.n_samples = n_samples
+        self.n_frames = n_frames
+        self.window_size = window_size
+        self.n_coeffs = self.window_size // 2 + 1
+        self.resonance_frames = self.n_samples // (self.window_size // 2)
+        self.max_gain = max_gain
+        self.base_resonance = base_resonance
+        self.resonance_range = 1 - self.base_resonance
+
+        self.spectral_shapes = nn.Parameter(
+            torch.zeros(self.n_resonances, self.n_coeffs).uniform_(-3, 3) \
+            * torch.zeros(self.n_resonances, self.n_coeffs).bernoulli_(p=0.001)
+        )
+
+        self.route_energy = nn.Parameter(torch.zeros(self.control_plane_dim, self.n_resonances).bernoulli_(p=0.1))
+        self.route_to_control_plane = nn.Parameter(torch.zeros(self.n_resonances, self.control_plane_dim).bernoulli_(p=0.1))
+
+        self.gains = nn.Parameter(torch.zeros(1, self.n_resonances, 1).uniform_(-3, 3))
+
+
+
+    def forward(self, control_plane: torch.Tensor, mix: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+
+        if control_plane.shape[-1] != self.n_samples:
+            cp = upsample_with_holes(control_plane, self.n_samples)
+        else:
+            cp = control_plane
+
+        n = torch.zeros(1, 1, 128, device=control_plane.device).uniform_(-1, 1)
+        n = n * torch.hamming_window(128, device=n.device)
+
+        n = torch.cat([n, torch.zeros(1, 1, self.n_samples - 128, device=n.device)], dim=-1)
+        energy = fft_convolve(cp, n)
+
+        # print(self.spectral_shapes.shape, self.gammatone.shape)
+
+        resonances = freq_domain_transfer_function_to_resonance(
+            window_size=self.window_size,
+            coeffs=self.base_resonance + (torch.sigmoid(self.spectral_shapes) * self.resonance_range),
+            n_frames=self.resonance_frames,
+            apply_decay=True,
+        ).view(1, self.n_resonances, self.n_samples)
+
+        energy = self.route_energy.T @ energy
+
+        energy_with_resonance = fft_convolve(energy, resonances)
+
+        # print(energy_with_resonance.shape, self.gains.shape)
+
+        energy_with_resonance = torch.tanh(energy_with_resonance * torch.sigmoid(self.gains) * self.max_gain)
+
+        mix = torch.softmax(mix, dim=-1)
+
+        stacked = torch.stack([energy, energy_with_resonance], dim=-1)
+
+        x = torch.sum(stacked * mix[:, None, None, :], dim=-1)
+
+        routed = self.route_to_control_plane.T @ x
+
+        output = torch.sum(x, dim=1, keepdim=True)
+
+        return routed, output
 
 
 class OverfitAudioNetwork(nn.Module):
@@ -559,7 +641,7 @@ def construct_experiment_model(n_samples: int) -> OverfitAudioNetwork:
     samplerate = 22050
 
     # ==========
-    window_size = 512
+    window_size = 128
     block_size = 128
     control_plane_dim = block_size
 
@@ -633,10 +715,15 @@ def train_and_monitor_overfit_model(
             optim.zero_grad()
             recon, control_signal = model.forward()
 
+            # windowed = recon.unfold(-1, 512, 512)
+            # last = windowed[:, :, -1:]
+            # first = windowed[:, :, :1]
+            # window_loss = torch.abs(last - first).sum()
+
             recon_audio(max_norm(recon.sum(dim=1, keepdim=True)))
 
             # loss = loss_model.compute_multiband_loss(target, recon)
-            loss = loss_model.multiband_noise_loss(target, recon, 64, 16)
+            loss = loss_model.multiband_noise_loss(target, recon, 64, 16) #+ window_loss
             # loss = reconstruction_loss(recon, target)
             # recon_loss = recon_loss + loss_model.noise_loss(target, recon)
             # loss = loss + sparsity_loss(control_signal)
@@ -666,8 +753,45 @@ def train_and_monitor_overfit_model(
 
 
 if __name__ == '__main__':
-    train_and_monitor_overfit_model(
-        n_samples=2 ** 17,
-        samplerate=22050,
-    )
+    # train_and_monitor_overfit_model(
+    #     n_samples=2 ** 17,
+    #     samplerate=22050,
+    # )
     # train_and_monitor_auto_encoder(batch_size=2)
+
+    control_plane_dim = 16
+    n_resonances = 16
+    n_deformations = 4
+
+    layer = ResonanceLayer(
+        n_frames=128,
+        n_samples=2**16,
+        control_plane_dim=control_plane_dim,
+        n_resonances=n_resonances,
+        n_deformations=n_deformations,
+        window_size=2048,
+        base_resonance=0.1,
+        max_gain=2)
+
+
+    control_plane = torch.zeros(3, control_plane_dim, n_frames).bernoulli_(p=0.01)
+    plt.matshow(control_plane.data.cpu().numpy()[0])
+    plt.show()
+
+    mix = torch.zeros(3, 2).uniform_(0, 1)
+    x, output = layer.forward(control_plane, mix)
+
+    print(output.shape)
+    spec = stft(output, 2048, 256, pad=True)
+    print(spec.shape)
+
+    # print(spech.)
+    plt.matshow(spec.data.cpu().numpy()[0].reshape((-1, 1025)))
+    plt.show()
+
+    x = playable(output, 22050, normalize=True)
+    listen_to_sound(x)
+
+
+    # print(x.shape, output.shape)
+

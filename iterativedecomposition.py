@@ -18,9 +18,13 @@ from modules.eventgenerators.generator import EventGenerator, ShapeSpec
 from modules.eventgenerators.overfitresonance import OverfitResonanceModel, Lookup
 from modules.eventgenerators.schedule import DiracScheduler
 from modules.eventgenerators.splat import SplattingEventGenerator
+from modules.infoloss import CorrelationLoss
+from modules.mixer import MixerStack
 from modules.multiheadtransform import MultiHeadTransform
 from modules.transfer import fft_convolve
+from spiking import AutocorrelationLoss
 from util import device, encode_audio, make_initializer
+from torch.nn import functional as F
 
 # the size, in samples of the audio segment we'll overfit
 n_samples = 2 ** 17
@@ -70,19 +74,69 @@ def fft_shift(a: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
     # samples = torch.relu(samples)
     return samples
 
+class MultibandSpectrogram(nn.Module):
+    def __init__(self, window_size: int, step_size: int, desired_frames: int):
+        super().__init__()
+        self.window_size = window_size
+        self.n_coeffs = self.window_size // 2 + 1
+        self.step_size = step_size
+        self.desired_frames = desired_frames
+
+    def compute_loss(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        x = self.forward(x)
+        y = self.forward(y)
+        return torch.abs(x - y).sum()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch = x.shape[0]
+
+        x = fft_frequency_decompose(x, 512)
+        # print(len(x))
+
+        bands = []
+
+        for size, band in x.items():
+            spec = stft(band, self.window_size, self.step_size, pad=True)
+            # print(spec.shape)
+            batch, n_events, frames, coeffs = spec.shape
+
+            spec = spec.reshape(-1, frames, self.n_coeffs).permute(0, 2, 1)
+            f = spec.shape[-1]
+            if f < self.desired_frames:
+                spec = F.upsample(spec, size=self.desired_frames, mode='linear')
+            elif f == self.desired_frames:
+                spec = spec
+            else:
+                step = f // self.desired_frames
+                spec = F.max_pool1d(spec, kernel_size=step * 2, stride=step, padding=step)[..., :self.desired_frames]
+
+            spec = spec.view(batch, -1, coeffs, self.desired_frames)
+            bands.append(spec)
+
+
+        bands = torch.cat(bands, dim=2)
+        # print(bands.shape)
+        return bands
+
+transform_model = MultibandSpectrogram(128, 32, n_samples // 256).to(device)
 
 def transform(x: torch.Tensor):
     batch_size = x.shape[0]
-    x = stft(x, transform_window_size, transform_step_size, pad=True)
-
-    n_coeffs = transform_window_size // 2 + 1
-    x = x.view(batch_size, -1, n_coeffs)[..., :n_coeffs - 1].permute(0, 2, 1)
+    # x = stft(x, transform_window_size, transform_step_size, pad=True)
+    #
+    # n_coeffs = transform_window_size // 2 + 1
+    # x = x.view(batch_size, -1, n_coeffs)[..., :n_coeffs - 1].permute(0, 2, 1)
+    x = transform_model.forward(x)
+    # print(x.shape)
+    x = x[:, 0, :, :]
     return x
 
 
 def loss_transform(x: torch.Tensor) -> torch.Tensor:
     batch, n_events, time = x.shape
-    x = stft(x, transform_window_size, transform_step_size, pad=True)
+    # x = stft(x, transform_window_size, transform_step_size, pad=True)
+    # x = x.view(batch, n_events, -1)
+    x = transform_model.forward(x)
     x = x.view(batch, n_events, -1)
     return x
 
@@ -257,6 +311,23 @@ class MultiRNN(EventGenerator, nn.Module):
 
 
 
+class MixerEncoder(nn.Module):
+    def __init__(self, in_channels: int, hidden: int, out_channels: int):
+        super().__init__()
+        self.encoder = MixerStack(
+            in_channels=in_channels,
+            channels=hidden,
+            sequence_length=n_frames,
+            layers=4,
+            attn_blocks=2,
+            channels_last=False)
+        self.out = nn.Conv1d(hidden, out_channels, 1, 1, 0)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.encoder(x)
+        x = self.out(x)
+        return x
+
 class Model(nn.Module):
 
     def __init__(
@@ -278,6 +349,8 @@ class Model(nn.Module):
             pos_encodings=False,
             do_norm=False,
             with_activation_norm=with_activation_norm)
+
+        # self.encoder = MixerEncoder(in_channels=in_channels, hidden=hidden_channels, out_channels=hidden_channels)
 
         self.to_event_vectors = nn.Conv1d(hidden_channels, context_dim, 1, 1, 0)
         self.to_event_switch = nn.Conv1d(hidden_channels, 1, 1, 1, 0)
@@ -519,7 +592,7 @@ def train_and_monitor(
         f'training on {n_seconds} of audio and {n_events} events with {model_type} event generator')
     print('==========================================')
 
-    model_filename = 'iterativedecomposition15.dat'
+    model_filename = 'iterativedecomposition16.dat'
 
     def train():
 
@@ -584,7 +657,7 @@ def train_and_monitor(
 
         model = Model(
             resonance_model=resonance_model,
-            in_channels=1024,
+            in_channels=585,
             hidden_channels=hidden_channels,
             with_activation_norm=True).to(device)
 
@@ -605,7 +678,7 @@ def train_and_monitor(
 
         # loss_model = AutocorrelationLoss(n_channels=64, filter_size=64).to(device)
 
-        # loss_model = CorrelationLoss(n_elements=512)
+        # loss_model = CorrelationLoss(n_elements=1024).to(device)
 
         for i, item in enumerate(iter(stream)):
             optim.zero_grad()
@@ -631,8 +704,12 @@ def train_and_monitor(
 
                 loss = iterative_loss(target, recon, loss_transform, ratio_loss=True)
 
+                # loss = loss + loss_model.multiband_noise_loss(target, recon_summed, 64, 16)
+
 
             scaler.scale(loss).backward()
+
+            # clip_grad_value_(model.parameters(), 0.5)
 
             if model_type == 'ssm':
                 clip_grad_value_(model.parameters(), 0.5)
@@ -650,7 +727,7 @@ def train_and_monitor(
                 rnd = max_norm(rnd)
                 random_audio(rnd)
 
-            if i % 50 == 0:
+            if i % 1000 == 0:
                 with torch.no_grad():
                     s = get_one_audio_segment(n_samples * 4, device=device)
                     s = s.view(1, 1, -1)

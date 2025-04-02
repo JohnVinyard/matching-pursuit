@@ -3,6 +3,8 @@ from torch.nn.utils.weight_norm import weight_norm
 import torch.nn.functional as F
 import torch
 
+from modules.atoms import unit_norm
+
 
 class MixerBlock(nn.Module):
     def __init__(self, channels, sequence_length):
@@ -16,6 +18,8 @@ class MixerBlock(nn.Module):
         self.proj2 = weight_norm(nn.Linear(sequence_length, channels))
         self.proj3 = weight_norm(nn.Linear(channels, sequence_length))
         self.nl = lambda x: F.elu(x)
+
+        self.norm = nn.LayerNorm(channels)
 
     
     def forward(self, x):
@@ -37,7 +41,9 @@ class MixerBlock(nn.Module):
         x = x + tr + skip
         x = self.nl(x)
 
+        # x = self.norm(x)
 
+        # x = unit_norm(x)
         return x
 
 
