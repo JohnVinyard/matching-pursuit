@@ -1,5 +1,5 @@
 from argparse import ArgumentParser
-from typing import Union
+from typing import Union, Tuple
 
 import numpy as np
 import torch
@@ -22,7 +22,7 @@ from modules.infoloss import CorrelationLoss
 from modules.mixer import MixerStack
 from modules.multiheadtransform import MultiHeadTransform
 from modules.transfer import fft_convolve
-from spiking import AutocorrelationLoss
+from spiking import AutocorrelationLoss, SpikingModel
 from util import device, encode_audio, make_initializer
 from torch.nn import functional as F
 
@@ -74,69 +74,178 @@ def fft_shift(a: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
     # samples = torch.relu(samples)
     return samples
 
-class MultibandSpectrogram(nn.Module):
-    def __init__(self, window_size: int, step_size: int, desired_frames: int):
+# class MultibandSpectrogram(nn.Module):
+#     def __init__(self, window_size: int, step_size: int, desired_frames: int):
+#         super().__init__()
+#         self.window_size = window_size
+#         self.n_coeffs = self.window_size // 2 + 1
+#         self.step_size = step_size
+#         self.desired_frames = desired_frames
+#
+#     def compute_loss(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+#         x = self.forward(x)
+#         y = self.forward(y)
+#         return torch.abs(x - y).sum()
+#
+#     def forward(self, x: torch.Tensor) -> torch.Tensor:
+#         batch = x.shape[0]
+#
+#         x = fft_frequency_decompose(x, 512)
+#         # print(len(x))
+#
+#         bands = []
+#
+#         for size, band in x.items():
+#             spec = stft(band, self.window_size, self.step_size, pad=True)
+#             # print(spec.shape)
+#             batch, n_events, frames, coeffs = spec.shape
+#
+#             spec = spec.reshape(-1, frames, self.n_coeffs).permute(0, 2, 1)
+#             f = spec.shape[-1]
+#             if f < self.desired_frames:
+#                 spec = F.upsample(spec, size=self.desired_frames, mode='linear')
+#             elif f == self.desired_frames:
+#                 spec = spec
+#             else:
+#                 step = f // self.desired_frames
+#                 spec = F.max_pool1d(spec, kernel_size=step * 2, stride=step, padding=step)[..., :self.desired_frames]
+#
+#             spec = spec.view(batch, -1, coeffs, self.desired_frames)
+#             bands.append(spec)
+#
+#
+#         bands = torch.cat(bands, dim=2)
+#         # print(bands.shape)
+#         return bands
+#
+# transform_model = MultibandSpectrogram(128, 32, n_samples // 256).to(device)
+
+def run_layer(
+        control_plane: torch.Tensor,
+        mapping: torch.Tensor,
+        decays: torch.Tensor,
+        out_mapping: torch.Tensor,
+        audio_mapping: torch.Tensor,
+        gains: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+
+    batch_size, control_plane_dim, frames = control_plane.shape
+
+
+    x = mapping @ control_plane
+    orig = x
+    decays = decays.view(batch_size, control_plane_dim, 1).repeat(1, 1, frames)
+
+    decays = torch.log(1e-12 + decays)
+    decays = torch.cumsum(decays, dim=-1)
+    decays = torch.exp(decays)
+
+    # decays = decays.cumprod(dim=-1)
+    # decays = torch.flip(decays, dims=[-1])
+    x = fft_convolve(x, decays)
+    x = (out_mapping @ x) + orig
+
+    cp = torch.tanh(x * gains.view(batch_size, control_plane_dim, 1))
+
+    audio = audio_mapping @ cp
+
+    # TODO: This should be mapped to audio outside of this layer, probably
+    # each layer by a single mapping network
+    audio = audio.permute(0, 2, 1)
+
+    audio = audio.reshape(batch_size, 1, -1)
+
+    return audio, cp
+
+
+class Block(nn.Module):
+    def __init__(
+            self,
+            block_size,
+            base_resonance: float = 0.5,
+            max_gain: float = 5,
+            window_size: Union[int, None] = None):
+
         super().__init__()
+        self.block_size = block_size
+        self.base_resonance = base_resonance
+        self.resonance_span = 1 - base_resonance
+        self.max_gain = max_gain
+        self.window_size = window_size or block_size
+
+        self.w1 = nn.Parameter(torch.zeros(block_size, block_size).uniform_(-0.01, 0.01))
+        self.w2 = nn.Parameter(torch.zeros(block_size, block_size).uniform_(-0.01, 0.01))
+        self.audio = nn.Parameter(torch.zeros(window_size, block_size).uniform_(-0.01, 0.01))
+
+
+        self.decays = nn.Parameter(torch.zeros(block_size).uniform_(0.001, 0.99))
+        self.gains = nn.Parameter(torch.zeros(block_size).uniform_(-3, 3))
+
+    def forward(self, cp: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        output, cp = run_layer(
+            torch.relu(cp),
+            self.w1,
+            self.base_resonance + torch.sigmoid(self.decays) * self.resonance_span,
+            self.w2,
+            self.audio,
+            torch.sigmoid(self.gains) * self.max_gain)
+        return output, cp
+
+
+class Stack(nn.Module):
+    def __init__(
+            self,
+            n_blocks,
+            block_size,
+            base_resonance: float = 0.5,
+            max_gain: float = 5,
+            window_size: Union[int, None] = None):
+        super().__init__()
+        self.block_size = block_size
+        self.n_blocks = n_blocks
         self.window_size = window_size
-        self.n_coeffs = self.window_size // 2 + 1
-        self.step_size = step_size
-        self.desired_frames = desired_frames
 
-    def compute_loss(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        x = self.forward(x)
-        y = self.forward(y)
-        return torch.abs(x - y).sum()
+        self.mix = nn.Parameter(torch.zeros(n_blocks).uniform_(-1, 1))
+        self.blocks = nn.ModuleList([
+            Block(
+                block_size,
+                base_resonance,
+                max_gain,
+                window_size = window_size
+            ) for _ in range(n_blocks)
+        ])
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        batch = x.shape[0]
+    def forward(self, cp):
+        batch_size, channels, frames = cp.shape
 
-        x = fft_frequency_decompose(x, 512)
-        # print(len(x))
+        working_control_plane = cp
 
-        bands = []
+        total_samples = frames * self.window_size
 
-        for size, band in x.items():
-            spec = stft(band, self.window_size, self.step_size, pad=True)
-            # print(spec.shape)
-            batch, n_events, frames, coeffs = spec.shape
+        channels = torch.zeros(
+            batch_size, self.n_blocks, total_samples, device=cp.device)
 
-            spec = spec.reshape(-1, frames, self.n_coeffs).permute(0, 2, 1)
-            f = spec.shape[-1]
-            if f < self.desired_frames:
-                spec = F.upsample(spec, size=self.desired_frames, mode='linear')
-            elif f == self.desired_frames:
-                spec = spec
-            else:
-                step = f // self.desired_frames
-                spec = F.max_pool1d(spec, kernel_size=step * 2, stride=step, padding=step)[..., :self.desired_frames]
+        for i, block in enumerate(self.blocks):
+            output, working_control_plane = block(working_control_plane)
+            channels[:, i: i + 1, :] = output
 
-            spec = spec.view(batch, -1, coeffs, self.desired_frames)
-            bands.append(spec)
+        mix = torch.softmax(self.mix, dim=-1)
+        mixed = channels.permute(0, 2, 1) @ mix
+        mixed = mixed.view(batch_size, 1, total_samples)
+        return max_norm(mixed)
 
 
-        bands = torch.cat(bands, dim=2)
-        # print(bands.shape)
-        return bands
-
-transform_model = MultibandSpectrogram(128, 32, n_samples // 256).to(device)
 
 def transform(x: torch.Tensor):
     batch_size = x.shape[0]
-    # x = stft(x, transform_window_size, transform_step_size, pad=True)
-    #
-    # n_coeffs = transform_window_size // 2 + 1
-    # x = x.view(batch_size, -1, n_coeffs)[..., :n_coeffs - 1].permute(0, 2, 1)
-    x = transform_model.forward(x)
-    # print(x.shape)
-    x = x[:, 0, :, :]
+    x = stft(x, transform_window_size, transform_step_size, pad=True)
+    n_coeffs = transform_window_size // 2 + 1
+    x = x.view(batch_size, -1, n_coeffs)[..., :n_coeffs - 1].permute(0, 2, 1)
     return x
 
 
 def loss_transform(x: torch.Tensor) -> torch.Tensor:
     batch, n_events, time = x.shape
-    # x = stft(x, transform_window_size, transform_step_size, pad=True)
-    # x = x.view(batch, n_events, -1)
-    x = transform_model.forward(x)
+    x = stft(x, transform_window_size, transform_step_size, pad=True)
     x = x.view(batch, n_events, -1)
     return x
 
@@ -162,32 +271,35 @@ class PhysicalModel(nn.Module):
         self.max_active = max_active
         self.window_size = window_size
 
-        self.net = nn.RNN(
-            input_size=window_size,
-            hidden_size=hidden_dim,
-            num_layers=1,
-            nonlinearity='tanh',
-            bias=False,
-            batch_first=True)
+        self.net = Stack(
+            3, self.control_plane_dim, base_resonance=0.5, max_gain=5, window_size=self.window_size)
 
-        self.in_projection = nn.Linear(control_plane_dim, window_size, bias=False)
-        self.out_projection = nn.Linear(hidden_dim, window_size, bias=False)
+        # self.net = nn.RNN(
+        #     input_size=window_size,
+        #     hidden_size=hidden_dim,
+        #     num_layers=1,
+        #     nonlinearity='tanh',
+        #     bias=False,
+        #     batch_first=True)
+
+        # self.in_projection = nn.Linear(control_plane_dim, window_size, bias=False)
+        # self.out_projection = nn.Linear(hidden_dim, window_size, bias=False)
 
     def forward(self, control: torch.Tensor) -> torch.Tensor:
         batch, cpd, frames = control.shape
-        control = control.permute(0, 2, 1)
+        # control = control.permute(0, 2, 1)
 
-        control = sparsify(control, self.max_active)
-        control = torch.relu(control)
+        control = sparsify(control / (control.sum() + 1e-8), self.max_active)
+        # control = torch.relu(control)
 
         # control = control[:, :, :frames // 4]
 
-        proj = self.in_projection(control)
-        result, hidden = self.net.forward(proj)
-        result = self.out_projection(result)
+        # proj = self.in_projection(control)
+        result = self.net.forward(control)
+        # result = self.out_projection(result)
 
         samples = result.view(batch, -1, n_samples)
-        samples = torch.sin(samples)
+        # samples = torch.sin(samples)
         return samples
 
 
@@ -200,7 +312,7 @@ class MultiRNN(EventGenerator, nn.Module):
             control_plane_dim: int = 16,
             hidden_dim: int = 128,
             n_frames: int = 128,
-            control_plane_sparsity: int = 128,
+            control_plane_sparsity: int = 32,
             window_size: int = 1024,
             n_events: int = 1,
             n_samples: int = n_samples,
@@ -226,7 +338,8 @@ class MultiRNN(EventGenerator, nn.Module):
                 control_plane_dim=control_plane_dim,
                 hidden_dim=hidden_dim,
                 max_active=control_plane_sparsity,
-                window_size=window_size, ) for _ in range(self.n_voices)
+                window_size=window_size, )
+            for _ in range(self.n_voices)
         ])
 
         self.room_shape = (1, n_events, n_verbs)
@@ -638,14 +751,14 @@ def train_and_monitor(
             )
         elif model_type == 'ssm':
 
-            window_size = 128
+            window_size = 512
             rnn_frames = n_samples // window_size
 
             resonance_model = MultiRNN(
                 n_voices=16,
                 n_control_planes=512,
-                control_plane_dim=32,
-                hidden_dim=128,
+                control_plane_dim=64,
+                hidden_dim=64,
                 control_plane_sparsity=128,
                 window_size=window_size,
                 n_frames=rnn_frames,
@@ -657,7 +770,7 @@ def train_and_monitor(
 
         model = Model(
             resonance_model=resonance_model,
-            in_channels=585,
+            in_channels=1024,
             hidden_channels=hidden_channels,
             with_activation_norm=True).to(device)
 
@@ -678,7 +791,8 @@ def train_and_monitor(
 
         # loss_model = AutocorrelationLoss(n_channels=64, filter_size=64).to(device)
 
-        # loss_model = CorrelationLoss(n_elements=1024).to(device)
+        loss_model = CorrelationLoss(n_elements=1024).to(device)
+
 
         for i, item in enumerate(iter(stream)):
             optim.zero_grad()
@@ -711,8 +825,8 @@ def train_and_monitor(
 
             # clip_grad_value_(model.parameters(), 0.5)
 
-            if model_type == 'ssm':
-                clip_grad_value_(model.parameters(), 0.5)
+            # if model_type == 'ssm':
+            #     clip_grad_value_(model.parameters(), 0.5)
 
             scaler.step(optim)
             scaler.update()

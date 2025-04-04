@@ -423,7 +423,6 @@ class ResonanceLayer(nn.Module):
         self.gains = nn.Parameter(torch.zeros(1, self.n_resonances, 1).uniform_(-3, 3))
 
 
-
     def forward(self, control_plane: torch.Tensor, mix: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
 
         if control_plane.shape[-1] != self.n_samples:
@@ -441,7 +440,7 @@ class ResonanceLayer(nn.Module):
 
         resonances = freq_domain_transfer_function_to_resonance(
             window_size=self.window_size,
-            coeffs=self.base_resonance + (torch.sigmoid(self.spectral_shapes) * self.resonance_range),
+            coeffs=self.base_resonance + (torch.sigmoid(self.spectral_shapes) * self.resonance_range * 0.9),
             n_frames=self.resonance_frames,
             apply_decay=True,
         ).view(1, self.n_resonances, self.n_samples)
@@ -779,6 +778,7 @@ if __name__ == '__main__':
     plt.show()
 
     mix = torch.zeros(3, 2).uniform_(0, 1)
+
     x, output = layer.forward(control_plane, mix)
 
     print(output.shape)
