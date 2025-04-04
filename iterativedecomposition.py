@@ -4,7 +4,6 @@ from typing import Union, Tuple
 import numpy as np
 import torch
 from torch import nn
-from torch.nn.utils import clip_grad_value_
 from torch.optim import Adam
 
 from config import Config
@@ -18,13 +17,14 @@ from modules.eventgenerators.generator import EventGenerator, ShapeSpec
 from modules.eventgenerators.overfitresonance import OverfitResonanceModel, Lookup
 from modules.eventgenerators.schedule import DiracScheduler
 from modules.eventgenerators.splat import SplattingEventGenerator
-from modules.infoloss import CorrelationLoss
 from modules.mixer import MixerStack
 from modules.multiheadtransform import MultiHeadTransform
 from modules.transfer import fft_convolve
-from spiking import AutocorrelationLoss, SpikingModel
 from util import device, encode_audio, make_initializer
-from torch.nn import functional as F
+
+import matplotlib
+matplotlib.use('Qt5Agg')
+from matplotlib import pyplot as plt
 
 # the size, in samples of the audio segment we'll overfit
 n_samples = 2 ** 17
@@ -74,51 +74,6 @@ def fft_shift(a: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
     # samples = torch.relu(samples)
     return samples
 
-# class MultibandSpectrogram(nn.Module):
-#     def __init__(self, window_size: int, step_size: int, desired_frames: int):
-#         super().__init__()
-#         self.window_size = window_size
-#         self.n_coeffs = self.window_size // 2 + 1
-#         self.step_size = step_size
-#         self.desired_frames = desired_frames
-#
-#     def compute_loss(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-#         x = self.forward(x)
-#         y = self.forward(y)
-#         return torch.abs(x - y).sum()
-#
-#     def forward(self, x: torch.Tensor) -> torch.Tensor:
-#         batch = x.shape[0]
-#
-#         x = fft_frequency_decompose(x, 512)
-#         # print(len(x))
-#
-#         bands = []
-#
-#         for size, band in x.items():
-#             spec = stft(band, self.window_size, self.step_size, pad=True)
-#             # print(spec.shape)
-#             batch, n_events, frames, coeffs = spec.shape
-#
-#             spec = spec.reshape(-1, frames, self.n_coeffs).permute(0, 2, 1)
-#             f = spec.shape[-1]
-#             if f < self.desired_frames:
-#                 spec = F.upsample(spec, size=self.desired_frames, mode='linear')
-#             elif f == self.desired_frames:
-#                 spec = spec
-#             else:
-#                 step = f // self.desired_frames
-#                 spec = F.max_pool1d(spec, kernel_size=step * 2, stride=step, padding=step)[..., :self.desired_frames]
-#
-#             spec = spec.view(batch, -1, coeffs, self.desired_frames)
-#             bands.append(spec)
-#
-#
-#         bands = torch.cat(bands, dim=2)
-#         # print(bands.shape)
-#         return bands
-#
-# transform_model = MultibandSpectrogram(128, 32, n_samples // 256).to(device)
 
 def run_layer(
         control_plane: torch.Tensor,
@@ -274,16 +229,6 @@ class PhysicalModel(nn.Module):
         self.net = Stack(
             3, self.control_plane_dim, base_resonance=0.5, max_gain=5, window_size=self.window_size)
 
-        # self.net = nn.RNN(
-        #     input_size=window_size,
-        #     hidden_size=hidden_dim,
-        #     num_layers=1,
-        #     nonlinearity='tanh',
-        #     bias=False,
-        #     batch_first=True)
-
-        # self.in_projection = nn.Linear(control_plane_dim, window_size, bias=False)
-        # self.out_projection = nn.Linear(hidden_dim, window_size, bias=False)
 
     def forward(self, control: torch.Tensor) -> torch.Tensor:
         batch, cpd, frames = control.shape
@@ -469,12 +414,17 @@ class Model(nn.Module):
         self.to_event_switch = nn.Conv1d(hidden_channels, 1, 1, 1, 0)
         self.resonance = resonance_model
 
+        self.context_dim = context_dim
+
         self.multihead = MultiHeadTransform(
             latent_dim=context_dim,
             hidden_channels=hidden_channels,
             n_layers=2,
             shapes=self.resonance.shape_spec,
         )
+
+        self.reservoir_size = 256
+        self.reservoir = np.zeros((self.reservoir_size, self.context_dim), dtype=np.float32)
 
         self.apply(initializer)
 
@@ -533,10 +483,22 @@ class Model(nn.Module):
         events = self.resonance.forward(**choices_with_scheduling)
         return events
 
-    def random_sequence(self, device=device) -> torch.Tensor:
-        vecs = torch.zeros(1, 1, context_dim, device=device).uniform_(-1, 1)
+    def random_sequence(self, device=device, n_events: int = 1, batch_size: int = 1, max_events: int = 32) -> torch.Tensor:
+        # vecs = torch.zeros(1, 1, context_dim, device=device).uniform_(-1, 1)
+        total_needed = batch_size * max_events
+        indices = np.random.permutation(self.reservoir_size)[:total_needed]
+        vecs = self.reservoir[indices]
+        vecs = torch.from_numpy(vecs).to(device).float()
+
+        vecs = vecs.view(batch_size, max_events, self.context_dim)
+
+        raw_times = torch.zeros(batch_size, max_events, n_frames, device=device).uniform_(-1, 1)
+        raw_times[:, :, n_frames // 2:] = 0
         times = sparse_softmax(
-            torch.zeros(1, 1, n_frames, device=device).uniform_(-1, 1), normalize=True, dim=-1)
+            raw_times, normalize=True, dim=-1)
+        times = times * torch.zeros_like(times).uniform_(0, 1)
+
+        print(vecs.shape, times.shape)
         final = self.generate(vecs, times)
         return final
 
@@ -638,6 +600,16 @@ class Model(nn.Module):
         schedules = torch.cat(schedules, dim=1)
         residuals = torch.cat(residuals, dim=1)
 
+        # put vectors into the reservoir
+        v = vecs.view(-1, self.context_dim)
+        indices = np.random.permutation(self.reservoir_size)[:v.shape[0]]
+        v = v.data.cpu().numpy()
+        for i, index in enumerate(indices):
+            self.reservoir[index, :] = v[i, :]
+
+        # plt.matshow(self.reservoir)
+        # plt.show()
+
         if return_all_residuals:
             return channels, vecs, schedules, residuals
         elif return_residual:
@@ -677,14 +649,14 @@ def train_and_monitor(
 
     collection = LmdbCollection(path='iterativedecomposition')
 
-    recon_audio, orig_audio, random_audio, streaming = loggers(
-        ['recon', 'orig', 'random', 'streaming'],
+    recon_audio, orig_audio, random_audio = loggers(
+        ['recon', 'orig', 'random'],
         'audio/wav',
         encode_audio,
         collection)
 
-    envelopes, latents = loggers(
-        ['envelopes', 'latents'],
+    envelopes, latents, reservoir = loggers(
+        ['envelopes', 'latents', 'reservoir'],
         SupportedContentType.Spectrogram.value,
         to_numpy,
         collection,
@@ -697,7 +669,7 @@ def train_and_monitor(
         random_audio,
         envelopes,
         latents,
-        streaming
+        reservoir
     ], port=9999, n_workers=1)
 
     print('==========================================')
@@ -789,10 +761,6 @@ def train_and_monitor(
 
         optim = Adam(model.parameters(), lr=1e-4)
 
-        # loss_model = AutocorrelationLoss(n_channels=64, filter_size=64).to(device)
-
-        loss_model = CorrelationLoss(n_elements=1024).to(device)
-
 
         for i, item in enumerate(iter(stream)):
             optim.zero_grad()
@@ -818,36 +786,33 @@ def train_and_monitor(
 
                 loss = iterative_loss(target, recon, loss_transform, ratio_loss=True)
 
-                # loss = loss + loss_model.multiband_noise_loss(target, recon_summed, 64, 16)
-
 
             scaler.scale(loss).backward()
 
-            # clip_grad_value_(model.parameters(), 0.5)
-
-            # if model_type == 'ssm':
-            #     clip_grad_value_(model.parameters(), 0.5)
 
             scaler.step(optim)
             scaler.update()
             print(i, loss.item())
 
 
+            optim.zero_grad()
+
             with torch.no_grad():
                 # TODO: this should be collecting statistics from reconstructions
                 # so that random reconstructions are within the expected distribution
-                rnd = model.random_sequence()
+                rnd = model.random_sequence(batch_size=1, max_events=8)
                 rnd = torch.sum(rnd, dim=1, keepdim=True)
                 rnd = max_norm(rnd)
                 random_audio(rnd)
+                reservoir(max_norm(torch.from_numpy(model.reservoir)))
 
-            if i % 1000 == 0:
-                with torch.no_grad():
-                    s = get_one_audio_segment(n_samples * 4, device=device)
-                    s = s.view(1, 1, -1)
-                    s = model.streaming(s)
-                    print(s.shape)
-                    streaming(max_norm(s))
+            # if i % 1000 == 0:
+            #     with torch.no_grad():
+            #         s = get_one_audio_segment(n_samples * 4, device=device)
+            #         s = s.view(1, 1, -1)
+            #         s = model.streaming(s)
+            #         print(s.shape)
+            #         streaming(max_norm(s))
 
             if save_and_load_weights and i % 100 == 0:
                 torch.save(model.state_dict(), model_filename)

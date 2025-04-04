@@ -634,6 +634,8 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
         final = final.view(-1, self.n_events, self.n_samples)
         final = final * torch.abs(amplitudes)
 
+        # print('AMPS', amplitudes)
+
         # End layer ==========================================
 
         scheduled = self.scheduler.schedule(times, final)
