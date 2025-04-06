@@ -527,7 +527,7 @@ if __name__ == '__main__':
     transform_block_size = total_complex_coeffs
     to_samples = \
         torch.zeros(transform_block_size, instrument_dim).uniform_(-1, 1) \
-        * torch.zeros(transform_block_size, instrument_dim).bernoulli_(p=0.1)
+        * torch.zeros(transform_block_size, instrument_dim).bernoulli_(p=0.01)
 
     damping = 0.7
 
