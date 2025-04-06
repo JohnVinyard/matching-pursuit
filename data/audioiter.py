@@ -60,3 +60,21 @@ def get_one_audio_segment(
         audio_path=audio_path)
     target: torch.Tensor = next(iter(ai)).to(device).view(-1, 1, n_samples)
     return target
+
+def get_one_audio_batch(
+        batch_size: int,
+        n_samples: int,
+        samplerate: int = 22050,
+        device: Union[torch.device, None] = None,
+        pattern: str = '*.wav',
+        audio_path: Optional[str] = None) -> torch.Tensor:
+    ai = AudioIterator(
+        batch_size=batch_size,
+        n_samples=n_samples,
+        samplerate=samplerate,
+        normalize=True,
+        overfit=True,
+        pattern=pattern,
+        audio_path=audio_path)
+    target: torch.Tensor = next(iter(ai)).to(device).view(-1, 1, n_samples)
+    return target

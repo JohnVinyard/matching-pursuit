@@ -63,8 +63,7 @@ class CanonicalOrdering(nn.Module):
         # project to one dimension
         z = x @ self.projection
         indices = torch.argsort(z, dim=1)
-        print(indices.squeeze())
-        
+
         
         # order based on the projection
         ordered = torch.take_along_dim(x, indices=indices, dim=1)

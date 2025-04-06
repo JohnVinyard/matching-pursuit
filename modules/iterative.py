@@ -15,6 +15,12 @@ from torch.nn import functional as F
 TensorTransform = Callable[[torch.Tensor], torch.Tensor]
 
 
+def sort_channels_descending_norm(x: torch.Tensor) -> torch.Tensor:
+    diff = torch.norm(x, dim=(-1), p=1)
+    indices = torch.argsort(diff, dim=-1, descending=True)
+    srt = torch.take_along_dim(x, indices[:, :, None], dim=1)
+    return srt
+
 def iterative_loss(
         target_audio: torch.Tensor,
         recon_channels: torch.Tensor,

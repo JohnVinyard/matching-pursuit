@@ -9,11 +9,19 @@ from PIL import Image
 from matplotlib import pyplot as plt
 from io import BytesIO
 from soundfile import SoundFile
-from scipy.signal import stft
 from data.audioiter import AudioIterator
+from modules import stft
 
 from modules.hypernetwork import HyperNetworkLayer
+from modules.overlap_add import overlap_add
 from modules.transfer import fft_convolve, freq_domain_transfer_function_to_resonance
+
+import matplotlib
+
+from util import playable
+
+matplotlib.use('Qt5Agg')
+from matplotlib import pyplot as plt
 
 from scipy.signal import gammatone
 
@@ -502,32 +510,88 @@ def test_shift():
 # TODO: frequency-matching experiment with wavetable
 
 if __name__ == '__main__':
-    ai = AudioIterator(
-        batch_size=1, 
-        n_samples=2**17, 
-        samplerate=22050, 
-        normalize=True, 
-        overfit=True,)
-    target: torch.Tensor = next(iter(ai)).view(-1)
-    target = target.data.cpu().numpy()
-    
-    listen_to_sound(target, 22050)
-    
-    spec = np.fft.rfft(target, axis=-1)
-    spec.imag = 0
-    recon = np.fft.irfft(spec, axis=-1)
-    
-    listen_to_sound(recon, 22050)
-    
-    # b, a = gammatone(440, ftype='fir', order=4, numtaps=1024, fs=22050)
-    # plt.plot(b)
+
+    instrument_dim = 16
+    n_events = 1
+    batch_size = 1
+    block_size = 512
+    n_coeffs = block_size // 2 + 1
+    total_complex_coeffs = n_coeffs * 2
+
+    n_frames = 512
+
+    resting = torch.zeros(batch_size, n_events, instrument_dim)
+    masses = torch.zeros_like(resting).uniform_(0.01, 0.1)
+    tensions = torch.zeros_like(resting).uniform_(0.01, 0.1)
+
+    transform_block_size = total_complex_coeffs
+    to_samples = \
+        torch.zeros(transform_block_size, instrument_dim).uniform_(-1, 1) \
+        * torch.zeros(transform_block_size, instrument_dim).bernoulli_(p=0.1)
+
+    damping = 0.7
+
+    velocity = torch.zeros_like(resting)
+    acceleration = torch.zeros_like(resting)
+
+    state = torch.zeros_like(resting)
+
+    forces = torch.zeros(batch_size, n_events, instrument_dim, n_frames).bernoulli_(p=0.002) * 0.001
+    # forces[:, :, :, 0] = torch.zeros(batch_size, n_events, instrument_dim).uniform_(-0.01, 0.01)
+
+    displacement = torch.zeros_like(state)
+    blocks = []
+
+
+    for i in range(n_frames):
+
+        acceleration += (-displacement * tensions) / masses
+
+        # accumulate forces
+        # apply any forces from outside the system
+        acceleration += forces[:, :, :, i] / masses
+
+        # apply forces
+        velocity += acceleration
+        state += velocity
+
+        # clear
+        # apply damping (this could vary over time)
+        velocity *= damping
+        velocity[torch.abs(velocity) < 1e-6] = 0
+
+        # clear forces
+        acceleration *= 0
+
+        block = (displacement @ to_samples.T) #* torch.norm(displacement)
+
+        block = block.view(batch_size, n_events, n_coeffs, 2)
+        block = torch.view_as_complex(block)
+        block = torch.fft.irfft(block, dim=-1)
+
+        # print(torch.norm(displacement), torch.norm(block))
+        blocks.append(block[:, :, None, :])
+
+        # calculate new displacement
+        displacement = (state - resting)
+
+
+
+    # plt.matshow(np.abs(torch.stack(disp, dim=0).data.cpu().numpy().squeeze()))
     # plt.show()
-    
-    # _, _, x = stft(b, fs=22050, nperseg=64, noverlap=32)
-    # print(x.shape)
-    
-    # plt.matshow(np.log(1e-3 + np.abs(x)[::-1, :]))
-    # plt.show()
+
+    blocks = torch.cat(blocks, dim=-2)
+    # print(blocks.shape)
+    # samples = blocks.view(batch_size, n_events, -1)
+    samples = overlap_add(blocks, apply_window=True)
+
+    plt.plot(samples[0, 0, :])
+    plt.show()
+    samples = playable(samples, 22050, normalize=True)
+    listen_to_sound(samples, 22050, wait_for_user_input=True)
+
+
+
     
     
     

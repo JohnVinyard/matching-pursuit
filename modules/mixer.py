@@ -41,7 +41,7 @@ class MixerBlock(nn.Module):
         x = x + tr + skip
         x = self.nl(x)
 
-        # x = self.norm(x)
+        x = self.norm(x)
 
         # x = unit_norm(x)
         return x

@@ -9,18 +9,22 @@ from torch.optim import Adam
 from config import Config
 from conjure import LmdbCollection, serve_conjure, loggers, SupportedContentType, NumpySerializer, NumpyDeserializer
 from data import AudioIterator, get_one_audio_segment
+from data.audioiter import get_one_audio_batch
 from modules import stft, sparsify, sparsify_vectors, iterative_loss, max_norm, flattened_multiband_spectrogram, \
-    sparse_softmax, positional_encoding, NeuralReverb, fft_frequency_decompose
+    sparse_softmax, positional_encoding, NeuralReverb, fft_frequency_decompose, CanonicalOrdering
 from modules.anticausal import AntiCausalAnalysis
 from modules.eventgenerators.convimpulse import ConvImpulseEventGenerator
 from modules.eventgenerators.generator import EventGenerator, ShapeSpec
 from modules.eventgenerators.overfitresonance import OverfitResonanceModel, Lookup
 from modules.eventgenerators.schedule import DiracScheduler
 from modules.eventgenerators.splat import SplattingEventGenerator
+from modules.infoloss import CorrelationLoss
+from modules.iterative import sort_channels_descending_norm
 from modules.mixer import MixerStack
 from modules.multiheadtransform import MultiHeadTransform
 from modules.transfer import fft_convolve
 from util import device, encode_audio, make_initializer
+from torch.nn import functional as F
 
 import matplotlib
 matplotlib.use('Qt5Agg')
@@ -189,10 +193,16 @@ class Stack(nn.Module):
         return max_norm(mixed)
 
 
+# stats_batch = get_one_audio_batch(32, n_samples, samplerate, device)
+# spec = stft(stats_batch, 2048, 256, pad=True)
+# stds = torch.std(spec, dim=-2, keepdim=True)
+
+
 
 def transform(x: torch.Tensor):
     batch_size = x.shape[0]
     x = stft(x, transform_window_size, transform_step_size, pad=True)
+    # x = x / (stds + 1e-8)
     n_coeffs = transform_window_size // 2 + 1
     x = x.view(batch_size, -1, n_coeffs)[..., :n_coeffs - 1].permute(0, 2, 1)
     return x
@@ -201,6 +211,7 @@ def transform(x: torch.Tensor):
 def loss_transform(x: torch.Tensor) -> torch.Tensor:
     batch, n_events, time = x.shape
     x = stft(x, transform_window_size, transform_step_size, pad=True)
+    # x = x / (stds + 1e-8)
     x = x.view(batch, n_events, -1)
     return x
 
@@ -425,6 +436,8 @@ class Model(nn.Module):
 
         self.reservoir_size = 256
         self.reservoir = np.zeros((self.reservoir_size, self.context_dim), dtype=np.float32)
+        # self.scheduling_mean: float = 1e-3
+        # self.scheduling_std: float = 1e-3
 
         self.apply(initializer)
 
@@ -483,24 +496,32 @@ class Model(nn.Module):
         events = self.resonance.forward(**choices_with_scheduling)
         return events
 
-    def random_sequence(self, device=device, n_events: int = 1, batch_size: int = 1, max_events: int = 32) -> torch.Tensor:
-        # vecs = torch.zeros(1, 1, context_dim, device=device).uniform_(-1, 1)
-        total_needed = batch_size * max_events
+    def random_sequence(
+            self,
+            device=device,
+            batch_size: int = 1) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+
+        total_needed = batch_size * n_events
         indices = np.random.permutation(self.reservoir_size)[:total_needed]
         vecs = self.reservoir[indices]
         vecs = torch.from_numpy(vecs).to(device).float()
+        vecs = vecs.view(batch_size, n_events, self.context_dim)
 
-        vecs = vecs.view(batch_size, max_events, self.context_dim)
 
-        raw_times = torch.zeros(batch_size, max_events, n_frames, device=device).uniform_(-1, 1)
+        raw_times = torch.zeros(batch_size, n_events, n_frames, device=device).normal_(-1, 1)
         raw_times[:, :, n_frames // 2:] = 0
         times = sparse_softmax(
             raw_times, normalize=True, dim=-1)
-        times = times * torch.zeros_like(times).uniform_(0, 1)
 
-        print(vecs.shape, times.shape)
-        final = self.generate(vecs, times)
-        return final
+        times = \
+            times * \
+            torch.zeros_like(times).uniform_(0, 1) \
+            * torch.zeros_like(times).bernoulli_(p=0.5)
+
+        final = torch.cat(
+            [self.generate(vecs[:, i:i + 1, :], times[:, i:i + 1, :]) for i in range(n_events)], dim=1)
+
+        return final, vecs, times
 
     def streaming(self, audio: torch.Tensor, return_event_vectors: bool = False):
         samps = audio.shape[-1]
@@ -570,22 +591,12 @@ class Model(nn.Module):
         else:
             spec = audio
 
-        print(f'iterative {spec.shape}')
-
         for i in range(n_events):
-
-            # flat_spec = spec.reshape(batch_size, -1)
-            # mx, _ = torch.max(torch.abs(flat_spec), dim=-1, keepdim=True)
-            # mx = mx.view(batch_size, 1, 1)
-            # normalized_spec = spec / (mx + 1e-6)
 
             v, sched = self.encode(spec)
             vecs.append(v)
             schedules.append(sched)
             ch = self.generate(v, sched)
-
-            # scale the channel
-            # ch = ch * mx
 
             # perform transform and scale proportionally
             current = transform(ch)
@@ -600,15 +611,16 @@ class Model(nn.Module):
         schedules = torch.cat(schedules, dim=1)
         residuals = torch.cat(residuals, dim=1)
 
-        # put vectors into the reservoir
+        # put vectors into the reservoir to support random generations
         v = vecs.view(-1, self.context_dim)
         indices = np.random.permutation(self.reservoir_size)[:v.shape[0]]
         v = v.data.cpu().numpy()
-        for i, index in enumerate(indices):
-            self.reservoir[index, :] = v[i, :]
+        self.reservoir[indices, :] = v
 
-        # plt.matshow(self.reservoir)
-        # plt.show()
+        # record mean and std of scheduling impulses
+        # active = schedules[schedules > 0] + 1e-8
+        # self.scheduling_mean = active.mean().item()
+        # self.scheduling_std = active.std().item()
 
         if return_all_residuals:
             return channels, vecs, schedules, residuals
@@ -650,7 +662,7 @@ def train_and_monitor(
     collection = LmdbCollection(path='iterativedecomposition')
 
     recon_audio, orig_audio, random_audio = loggers(
-        ['recon', 'orig', 'random'],
+        ['recon', 'orig', 'random',],
         'audio/wav',
         encode_audio,
         collection)
@@ -669,7 +681,7 @@ def train_and_monitor(
         random_audio,
         envelopes,
         latents,
-        reservoir
+        reservoir,
     ], port=9999, n_workers=1)
 
     print('==========================================')
@@ -764,7 +776,6 @@ def train_and_monitor(
 
         for i, item in enumerate(iter(stream)):
             optim.zero_grad()
-            # disc_optim.zero_grad()
 
             with torch.cuda.amp.autocast():
                 target = item.view(batch_size, 1, n_samples).to(device)
@@ -785,26 +796,60 @@ def train_and_monitor(
                 recon_summed = recon_summed * weighting
 
                 loss = iterative_loss(target, recon, loss_transform, ratio_loss=True)
+                # loss = loss_model.forward(target, recon_summed)
 
 
             scaler.scale(loss).backward()
-
-
             scaler.step(optim)
             scaler.update()
             print(i, loss.item())
 
-
             optim.zero_grad()
 
+            # TODO: sample scale/amplitude of one-hot time vectors
+            # for completely realistic ground-truth generations.
+            # Then, sort both by descending norm and compare the spectrograms
+            # of each
             with torch.no_grad():
-                # TODO: this should be collecting statistics from reconstructions
-                # so that random reconstructions are within the expected distribution
-                rnd = model.random_sequence(batch_size=1, max_events=8)
-                rnd = torch.sum(rnd, dim=1, keepdim=True)
-                rnd = max_norm(rnd)
-                random_audio(rnd)
+                self_supervised_batch_size = 1
+                # Generate a random sequence using random event vectors from the recent past
+                rnd, vecs, times = model.random_sequence(batch_size=self_supervised_batch_size)
+
+                # normalize such that the loudest channel peaks at 1
+                random_seq = rnd
+                random_seq = random_seq.view(self_supervised_batch_size, -1)
+                random_seq = max_norm(random_seq)
+                random_seq = random_seq.view(self_supervised_batch_size, n_events, n_samples)
+
+                rnd = torch.sum(random_seq, dim=1, keepdim=True)
+
+
+                random_audio(max_norm(rnd))
                 reservoir(max_norm(torch.from_numpy(model.reservoir)))
+                # random_vecs(max_norm(vecs[0]))
+
+            # encode the random sequence
+            # recon, encoded, scheduling = model.iterative(rnd)
+            #
+            # self_supervised(max_norm(torch.sum(recon, dim=1, keepdim=True)))
+            #
+            # # sort the random sequence and the reconstruction by descending norms
+            # random_seq = sort_channels_descending_norm(random_seq)
+            # random_seq = loss_transform(random_seq)
+            #
+            # recon = sort_channels_descending_norm(recon)
+            # recon = loss_transform(recon)
+            #
+            # print('SELF-SUPERVISED', random_seq.shape, recon.shape)
+            #
+            # # compare the difference between the spectrogram at each individual channel
+            # loss = torch.abs(random_seq - recon).sum() * 1e-2
+
+
+            # loss.backward()
+            # optim.step()
+            # print('SELF-SUPERVISED', loss.item())
+
 
             # if i % 1000 == 0:
             #     with torch.no_grad():
