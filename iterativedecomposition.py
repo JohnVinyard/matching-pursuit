@@ -495,7 +495,7 @@ class Model(nn.Module):
         choices_with_scheduling = dict(**choices, times=scheduling)
 
         if include_intermediates:
-            events, intermediates = self.resonance.forward_with_intermediates(**choices_with_scheduling)
+            events, intermediates = self.resonance.forward_with_intermediate_steps(**choices_with_scheduling)
             return events, intermediates
         else:
             events = self.resonance.forward(**choices_with_scheduling)

@@ -106,7 +106,6 @@ for the sound reproductions in this article.
 
 """
 
-
 """[markdown]
 
 # Cite this Article
@@ -175,6 +174,16 @@ We mask the second half of the input audio to enable the streaming algorithm, so
 # example_1.recon_audio
 
 # example_1.recon_spec
+
+"""[markdown]
+
+### Individual Event Intermediate Steps
+
+"""
+
+# example_1.impulse
+# example_1.resonance
+# example_1.wet
 
 """[markdown]
 
@@ -268,6 +277,17 @@ We mask the second half of the input audio to enable the streaming algorithm, so
 # example_2.recon_audio
 
 # example_2.recon_spec
+
+"""[markdown]
+
+### Individual Event Intermediate Steps
+
+"""
+
+# example_2.impulse
+# example_2.resonance
+# example_2.wet
+
 
 """[markdown]
 
@@ -365,6 +385,17 @@ We mask the second half of the input audio to enable the streaming algorithm, so
 
 """[markdown]
 
+### Individual Event Intermediate Steps
+
+"""
+
+# example_3.impulse
+# example_3.resonance
+# example_3.wet
+
+
+"""[markdown]
+
 ### Decomposition
 
 We can see that while energy is removed at each step, removed segments do not map cleanly onto audio "events" as a human listener would typically conceive of them.  Future work will move toward fewer and more meaningul events via induced sparsity and/or clustering of events.
@@ -459,6 +490,17 @@ We mask the second half of the input audio to enable the streaming algorithm, so
 
 """[markdown]
 
+### Individual Event Intermediate Steps
+
+"""
+
+# example_4.impulse
+# example_4.resonance
+# example_4.wet
+
+
+"""[markdown]
+
 ### Decomposition
 
 We can see that while energy is removed at each step, removed segments do not map cleanly onto audio "events" as a human listener would typically conceive of them.  Future work will move toward fewer and more meaningul events via induced sparsity and/or clustering of events.
@@ -550,6 +592,17 @@ We mask the second half of the input audio to enable the streaming algorithm, so
 # example_5.recon_audio
 
 # example_5.recon_spec
+
+"""[markdown]
+
+### Individual Event Intermediate Steps
+
+"""
+
+# example_1.impulse
+# example_1.resonance
+# example_1.wet
+
 
 """[markdown]
 
@@ -807,12 +860,37 @@ def streaming_section(logger: Logger) -> CompositeComponent:
     )
 
 
+def make_audio_component(
+        logger: Logger,
+        samples: torch.Tensor,
+        key: str,
+        audio_color: str = 'rgba(100, 200, 150, 0.5)') -> AudioComponent:
+    _, meta = logger.log_sound(key=key, audio=samples)
+    audio_component = AudioComponent(meta.public_uri, height=100, color=audio_color)
+    return audio_component
+
+
 def reconstruction_section(logger: Logger) -> CompositeComponent:
     model = load_model()
 
     # get a random audio segment
     samples = get_one_audio_segment(n_samples, samplerate, device='cpu').view(1, 1, n_samples)
     events, vectors, times, residuals = model.iterative(samples, return_all_residuals=True)
+
+    event_norms = torch.norm(events, dim=-1).view(-1)
+    # logger.log
+
+    # choose one of the earliest/most prominent events
+    random_event_index = np.random.randint(0, n_events // 4)
+    _, intermediates = model.generate(
+        vectors[:, random_event_index:random_event_index + 1, :],
+        times[:, random_event_index:random_event_index + 1, :],
+        include_intermediates = True)
+
+    impulse_audio_component = make_audio_component(logger, max_norm(intermediates['impulse']), 'impulse')
+    resonance_audio_component = make_audio_component(logger, max_norm(intermediates['dry']), 'dry')
+    reverb_audio_component = make_audio_component(logger, max_norm(intermediates['wet']), 'wet')
+
 
     residuals = residuals.view(n_events, 1024, -1).data.cpu().numpy()
     residuals = residuals[:, ::-1, :]
@@ -861,8 +939,8 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
     summed = torch.sum(events, dim=1, keepdim=True)
     summed = max_norm(summed)
 
-    _, original = logger.log_sound(f'original', samples)
-    _, reconstruction = logger.log_sound(f'reconstruction', summed)
+    # _, original = logger.log_sound(f'original', samples)
+    # _, reconstruction = logger.log_sound(f'reconstruction', summed)
 
     # TODO: These three lines are an incredibly common pattern, they should be at most 2
     n_bins = 84
@@ -874,10 +952,13 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
     _, recon_spec = logger.log_matrix_with_cmap('reconspec', np.flipud(np.abs(recon_spec)), cmap='hot')
     recon_spec = ImageComponent(recon_spec.public_uri, height=200, title='Reconstruction')
 
-    audio_color = 'rgba(100, 200, 150, 0.5)'
+    # audio_color = 'rgba(100, 200, 150, 0.5)'
 
-    orig_audio_component = AudioComponent(original.public_uri, height=100, color=audio_color)
-    recon_audio_component = AudioComponent(reconstruction.public_uri, height=100, color=audio_color)
+    # orig_audio_component = AudioComponent(original.public_uri, height=100, color=audio_color)
+    # recon_audio_component = AudioComponent(reconstruction.public_uri, height=100, color=audio_color)orig_audio_component
+
+    orig_audio_component = make_audio_component(logger, samples, 'original')
+    recon_audio_component = make_audio_component(logger, summed, 'recon')
 
     scatterplot_component = AudioTimelineComponent(
         duration=total_seconds,
@@ -900,6 +981,9 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
         decomposition=movie,
         orig_spec=original_spec,
         recon_spec=recon_spec,
+        impulse=impulse_audio_component,
+        resonance=resonance_audio_component,
+        wet=reverb_audio_component,
         **event_components
     )
 
@@ -963,6 +1047,7 @@ def generate_demo_page():
         __file__,
         'html',
         title='Toward a Sparse Interpretable Audio Codec',
+        web_components_version='0.0.78',
         **display)
 
 
