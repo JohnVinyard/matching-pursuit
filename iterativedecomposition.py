@@ -490,11 +490,16 @@ class Model(nn.Module):
 
         return vecs, scheduling
 
-    def generate(self, vecs: torch.Tensor, scheduling: torch.Tensor):
+    def generate(self, vecs: torch.Tensor, scheduling: torch.Tensor, include_intermediates: bool = False):
         choices = self.multihead.forward(vecs)
         choices_with_scheduling = dict(**choices, times=scheduling)
-        events = self.resonance.forward(**choices_with_scheduling)
-        return events
+
+        if include_intermediates:
+            events, intermediates = self.resonance.forward_with_intermediates(**choices_with_scheduling)
+            return events, intermediates
+        else:
+            events = self.resonance.forward(**choices_with_scheduling)
+            return events
 
     def random_sequence(
             self,

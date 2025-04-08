@@ -1,4 +1,4 @@
-from typing import Union
+from typing import Union, Tuple, Dict
 
 import numpy as np
 import torch
@@ -535,8 +535,7 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
 
         return params
 
-    def forward(
-            self,
+    def forward_with_intermediate_steps(self,
             noise_resonance: torch.Tensor,
             noise_deformations: torch.Tensor,
             noise_mixes: torch.Tensor,
@@ -550,9 +549,10 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
             times: torch.Tensor,
             room_choice: torch.Tensor,
             room_mix: torch.Tensor,
-            fine: Union[torch.Tensor, None] = None) -> torch.Tensor:
+            fine: Union[torch.Tensor, None] = None) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
 
-        # Begin layer ==========================================
+        intermediates = {}
+
 
         # calculate impulses or energy injected into a system
         impulses = self.e.forward(envelopes)
@@ -569,12 +569,14 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
 
         # choose a dry/wet mix
         noise_mix = noise_mixes[:, :, None, :]
-        noise_mix = torch.softmax(noise_mix, dim=-1)
+        # noise_mix = torch.softmax(noise_mix, dim=-1)
 
         # convolve the initial impulse with all filters, then mix together
         noise_wet = fft_convolve(impulses[:, :, None, :], noise_res)
         noise_wet = noise_wet * noise_def
         noise_wet = torch.sum(noise_wet, dim=2)
+
+        intermediates['impulse'] = noise_wet
 
         # mix dry and wet
         # stacked = torch.stack([impulses, noise_wet], dim=-1)
@@ -621,6 +623,8 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
         mixed = stacked * mixes
         final = torch.sum(mixed, dim=-1)
 
+        intermediates['dry'] = final
+
         # apply reverb
         verb = self.verb.forward(room_choice)
         wet = fft_convolve(verb, final.view(*verb.shape))
@@ -630,13 +634,13 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
 
         final = stacked.sum(dim=-1)
 
+        intermediates['wet'] = final
+
         # apply amplitudes
         final = final.view(-1, self.n_events, self.n_samples)
         final = final * torch.abs(amplitudes)
 
         # print('AMPS', amplitudes)
-
-        # End layer ==========================================
 
         scheduled = self.scheduler.schedule(times, final)
 
@@ -645,4 +649,131 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
             scheduled = fft_shift(scheduled, fine_shifts)
             scheduled = scheduled[..., :self.n_samples]
 
+        return scheduled, intermediates
+
+    def forward(
+            self,
+            noise_resonance: torch.Tensor,
+            noise_deformations: torch.Tensor,
+            noise_mixes: torch.Tensor,
+            envelopes: torch.Tensor,
+            resonances: torch.Tensor,
+            res_filter: torch.Tensor,
+            deformations: torch.Tensor,
+            decays: torch.Tensor,
+            mixes: torch.Tensor,
+            amplitudes: torch.Tensor,
+            times: torch.Tensor,
+            room_choice: torch.Tensor,
+            room_mix: torch.Tensor,
+            fine: Union[torch.Tensor, None] = None) -> torch.Tensor:
+
+        scheduled, intermediates = self.forward_with_intermediate_steps(
+            noise_resonance,
+            noise_deformations,
+            noise_mixes,
+            envelopes,
+            resonances,
+            res_filter,
+            deformations,
+            decays,
+            mixes,
+            amplitudes,
+            times,
+            room_choice,
+            room_mix, fine)
+
         return scheduled
+
+        # # calculate impulses or energy injected into a system
+        # impulses = self.e.forward(envelopes)
+        #
+        # # choose filters to be convolved with energy/noise
+        # noise_res = self.n.forward(noise_resonance)
+        # noise_res = torch.cat([
+        #     noise_res,
+        #     torch.zeros(*noise_res.shape[:-1], self.n_samples - noise_res.shape[-1], device=impulses.device)
+        # ], dim=-1)
+        #
+        # # choose deformations to be applied to the initial noise resonance
+        # noise_def = self.noise_warp.forward(noise_deformations)
+        #
+        # # choose a dry/wet mix
+        # noise_mix = noise_mixes[:, :, None, :]
+        # noise_mix = torch.softmax(noise_mix, dim=-1)
+        #
+        # # convolve the initial impulse with all filters, then mix together
+        # noise_wet = fft_convolve(impulses[:, :, None, :], noise_res)
+        # noise_wet = noise_wet * noise_def
+        # noise_wet = torch.sum(noise_wet, dim=2)
+        #
+        # # mix dry and wet
+        # # stacked = torch.stack([impulses, noise_wet], dim=-1)
+        # # mixed = stacked * noise_mix
+        # # mixed = torch.sum(mixed, dim=-1)
+        # mixed = noise_wet
+        #
+        # # initial filtered noise is now the input to our longer resonances
+        # impulses = mixed
+        #
+        # # choose a number of resonances to be convolved with
+        # # those impulses
+        # resonance = self.r.forward(resonances)
+        # res_filters = self.n.forward(res_filter)
+        #
+        # res_filters = torch.cat([
+        #     res_filters,
+        #     torch.zeros(*res_filters.shape[:-1], resonance.shape[-1] - res_filters.shape[-1], device=res_filters.device)
+        # ], dim=-1)
+        #
+        # resonance = fft_convolve(resonance, res_filters)
+        #
+        # # describe how we interpolate between different
+        # # resonances over time
+        # deformations = self.warp.forward(deformations)
+        #
+        # # determine how each resonance decays or leaks energy
+        # decays = self.d.forward(decays)
+        # decaying_resonance = resonance * decays[:, :, None, :]
+        #
+        # dry = impulses[:, :, None, :]
+        #
+        # # convolve the impulse with all the resonances and
+        # # interpolate between them
+        # conv = fft_convolve(dry, decaying_resonance)
+        # with_deformations = conv * deformations
+        # audio_events = torch.sum(with_deformations, dim=2, keepdim=True)
+        #
+        # # mix the dry and wet signals
+        # mixes = mixes[:, :, None, None, :]
+        # mixes = torch.softmax(mixes, dim=-1)
+        #
+        # stacked = torch.stack([dry, audio_events], dim=-1)
+        # mixed = stacked * mixes
+        # final = torch.sum(mixed, dim=-1)
+        #
+        # # apply reverb
+        # verb = self.verb.forward(room_choice)
+        # wet = fft_convolve(verb, final.view(*verb.shape))
+        # verb_mix = torch.softmax(room_mix, dim=-1)[:, :, None, :]
+        # stacked = torch.stack([wet, final.view(*verb.shape)], dim=-1)
+        # stacked = stacked * verb_mix
+        #
+        # final = stacked.sum(dim=-1)
+        #
+        #
+        # # apply amplitudes
+        # final = final.view(-1, self.n_events, self.n_samples)
+        # final = final * torch.abs(amplitudes)
+        #
+        # # print('AMPS', amplitudes)
+        #
+        #
+        # scheduled = self.scheduler.schedule(times, final)
+        #
+        # if fine is not None:
+        #     fine_shifts = torch.tanh(fine) * self.frame_ratio
+        #     scheduled = fft_shift(scheduled, fine_shifts)
+        #     scheduled = scheduled[..., :self.n_samples]
+        #
+        # return scheduled

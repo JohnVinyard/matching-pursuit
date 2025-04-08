@@ -10,7 +10,7 @@ from matplotlib import pyplot as plt
 from io import BytesIO
 from soundfile import SoundFile
 from data.audioiter import AudioIterator
-from modules import stft
+from modules import stft, gammatone_filter_bank
 
 from modules.hypernetwork import HyperNetworkLayer
 from modules.overlap_add import overlap_add
@@ -19,6 +19,7 @@ from modules.transfer import fft_convolve, freq_domain_transfer_function_to_reso
 import matplotlib
 
 from util import playable
+from util.music import musical_scale_hz
 
 matplotlib.use('Qt5Agg')
 from matplotlib import pyplot as plt
@@ -520,16 +521,23 @@ if __name__ == '__main__':
 
     n_frames = 512
 
-    resting = torch.zeros(batch_size, n_events, instrument_dim)
-    masses = torch.zeros_like(resting).uniform_(0.01, 0.1)
-    tensions = torch.zeros_like(resting).uniform_(0.01, 0.1)
 
     transform_block_size = total_complex_coeffs
+
+    n_filters = n_coeffs
+    filters = gammatone_filter_bank(n_filters, block_size, 'cpu', band_spacing='geometric')
+    filters = torch.fft.rfft(filters, dim=-1)
+
+    resting = torch.zeros(batch_size, n_events, instrument_dim)
+    masses = torch.zeros_like(resting).uniform_(1, 100)
+    tensions = torch.zeros_like(resting).uniform_(1, 10)
+    gains = torch.zeros_like(resting).uniform_(0.1, 10)
+
     to_samples = \
         torch.zeros(transform_block_size, instrument_dim).uniform_(-1, 1) \
-        * torch.zeros(transform_block_size, instrument_dim).bernoulli_(p=0.01)
+        * torch.zeros(transform_block_size, instrument_dim).bernoulli_(p=0.002)
 
-    damping = 0.7
+    damping = 0.95
 
     velocity = torch.zeros_like(resting)
     acceleration = torch.zeros_like(resting)
@@ -545,6 +553,9 @@ if __name__ == '__main__':
 
     for i in range(n_frames):
 
+        # calculate new displacement
+        displacement = (state - resting)
+
         acceleration += (-displacement * tensions) / masses
 
         # accumulate forces
@@ -558,22 +569,26 @@ if __name__ == '__main__':
         # clear
         # apply damping (this could vary over time)
         velocity *= damping
-        velocity[torch.abs(velocity) < 1e-6] = 0
+        # velocity[torch.abs(velocity) < 1e-6] = 0
 
         # clear forces
         acceleration *= 0
 
         block = (displacement @ to_samples.T) #* torch.norm(displacement)
 
+
+
         block = block.view(batch_size, n_events, n_coeffs, 2)
         block = torch.view_as_complex(block)
+
+        block = block @ filters
+
         block = torch.fft.irfft(block, dim=-1)
 
         # print(torch.norm(displacement), torch.norm(block))
         blocks.append(block[:, :, None, :])
 
-        # calculate new displacement
-        displacement = (state - resting)
+
 
 
 
