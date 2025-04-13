@@ -799,7 +799,7 @@ def load_model(wavetable_device: str = 'cpu') -> nn.Module:
             fft_resonance=True,
         ))
 
-    with open('iterativedecomposition16.dat', 'rb') as f:
+    with open('iterativedecomposition17.dat', 'rb') as f:
         model.load_state_dict(torch.load(f, map_location=lambda storage, loc: storage))
 
     print('Total parameters', count_parameters(model))

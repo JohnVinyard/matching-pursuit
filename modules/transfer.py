@@ -180,12 +180,16 @@ def freq_domain_transfer_function_to_resonance(
 
     res = coeffs.view(-1, expected_coeffs, 1).repeat(1, 1, n_frames)
 
+    # always start with full energy at every coefficient
+    res = torch.cat([torch.ones(res.shape[0], expected_coeffs, 1, device=res.device), res], dim=-1)
+
     if apply_decay:
         res = torch.log(res + 1e-12)
         res = torch.cumsum(res, dim=-1)
         res = torch.exp(res)
 
-    spec = res
+    # remove the final frame
+    spec = res[..., :n_frames]
     spec = spec.view(-1, expected_coeffs, n_frames).permute(0, 2, 1).view(-1, 1, n_frames, expected_coeffs)
 
     phase = torch.zeros_like(spec).uniform_(-np.pi, np.pi)

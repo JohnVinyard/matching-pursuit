@@ -6,7 +6,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from config import Config
-from modules import interpolate_last_axis, select_items, NeuralReverb, SSM, sparse_softmax, sparsify
+from modules import interpolate_last_axis, select_items, NeuralReverb, SSM, sparse_softmax, sparsify, max_norm
 from modules.eventgenerators.generator import EventGenerator
 from modules.eventgenerators.schedule import DiracScheduler
 from modules.iterative import TensorTransform
@@ -196,11 +196,14 @@ class MultiSSM(nn.Module, EventGenerator):
 class FFTResonanceLookup(Lookup):
     def __init__(self, n_items: int, n_samples: int, window_size: int):
 
+        def init(x):
+            return torch.zeros_like(x).uniform_(-6, 6) * torch.zeros_like(x).bernoulli_(p=0.01)
+
         n_coeffs = (window_size // 2 + 1) * 2
 
         step_size = window_size // 2
 
-        super().__init__(n_items, n_coeffs)
+        super().__init__(n_items, n_coeffs, initialize=init)
 
         self.window_size = window_size
         self.n_coeffs = n_coeffs
@@ -220,7 +223,7 @@ class FFTResonanceLookup(Lookup):
             self.window_size,
             mags,
             self.n_frames,
-            apply_decay=False,
+            apply_decay=True,
             start_phase=phases
         )
 
@@ -335,8 +338,9 @@ class SampleLookup(Lookup):
 
 class Decays(Lookup):
     def __init__(self, n_items: int, n_samples: int, full_size: int, base_resonance: float = 0.5):
-        super().__init__(n_items, n_samples)
+        super().__init__(n_items, 1,)
         self.full_size = full_size
+        self.n_samples = n_samples
         self.base_resonance = base_resonance
         self.diff = 1 - self.base_resonance
 
@@ -351,6 +355,7 @@ class Decays(Lookup):
         """Apply a scan in log-space to end up with exponential decay
         """
 
+        decay = decay.repeat(1, 1, 1, self.n_samples)
         decay = torch.log(decay + 1e-12)
         decay = torch.cumsum(decay, dim=-1)
         decay = torch.exp(decay)
@@ -365,12 +370,16 @@ class Envelopes(Lookup):
             n_samples: int,
             full_size: int,
             padded_size: int):
-        def init(x):
-            return \
-                    torch.zeros(n_items, n_samples).uniform_(-1, 1) \
-                    * (torch.linspace(1, 0, steps=n_samples)[None, :] ** torch.zeros(n_items, 1).uniform_(50, 150))
+        # def init(x):
+        #     return \
+        #             torch.zeros(n_items, n_samples).uniform_(-1, 1) \
+        #             * (torch.linspace(1, 0, steps=n_samples)[None, :] ** torch.zeros(n_items, 1).uniform_(50, 150))
 
-        super().__init__(n_items, n_samples, initialize=init)
+        super().__init__(
+            n_items,
+            n_samples,
+            #initialize=init
+        )
         self.full_size = full_size
         self.padded_size = padded_size
 
@@ -386,7 +395,7 @@ class Envelopes(Lookup):
         """
 
         amp = interpolate_last_axis(decay, desired_size=self.full_size)
-        amp = amp * torch.zeros_like(amp).uniform_(-0.02, 0.02)
+        amp = amp * torch.zeros_like(amp).uniform_(-1, 1)
         diff = self.padded_size - self.full_size
         padding = torch.zeros((amp.shape[:-1] + (diff,)), device=amp.device)
         amp = torch.cat([amp, padding], dim=-1)
@@ -410,6 +419,65 @@ class Deformations(Lookup):
         x = torch.softmax(x, dim=-2)
         x = interpolate_last_axis(x, desired_size=self.full_size)
         return x
+
+
+
+class WavetableModel(nn.Module, EventGenerator):
+
+    def __init__(
+            self, n_items: int,
+            n_samples: int,
+            n_frames: int,
+            n_events: int):
+
+        super().__init__()
+        self.n_items = n_items
+        self.n_samples = n_samples
+        self.n_frames = n_frames
+        self.n_events = n_events
+
+        self.items = Lookup(n_items, 16384, fixed=False, selection_type='softmax')
+        verbs = NeuralReverb.tensors_from_directory(Config.impulse_response_path(), n_samples)
+        n_verbs = verbs.shape[0]
+        self.n_verbs = n_verbs
+        self.verb = Lookup(n_verbs, n_samples, initialize=lambda x: verbs, fixed=True)
+        self.scheduler = DiracScheduler(
+            self.n_events, start_size=n_frames, n_samples=self.n_samples, pre_sparse=True)
+
+    @property
+    def shape_spec(self) -> ShapeSpec:
+        return dict(
+            amplitudes=(1,),
+            mix=(self.n_items,),
+            room_choice=(self.n_verbs,),
+            room_mix=(2,),
+        )
+
+    def forward(
+            self,
+            amplitudes: torch.Tensor,
+            mix: torch.Tensor,
+            room_choice: torch.Tensor,
+            room_mix: torch.Tensor,
+            times: torch.Tensor) -> torch.Tensor:
+
+        batch_size = amplitudes.shape[0]
+
+        dry = self.items.forward(mix)
+        dry = dry + torch.zeros_like(dry).uniform_(-1e-7, 1e-7)
+
+        dry = F.pad(dry, (0, self.n_samples - dry.shape[-1]))
+        verb = self.verb.forward(room_choice)
+        wet = fft_convolve(dry, verb)
+
+        stacked = torch.stack([dry, wet], dim=-1)
+        final = stacked @ torch.softmax(room_mix, dim=-1)[:, :, :, None]
+        final = final.reshape(batch_size, -1, self.n_samples)
+
+        # final = max_norm(final)
+        final = final * torch.abs(amplitudes)
+        final = self.scheduler.schedule(times, final)
+        return final
 
 
 class OverfitResonanceModel(nn.Module, EventGenerator):
@@ -523,7 +591,7 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
             resonances=(self.instr_expressivity, self.n_resonances),
             res_filter=(self.noise_expressivity, self.n_noise_filters),
             deformations=(self.n_deformations,),
-            decays=(self.n_decays,),
+            decays=(self.instr_expressivity, self.n_decays,),
             mixes=(2,),
             amplitudes=(1,),
             room_choice=(self.n_verbs,),
@@ -569,7 +637,7 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
 
         # choose a dry/wet mix
         noise_mix = noise_mixes[:, :, None, :]
-        # noise_mix = torch.softmax(noise_mix, dim=-1)
+        noise_mix = torch.softmax(noise_mix, dim=-1)
 
         # convolve the initial impulse with all filters, then mix together
         noise_wet = fft_convolve(impulses[:, :, None, :], noise_res)
@@ -590,28 +658,29 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
         # choose a number of resonances to be convolved with
         # those impulses
         resonance = self.r.forward(resonances)
-        res_filters = self.n.forward(res_filter)
+        # res_filters = self.n.forward(res_filter)
 
-        res_filters = torch.cat([
-            res_filters,
-            torch.zeros(*res_filters.shape[:-1], resonance.shape[-1] - res_filters.shape[-1], device=res_filters.device)
-        ], dim=-1)
+        # res_filters = torch.cat([
+        #     res_filters,
+        #     torch.zeros(*res_filters.shape[:-1], resonance.shape[-1] - res_filters.shape[-1], device=res_filters.device)
+        # ], dim=-1)
 
-        resonance = fft_convolve(resonance, res_filters)
+        # resonance = fft_convolve(resonance, res_filters)
 
         # describe how we interpolate between different
         # resonances over time
         deformations = self.warp.forward(deformations)
 
         # determine how each resonance decays or leaks energy
-        decays = self.d.forward(decays)
-        decaying_resonance = resonance * decays[:, :, None, :]
+        # decays = self.d.forward(decays)
+        decaying_resonance = resonance
 
         dry = impulses[:, :, None, :]
 
         # convolve the impulse with all the resonances and
         # interpolate between them
         conv = fft_convolve(dry, decaying_resonance)
+        # conv = dry
         with_deformations = conv * deformations
         audio_events = torch.sum(with_deformations, dim=2, keepdim=True)
 
@@ -684,96 +753,3 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
             room_mix, fine)
 
         return scheduled
-
-        # # calculate impulses or energy injected into a system
-        # impulses = self.e.forward(envelopes)
-        #
-        # # choose filters to be convolved with energy/noise
-        # noise_res = self.n.forward(noise_resonance)
-        # noise_res = torch.cat([
-        #     noise_res,
-        #     torch.zeros(*noise_res.shape[:-1], self.n_samples - noise_res.shape[-1], device=impulses.device)
-        # ], dim=-1)
-        #
-        # # choose deformations to be applied to the initial noise resonance
-        # noise_def = self.noise_warp.forward(noise_deformations)
-        #
-        # # choose a dry/wet mix
-        # noise_mix = noise_mixes[:, :, None, :]
-        # noise_mix = torch.softmax(noise_mix, dim=-1)
-        #
-        # # convolve the initial impulse with all filters, then mix together
-        # noise_wet = fft_convolve(impulses[:, :, None, :], noise_res)
-        # noise_wet = noise_wet * noise_def
-        # noise_wet = torch.sum(noise_wet, dim=2)
-        #
-        # # mix dry and wet
-        # # stacked = torch.stack([impulses, noise_wet], dim=-1)
-        # # mixed = stacked * noise_mix
-        # # mixed = torch.sum(mixed, dim=-1)
-        # mixed = noise_wet
-        #
-        # # initial filtered noise is now the input to our longer resonances
-        # impulses = mixed
-        #
-        # # choose a number of resonances to be convolved with
-        # # those impulses
-        # resonance = self.r.forward(resonances)
-        # res_filters = self.n.forward(res_filter)
-        #
-        # res_filters = torch.cat([
-        #     res_filters,
-        #     torch.zeros(*res_filters.shape[:-1], resonance.shape[-1] - res_filters.shape[-1], device=res_filters.device)
-        # ], dim=-1)
-        #
-        # resonance = fft_convolve(resonance, res_filters)
-        #
-        # # describe how we interpolate between different
-        # # resonances over time
-        # deformations = self.warp.forward(deformations)
-        #
-        # # determine how each resonance decays or leaks energy
-        # decays = self.d.forward(decays)
-        # decaying_resonance = resonance * decays[:, :, None, :]
-        #
-        # dry = impulses[:, :, None, :]
-        #
-        # # convolve the impulse with all the resonances and
-        # # interpolate between them
-        # conv = fft_convolve(dry, decaying_resonance)
-        # with_deformations = conv * deformations
-        # audio_events = torch.sum(with_deformations, dim=2, keepdim=True)
-        #
-        # # mix the dry and wet signals
-        # mixes = mixes[:, :, None, None, :]
-        # mixes = torch.softmax(mixes, dim=-1)
-        #
-        # stacked = torch.stack([dry, audio_events], dim=-1)
-        # mixed = stacked * mixes
-        # final = torch.sum(mixed, dim=-1)
-        #
-        # # apply reverb
-        # verb = self.verb.forward(room_choice)
-        # wet = fft_convolve(verb, final.view(*verb.shape))
-        # verb_mix = torch.softmax(room_mix, dim=-1)[:, :, None, :]
-        # stacked = torch.stack([wet, final.view(*verb.shape)], dim=-1)
-        # stacked = stacked * verb_mix
-        #
-        # final = stacked.sum(dim=-1)
-        #
-        #
-        # # apply amplitudes
-        # final = final.view(-1, self.n_events, self.n_samples)
-        # final = final * torch.abs(amplitudes)
-        #
-        # # print('AMPS', amplitudes)
-        #
-        #
-        # scheduled = self.scheduler.schedule(times, final)
-        #
-        # if fine is not None:
-        #     fine_shifts = torch.tanh(fine) * self.frame_ratio
-        #     scheduled = fft_shift(scheduled, fine_shifts)
-        #     scheduled = scheduled[..., :self.n_samples]
-        #
-        # return scheduled

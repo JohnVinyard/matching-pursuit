@@ -386,7 +386,7 @@ class AutocorrelationLoss(nn.Module):
 
         channels = F.pad(channels, (0, step_size))
         channels = channels.unfold(-1, window_size, step_size)
-        channels = unit_norm(channels, dim=-1)
+        # channels = unit_norm(channels, dim=-1)
 
         spec = torch.fft.rfft(channels, dim=-1)
         # spec = torch.abs(spec)

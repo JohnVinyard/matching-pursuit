@@ -49,6 +49,7 @@ def iterative_loss(
     srt = torch.take_along_dim(channels, indices[:, :, None], dim=1)
 
     loss = 0
+
     for i in range(n_events):
         current = srt[:, i, :]
         start_norm = torch.norm(residual, dim=-1, p=1)

@@ -4,6 +4,7 @@ from typing import Union, Tuple
 import numpy as np
 import torch
 from torch import nn
+from torch.nn.utils import clip_grad_value_
 from torch.optim import Adam
 
 from config import Config
@@ -15,14 +16,17 @@ from modules import stft, sparsify, sparsify_vectors, iterative_loss, max_norm, 
 from modules.anticausal import AntiCausalAnalysis
 from modules.eventgenerators.convimpulse import ConvImpulseEventGenerator
 from modules.eventgenerators.generator import EventGenerator, ShapeSpec
-from modules.eventgenerators.overfitresonance import OverfitResonanceModel, Lookup
+from modules.eventgenerators.overfitresonance import OverfitResonanceModel, Lookup, WavetableModel
 from modules.eventgenerators.schedule import DiracScheduler
 from modules.eventgenerators.splat import SplattingEventGenerator
 from modules.infoloss import CorrelationLoss
 from modules.iterative import sort_channels_descending_norm
 from modules.mixer import MixerStack
 from modules.multiheadtransform import MultiHeadTransform
+from modules.overlap_add import overlap_add
 from modules.transfer import fft_convolve
+from modules.upsample import ConvUpsample
+from spiking import AutocorrelationLoss, SpikingModel
 from util import device, encode_audio, make_initializer
 from torch.nn import functional as F
 
@@ -51,7 +55,7 @@ transform_step_size = 256
 
 n_frames = n_samples // transform_step_size
 
-initializer = make_initializer(0.02)
+initializer = make_initializer(0.05)
 
 
 def fft_shift(a: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
@@ -98,20 +102,18 @@ def run_layer(
     decays = torch.cumsum(decays, dim=-1)
     decays = torch.exp(decays)
 
-    # decays = decays.cumprod(dim=-1)
-    # decays = torch.flip(decays, dims=[-1])
     x = fft_convolve(x, decays)
     x = (out_mapping @ x) + orig
 
     cp = torch.tanh(x * gains.view(batch_size, control_plane_dim, 1))
 
     audio = audio_mapping @ cp
+    audio = audio.permute(0, 2, 1).view(batch_size, frames, -1, 2)
+    audio = torch.view_as_complex(audio.contiguous())
+    audio = torch.fft.irfft(audio, norm='ortho')
 
-    # TODO: This should be mapped to audio outside of this layer, probably
-    # each layer by a single mapping network
-    audio = audio.permute(0, 2, 1)
-
-    audio = audio.reshape(batch_size, 1, -1)
+    audio = overlap_add(audio[:, None, :, :], apply_window=True)
+    audio = audio[..., :n_samples]
 
     return audio, cp
 
@@ -130,10 +132,12 @@ class Block(nn.Module):
         self.resonance_span = 1 - base_resonance
         self.max_gain = max_gain
         self.window_size = window_size or block_size
+        self.n_coeffs = window_size // 2 + 1
+        self.total_coeffs = self.n_coeffs * 2
 
         self.w1 = nn.Parameter(torch.zeros(block_size, block_size).uniform_(-0.01, 0.01))
         self.w2 = nn.Parameter(torch.zeros(block_size, block_size).uniform_(-0.01, 0.01))
-        self.audio = nn.Parameter(torch.zeros(window_size, block_size).uniform_(-0.01, 0.01))
+        self.audio = nn.Parameter(torch.zeros(self.total_coeffs, block_size).uniform_(-0.01, 0.01))
 
 
         self.decays = nn.Parameter(torch.zeros(block_size).uniform_(0.001, 0.99))
@@ -178,7 +182,7 @@ class Stack(nn.Module):
 
         working_control_plane = cp
 
-        total_samples = frames * self.window_size
+        total_samples = frames * (self.window_size // 2)
 
         channels = torch.zeros(
             batch_size, self.n_blocks, total_samples, device=cp.device)
@@ -204,7 +208,7 @@ def transform(x: torch.Tensor):
     x = stft(x, transform_window_size, transform_step_size, pad=True)
     # x = x / (stds + 1e-8)
     n_coeffs = transform_window_size // 2 + 1
-    x = x.view(batch_size, -1, n_coeffs)[..., :n_coeffs - 1].permute(0, 2, 1)
+    x = x.reshape(batch_size, -1, n_coeffs)[..., :n_coeffs - 1].permute(0, 2, 1)
     return x
 
 
@@ -258,6 +262,64 @@ class PhysicalModel(nn.Module):
         # samples = torch.sin(samples)
         return samples
 
+
+class ConvSTFT(EventGenerator, nn.Module):
+
+    def __init__(self, fine_positioning: bool = False):
+        super().__init__()
+        self.window_size = 512
+        self.step_size = self.window_size // 2
+        self.n_coeffs = self.window_size // 2 + 1
+        self.total_coeffs = self.n_coeffs * 2
+        self.fine_positioning = fine_positioning
+        self.frame_ratio = n_samples / (self.window_size // 2)
+
+        self.net = ConvUpsample(
+            latent_dim=context_dim,
+            channels=128,
+            start_size=8,
+            end_size=n_frames,
+            mode='learned',
+            out_channels=self.total_coeffs,
+            from_latent=True,
+            weight_norm=True,
+            batch_norm=True
+        )
+
+        self.scheduler = DiracScheduler(
+            n_events, start_size=n_frames, n_samples=n_samples, pre_sparse=True)
+
+    def forward(self, latent, times: torch.Tensor, fine: Union[torch.Tensor, None] = None) -> torch.Tensor:
+
+        batch_size = latent.shape[0]
+
+        final = self.net.forward(latent)
+
+        final = final.view(batch_size, self.n_coeffs, 2, -1).permute(0, 3, 1, 2)
+        final = torch.view_as_complex(final.contiguous())
+        final = torch.fft.irfft(final, norm='ortho')
+        final = overlap_add(final[:, None, :, :], apply_window=True)
+        final = final[..., :n_samples]
+
+        scheduled = self.scheduler.schedule(times, final)
+
+        if fine is not None:
+            fine_shifts = torch.tanh(fine) * self.frame_ratio
+            scheduled = fft_shift(scheduled, fine_shifts)
+            scheduled = scheduled[..., :n_samples]
+
+        return scheduled
+
+    @property
+    def shape_spec(self) -> ShapeSpec:
+        params = dict(
+            latent=(context_dim,),
+        )
+
+        if self.fine_positioning:
+            params['fine'] = (1,)
+
+        return params
 
 class MultiRNN(EventGenerator, nn.Module):
 
@@ -603,7 +665,7 @@ class Model(nn.Module):
             schedules.append(sched)
             ch = self.generate(v, sched)
 
-            # perform transform and scale proportionally
+
             current = transform(ch)
 
             spec = (spec - current)#.clone().detach()
@@ -694,7 +756,7 @@ def train_and_monitor(
         f'training on {n_seconds} of audio and {n_events} events with {model_type} event generator')
     print('==========================================')
 
-    model_filename = 'iterativedecomposition16.dat'
+    model_filename = 'iterativedecomposition17.dat'
 
     def train():
 
@@ -740,18 +802,25 @@ def train_and_monitor(
             )
         elif model_type == 'ssm':
 
-            window_size = 512
-            rnn_frames = n_samples // window_size
+            resonance_model = WavetableModel(
+                n_items=512,
+                n_samples=n_samples,
+                n_frames=n_frames,
+                n_events=n_events)
+            # resonance_model = ConvSTFT(fine_positioning=False)
 
-            resonance_model = MultiRNN(
-                n_voices=16,
-                n_control_planes=512,
-                control_plane_dim=64,
-                hidden_dim=64,
-                control_plane_sparsity=128,
-                window_size=window_size,
-                n_frames=rnn_frames,
-                fine_positioning=False)
+            # window_size = 512
+            # rnn_frames = n_samples // (window_size // 2)
+            #
+            # resonance_model = MultiRNN(
+            #     n_voices=8,
+            #     n_control_planes=256,
+            #     control_plane_dim=32,
+            #     hidden_dim=64,
+            #     control_plane_sparsity=128,
+            #     window_size=window_size,
+            #     n_frames=rnn_frames,
+            #     fine_positioning=False)
         else:
             raise ValueError(f'Unknown model type {model_type}')
 
@@ -778,6 +847,12 @@ def train_and_monitor(
 
         optim = Adam(model.parameters(), lr=1e-4)
 
+        # loss_model = CorrelationLoss(n_elements=512).to(device)
+
+        # achieves "Breakup", starts to find tonal things quickly, but without much resonance, trails off as desired
+        # loss_model = AutocorrelationLoss(64, 64).to(device)
+
+        # loss_model = SpikingModel(64, 64, 64, 64, 64).to(device)
 
         for i, item in enumerate(iter(stream)):
             optim.zero_grad()
@@ -788,6 +863,7 @@ def train_and_monitor(
                 recon, encoded, scheduling = model.iterative(target)
 
                 recon_summed = torch.sum(recon, dim=1, keepdim=True)
+                print(recon_summed.min(), recon_summed.max(), recon_summed.mean(), recon_summed.std())
                 recon_audio(max_norm(recon_summed))
 
                 envelopes(max_norm(scheduling[0]))
@@ -800,38 +876,46 @@ def train_and_monitor(
                 target = target * weighting
                 recon_summed = recon_summed * weighting
 
-                loss = iterative_loss(target, recon, loss_transform, ratio_loss=True)
+                # loss = loss_model.compute_multiband_loss(target, recon_summed, 64, 16)
+
                 # loss = loss_model.forward(target, recon_summed)
 
+                loss = iterative_loss(target, recon, loss_transform, ratio_loss=True)
+
+                # target_spec = transform(target)
+                # recon_spec = transform(recon_summed)
+                # loss = loss + torch.abs(target_spec - recon_spec).sum()
 
             scaler.scale(loss).backward()
+            # clip_grad_value_(model.parameters(), 0.5)
             scaler.step(optim)
             scaler.update()
             print(i, loss.item())
 
             optim.zero_grad()
 
-            # TODO: sample scale/amplitude of one-hot time vectors
-            # for completely realistic ground-truth generations.
-            # Then, sort both by descending norm and compare the spectrograms
-            # of each
-            with torch.no_grad():
-                self_supervised_batch_size = 1
-                # Generate a random sequence using random event vectors from the recent past
-                rnd, vecs, times = model.random_sequence(batch_size=self_supervised_batch_size)
+            if i % 10 == 0:
+                # TODO: sample scale/amplitude of one-hot time vectors
+                # for completely realistic ground-truth generations.
+                # Then, sort both by descending norm and compare the spectrograms
+                # of each
+                with torch.no_grad():
+                    self_supervised_batch_size = 1
+                    # Generate a random sequence using random event vectors from the recent past
+                    rnd, vecs, times = model.random_sequence(batch_size=self_supervised_batch_size)
 
-                # normalize such that the loudest channel peaks at 1
-                random_seq = rnd
-                random_seq = random_seq.view(self_supervised_batch_size, -1)
-                random_seq = max_norm(random_seq)
-                random_seq = random_seq.view(self_supervised_batch_size, n_events, n_samples)
+                    # normalize such that the loudest channel peaks at 1
+                    random_seq = rnd
+                    random_seq = random_seq.view(self_supervised_batch_size, -1)
+                    random_seq = max_norm(random_seq)
+                    random_seq = random_seq.view(self_supervised_batch_size, n_events, n_samples)
 
-                rnd = torch.sum(random_seq, dim=1, keepdim=True)
+                    rnd = torch.sum(random_seq, dim=1, keepdim=True)
 
 
-                random_audio(max_norm(rnd))
-                reservoir(max_norm(torch.from_numpy(model.reservoir)))
-                # random_vecs(max_norm(vecs[0]))
+                    random_audio(max_norm(rnd))
+                    reservoir(max_norm(torch.from_numpy(model.reservoir)))
+                    # random_vecs(max_norm(vecs[0]))
 
             # encode the random sequence
             # recon, encoded, scheduling = model.iterative(rnd)
