@@ -1,6 +1,7 @@
 from argparse import ArgumentParser
 from typing import Union, Tuple
 
+import matplotlib
 import numpy as np
 import torch
 from torch import nn
@@ -9,10 +10,9 @@ from torch.optim import Adam
 
 from config import Config
 from conjure import LmdbCollection, serve_conjure, loggers, SupportedContentType, NumpySerializer, NumpyDeserializer
-from data import AudioIterator, get_one_audio_segment
-from data.audioiter import get_one_audio_batch
+from data import AudioIterator
 from modules import stft, sparsify, sparsify_vectors, iterative_loss, max_norm, flattened_multiband_spectrogram, \
-    sparse_softmax, positional_encoding, NeuralReverb, fft_frequency_decompose, CanonicalOrdering
+    sparse_softmax, positional_encoding, NeuralReverb
 from modules.anticausal import AntiCausalAnalysis
 from modules.eventgenerators.convimpulse import ConvImpulseEventGenerator
 from modules.eventgenerators.generator import EventGenerator, ShapeSpec
@@ -20,19 +20,14 @@ from modules.eventgenerators.overfitresonance import OverfitResonanceModel, Look
 from modules.eventgenerators.schedule import DiracScheduler
 from modules.eventgenerators.splat import SplattingEventGenerator
 from modules.infoloss import CorrelationLoss
-from modules.iterative import sort_channels_descending_norm
 from modules.mixer import MixerStack
 from modules.multiheadtransform import MultiHeadTransform
 from modules.overlap_add import overlap_add
 from modules.transfer import fft_convolve
 from modules.upsample import ConvUpsample
-from spiking import AutocorrelationLoss, SpikingModel
 from util import device, encode_audio, make_initializer
-from torch.nn import functional as F
 
-import matplotlib
 matplotlib.use('Qt5Agg')
-from matplotlib import pyplot as plt
 
 # the size, in samples of the audio segment we'll overfit
 n_samples = 2 ** 17
@@ -51,11 +46,10 @@ n_seconds = n_samples / samplerate
 transform_window_size = 2048
 transform_step_size = 256
 
-# log_amplitude = True
 
 n_frames = n_samples // transform_step_size
 
-initializer = make_initializer(0.05)
+initializer = make_initializer(0.02)
 
 
 def fft_shift(a: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
@@ -197,16 +191,11 @@ class Stack(nn.Module):
         return max_norm(mixed)
 
 
-# stats_batch = get_one_audio_batch(32, n_samples, samplerate, device)
-# spec = stft(stats_batch, 2048, 256, pad=True)
-# stds = torch.std(spec, dim=-2, keepdim=True)
-
 
 
 def transform(x: torch.Tensor):
     batch_size = x.shape[0]
     x = stft(x, transform_window_size, transform_step_size, pad=True)
-    # x = x / (stds + 1e-8)
     n_coeffs = transform_window_size // 2 + 1
     x = x.reshape(batch_size, -1, n_coeffs)[..., :n_coeffs - 1].permute(0, 2, 1)
     return x
@@ -214,11 +203,21 @@ def transform(x: torch.Tensor):
 
 def loss_transform(x: torch.Tensor) -> torch.Tensor:
     batch, n_events, time = x.shape
-    x = stft(x, transform_window_size, transform_step_size, pad=True)
-    # x = x / (stds + 1e-8)
-    x = x.view(batch, n_events, -1)
+    x = flattened_multiband_spectrogram(
+        x,
+        {
+            'a': (64, 16)
+        },
+        512
+    )
+    # x = stft(x, transform_window_size, transform_step_size, pad=True)
+    # x = x.view(batch, n_events, -1)
     return x
 
+def reconstruction_loss(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    a = loss_transform(a)
+    b = loss_transform(b)
+    return torch.abs(a - b).sum()
 
 
 def all_at_once_loss(target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
@@ -347,7 +346,7 @@ class MultiRNN(EventGenerator, nn.Module):
         self.samples_per_frame = n_samples // n_frames
         self.frame_ratio = self.samples_per_frame / n_samples
 
-        verbs = NeuralReverb.tensors_from_directory(Config.impulse_response_path(), n_samples)
+        verbs = NeuralReverb.tensors_from_directory(Config.impulse_response_path(), n_samples, normalize=True)
         n_verbs = verbs.shape[0]
         self.n_verbs = n_verbs
 
@@ -684,11 +683,6 @@ class Model(nn.Module):
         v = v.data.cpu().numpy()
         self.reservoir[indices, :] = v
 
-        # record mean and std of scheduling impulses
-        # active = schedules[schedules > 0] + 1e-8
-        # self.scheduling_mean = active.mean().item()
-        # self.scheduling_std = active.std().item()
-
         if return_all_residuals:
             return channels, vecs, schedules, residuals
         elif return_residual:
@@ -734,8 +728,8 @@ def train_and_monitor(
         encode_audio,
         collection)
 
-    envelopes, latents, reservoir = loggers(
-        ['envelopes', 'latents', 'reservoir'],
+    envelopes, latents, reservoir, dist = loggers(
+        ['envelopes', 'latents', 'reservoir', 'dist'],
         SupportedContentType.Spectrogram.value,
         to_numpy,
         collection,
@@ -749,6 +743,7 @@ def train_and_monitor(
         envelopes,
         latents,
         reservoir,
+        dist
     ], port=9999, n_workers=1)
 
     print('==========================================')
@@ -766,15 +761,16 @@ def train_and_monitor(
         if model_type == 'lookup':
             resonance_model = OverfitResonanceModel(
                 n_noise_filters=64,
-                noise_expressivity=4,
+                noise_expressivity=2,
                 noise_filter_samples=128,
                 noise_deformations=32,
-                instr_expressivity=4,
+                instr_expressivity=8,
                 n_events=1,
                 n_resonances=4096,
+                # n_resonances=512,
                 n_envelopes=64,
                 n_decays=64,
-                n_deformations=64,
+                n_deformations=128,
                 n_samples=n_samples,
                 n_frames=n_frames,
                 samplerate=samplerate,
@@ -832,7 +828,6 @@ def train_and_monitor(
             hidden_channels=hidden_channels,
             with_activation_norm=True).to(device)
 
-        # disc = Discriminator(disc_type=disc_type).to(device)
 
         if save_and_load_weights:
             # KLUDGE: Unless the same command line arguments are used, this will
@@ -847,12 +842,7 @@ def train_and_monitor(
 
         optim = Adam(model.parameters(), lr=1e-4)
 
-        # loss_model = CorrelationLoss(n_elements=512).to(device)
-
-        # achieves "Breakup", starts to find tonal things quickly, but without much resonance, trails off as desired
-        # loss_model = AutocorrelationLoss(64, 64).to(device)
-
-        # loss_model = SpikingModel(64, 64, 64, 64, 64).to(device)
+        loss_model = CorrelationLoss(n_elements=1024).to(device)
 
         for i, item in enumerate(iter(stream)):
             optim.zero_grad()
@@ -862,8 +852,13 @@ def train_and_monitor(
                 orig_audio(target)
                 recon, encoded, scheduling = model.iterative(target)
 
+                norms = torch.norm(recon, dim=-1)
+                norms, indices = torch.sort(norms, dim=-1)
+                norms = max_norm(norms)
+                dist(norms)
+
                 recon_summed = torch.sum(recon, dim=1, keepdim=True)
-                print(recon_summed.min(), recon_summed.max(), recon_summed.mean(), recon_summed.std())
+                # print(recon_summed.min(), recon_summed.max(), recon_summed.mean(), recon_summed.std())
                 recon_audio(max_norm(recon_summed))
 
                 envelopes(max_norm(scheduling[0]))
@@ -876,15 +871,9 @@ def train_and_monitor(
                 target = target * weighting
                 recon_summed = recon_summed * weighting
 
-                # loss = loss_model.compute_multiband_loss(target, recon_summed, 64, 16)
-
-                # loss = loss_model.forward(target, recon_summed)
-
-                loss = iterative_loss(target, recon, loss_transform, ratio_loss=True)
-
-                # target_spec = transform(target)
-                # recon_spec = transform(recon_summed)
-                # loss = loss + torch.abs(target_spec - recon_spec).sum()
+                loss = iterative_loss(target, recon, loss_transform, ratio_loss=False)
+                # loss = loss + loss_model.multiband_noise_loss(target, recon_summed, 64, 16)
+                # loss = loss + reconstruction_loss(target, recon_summed)
 
             scaler.scale(loss).backward()
             # clip_grad_value_(model.parameters(), 0.5)
@@ -916,28 +905,6 @@ def train_and_monitor(
                     random_audio(max_norm(rnd))
                     reservoir(max_norm(torch.from_numpy(model.reservoir)))
                     # random_vecs(max_norm(vecs[0]))
-
-            # encode the random sequence
-            # recon, encoded, scheduling = model.iterative(rnd)
-            #
-            # self_supervised(max_norm(torch.sum(recon, dim=1, keepdim=True)))
-            #
-            # # sort the random sequence and the reconstruction by descending norms
-            # random_seq = sort_channels_descending_norm(random_seq)
-            # random_seq = loss_transform(random_seq)
-            #
-            # recon = sort_channels_descending_norm(recon)
-            # recon = loss_transform(recon)
-            #
-            # print('SELF-SUPERVISED', random_seq.shape, recon.shape)
-            #
-            # # compare the difference between the spectrogram at each individual channel
-            # loss = torch.abs(random_seq - recon).sum() * 1e-2
-
-
-            # loss.backward()
-            # optim.step()
-            # print('SELF-SUPERVISED', loss.item())
 
 
             # if i % 1000 == 0:

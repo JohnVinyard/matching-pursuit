@@ -10,10 +10,11 @@ from matplotlib import pyplot as plt
 from io import BytesIO
 from soundfile import SoundFile
 from data.audioiter import AudioIterator
-from modules import stft, gammatone_filter_bank
+from modules import stft, gammatone_filter_bank, interpolate_last_axis
 
 from modules.hypernetwork import HyperNetworkLayer
 from modules.overlap_add import overlap_add
+from modules.reds import F0Resonance
 from modules.transfer import fft_convolve, freq_domain_transfer_function_to_resonance
 
 import matplotlib
@@ -505,6 +506,70 @@ def test_shift():
     index = torch.argmax(shifted, dim=-1)
     assert index.item() == 64
 
+def decaying_resonance(
+        n_samples: int,
+        samplerate: int,
+        f0s: torch.Tensor,
+        freq_spacing: torch.Tensor,
+        freq_decay: torch.Tensor,
+        time_decay: torch.Tensor
+    ) -> torch.Tensor:
+
+    pass
+
+def run_block(
+        n_samples: int,
+        energy_envelope: torch.Tensor,
+        energy_samples: int,
+        resonances: torch.Tensor,
+        deformation: torch.Tensor,
+        gains: torch.Tensor,
+        mix: torch.Tensor) -> torch.Tensor:
+
+    batch, n_events, n_frames = energy_envelope.shape
+    batch, n_events, n_resonances, samples = resonances.shape
+    assert samples == n_samples
+    batch, n_events, n_deformations, deformation_frames = deformation.shape
+    assert n_deformations == n_resonances
+
+    batch, n_events, _ = gains.shape
+    batch, n_events, mx = mix.shape
+
+    # first scale up the envelope to sample rate
+    energy_envelope = interpolate_last_axis(energy_envelope, desired_size=energy_samples)
+    energy_envelope = energy_envelope * torch.zeros_like(energy_envelope).uniform_(-1, 1)
+    diff = n_samples - energy_samples
+    padding = torch.zeros(batch, n_events, diff)
+    energy_envelope = torch.cat([energy_envelope, padding], dim=-1)
+    dry = energy_envelope
+
+    # expand to prepare for convolution
+    energy_envelope = energy_envelope.view(batch, n_events, 1, n_samples)
+    resonance = fft_convolve(energy_envelope, resonances)
+
+    # expand gains for broadcast multiplication
+    gains = gains.view(batch, n_events, n_resonances, 1)
+    resonance = torch.tanh(resonance * gains)
+
+    # interpolate between resonances
+    deformation = torch.softmax(deformation, dim=2)
+    deformed = resonance * deformation
+    wet = torch.sum(deformed, dim=2).view(batch_size, n_events, n_samples)
+
+    stacked = torch.stack([dry, wet], dim=-1)
+
+    mix = torch.softmax(mix, dim=-1).view(batch, n_events, 1, 2)
+
+    mixed = stacked * mix
+
+    final = torch.sum(mixed, dim=-1)
+    return final
+
+
+
+
+
+
 
 # TODO: how do I fit resonances into the instrument stack?
 # TODO: frequency-matching experiment with damped harmonic resonantor
@@ -512,102 +577,168 @@ def test_shift():
 
 if __name__ == '__main__':
 
-    instrument_dim = 16
-    n_events = 1
     batch_size = 1
-    block_size = 512
-    n_coeffs = block_size // 2 + 1
-    total_complex_coeffs = n_coeffs * 2
+    n_events = 1
+    n_samples = 2 ** 15
+    total_coeffs = n_samples // 2 + 1
+    n_frames = 64
+    energy_samples = 4096
+    n_resonances = 4
 
-    n_frames = 512
+    window_size = 2048
+    step_size = 1024
+    resonance_frames = n_samples // step_size
 
+    n_coeffs = window_size // 2 + 1
 
-    transform_block_size = total_complex_coeffs
+    # FFT
 
-    n_filters = n_coeffs
-    filters = gammatone_filter_bank(n_filters, block_size, 'cpu', band_spacing='geometric')
-    filters = torch.fft.rfft(filters, dim=-1)
+    # resonances = torch.zeros(batch_size, n_events, n_resonances, n_coeffs).uniform_(0.001, 0.9)
+    # resonances = resonances * torch.zeros_like(resonances).bernoulli_(p=0.01)
+    #
+    # phases = torch.zeros(batch_size, n_events, n_resonances, n_coeffs).uniform_(-np.pi, np.pi)
+    #
+    # resonances = freq_domain_transfer_function_to_resonance(
+    #     window_size=2048,
+    #     coeffs=resonances,
+    #     n_frames=resonance_frames,
+    #     apply_decay=True,
+    #     start_phase=phases)
+    #
+    # resonances = resonances.view(batch_size, n_events, n_resonances, n_samples)
 
-    resting = torch.zeros(batch_size, n_events, instrument_dim)
-    masses = torch.zeros_like(resting).uniform_(1, 100)
-    tensions = torch.zeros_like(resting).uniform_(1, 10)
-    gains = torch.zeros_like(resting).uniform_(0.1, 10)
+    # F0
 
-    to_samples = \
-        torch.zeros(transform_block_size, instrument_dim).uniform_(-1, 1) \
-        * torch.zeros(transform_block_size, instrument_dim).bernoulli_(p=0.002)
+    f0 = F0Resonance(n_octaves=32, n_samples=n_samples)
+    freq = torch.zeros(batch_size * n_events, n_resonances, 1).uniform_(0.01, 1)
+    spacing = torch.zeros(batch_size * n_events, n_resonances, 1).uniform_(0.25, 4)
+    decays = torch.zeros(batch_size * n_events, n_resonances, 1).uniform_(0.1, 0.9)
 
-    damping = 0.95
+    resonances = f0.forward(freq, decays, spacing, sigmoid_decay=False, apply_exponential_decay=True)
+    resonances = resonances.view(batch_size, n_events, n_resonances, n_samples)
 
-    velocity = torch.zeros_like(resting)
-    acceleration = torch.zeros_like(resting)
+    result = run_block(
+        n_samples=n_samples,
+        energy_envelope=(torch.linspace(1, 0, n_frames) ** 8)[None, None, :],
+        energy_samples=energy_samples,
+        deformation=torch.eye(n_resonances, n_samples)[None, None, :, :],
+        resonances=resonances,
+        gains=torch.zeros(batch_size, n_events, n_resonances).uniform_(0.5, 10),
+        mix = torch.zeros(batch_size, n_events, 2).uniform_(-1, 1)
+    )
 
-    state = torch.zeros_like(resting)
-
-    forces = torch.zeros(batch_size, n_events, instrument_dim, n_frames).bernoulli_(p=0.002) * 0.001
-    # forces[:, :, :, 0] = torch.zeros(batch_size, n_events, instrument_dim).uniform_(-0.01, 0.01)
-
-    displacement = torch.zeros_like(state)
-    blocks = []
-
-
-    for i in range(n_frames):
-
-        # calculate new displacement
-        displacement = (state - resting)
-
-        acceleration += (-displacement * tensions) / masses
-
-        # accumulate forces
-        # apply any forces from outside the system
-        acceleration += forces[:, :, :, i] / masses
-
-        # apply forces
-        velocity += acceleration
-        state += velocity
-
-        # clear
-        # apply damping (this could vary over time)
-        velocity *= damping
-        # velocity[torch.abs(velocity) < 1e-6] = 0
-
-        # clear forces
-        acceleration *= 0
-
-        block = (displacement @ to_samples.T) #* torch.norm(displacement)
-
-
-
-        block = block.view(batch_size, n_events, n_coeffs, 2)
-        block = torch.view_as_complex(block)
-
-        block = block @ filters
-
-        block = torch.fft.irfft(block, dim=-1)
-
-        # print(torch.norm(displacement), torch.norm(block))
-        blocks.append(block[:, :, None, :])
-
-
-
-
-
-    # plt.matshow(np.abs(torch.stack(disp, dim=0).data.cpu().numpy().squeeze()))
-    # plt.show()
-
-    blocks = torch.cat(blocks, dim=-2)
-    # print(blocks.shape)
-    # samples = blocks.view(batch_size, n_events, -1)
-    samples = overlap_add(blocks, apply_window=True)
-
-    plt.plot(samples[0, 0, :])
+    plt.plot(result.view(-1).data.cpu().numpy())
     plt.show()
-    samples = playable(samples, 22050, normalize=True)
-    listen_to_sound(samples, 22050, wait_for_user_input=True)
+
+    spec = stft(result.view(batch_size, 1, n_samples), 2048, 256, pad=True)
+    spec = spec.view(-1, 1025).data.cpu().numpy()
+    plt.matshow(spec)
+    plt.show()
+    print(result.shape)
+
+    audio = playable(result, 22050, normalize=True)
+    listen_to_sound(audio, 22050, wait_for_user_input=True)
 
 
 
-    
-    
-    
-    
+    #=======================================================
+
+    # instrument_dim = 16
+    # n_events = 1
+    # batch_size = 1
+    # block_size = 512
+    # n_coeffs = block_size // 2 + 1
+    # total_complex_coeffs = n_coeffs * 2
+    #
+    # n_frames = 512
+    #
+    #
+    # transform_block_size = total_complex_coeffs
+    #
+    # n_filters = n_coeffs
+    # filters = gammatone_filter_bank(n_filters, block_size, 'cpu', band_spacing='geometric')
+    # filters = torch.fft.rfft(filters, dim=-1)
+    #
+    # resting = torch.zeros(batch_size, n_events, instrument_dim)
+    # masses = torch.zeros_like(resting).uniform_(1, 100)
+    # tensions = torch.zeros_like(resting).uniform_(1, 10)
+    # gains = torch.zeros_like(resting).uniform_(0.1, 10)
+    #
+    # to_samples = \
+    #     torch.zeros(transform_block_size, instrument_dim).uniform_(-1, 1) \
+    #     * torch.zeros(transform_block_size, instrument_dim).bernoulli_(p=0.002)
+    #
+    # damping = 0.95
+    #
+    # velocity = torch.zeros_like(resting)
+    # acceleration = torch.zeros_like(resting)
+    #
+    # state = torch.zeros_like(resting)
+    #
+    # forces = torch.zeros(batch_size, n_events, instrument_dim, n_frames).bernoulli_(p=0.002) * 0.001
+    # # forces[:, :, :, 0] = torch.zeros(batch_size, n_events, instrument_dim).uniform_(-0.01, 0.01)
+    #
+    # displacement = torch.zeros_like(state)
+    # blocks = []
+    #
+    #
+    # for i in range(n_frames):
+    #
+    #     # calculate new displacement
+    #     displacement = (state - resting)
+    #
+    #     acceleration += (-displacement * tensions) / masses
+    #
+    #     # accumulate forces
+    #     # apply any forces from outside the system
+    #     acceleration += forces[:, :, :, i] / masses
+    #
+    #     # apply forces
+    #     velocity += acceleration
+    #     state += velocity
+    #
+    #     # clear
+    #     # apply damping (this could vary over time)
+    #     velocity *= damping
+    #     # velocity[torch.abs(velocity) < 1e-6] = 0
+    #
+    #     # clear forces
+    #     acceleration *= 0
+    #
+    #     block = (displacement @ to_samples.T) #* torch.norm(displacement)
+    #
+    #
+    #
+    #     block = block.view(batch_size, n_events, n_coeffs, 2)
+    #     block = torch.view_as_complex(block)
+    #
+    #     block = block @ filters
+    #
+    #     block = torch.fft.irfft(block, dim=-1)
+    #
+    #     # print(torch.norm(displacement), torch.norm(block))
+    #     blocks.append(block[:, :, None, :])
+    #
+    #
+    #
+    #
+    #
+    # # plt.matshow(np.abs(torch.stack(disp, dim=0).data.cpu().numpy().squeeze()))
+    # # plt.show()
+    #
+    # blocks = torch.cat(blocks, dim=-2)
+    # # print(blocks.shape)
+    # # samples = blocks.view(batch_size, n_events, -1)
+    # samples = overlap_add(blocks, apply_window=True)
+    #
+    # plt.plot(samples[0, 0, :])
+    # plt.show()
+    # samples = playable(samples, 22050, normalize=True)
+    # listen_to_sound(samples, 22050, wait_for_user_input=True)
+    #
+    #
+    #
+    #
+    #
+    #
+    #

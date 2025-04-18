@@ -599,9 +599,9 @@ We mask the second half of the input audio to enable the streaming algorithm, so
 
 """
 
-# example_1.impulse
-# example_1.resonance
-# example_1.wet
+# example_5.impulse
+# example_5.resonance
+# example_5.wet
 
 
 """[markdown]
@@ -775,21 +775,22 @@ def process_events2(
 def load_model(wavetable_device: str = 'cpu') -> nn.Module:
     hidden_channels = 512
 
+
     model = IterativeDecompositionModel(
         in_channels=1024,
         hidden_channels=hidden_channels,
         with_activation_norm=True,
         resonance_model=OverfitResonanceModel(
             n_noise_filters=64,
-            noise_expressivity=4,
+            noise_expressivity=2,
             noise_filter_samples=128,
             noise_deformations=32,
-            instr_expressivity=4,
+            instr_expressivity=8,
             n_events=1,
             n_resonances=4096,
             n_envelopes=64,
             n_decays=64,
-            n_deformations=64,
+            n_deformations=128,
             n_samples=n_samples,
             n_frames=n_frames,
             samplerate=samplerate,

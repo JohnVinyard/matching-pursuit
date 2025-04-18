@@ -28,7 +28,7 @@ class NeuralReverb(nn.Module):
             self.register_buffer('rooms', imp)
 
     @staticmethod
-    def tensors_from_directory(path, n_samples):
+    def tensors_from_directory(path, n_samples, normalize: bool = False):
         root = pathlib.Path(path)
         g = root.joinpath('*.wav')
 
@@ -48,6 +48,9 @@ class NeuralReverb(nn.Module):
 
         audio = np.concatenate(audio, axis=0)
         audio = torch.from_numpy(audio)
+
+        if normalize:
+            audio = audio / (torch.max(audio, dim=-1, keepdim=True)[0] + 1e-8)
         return audio
 
     @staticmethod

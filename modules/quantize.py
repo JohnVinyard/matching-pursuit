@@ -7,7 +7,7 @@ from util.music import musical_scale_hz
 from torch.nn import functional as F
 from typing import Literal
 
-SelectionType = Literal['sparse_softmax', 'gumbel_softmax', 'softmax']
+SelectionType = Literal['sparse_softmax', 'gumbel_softmax', 'softmax', 'relu']
 
 
 def hard_choice(
@@ -20,6 +20,8 @@ def hard_choice(
         selections = F.gumbel_softmax(selections, tau=0.1, hard=True, dim=-1)
     elif selection_type == 'softmax':
         selections = torch.softmax(selections, dim=-1)
+    elif selection_type == 'relu':
+        selections = torch.relu(selections)
     else:
         raise ValueError(f'{selection_type} is an unknown selection type')
 

@@ -193,6 +193,22 @@ class MultiSSM(nn.Module, EventGenerator):
         return samples
 
 
+class SampleResonanceLookup(Lookup):
+    def __init__(self, n_items: int, n_samples: int):
+
+        def init(x: torch.Tensor) -> torch.Tensor:
+            noise = torch.zeros_like(x).uniform_(-1, 1)
+            ramp = torch.linspace(1, 0, n_samples, device=x.device)[None, :]
+            decays = torch.linspace(2, 40, n_items, device=x.device)[:, None]
+            resonances = (ramp ** decays) * noise
+            return resonances
+
+        super().__init__(n_items, n_samples, initialize=init, selection_type='relu')
+
+    def postprocess_results(self, items: torch.Tensor) -> torch.Tensor:
+        items = max_norm(items, dim=-1)
+        return items
+
 class FFTResonanceLookup(Lookup):
     def __init__(self, n_items: int, n_samples: int, window_size: int):
 
@@ -203,7 +219,7 @@ class FFTResonanceLookup(Lookup):
 
         step_size = window_size // 2
 
-        super().__init__(n_items, n_coeffs, initialize=init)
+        super().__init__(n_items, n_coeffs, initialize=init, selection_type='relu')
 
         self.window_size = window_size
         self.n_coeffs = n_coeffs
@@ -302,7 +318,7 @@ class SampleLookup(Lookup):
         else:
             initializer = None
 
-        super().__init__(n_items, n_samples, initialize=initializer)
+        super().__init__(n_items, n_samples, initialize=initializer, selection_type='relu')
         self.randomize_phases = randomize_phases
         self.flatten_kernel_size = flatten_kernel_size
         self.windowed = windowed
@@ -336,31 +352,32 @@ class SampleLookup(Lookup):
         return x
 
 
-class Decays(Lookup):
-    def __init__(self, n_items: int, n_samples: int, full_size: int, base_resonance: float = 0.5):
-        super().__init__(n_items, 1,)
-        self.full_size = full_size
-        self.n_samples = n_samples
-        self.base_resonance = base_resonance
-        self.diff = 1 - self.base_resonance
+# class Decays(Lookup):
+#     def __init__(self, n_items: int, n_samples: int, full_size: int, base_resonance: float = 0.5):
+#         super().__init__(n_items, 1,)
+#         self.full_size = full_size
+#         self.n_samples = n_samples
+#         self.base_resonance = base_resonance
+#         self.diff = 1 - self.base_resonance
+#
+#     def preprocess_items(self, items: torch.Tensor) -> torch.Tensor:
+#         """Ensure that we have all values between 0 and 1
+#         """
+#         # items = items - items.min()
+#         # items = items / (items.max() + 1e-3)
+#         return self.base_resonance + (torch.sigmoid(items) * self.diff)
+#
+#     def postprocess_results(self, decay: torch.Tensor) -> torch.Tensor:
+#         """Apply a scan in log-space to end up with exponential decay
+#         """
+#
+#         decay = decay.repeat(1, 1, 1, self.n_samples)
+#         decay = torch.log(decay + 1e-12)
+#         decay = torch.cumsum(decay, dim=-1)
+#         decay = torch.exp(decay)
+#         amp = interpolate_last_axis(decay, desired_size=self.full_size)
+#         return amp
 
-    def preprocess_items(self, items: torch.Tensor) -> torch.Tensor:
-        """Ensure that we have all values between 0 and 1
-        """
-        # items = items - items.min()
-        # items = items / (items.max() + 1e-3)
-        return self.base_resonance + (torch.sigmoid(items) * self.diff)
-
-    def postprocess_results(self, decay: torch.Tensor) -> torch.Tensor:
-        """Apply a scan in log-space to end up with exponential decay
-        """
-
-        decay = decay.repeat(1, 1, 1, self.n_samples)
-        decay = torch.log(decay + 1e-12)
-        decay = torch.cumsum(decay, dim=-1)
-        decay = torch.exp(decay)
-        amp = interpolate_last_axis(decay, desired_size=self.full_size)
-        return amp
 
 
 class Envelopes(Lookup):
@@ -370,31 +387,37 @@ class Envelopes(Lookup):
             n_samples: int,
             full_size: int,
             padded_size: int):
-        # def init(x):
-        #     return \
-        #             torch.zeros(n_items, n_samples).uniform_(-1, 1) \
-        #             * (torch.linspace(1, 0, steps=n_samples)[None, :] ** torch.zeros(n_items, 1).uniform_(50, 150))
+
+        def init(x: torch.Tensor):
+            ramp = torch.linspace(1, 0, n_samples, device=x.device)[None, :]
+            exp = torch.linspace(2, 40, n_items, device=x.device)[:, None]
+            x = ramp ** exp
+            return x
 
         super().__init__(
             n_items,
             n_samples,
-            #initialize=init
+            initialize=init,
+            selection_type='relu'
         )
         self.full_size = full_size
         self.padded_size = padded_size
 
-    def preprocess_items(self, items: torch.Tensor) -> torch.Tensor:
-        """Ensure that we have all values between 0 and 1
-        """
-        # items = items - items.min()
-        # items = items / (items.max() + 1e-3)
-        return items ** 2
+    # def preprocess_items(self, items: torch.Tensor) -> torch.Tensor:
+    #     """Ensure that we have all values between 0 and 1
+    #     """
+    #     return items ** 2
 
-    def postprocess_results(self, decay: torch.Tensor) -> torch.Tensor:
+    def postprocess_results(self, envelope: torch.Tensor) -> torch.Tensor:
         """Scale up to sample rate and multiply with noise
         """
+        envelope = torch.relu(envelope)
 
-        amp = interpolate_last_axis(decay, desired_size=self.full_size)
+        # scale so we always have a max of one and min of zero
+        # envelope = envelope - torch.min(envelope, dim=-1, keepdim=True)[0]
+        # envelope = envelope / (torch.max(envelope, dim=-1, keepdim=True)[0] + 1e-8)
+
+        amp = interpolate_last_axis(envelope, desired_size=self.full_size)
         amp = amp * torch.zeros_like(amp).uniform_(-1, 1)
         diff = self.padded_size - self.full_size
         padding = torch.zeros((amp.shape[:-1] + (diff,)), device=amp.device)
@@ -402,10 +425,11 @@ class Envelopes(Lookup):
         return amp
 
 
+
 class Deformations(Lookup):
 
     def __init__(self, n_items: int, channels: int, frames: int, full_size: int):
-        super().__init__(n_items, channels * frames)
+        super().__init__(n_items, channels * frames, selection_type='relu')
         self.full_size = full_size
         self.channels = channels
         self.frames = frames
@@ -417,6 +441,7 @@ class Deformations(Lookup):
         shape = items.shape[:-1]
         x = items.reshape(*shape, self.channels, self.frames)
         x = torch.softmax(x, dim=-2)
+        # x = torch.relu(x)
         x = interpolate_last_axis(x, desired_size=self.full_size)
         return x
 
@@ -531,16 +556,18 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
         self.mix_shape = (1, n_events, 2)
         self.amplitude_shape = (1, n_events, 1)
 
-        verbs = NeuralReverb.tensors_from_directory(Config.impulse_response_path(), n_samples)
-        n_verbs = verbs.shape[0]
-        self.n_verbs = n_verbs
+        # verbs = NeuralReverb.tensors_from_directory(Config.impulse_response_path(), n_samples, normalize=True)
+        # n_verbs = verbs.shape[0]
+        # self.n_verbs = n_verbs
 
-        self.room_shape = (1, n_events, n_verbs)
+        # self.room_shape = (1, n_events, n_verbs)
 
         self.n_resonances = n_resonances
 
         if fft_resonance:
+            # TODO: Replace this with a small MLP that maps from context_dim to n_coeffs * 2
             self.r = FFTResonanceLookup(n_resonances, n_samples, 2048)
+            # self.r = SampleResonanceLookup(n_resonances, n_samples)
         else:
             self.r = WavetableLookup(
                 n_resonances,
@@ -556,10 +583,11 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
         # self.r = F0ResonanceLookup(n_resonances, n_samples)
 
         self.n = SampleLookup(
-            n_noise_filters, noise_filter_samples, windowed=True, randomize_phases=False)
+            n_noise_filters, noise_filter_samples, windowed=False, randomize_phases=False)
 
-        self.verb = Lookup(n_verbs, n_samples, initialize=lambda x: verbs, fixed=True)
+        # self.verb = Lookup(n_verbs, n_samples, initialize=lambda x: verbs, fixed=True)
 
+        # TODO: replace this with a small MLP instead
         self.e = Envelopes(
             n_envelopes,
             n_samples=128,
@@ -568,7 +596,7 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
 
         self.n_decays = n_decays
 
-        self.d = Decays(n_decays, n_frames, n_samples, base_resonance=0.5)
+        # self.d = Decays(n_decays, n_frames, n_samples, base_resonance=0.5)
         self.warp = Deformations(n_deformations, instr_expressivity, n_frames, n_samples)
 
         self.noise_warp = Deformations(noise_deformations, noise_expressivity, n_frames, n_samples)
@@ -594,8 +622,8 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
             decays=(self.instr_expressivity, self.n_decays,),
             mixes=(2,),
             amplitudes=(1,),
-            room_choice=(self.n_verbs,),
-            room_mix=(2,),
+            # room_choice=(self.n_verbs,),
+            # room_mix=(2,),
         )
 
         if self.fine_positioning:
@@ -615,8 +643,8 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
             mixes: torch.Tensor,
             amplitudes: torch.Tensor,
             times: torch.Tensor,
-            room_choice: torch.Tensor,
-            room_mix: torch.Tensor,
+            # room_choice: torch.Tensor,
+            # room_mix: torch.Tensor,
             fine: Union[torch.Tensor, None] = None) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
 
         intermediates = {}
@@ -625,6 +653,7 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
         # calculate impulses or energy injected into a system
         impulses = self.e.forward(envelopes)
 
+
         # choose filters to be convolved with energy/noise
         noise_res = self.n.forward(noise_resonance)
         noise_res = torch.cat([
@@ -632,8 +661,10 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
             torch.zeros(*noise_res.shape[:-1], self.n_samples - noise_res.shape[-1], device=impulses.device)
         ], dim=-1)
 
+
         # choose deformations to be applied to the initial noise resonance
         noise_def = self.noise_warp.forward(noise_deformations)
+
 
         # choose a dry/wet mix
         noise_mix = noise_mixes[:, :, None, :]
@@ -647,10 +678,10 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
         intermediates['impulse'] = noise_wet
 
         # mix dry and wet
-        # stacked = torch.stack([impulses, noise_wet], dim=-1)
-        # mixed = stacked * noise_mix
-        # mixed = torch.sum(mixed, dim=-1)
-        mixed = noise_wet
+        stacked = torch.stack([impulses, noise_wet], dim=-1)
+        mixed = stacked * noise_mix
+        mixed = torch.sum(mixed, dim=-1)
+        # mixed = noise_wet
 
         # initial filtered noise is now the input to our longer resonances
         impulses = mixed
@@ -695,13 +726,13 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
         intermediates['dry'] = final
 
         # apply reverb
-        verb = self.verb.forward(room_choice)
-        wet = fft_convolve(verb, final.view(*verb.shape))
-        verb_mix = torch.softmax(room_mix, dim=-1)[:, :, None, :]
-        stacked = torch.stack([wet, final.view(*verb.shape)], dim=-1)
-        stacked = stacked * verb_mix
-
-        final = stacked.sum(dim=-1)
+        # verb = self.verb.forward(room_choice)
+        # wet = fft_convolve(verb, final.view(*verb.shape))
+        # verb_mix = torch.softmax(room_mix, dim=-1)[:, :, None, :]
+        # stacked = torch.stack([wet, final.view(*verb.shape)], dim=-1)
+        # stacked = stacked * verb_mix
+        #
+        # final = stacked.sum(dim=-1)
 
         intermediates['wet'] = final
 
@@ -709,7 +740,6 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
         final = final.view(-1, self.n_events, self.n_samples)
         final = final * torch.abs(amplitudes)
 
-        # print('AMPS', amplitudes)
 
         scheduled = self.scheduler.schedule(times, final)
 
@@ -717,6 +747,8 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
             fine_shifts = torch.tanh(fine) * self.frame_ratio
             scheduled = fft_shift(scheduled, fine_shifts)
             scheduled = scheduled[..., :self.n_samples]
+
+
 
         return scheduled, intermediates
 
@@ -733,8 +765,8 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
             mixes: torch.Tensor,
             amplitudes: torch.Tensor,
             times: torch.Tensor,
-            room_choice: torch.Tensor,
-            room_mix: torch.Tensor,
+            # room_choice: torch.Tensor,
+            # room_mix: torch.Tensor,
             fine: Union[torch.Tensor, None] = None) -> torch.Tensor:
 
         scheduled, intermediates = self.forward_with_intermediate_steps(
@@ -749,7 +781,8 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
             mixes,
             amplitudes,
             times,
-            room_choice,
-            room_mix, fine)
+            # room_choice,
+            # room_mix,
+            fine)
 
         return scheduled
