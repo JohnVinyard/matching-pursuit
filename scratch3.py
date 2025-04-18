@@ -10,7 +10,8 @@ from matplotlib import pyplot as plt
 from io import BytesIO
 from soundfile import SoundFile
 from data.audioiter import AudioIterator
-from modules import stft, gammatone_filter_bank, interpolate_last_axis, fft_frequency_decompose, fft_frequency_recompose
+from modules import stft, gammatone_filter_bank, interpolate_last_axis, fft_frequency_decompose, \
+    fft_frequency_recompose, max_norm
 
 from modules.hypernetwork import HyperNetworkLayer
 from modules.overlap_add import overlap_add
@@ -573,7 +574,7 @@ if __name__ == '__main__':
 
     batch_size = 1
     n_events = 1
-    n_samples = 2 ** 15
+    n_samples = 2 ** 16
     total_coeffs = n_samples // 2 + 1
     n_frames = 64
     energy_samples = 4096
@@ -587,7 +588,7 @@ if __name__ == '__main__':
 
 
     # Multi-band FFT
-    sizes = fft_frequency_decompose(torch.zeros(batch_size, n_events, n_samples), min_size=512)
+    sizes = fft_frequency_decompose(torch.zeros(batch_size, n_events, n_samples * 2), min_size=512)
     # coeffs = {k: v.shape[-1] // 2 + 1 for k, v in sizes.items()}
     coeffs = 64 // 2 + 1
     rnd = {k: torch.zeros(batch_size, n_events, n_resonances, coeffs).uniform_(0.1, 0.99) for k, v in sizes.items()}
@@ -599,8 +600,8 @@ if __name__ == '__main__':
         apply_decay=True,
         start_phase=rnd_phase[k]
     ) for k, v in rnd_phase.items()}
-    resonances = fft_frequency_recompose(resonances, desired_size=n_samples)
-    resonances = resonances.view(batch_size, n_events, n_resonances, n_samples)
+    resonances = fft_frequency_recompose(resonances, desired_size=n_samples * 2)
+    resonances = resonances.view(batch_size, n_events, n_resonances, n_samples * 2)[..., :n_samples]
 
     # FFT
     # resonances = torch.zeros(batch_size, n_events, n_resonances, n_coeffs).uniform_(0.5, 0.99)
@@ -641,9 +642,10 @@ if __name__ == '__main__':
         energy_samples=energy_samples,
         deformation=deformations,
         resonances=resonances,
-        gains=torch.zeros(batch_size, n_events, n_resonances).uniform_(0.1, 5),
+        gains=torch.zeros(batch_size, n_events, n_resonances).uniform_(0.1, 2),
         mix = torch.zeros(batch_size, n_events, 2).uniform_(-1, 1),
     )
+    result = max_norm(result)
 
     plt.plot(result.view(-1).data.cpu().numpy())
     plt.show()
