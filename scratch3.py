@@ -10,7 +10,7 @@ from matplotlib import pyplot as plt
 from io import BytesIO
 from soundfile import SoundFile
 from data.audioiter import AudioIterator
-from modules import stft, gammatone_filter_bank, interpolate_last_axis
+from modules import stft, gammatone_filter_bank, interpolate_last_axis, fft_frequency_decompose, fft_frequency_recompose
 
 from modules.hypernetwork import HyperNetworkLayer
 from modules.overlap_add import overlap_add
@@ -506,16 +506,6 @@ def test_shift():
     index = torch.argmax(shifted, dim=-1)
     assert index.item() == 64
 
-def decaying_resonance(
-        n_samples: int,
-        samplerate: int,
-        f0s: torch.Tensor,
-        freq_spacing: torch.Tensor,
-        freq_decay: torch.Tensor,
-        time_decay: torch.Tensor
-    ) -> torch.Tensor:
-
-    pass
 
 def run_block(
         n_samples: int,
@@ -595,7 +585,22 @@ if __name__ == '__main__':
 
     n_coeffs = window_size // 2 + 1
 
-    # TODO: Maybe multi-resolution FFT resonance
+
+    # Multi-band FFT
+    sizes = fft_frequency_decompose(torch.zeros(batch_size, n_events, n_samples), min_size=512)
+    # coeffs = {k: v.shape[-1] // 2 + 1 for k, v in sizes.items()}
+    coeffs = 64 // 2 + 1
+    rnd = {k: torch.zeros(batch_size, n_events, n_resonances, coeffs).uniform_(0.1, 0.99) for k, v in sizes.items()}
+    rnd_phase = {k: torch.zeros(batch_size, n_events, n_resonances, coeffs).uniform_(-np.pi, np.pi) for k, v in sizes.items()}
+    resonances = {k: freq_domain_transfer_function_to_resonance(
+        window_size=64,
+        coeffs=rnd[k],
+        n_frames=k // (64 // 2),
+        apply_decay=True,
+        start_phase=rnd_phase[k]
+    ) for k, v in rnd_phase.items()}
+    resonances = fft_frequency_recompose(resonances, desired_size=n_samples)
+    resonances = resonances.view(batch_size, n_events, n_resonances, n_samples)
 
     # FFT
     # resonances = torch.zeros(batch_size, n_events, n_resonances, n_coeffs).uniform_(0.5, 0.99)
@@ -613,15 +618,15 @@ if __name__ == '__main__':
     # resonances = resonances.view(batch_size, n_events, n_resonances, n_samples)
 
     # F0
-    f0 = F0Resonance(n_octaves=32, n_samples=n_samples)
-    freq = torch.zeros(batch_size * n_events, n_resonances, 1).uniform_(0.01, 0.25)
-    spacing = torch.zeros(batch_size * n_events, n_resonances, 1).uniform_(0.25, 4)
-    decays = torch.zeros(batch_size * n_events, n_resonances, 1).uniform_(0.1, 0.9)
-
-    time_decay = torch.zeros(batch_size, n_events, n_resonances, 1).uniform_(2, 20).repeat(1, 1, 1, n_frames)
-
-    resonances = f0.forward(freq, decays, spacing, sigmoid_decay=False, apply_exponential_decay=True, time_decay=time_decay)
-    resonances = resonances.view(batch_size, n_events, n_resonances, n_samples)
+    # f0 = F0Resonance(n_octaves=32, n_samples=n_samples)
+    # freq = torch.zeros(batch_size * n_events, n_resonances, 1).uniform_(0.001, 0.1)
+    # spacing = torch.zeros(batch_size * n_events, n_resonances, 1).uniform_(0.25, 2)
+    # decays = torch.zeros(batch_size * n_events, n_resonances, 1).uniform_(0.1, 0.9)
+    #
+    # time_decay = torch.zeros(batch_size, n_events, n_resonances, 1).uniform_(2, 10).repeat(1, 1, 1, n_frames)
+    #
+    # resonances = f0.forward(freq, decays, spacing, sigmoid_decay=False, apply_exponential_decay=True, time_decay=time_decay)
+    # resonances = resonances.view(batch_size, n_events, n_resonances, n_samples)
 
 
 
@@ -636,7 +641,7 @@ if __name__ == '__main__':
         energy_samples=energy_samples,
         deformation=deformations,
         resonances=resonances,
-        gains=torch.zeros(batch_size, n_events, n_resonances).uniform_(0.1, 2),
+        gains=torch.zeros(batch_size, n_events, n_resonances).uniform_(0.1, 5),
         mix = torch.zeros(batch_size, n_events, 2).uniform_(-1, 1),
     )
 
