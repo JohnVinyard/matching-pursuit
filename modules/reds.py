@@ -1,6 +1,7 @@
 from typing import Callable, List, Union
 import torch
 from torch import nn
+
 from modules.fft import fft_convolve
 from modules.normal_pdf import gamma_pdf, pdf2
 from modules.normalization import max_norm, unit_norm
@@ -12,6 +13,20 @@ from enum import Enum
 import numpy as np
 
 from util.music import musical_scale_hz
+
+
+def interpolate_last_axis(low_sr: torch.Tensor, desired_size) -> torch.Tensor:
+    """A convenience wrapper around `torch.nn.functional.interpolate` to allow
+    for an arbitrary number of leading dimensions
+    """
+    orig_shape = low_sr.shape
+    new_shape = orig_shape[:-1] + (desired_size,)
+    last_dim = low_sr.shape[-1]
+
+    reshaped = low_sr.reshape(-1, 1, last_dim)
+    upsampled = F.interpolate(reshaped, mode='linear', size=desired_size)
+    upsampled = upsampled.reshape(*new_shape)
+    return upsampled
 
 
 def fft_shift(a: torch.Tensor, shift: torch.Tensor):
@@ -100,7 +115,9 @@ class F0Resonance(nn.Module):
             decay_coefficients: torch.Tensor,
             freq_spacing: torch.Tensor,
             sigmoid_decay: bool = True,
-            apply_exponential_decay: bool = True) -> torch.Tensor:
+            apply_exponential_decay: bool = True,
+            time_decay: Union[torch.Tensor, None] = None) -> torch.Tensor:
+
         batch, n_events, n_elements = f0.shape
 
         # assert n_elements == self.n_f0_elements
@@ -153,6 +170,15 @@ class F0Resonance(nn.Module):
         # apply decaying value
         if apply_exponential_decay:
             osc = osc * exp_decays[..., None]
+
+        if time_decay is not None:
+            frames = time_decay.shape[-1]
+            ramp = torch.linspace(1, 0, frames, device=time_decay.device)
+            ramp = ramp ** time_decay
+            ramp = interpolate_last_axis(ramp, desired_size=self.n_samples)
+            ramp = ramp.view(-1, 1, self.n_samples)
+            print(osc.shape, ramp.shape)
+            osc = osc * ramp
 
         osc = torch.sum(osc, dim=2)
         osc = max_norm(osc, dim=-1)

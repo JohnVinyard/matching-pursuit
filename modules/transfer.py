@@ -497,7 +497,6 @@ def fft_convolve(*args, correlation=False):
     final = torch.fft.irfft(spec, dim=-1)
 
     # remove padding
-
     final = final[..., :n_samples]
     return final
 

@@ -552,6 +552,10 @@ def run_block(
     resonance = torch.tanh(resonance * gains)
 
     # interpolate between resonances
+    plt.matshow(deformation[0, 0, ...].data.cpu().numpy())
+    plt.show()
+
+    deformation = interpolate_last_axis(deformation, desired_size=n_samples)
     deformation = torch.softmax(deformation, dim=2)
     deformed = resonance * deformation
     wet = torch.sum(deformed, dim=2).view(batch_size, n_events, n_samples)
@@ -591,10 +595,11 @@ if __name__ == '__main__':
 
     n_coeffs = window_size // 2 + 1
 
-    # FFT
+    # TODO: Maybe multi-resolution FFT resonance
 
-    # resonances = torch.zeros(batch_size, n_events, n_resonances, n_coeffs).uniform_(0.001, 0.9)
-    # resonances = resonances * torch.zeros_like(resonances).bernoulli_(p=0.01)
+    # FFT
+    # resonances = torch.zeros(batch_size, n_events, n_resonances, n_coeffs).uniform_(0.5, 0.99)
+    # # resonances = resonances * torch.zeros_like(resonances).bernoulli_(p=0.01)
     #
     # phases = torch.zeros(batch_size, n_events, n_resonances, n_coeffs).uniform_(-np.pi, np.pi)
     #
@@ -608,23 +613,31 @@ if __name__ == '__main__':
     # resonances = resonances.view(batch_size, n_events, n_resonances, n_samples)
 
     # F0
-
     f0 = F0Resonance(n_octaves=32, n_samples=n_samples)
-    freq = torch.zeros(batch_size * n_events, n_resonances, 1).uniform_(0.01, 1)
+    freq = torch.zeros(batch_size * n_events, n_resonances, 1).uniform_(0.01, 0.25)
     spacing = torch.zeros(batch_size * n_events, n_resonances, 1).uniform_(0.25, 4)
     decays = torch.zeros(batch_size * n_events, n_resonances, 1).uniform_(0.1, 0.9)
 
-    resonances = f0.forward(freq, decays, spacing, sigmoid_decay=False, apply_exponential_decay=True)
+    time_decay = torch.zeros(batch_size, n_events, n_resonances, 1).uniform_(2, 20).repeat(1, 1, 1, n_frames)
+
+    resonances = f0.forward(freq, decays, spacing, sigmoid_decay=False, apply_exponential_decay=True, time_decay=time_decay)
     resonances = resonances.view(batch_size, n_events, n_resonances, n_samples)
+
+
+
+    deformations = torch.zeros(batch_size, n_events, n_resonances, n_frames).uniform_(-0.5, 0.5)
+    deformations = torch.cumsum(deformations, dim=-1)
+
+
 
     result = run_block(
         n_samples=n_samples,
         energy_envelope=(torch.linspace(1, 0, n_frames) ** 8)[None, None, :],
         energy_samples=energy_samples,
-        deformation=torch.eye(n_resonances, n_samples)[None, None, :, :],
+        deformation=deformations,
         resonances=resonances,
-        gains=torch.zeros(batch_size, n_events, n_resonances).uniform_(0.5, 10),
-        mix = torch.zeros(batch_size, n_events, 2).uniform_(-1, 1)
+        gains=torch.zeros(batch_size, n_events, n_resonances).uniform_(0.1, 2),
+        mix = torch.zeros(batch_size, n_events, 2).uniform_(-1, 1),
     )
 
     plt.plot(result.view(-1).data.cpu().numpy())
