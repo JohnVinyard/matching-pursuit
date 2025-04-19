@@ -6,7 +6,8 @@ from torch import nn
 from torch.nn import functional as F
 
 from config import Config
-from modules import interpolate_last_axis, select_items, NeuralReverb, SSM, sparse_softmax, sparsify, max_norm
+from modules import interpolate_last_axis, select_items, NeuralReverb, SSM, sparse_softmax, sparsify, max_norm, \
+    fft_frequency_recompose
 from modules.eventgenerators.generator import EventGenerator
 from modules.eventgenerators.schedule import DiracScheduler
 from modules.iterative import TensorTransform
@@ -208,6 +209,72 @@ class SampleResonanceLookup(Lookup):
     def postprocess_results(self, items: torch.Tensor) -> torch.Tensor:
         items = max_norm(items, dim=-1)
         return items
+
+class MultibandResonanceLookup(Lookup):
+
+    def __init__(
+            self,
+            n_items: int,
+            n_samples: int,
+            smallest_band_size: int = 512,
+            window_size: int = 64):
+
+        def init(x):
+            return torch.zeros_like(x).uniform_(-6, 6) * torch.zeros_like(x).bernoulli_(p=0.01)
+
+        step_size = window_size // 2
+
+
+        full_size_log2 = int(np.log2(n_samples))
+        small_size_log2 = int(np.log2(smallest_band_size))
+        band_sizes = [2**x for x in range(small_size_log2, full_size_log2, 1)]
+        n_bands = len(band_sizes)
+
+        n_coeffs = window_size // 2 + 1
+        # magnitude and phase for each band
+        params_per_band = n_coeffs * 2
+        total_params_per_item = params_per_band * n_bands
+        super().__init__(n_items, total_params_per_item, selection_type='relu', initialize=init)
+
+        self.frames_per_band = [(size // step_size) for size in band_sizes]
+        self.total_frames = (n_samples // step_size) * 2
+        self.band_sizes = band_sizes
+        self.n_bands = n_bands
+        self.params_per_band = params_per_band
+        self.n_coeffs = n_coeffs
+        self.window_size = window_size
+        self.padded_samples = n_samples * 2
+
+    def postprocess_results(self, items: torch.Tensor) -> torch.Tensor:
+        batch, n_events, expressivity, n_params = items.shape
+
+        bands = dict()
+
+        for i, size in enumerate(self.band_sizes):
+            start = i * self.params_per_band
+            stop = start + self.params_per_band
+            band_params = items[:, :, :, start: stop]
+
+            mag = band_params[:, :, :, :self.n_coeffs]
+            phase = band_params[:, :, :, self.n_coeffs:]
+
+            mag = torch.sigmoid(mag) * 0.9999
+            phase = torch.tanh(phase) * np.pi
+
+            band = freq_domain_transfer_function_to_resonance(
+                window_size=self.window_size,
+                coeffs=mag,
+                n_frames=self.frames_per_band[i],
+                apply_decay=True,
+                start_phase=phase
+            )
+            bands[size] = band
+
+        full = fft_frequency_recompose(bands, desired_size=self.padded_samples // 2)
+        # full = full[..., :self.padded_samples // 2]
+        full = full.view(batch, n_events, expressivity, -1)
+        return full
+
 
 class FFTResonanceLookup(Lookup):
     def __init__(self, n_items: int, n_samples: int, window_size: int):
@@ -566,7 +633,8 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
 
         if fft_resonance:
             # TODO: Replace this with a small MLP that maps from context_dim to n_coeffs * 2
-            self.r = FFTResonanceLookup(n_resonances, n_samples, 2048)
+            self.r = MultibandResonanceLookup(n_resonances, n_samples)
+            # self.r = FFTResonanceLookup(n_resonances, n_samples, 2048)
             # self.r = SampleResonanceLookup(n_resonances, n_samples)
         else:
             self.r = WavetableLookup(
