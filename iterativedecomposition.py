@@ -872,7 +872,7 @@ def train_and_monitor(
                 recon_summed = recon_summed * weighting
 
                 loss = iterative_loss(target, recon, loss_transform, ratio_loss=False)
-                # loss = loss + loss_model.multiband_noise_loss(target, recon_summed, 64, 16)
+                loss = loss + loss_model.multiband_noise_loss(target, recon_summed, 64, 16)
                 # loss = loss + reconstruction_loss(target, recon_summed)
 
             scaler.scale(loss).backward()
