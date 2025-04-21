@@ -96,7 +96,7 @@ from util import device, make_initializer
 from sklearn.manifold import TSNE
 
 
-initializer = make_initializer(0.05)
+initializer = make_initializer(0.02)
 
 
 article_title = 'Audio Splatting With Physics-Inspired Event Generators'
@@ -124,7 +124,7 @@ class OverfitHierarchicalEvents(nn.Module):
         self.event_generator = SplattingEventGenerator(
             n_samples=n_samples,
             samplerate=samplerate,
-            n_resonance_octaves=16,
+            n_resonance_octaves=32,
             n_frames=n_samples // 256,
             hard_reverb_choice=False,
             hierarchical_scheduler=True,
@@ -259,6 +259,7 @@ def overfit():
     model = OverfitHierarchicalEvents(
         n_samples, samplerate, n_events, context_dim=event_dim).to(device)
     optim = Adam(model.parameters(), lr=1e-3)
+
     # loss_model = CorrelationLoss(n_elements=512).to(device)
 
     # loss_model = AutocorrelationLoss(64, 64).to(device)
@@ -284,10 +285,10 @@ def overfit():
         perturbed_summed = max_norm(perturbed_summed)
         perturbed_audio(perturbed_summed)
 
-        # loss = loss_model.compute_multiband_loss(target, recon)
-        # loss = loss_model.multiband_noise_loss(target, recon_summed, 64, 16)
+        # loss = loss_model.forward(target, recon_summed)
+        # loss = loss_model.compute_multiband_loss(target, recon_summed, 64, 16)
 
-        loss = iterative_loss(target, recon, loss_transform, ratio_loss=False)
+        loss = iterative_loss(target, recon, loss_transform, ratio_loss=True)
 
         # loss = reconstruction_loss(target, recon_summed)
         # t = loss_model.forward(target)

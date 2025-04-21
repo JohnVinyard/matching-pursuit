@@ -634,8 +634,8 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
 
         if fft_resonance:
             # TODO: Replace this with a small MLP that maps from context_dim to n_coeffs * 2
-            self.r = MultibandResonanceLookup(n_resonances, n_samples)
-            # self.r = FFTResonanceLookup(n_resonances, n_samples, 2048)
+            # self.r = MultibandResonanceLookup(n_resonances, n_samples)
+            self.r = FFTResonanceLookup(n_resonances, n_samples, 2048)
             # self.r = SampleResonanceLookup(n_resonances, n_samples)
         else:
             self.r = WavetableLookup(

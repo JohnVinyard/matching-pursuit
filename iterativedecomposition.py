@@ -766,8 +766,7 @@ def train_and_monitor(
                 noise_deformations=32,
                 instr_expressivity=8,
                 n_events=1,
-                n_resonances=2048,
-                # n_resonances=512,
+                n_resonances=4096,
                 n_envelopes=64,
                 n_decays=64,
                 n_deformations=128,
@@ -842,7 +841,7 @@ def train_and_monitor(
 
         optim = Adam(model.parameters(), lr=1e-4)
 
-        loss_model = CorrelationLoss(n_elements=1024).to(device)
+        # loss_model = CorrelationLoss(n_elements=1024).to(device)
 
         for i, item in enumerate(iter(stream)):
             optim.zero_grad()

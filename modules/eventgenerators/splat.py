@@ -378,7 +378,7 @@ class SplattingEventGenerator(nn.Module, EventGenerator):
         overall_mix = torch.softmax(mix, dim=-1)
 
         resonances = self.resonance_generator.forward(
-            f0_choice, decay, freq_spacing, sigmoid_decay=True, time_decay=time_decays)
+            f0_choice, decay, freq_spacing, sigmoid_decay=True, time_decay=1 + (torch.sigmoid(time_decays) * 80))
 
         filtered_noise = self.noise_generator.forward(
             noise_filter[:, :, 0],
