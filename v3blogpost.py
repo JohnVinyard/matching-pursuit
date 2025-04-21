@@ -184,6 +184,7 @@ We mask the second half of the input audio to enable the streaming algorithm, so
 # example_1.impulse
 # example_1.resonance
 # example_1.wet
+# example_1.deformations
 
 """[markdown]
 
@@ -287,6 +288,7 @@ We mask the second half of the input audio to enable the streaming algorithm, so
 # example_2.impulse
 # example_2.resonance
 # example_2.wet
+# example_2.deformations
 
 
 """[markdown]
@@ -392,7 +394,7 @@ We mask the second half of the input audio to enable the streaming algorithm, so
 # example_3.impulse
 # example_3.resonance
 # example_3.wet
-
+# example_3.deformations
 
 """[markdown]
 
@@ -497,6 +499,7 @@ We mask the second half of the input audio to enable the streaming algorithm, so
 # example_4.impulse
 # example_4.resonance
 # example_4.wet
+# example_4.deformations
 
 
 """[markdown]
@@ -602,7 +605,7 @@ We mask the second half of the input audio to enable the streaming algorithm, so
 # example_5.impulse
 # example_5.resonance
 # example_5.wet
-
+# example_5.deformations
 
 """[markdown]
 
@@ -787,7 +790,7 @@ def load_model(wavetable_device: str = 'cpu') -> nn.Module:
             noise_deformations=32,
             instr_expressivity=8,
             n_events=1,
-            n_resonances=4096,
+            n_resonances=2048,
             n_envelopes=64,
             n_decays=64,
             n_deformations=128,
@@ -800,7 +803,7 @@ def load_model(wavetable_device: str = 'cpu') -> nn.Module:
             fft_resonance=True,
         ))
 
-    with open('iterativedecomposition17.dat', 'rb') as f:
+    with open('iterativedecomposition18.dat', 'rb') as f:
         model.load_state_dict(torch.load(f, map_location=lambda storage, loc: storage))
 
     print('Total parameters', count_parameters(model))
@@ -870,6 +873,10 @@ def make_audio_component(
     audio_component = AudioComponent(meta.public_uri, height=100, color=audio_color)
     return audio_component
 
+def make_matrix_component(logger: Logger, samples: torch.Tensor, key: str) -> ImageComponent:
+    _, meta = logger.log_matrix(key, samples[0, 0, :, :])
+    component = ImageComponent(meta.public_uri, height=100)
+    return component
 
 def reconstruction_section(logger: Logger) -> CompositeComponent:
     model = load_model()
@@ -892,6 +899,7 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
     resonance_audio_component = make_audio_component(logger, max_norm(intermediates['dry']), 'dry')
     reverb_audio_component = make_audio_component(logger, max_norm(intermediates['wet']), 'wet')
 
+    deformations = make_matrix_component(logger, max_norm(intermediates['deformations']), 'deformations')
 
     residuals = residuals.view(n_events, 1024, -1).data.cpu().numpy()
     residuals = residuals[:, ::-1, :]
@@ -985,6 +993,7 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
         impulse=impulse_audio_component,
         resonance=resonance_audio_component,
         wet=reverb_audio_component,
+        deformations=deformations,
         **event_components
     )
 

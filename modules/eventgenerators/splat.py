@@ -118,6 +118,7 @@ class EvolvingFilteredResonance(nn.Module):
             start_filter_stds: torch.Tensor,
             end_filter_means: torch.Tensor,
             end_filter_stds: torch.Tensor):
+
         batch, n_events, n_samples = resonances.shape
         assert n_samples == self.n_samples
 
@@ -369,14 +370,15 @@ class SplattingEventGenerator(nn.Module, EventGenerator):
             resonance_filter_2: torch.Tensor,
             amp: torch.Tensor,
             verb_params: torch.Tensor,
-            times: torch.Tensor) -> torch.Tensor:
+            times: torch.Tensor,
+            time_decays: torch.Tensor) -> torch.Tensor:
 
         batch = env.shape[0]
 
         overall_mix = torch.softmax(mix, dim=-1)
 
         resonances = self.resonance_generator.forward(
-            f0_choice, decay, freq_spacing, sigmoid_decay=True)
+            f0_choice, decay, freq_spacing, sigmoid_decay=True, time_decay=time_decays)
 
         filtered_noise = self.noise_generator.forward(
             noise_filter[:, :, 0],
@@ -388,13 +390,13 @@ class SplattingEventGenerator(nn.Module, EventGenerator):
             start_filter_means=torch.zeros_like(resonance_filter_1[:, :, 0]),
             start_filter_stds=torch.abs(resonance_filter_1[:, :, 1]) + 1e-12,
             end_filter_means=torch.zeros_like(resonance_filter_2[:, :, 0]),
-            end_filter_stds=torch.abs(resonance_filter_2[:, :, 1]) + 1e-12
+            end_filter_stds=torch.abs(resonance_filter_2[:, :, 1]) + 1e-12,
         )
 
-        decays = self.amp_envelope_generator.forward(decay_choice)
+        # decays = self.amp_envelope_generator.forward(decay_choice)
 
-        decaying_resonance = filtered_resonance * decays
-        decaying_resonance2 = filt_res_2 * decays
+        decaying_resonance = filtered_resonance #* decays
+        decaying_resonance2 = filt_res_2 #* decays
 
         positioned_noise = self.env_and_position.forward(
             signals=filtered_noise,
@@ -445,6 +447,7 @@ class SplattingEventGenerator(nn.Module, EventGenerator):
                 resonance_filter_2=(2,),
                 amp=(1,),
                 verb_params=(4,),
+                time_decays=(self.n_resonance_octaves,)
             )
         else:
             return dict(
