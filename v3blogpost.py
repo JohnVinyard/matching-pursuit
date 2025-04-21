@@ -148,108 +148,7 @@ arbitrary lengths.
 
 """
 
-"""[markdown]
-
-## Example 1
-
-"""
-
-"""[markdown]
-
-### Original Audio
-
-"""
-# example_1.orig_audio
-
-# example_1.orig_spec
-
-"""[markdown]
-
-### Reconstruction
-
-We mask the second half of the input audio to enable the streaming algorithm, so only the first half of the input audio is reproduced.
-
-"""
-
-# example_1.recon_audio
-
-# example_1.recon_spec
-
-"""[markdown]
-
-### Individual Event Intermediate Steps
-
-"""
-
-# example_1.impulse
-# example_1.resonance
-# example_1.wet
-# example_1.deformations
-
-"""[markdown]
-
-### Decomposition
-
-We can see that while energy is removed at each step, removed segments do not map cleanly onto audio "events" as a human listener would typically conceive of them.  Future work will move toward fewer and more meaningul events via induced sparsity and/or clustering of events.
-
-"""
-
-# example_1.decomposition
-
-"""[markdown]
-
-### Randomized
-
-"""
-
-"""[markdown]
-
-Here, we generate random event vectors with the original event times.
-"""
-
-# example_1.random_events
-
-"""[markdown]
-
-Here we use the original event vectors, but generate random times.
-
-"""
-
-# example_1.random_times
-
-"""[markdown]
-
-### Random Perturbations
-
-Each event vector is "perturbed" or moved in the same direction in event space by adding a random event vector with
-small magnitude
-
-"""
-
-# example_1.perturbed
-
-
-"""[markdown]
-
-### Event Vectors
-
-Different stopping conditions might be chosen during inference (e.g. norm of the residual) but during training, we remove energy for 32 steps.  Each event vector is of dimension 32.  The decoder generates an event from this vector, which is then scheduled.  
-
- 
-"""
-
-# example_1.latents
-
-
-"""[markdown]
-
-### Event Scatterplot
-
-Time is along the x-axis, and a 32D -> 1D projection of event vectors using t-SNE constitutes the distribution along the y-axis.  Colors are produced via a random projection from 32D -> 3D (RGB).  Here it becomes clear that there are many redundant/overlapping events.  Future work will stress more sparsity and less event overlap, hopefully increasing interpretability further.
-
-"""
-
-# example_1.scatterplot
+# example_1
 
 
 """[markdown]
@@ -790,7 +689,7 @@ def load_model(wavetable_device: str = 'cpu') -> nn.Module:
             noise_deformations=32,
             instr_expressivity=8,
             n_events=1,
-            n_resonances=2048,
+            n_resonances=4096,
             n_envelopes=64,
             n_decays=64,
             n_deformations=128,
@@ -803,7 +702,7 @@ def load_model(wavetable_device: str = 'cpu') -> nn.Module:
             fft_resonance=True,
         ))
 
-    with open('iterativedecomposition18.dat', 'rb') as f:
+    with open('iterativedecomposition17.dat', 'rb') as f:
         model.load_state_dict(torch.load(f, map_location=lambda storage, loc: storage))
 
     print('Total parameters', count_parameters(model))
@@ -885,7 +784,7 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
     samples = get_one_audio_segment(n_samples, samplerate, device='cpu').view(1, 1, n_samples)
     events, vectors, times, residuals = model.iterative(samples, return_all_residuals=True)
 
-    event_norms = torch.norm(events, dim=-1).view(-1)
+    # event_norms = torch.norm(events, dim=-1).view(-1)
     # logger.log
 
     # choose one of the earliest/most prominent events
@@ -940,7 +839,7 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
 
     # points, times, colors = process_events(vectors, times, total_seconds)
 
-    scatterplot_events, event_components = process_events2(logger, events, vectors, times, total_seconds)
+    scatterplot_events, _ = process_events2(logger, events, vectors, times, total_seconds)
 
     print(scatterplot_events)
 
@@ -994,7 +893,7 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
         resonance=resonance_audio_component,
         wet=reverb_audio_component,
         deformations=deformations,
-        **event_components
+        # **event_components
     )
 
     return composite

@@ -698,6 +698,18 @@ def to_numpy(x: torch.Tensor):
     return x.data.cpu().numpy()
 
 
+def todos():
+    todo_items = [
+        'Explore complex loss once again',
+        'Explore self-supervised learning',
+
+        'Explore iterative decomposition with all vectors defined up-front',
+        'Not enough expressive power when transforming from single event vector to different elements/atoms;  some parameters are frozen',
+        'Does basic FFT resonance also struggle with the _same_ deformations each time',
+    ]
+    for item in todo_items:
+        print(f'TODO: {item}')
+
 def train_and_monitor(
         batch_size: int = 8,
         overfit: bool = False,

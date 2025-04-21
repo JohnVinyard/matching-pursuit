@@ -159,7 +159,12 @@ def make_waves(n_samples: int, f0s: List[float], samplerate: int):
         sin = np.sin(radians)
         sines.append(sin[None, ...])
 
-    waves = np.concatenate([sawtooths, squares, triangles, sines], axis=0)
+    waves = np.concatenate([
+        sawtooths,
+        squares,
+        triangles,
+        sines
+    ], axis=0)
     waves = torch.from_numpy(waves).view(total_atoms, n_samples).float()
     return waves
 

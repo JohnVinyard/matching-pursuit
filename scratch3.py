@@ -16,15 +16,17 @@ from modules import stft, gammatone_filter_bank, interpolate_last_axis, fft_freq
 from modules.hypernetwork import HyperNetworkLayer
 from modules.overlap_add import overlap_add
 from modules.reds import F0Resonance
-from modules.transfer import fft_convolve, freq_domain_transfer_function_to_resonance
+from modules.transfer import fft_convolve, freq_domain_transfer_function_to_resonance, make_waves
 
 import matplotlib
 
 from util import playable
 from util.music import musical_scale_hz
+# from scipy.signal import sawtooth, square
 
 matplotlib.use('Qt5Agg')
 from matplotlib import pyplot as plt
+from random import choice
 
 from scipy.signal import gammatone
 
@@ -563,6 +565,19 @@ def run_block(
 
 
 
+def choose_resonance_basis(
+        n_options: int,
+        n_items: int,
+        n_samples: int,
+        samplerate: int = 22050) -> torch.Tensor:
+
+    waves = make_waves(n_samples, [float(x) for x in musical_scale_hz(n_steps=n_options)], samplerate=samplerate)
+    choices = torch.Tensor(n_items, n_samples)
+
+    for i in range(n_items):
+        choices[i] = waves[np.random.randint(0, n_options * 4)]
+
+    return choices
 
 
 
@@ -588,35 +603,42 @@ if __name__ == '__main__':
 
 
     # Multi-band FFT
-    sizes = fft_frequency_decompose(torch.zeros(batch_size, n_events, n_samples * 2), min_size=512)
-    # coeffs = {k: v.shape[-1] // 2 + 1 for k, v in sizes.items()}
-    coeffs = 64 // 2 + 1
-    rnd = {k: torch.zeros(batch_size, n_events, n_resonances, coeffs).uniform_(0.1, 0.99) for k, v in sizes.items()}
-    rnd_phase = {k: torch.zeros(batch_size, n_events, n_resonances, coeffs).uniform_(-np.pi, np.pi) for k, v in sizes.items()}
-    resonances = {k: freq_domain_transfer_function_to_resonance(
-        window_size=64,
-        coeffs=rnd[k],
-        n_frames=k // (64 // 2),
-        apply_decay=True,
-        start_phase=rnd_phase[k]
-    ) for k, v in rnd_phase.items()}
-    resonances = fft_frequency_recompose(resonances, desired_size=n_samples * 2)
-    resonances = resonances.view(batch_size, n_events, n_resonances, n_samples * 2)[..., :n_samples]
+    # sizes = fft_frequency_decompose(torch.zeros(batch_size, n_events, n_samples * 2), min_size=512)
+    # # coeffs = {k: v.shape[-1] // 2 + 1 for k, v in sizes.items()}
+    # coeffs = 64 // 2 + 1
+    # rnd = {k: torch.zeros(batch_size, n_events, n_resonances, coeffs).uniform_(0.1, 0.99) for k, v in sizes.items()}
+    # rnd_phase = {k: torch.zeros(batch_size, n_events, n_resonances, coeffs).uniform_(-np.pi, np.pi) for k, v in sizes.items()}
+    # resonances = {k: freq_domain_transfer_function_to_resonance(
+    #     window_size=64,
+    #     coeffs=rnd[k],
+    #     n_frames=k // (64 // 2),
+    #     apply_decay=True,
+    #     start_phase=rnd_phase[k]
+    # ) for k, v in rnd_phase.items()}
+    # resonances = fft_frequency_recompose(resonances, desired_size=n_samples * 2)
+    # resonances = resonances.view(batch_size, n_events, n_resonances, n_samples * 2)[..., :n_samples]
 
     # FFT
-    # resonances = torch.zeros(batch_size, n_events, n_resonances, n_coeffs).uniform_(0.5, 0.99)
-    # # resonances = resonances * torch.zeros_like(resonances).bernoulli_(p=0.01)
-    #
-    # phases = torch.zeros(batch_size, n_events, n_resonances, n_coeffs).uniform_(-np.pi, np.pi)
-    #
-    # resonances = freq_domain_transfer_function_to_resonance(
-    #     window_size=2048,
-    #     coeffs=resonances,
-    #     n_frames=resonance_frames,
-    #     apply_decay=True,
-    #     start_phase=phases)
-    #
-    # resonances = resonances.view(batch_size, n_events, n_resonances, n_samples)
+    # TODO: generate resonances based on
+    # basis = choose_resonance_basis(n_options=128, n_items=n_resonances, n_samples=window_size, samplerate=22050)
+    # basis = max_norm(basis)
+    # resonances = torch.fft.rfft(basis, dim=-1, norm='ortho').view(batch_size, n_events, n_resonances, n_coeffs)
+    # mags = torch.abs(resonances).max()
+    # resonances = 0.5 + (resonances / (mags + 1e-8)) * 0.49
+
+    resonances = torch.zeros(batch_size, n_events, n_resonances, n_coeffs).uniform_(0.5, 0.99)
+    # resonances = resonances * torch.zeros_like(resonances).bernoulli_(p=0.01)
+
+    phases = torch.zeros(batch_size, n_events, n_resonances, n_coeffs).uniform_(-np.pi, np.pi)
+
+    resonances = freq_domain_transfer_function_to_resonance(
+        window_size=2048,
+        coeffs=resonances,
+        n_frames=resonance_frames,
+        apply_decay=True,
+        start_phase=phases)
+
+    resonances = resonances.view(batch_size, n_events, n_resonances, n_samples)
 
     # F0
     # f0 = F0Resonance(n_octaves=32, n_samples=n_samples)

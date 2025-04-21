@@ -32,6 +32,20 @@ def interpolate_last_axis(low_sr: torch.Tensor, desired_size) -> torch.Tensor:
     upsampled = upsampled.reshape(*new_shape)
     return upsampled
 
+def ensure_last_axis_length(x: torch.Tensor, desired_size: int) -> torch.Tensor:
+    last_dim = x.shape[-1]
+    first_dims = x.shape[:-1]
+    if last_dim > desired_size:
+        raise ValueError(
+            f'Desired size provided was {desired_size}, but tensor is already size {last_dim} along last axis')
+
+    if last_dim == desired_size:
+        return x
+
+    diff = desired_size - last_dim
+    padding = torch.zeros(*first_dims, diff, device=x.device, dtype=x.dtype)
+    padded = torch.cat([x, padding], dim=-1)
+    return padded
     
 
 class UpsampleBlock(nn.Module):
