@@ -1,5 +1,5 @@
 from functools import reduce
-from typing import Collection, List, Sequence, Union
+from typing import Collection, List, Union
 import torch
 from torch import nn
 
@@ -10,7 +10,6 @@ from modules.normal_pdf import pdf2
 from modules.pos_encode import pos_encoded
 from modules.softmax import sparse_softmax
 from modules.upsample import ConvUpsample
-from util import device
 import numpy as np
 from torch.nn import functional as F
 from scipy.signal import square, sawtooth
@@ -174,7 +173,8 @@ def freq_domain_transfer_function_to_resonance(
         coeffs: torch.Tensor,
         n_frames: int,
         apply_decay: bool = True,
-        start_phase: Union[None, torch.Tensor] = None) -> torch.Tensor:
+        start_phase: Union[None, torch.Tensor] = None,
+        start_mags: Union[None, torch.Tensor] = None) -> torch.Tensor:
 
     step_size = window_size // 2
     total_samples = step_size * n_frames
@@ -185,8 +185,16 @@ def freq_domain_transfer_function_to_resonance(
 
     res = coeffs.view(-1, expected_coeffs, 1).repeat(1, 1, n_frames)
 
+    if start_mags is not None:
+        start_mags = start_mags.view(res.shape[0], expected_coeffs, 1)
+    else:
+        start_mags = torch.ones(res.shape[0], expected_coeffs, 1, device=res.device)
+
     # always start with full energy at every coefficient
-    res = torch.cat([torch.ones(res.shape[0], expected_coeffs, 1, device=res.device), res], dim=-1)
+    res = torch.cat([
+        start_mags,
+        res
+    ], dim=-1)
 
     if apply_decay:
         res = torch.log(res + 1e-12)

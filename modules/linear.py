@@ -8,7 +8,7 @@ class ResidualBlock(nn.Module):
             bias=True,
             activation=None,
             shortcut=True,
-            norm=None):
+            norm=lambda channels: None):
 
         super().__init__()
         self.channels = channels
@@ -16,7 +16,7 @@ class ResidualBlock(nn.Module):
         self.l2 = nn.Linear(channels, channels, bias)
         self.activation = activation or nn.LeakyReLU(0.2)
         self.shortcut = shortcut
-        self.norm = norm
+        self.norm = norm(channels)
 
     def forward(self, x):
         shortcut = x
@@ -43,7 +43,7 @@ class ResidualStack(nn.Module):
             bias=True, 
             activation=lambda x: F.leaky_relu(x, 0.2), 
             shortcut=True,
-            norm=None):
+            norm=lambda channels: None):
 
         super().__init__()
         self.activation = activation
@@ -67,7 +67,7 @@ class LinearOutputStack(nn.Module):
             activation=lambda x: F.leaky_relu(x, 0.2),
             bias=True,
             shortcut=True,
-            norm=None):
+            norm=lambda channels: None):
 
         super().__init__()
         self.channels = channels

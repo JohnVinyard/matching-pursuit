@@ -14,6 +14,7 @@ from modules.iterative import TensorTransform
 from modules.multiheadtransform import ShapeSpec
 from modules.reds import F0Resonance
 from modules.transfer import fft_convolve, make_waves_vectorized, freq_domain_transfer_function_to_resonance, fft_shift
+from modules.upsample import ensure_last_axis_length, ConvUpsample
 from util import device
 
 
@@ -200,7 +201,7 @@ class SampleResonanceLookup(Lookup):
         def init(x: torch.Tensor) -> torch.Tensor:
             noise = torch.zeros_like(x).uniform_(-1, 1)
             ramp = torch.linspace(1, 0, n_samples, device=x.device)[None, :]
-            decays = torch.linspace(2, 40, n_items, device=x.device)[:, None]
+            decays = torch.linspace(2, 80, n_items, device=x.device)[:, None]
             resonances = (ramp ** decays) * noise
             return resonances
 
@@ -232,7 +233,7 @@ class MultibandResonanceLookup(Lookup):
 
         n_coeffs = window_size // 2 + 1
         # magnitude and phase for each band
-        params_per_band = n_coeffs * 2
+        params_per_band = n_coeffs * 3
         total_params_per_item = params_per_band * n_bands
         super().__init__(n_items, total_params_per_item, selection_type='relu', initialize=init)
 
@@ -256,22 +257,25 @@ class MultibandResonanceLookup(Lookup):
             band_params = items[:, :, :, start: stop]
 
             mag = band_params[:, :, :, :self.n_coeffs]
-            phase = band_params[:, :, :, self.n_coeffs:]
+            phase = band_params[:, :, :, self.n_coeffs:self.n_coeffs * 2]
+            start = band_params[:, :, :, -self.n_coeffs:]
 
             mag = torch.sigmoid(mag) * 0.9999
             phase = torch.tanh(phase) * np.pi
+            start = torch.sigmoid(start)
 
             band = freq_domain_transfer_function_to_resonance(
                 window_size=self.window_size,
                 coeffs=mag,
                 n_frames=self.frames_per_band[i],
                 apply_decay=True,
-                start_phase=phase
+                start_phase=phase,
+                start_mags=start
             )
-            bands[size] = band
+            bands[size] = ensure_last_axis_length(band, size * 2)
 
-        full = fft_frequency_recompose(bands, desired_size=self.padded_samples // 2)
-        # full = full[..., :self.padded_samples // 2]
+        full = fft_frequency_recompose(bands, desired_size=self.padded_samples)
+        full = full[..., :self.padded_samples // 2]
         full = full.view(batch, n_events, expressivity, -1)
         return full
 
@@ -282,11 +286,13 @@ class FFTResonanceLookup(Lookup):
         def init(x):
             return torch.zeros_like(x).uniform_(-6, 6) * torch.zeros_like(x).bernoulli_(p=0.01)
 
-        n_coeffs = (window_size // 2 + 1) * 2
+        self.chunk_size = (window_size // 2 + 1)
+        n_coeffs = self.chunk_size * 3
 
         step_size = window_size // 2
 
         super().__init__(n_items, n_coeffs, initialize=init, selection_type='relu')
+
 
         self.window_size = window_size
         self.n_coeffs = n_coeffs
@@ -299,15 +305,19 @@ class FFTResonanceLookup(Lookup):
 
         # mags = torch.sigmoid(items) * 0.9999
 
-        mags = torch.sigmoid(items[..., :n_coeffs // 2]) * 0.9999
-        phases = torch.tanh(items[..., n_coeffs // 2:]) * np.pi
+        mags = torch.sigmoid(items[..., :self.chunk_size]) * 0.9999
+
+        phases = torch.tanh(items[..., self.chunk_size: self.chunk_size * 2]) * np.pi
+
+        starts = torch.sigmoid(items[..., -self.chunk_size:])
 
         items = freq_domain_transfer_function_to_resonance(
             self.window_size,
             mags,
             self.n_frames,
             apply_decay=True,
-            start_phase=phases
+            start_phase=phases,
+            start_mags=starts
         )
 
         items = items.view(batch, n_events, expressivity, -1)
@@ -446,6 +456,38 @@ class SampleLookup(Lookup):
 #         return amp
 
 
+# class ConvEnvelopes(nn.Module):
+#
+#     def __init__(self, n_samples: int, full_size: int, padded_size: int, context_dim: int, channels: int):
+#         super().__init__()
+#         self.n_samples = n_samples
+#         self.full_size = full_size
+#         self.padded_size = padded_size
+#         self.context_dim = context_dim
+#         self.channels = channels
+#
+#         self.net = ConvUpsample(
+#             latent_dim=self.context_dim,
+#             channels=self.channels,
+#             start_size=8,
+#             end_size=self.n_samples,
+#             mode='nearest',
+#             out_channels=1,
+#             from_latent=True,
+#             weight_norm=True
+#         )
+#
+#     def forward(self, x: torch.Tensor) -> torch.Tensor:
+#         env = self.net.forward(x)
+#         env = torch.relu(env)
+#
+#         amp = interpolate_last_axis(env, desired_size=self.full_size)
+#         amp = amp * torch.zeros_like(amp).uniform_(-1, 1)
+#         diff = self.padded_size - self.full_size
+#         padding = torch.zeros((amp.shape[:-1] + (diff,)), device=amp.device)
+#         amp = torch.cat([amp, padding], dim=-1)
+#         return amp
+#
 
 class Envelopes(Lookup):
     def __init__(
@@ -493,6 +535,35 @@ class Envelopes(Lookup):
 
 
 
+# class ConvDeformations(nn.Module):
+#     def __init__(self, context_dim: int, channels: int, frames: int, full_size: int, hidden_channels: int):
+#         super().__init__()
+#         self.context_dim = context_dim
+#         self.channels = channels
+#         self.frames = frames
+#         self.full_size = full_size
+#         self.hidden_channels = hidden_channels
+#
+#         self.net = ConvUpsample(
+#             latent_dim=self.context_dim,
+#             channels=self.hidden_channels,
+#             start_size=8,
+#             end_size=self.frames,
+#             mode='nearest',
+#             out_channels=self.channels,
+#             from_latent=True,
+#             weight_norm=True
+#         )
+#
+#     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+#         x = self.net(x)
+#         x = torch.softmax(x, dim=-2)
+#         x = x[:, None, :, :]
+#         before_upsample = x
+#         x = interpolate_last_axis(x, desired_size=self.full_size)
+#         return x, before_upsample
+
+
 class Deformations(Lookup):
 
     def __init__(self, n_items: int, channels: int, frames: int, full_size: int):
@@ -508,8 +579,9 @@ class Deformations(Lookup):
         shape = items.shape[:-1]
         x = items.reshape(*shape, self.channels, self.frames)
         x = torch.softmax(x, dim=-2)
-        before_upsample = x
         # x = torch.relu(x)
+        before_upsample = x
+        # TODO: Does this work, or should softmax be applied _after_?
         x = interpolate_last_axis(x, desired_size=self.full_size)
         return x, before_upsample
 
@@ -591,6 +663,7 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
             n_frames: int,
             samplerate: int,
             hidden_channels: int,
+            context_dim: int,
             fine_positioning: bool = False,
             wavetable_device=None,
             fft_resonance: bool = False):
@@ -604,6 +677,7 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
         self.fine_positioning = fine_positioning
         self.samples_per_frame = n_samples // n_frames
         self.frame_ratio = self.samples_per_frame / n_samples
+        self.context_dim = context_dim
 
         self.samplerate = samplerate
         self.n_events = n_events
@@ -662,13 +736,17 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
             n_samples=128,
             full_size=8192,
             padded_size=self.n_samples)
+        # self.e = ConvEnvelopes(
+        #     n_samples=128, full_size=8192, padded_size=self.n_samples, context_dim=self.context_dim, channels=32)
 
         self.n_decays = n_decays
 
         # self.d = Decays(n_decays, n_frames, n_samples, base_resonance=0.5)
         self.warp = Deformations(n_deformations, instr_expressivity, n_frames, n_samples)
+        # self.warp = ConvDeformations(self.context_dim, instr_expressivity, n_frames, n_samples, 32)
 
         self.noise_warp = Deformations(noise_deformations, noise_expressivity, n_frames, n_samples)
+        # self.noise_warp = ConvDeformations(self.context_dim, noise_expressivity, n_frames, n_samples, 32)
 
         self.scheduler = DiracScheduler(
             self.n_events, start_size=n_frames, n_samples=self.n_samples, pre_sparse=True)
@@ -682,12 +760,19 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
     def shape_spec(self) -> ShapeSpec:
         params = dict(
             noise_resonance=(self.noise_expressivity, self.n_noise_filters),
+
+            # TODO: Replace these with convolutional upsampled things
             noise_deformations=(self.noise_deformations,),
-            noise_mixes=(2,),
+            deformations=(self.n_deformations,),
             envelopes=(self.n_envelopes,),
+
+            # noise_deformations=(self.context_dim,),
+            # deformations=(self.context_dim,),
+            # envelopes=(self.context_dim,),
+
+            noise_mixes=(2,),
             resonances=(self.instr_expressivity, self.n_resonances),
             res_filter=(self.noise_expressivity, self.n_noise_filters),
-            deformations=(self.n_deformations,),
             decays=(self.instr_expressivity, self.n_decays,),
             mixes=(2,),
             amplitudes=(1,),

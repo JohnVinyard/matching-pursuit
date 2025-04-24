@@ -667,7 +667,7 @@ class Model(nn.Module):
 
             current = transform(ch)
 
-            spec = (spec - current)#.clone().detach()
+            spec = (spec - current).clone().detach()
 
             channels.append(ch)
             residuals.append(spec[:, None, :, :].clone().detach())
@@ -776,7 +776,8 @@ def train_and_monitor(
                 noise_expressivity=2,
                 noise_filter_samples=128,
                 noise_deformations=32,
-                instr_expressivity=8,
+                instr_expressivity=4,
+                # instr_expressivity=1,
                 n_events=1,
                 n_resonances=4096,
                 n_envelopes=64,
@@ -788,7 +789,8 @@ def train_and_monitor(
                 hidden_channels=hidden_channels,
                 wavetable_device=device,
                 fine_positioning=fine_positioning,
-                fft_resonance=True
+                fft_resonance=True,
+                context_dim=context_dim
             )
         elif model_type == 'conv':
             resonance_model = ConvImpulseEventGenerator(
@@ -808,7 +810,6 @@ def train_and_monitor(
                 hierarchical_scheduler=False
             )
         elif model_type == 'ssm':
-
             resonance_model = WavetableModel(
                 n_items=512,
                 n_samples=n_samples,

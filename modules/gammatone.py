@@ -1,10 +1,11 @@
-from typing import Literal
+from typing import Literal, Sequence, Union
 
 import torch
 import numpy as np
 from scipy.signal import gammatone
 
-BandSpacing = Literal['linear', 'geometric']
+BandSpacing = Union[Literal['linear', 'geometric'], Sequence[float]]
+
 
 def gammatone_filter_bank(
         n_filters: int,
@@ -23,6 +24,8 @@ def gammatone_filter_bank(
     elif band_spacing == 'geometric':
         frequencies = np.geomspace(
             start_hz, stop_hz, num=n_filters)
+    elif hasattr(band_spacing, '__getitem__'):
+        frequencies = band_spacing
     else:
         raise ValueError(
             f'{band_spacing} is not a valid band_spacing value, please choose linear or geometric')

@@ -268,7 +268,7 @@ class SplattingEventGenerator(nn.Module, EventGenerator):
             2,
             samplerate,
             n_samples,
-            norm=nn.LayerNorm(4, ),
+            norm=lambda channels: nn.LayerNorm(4, ),
             hard_choice=hard_reverb_choice)
 
         if hierarchical_scheduler:

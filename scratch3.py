@@ -6,29 +6,25 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from PIL import Image
-from matplotlib import pyplot as plt
 from io import BytesIO
 from soundfile import SoundFile
-from data.audioiter import AudioIterator
+
 from modules import stft, gammatone_filter_bank, interpolate_last_axis, fft_frequency_decompose, \
-    fft_frequency_recompose, max_norm
+    fft_frequency_recompose, max_norm, unit_norm
 
 from modules.hypernetwork import HyperNetworkLayer
 from modules.overlap_add import overlap_add
-from modules.reds import F0Resonance
 from modules.transfer import fft_convolve, freq_domain_transfer_function_to_resonance, make_waves
 
 import matplotlib
 
-from util import playable
+from util import playable, device
 from util.music import musical_scale_hz
-# from scipy.signal import sawtooth, square
 
 matplotlib.use('Qt5Agg')
 from matplotlib import pyplot as plt
-from random import choice
 
-from scipy.signal import gammatone
+
 
 """
 The NERF-like network is familiar, but still requires a scan, meaning
@@ -601,6 +597,15 @@ if __name__ == '__main__':
 
     n_coeffs = window_size // 2 + 1
 
+    n_filters = 256
+    hz = musical_scale_hz(n_steps=n_filters)
+    filter_bank = gammatone_filter_bank(n_filters, window_size, device='cpu', band_spacing=hz)
+    filter_coeffs = torch.abs(torch.fft.rfft(filter_bank, dim=-1, norm='ortho'))
+    filter_coeffs = unit_norm(filter_coeffs)
+
+    plt.matshow(filter_coeffs.data.cpu().numpy())
+    plt.show()
+
 
     # Multi-band FFT
     # sizes = fft_frequency_decompose(torch.zeros(batch_size, n_events, n_samples * 2), min_size=512)
@@ -626,8 +631,9 @@ if __name__ == '__main__':
     # mags = torch.abs(resonances).max()
     # resonances = 0.5 + (resonances / (mags + 1e-8)) * 0.49
 
-    resonances = torch.zeros(batch_size, n_events, n_resonances, n_coeffs).uniform_(0.5, 0.99)
-    # resonances = resonances * torch.zeros_like(resonances).bernoulli_(p=0.01)
+    resonances = torch.zeros(batch_size, n_events, n_resonances, n_filters).uniform_(0.01, 0.99)
+    # resonances = resonances @ filter_coeffs
+    # resonances /= resonances.max()
 
     phases = torch.zeros(batch_size, n_events, n_resonances, n_coeffs).uniform_(-np.pi, np.pi)
 
@@ -650,8 +656,8 @@ if __name__ == '__main__':
     #
     # resonances = f0.forward(freq, decays, spacing, sigmoid_decay=False, apply_exponential_decay=True, time_decay=time_decay)
     # resonances = resonances.view(batch_size, n_events, n_resonances, n_samples)
-
-
+    #
+    #
 
     deformations = torch.zeros(batch_size, n_events, n_resonances, n_frames).uniform_(-0.5, 0.5)
     deformations = torch.cumsum(deformations, dim=-1)
@@ -683,7 +689,7 @@ if __name__ == '__main__':
 
 
 
-    #=======================================================
+    # =======================================================
 
     # instrument_dim = 16
     # n_events = 1
@@ -708,7 +714,7 @@ if __name__ == '__main__':
     #
     # to_samples = \
     #     torch.zeros(transform_block_size, instrument_dim).uniform_(-1, 1) \
-    #     * torch.zeros(transform_block_size, instrument_dim).bernoulli_(p=0.002)
+    #     #* torch.zeros(transform_block_size, instrument_dim).bernoulli_(p=0.002)
     #
     # damping = 0.95
     #
@@ -750,7 +756,6 @@ if __name__ == '__main__':
     #     block = (displacement @ to_samples.T) #* torch.norm(displacement)
     #
     #
-    #
     #     block = block.view(batch_size, n_events, n_coeffs, 2)
     #     block = torch.view_as_complex(block)
     #
@@ -777,10 +782,9 @@ if __name__ == '__main__':
     # plt.show()
     # samples = playable(samples, 22050, normalize=True)
     # listen_to_sound(samples, 22050, wait_for_user_input=True)
-    #
-    #
-    #
-    #
-    #
-    #
-    #
+
+
+
+
+
+
