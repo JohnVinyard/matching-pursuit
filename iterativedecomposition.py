@@ -25,6 +25,7 @@ from modules.multiheadtransform import MultiHeadTransform
 from modules.overlap_add import overlap_add
 from modules.transfer import fft_convolve
 from modules.upsample import ConvUpsample
+from spiking import AutocorrelationLoss, SpikingModel
 from util import device, encode_audio, make_initializer
 
 matplotlib.use('Qt5Agg')
@@ -194,10 +195,12 @@ class Stack(nn.Module):
 
 
 def transform(x: torch.Tensor):
-    batch_size = x.shape[0]
+    batch_size, n_events = x.shape[:2]
+
     x = stft(x, transform_window_size, transform_step_size, pad=True)
     n_coeffs = transform_window_size // 2 + 1
-    x = x.reshape(batch_size, -1, n_coeffs)[..., :n_coeffs - 1].permute(0, 2, 1)
+    x = x.view(batch_size, n_events, -1, n_coeffs)
+    x = x.permute(0, 1, 3, 2).view(batch_size, n_coeffs, -1)
     return x
 
 
@@ -214,17 +217,12 @@ def loss_transform(x: torch.Tensor) -> torch.Tensor:
     # x = x.view(batch, n_events, -1)
     return x
 
+
 def reconstruction_loss(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    a = loss_transform(a)
-    b = loss_transform(b)
+    a = stft(a, 2048, 256, pad=True, return_complex=True)
+    b = stft(b, 2048, 256, pad=True, return_complex=True)
     return torch.abs(a - b).sum()
 
-
-def all_at_once_loss(target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
-    t = loss_transform(target)
-    r = loss_transform(recon)
-    loss = torch.abs(t - r).sum()
-    return loss
 
 class PhysicalModel(nn.Module):
 
@@ -282,7 +280,7 @@ class ConvSTFT(EventGenerator, nn.Module):
             out_channels=self.total_coeffs,
             from_latent=True,
             weight_norm=True,
-            batch_norm=True
+            batch_norm=False
         )
 
         self.scheduler = DiracScheduler(
@@ -657,7 +655,10 @@ class Model(nn.Module):
         else:
             spec = audio
 
+        loss = 0
+
         for i in range(n_events):
+            start_norm = torch.norm(spec.view(batch_size, -1))
 
             v, sched = self.encode(spec)
             vecs.append(v)
@@ -668,6 +669,9 @@ class Model(nn.Module):
             current = transform(ch)
 
             spec = (spec - current).clone().detach()
+            end_norm = torch.norm(spec.view(batch_size, -1))
+            diff = -(start_norm - end_norm)
+            loss = loss + diff.sum()
 
             channels.append(ch)
             residuals.append(spec[:, None, :, :].clone().detach())
@@ -774,7 +778,7 @@ def train_and_monitor(
             resonance_model = OverfitResonanceModel(
                 n_noise_filters=64,
                 noise_expressivity=2,
-                noise_filter_samples=128,
+                noise_filter_samples=32,
                 noise_deformations=32,
                 instr_expressivity=4,
                 # instr_expressivity=1,
@@ -810,12 +814,12 @@ def train_and_monitor(
                 hierarchical_scheduler=False
             )
         elif model_type == 'ssm':
-            resonance_model = WavetableModel(
-                n_items=512,
-                n_samples=n_samples,
-                n_frames=n_frames,
-                n_events=n_events)
-            # resonance_model = ConvSTFT(fine_positioning=False)
+            # resonance_model = WavetableModel(
+            #     n_items=512,
+            #     n_samples=n_samples,
+            #     n_frames=n_frames,
+            #     n_events=n_events)
+            resonance_model = ConvSTFT(fine_positioning=False)
 
             # window_size = 512
             # rnn_frames = n_samples // (window_size // 2)
@@ -836,7 +840,7 @@ def train_and_monitor(
 
         model = Model(
             resonance_model=resonance_model,
-            in_channels=1024,
+            in_channels=1025,
             hidden_channels=hidden_channels,
             with_activation_norm=True).to(device)
 
@@ -854,6 +858,11 @@ def train_and_monitor(
 
         optim = Adam(model.parameters(), lr=1e-4)
 
+        # TODO: compute loss in decomposition loop
+        # TODO: don't sort by norm;  compute loss in original order
+        # TODO: Should resonances always be unit norm for energy preservation?
+
+        # loss_model = AutocorrelationLoss(64, 64).to(device)
         # loss_model = CorrelationLoss(n_elements=1024).to(device)
 
         for i, item in enumerate(iter(stream)):
@@ -883,9 +892,10 @@ def train_and_monitor(
                 target = target * weighting
                 recon_summed = recon_summed * weighting
 
+                # loss = loss_model.compute_multiband_loss(target, recon_summed, 64, 32)
+                # loss = loss_model.multiband_noise_loss(target, recon_summed, 64, 16)
                 loss = iterative_loss(target, recon, loss_transform, ratio_loss=False)
-                # loss = loss + loss_model.multiband_noise_loss(target, recon_summed, 64, 16)
-                # loss = loss + reconstruction_loss(target, recon_summed)
+
 
             scaler.scale(loss).backward()
             # clip_grad_value_(model.parameters(), 0.5)

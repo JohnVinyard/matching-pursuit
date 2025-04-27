@@ -26,7 +26,9 @@ def iterative_loss(
         recon_channels: torch.Tensor,
         transform: TensorTransform,
         return_residual: bool = False,
-        ratio_loss: bool = False):
+        ratio_loss: bool = False,
+        sort_channels: bool = True):
+
     batch, _, time = target_audio.shape
 
     batch_size, n_events, time = recon_channels.shape
@@ -42,11 +44,14 @@ def iterative_loss(
 
     residual = target
 
-    # sort channels from loudest to softest
-    diff = torch.norm(channels, dim=(-1), p=1)
-    indices = torch.argsort(diff, dim=-1, descending=True)
+    if sort_channels:
+        # sort channels from loudest to softest
+        diff = torch.norm(channels, dim=(-1), p=1)
+        indices = torch.argsort(diff, dim=-1, descending=True)
+        srt = torch.take_along_dim(channels, indices[:, :, None], dim=1)
+    else:
+        srt = channels
 
-    srt = torch.take_along_dim(channels, indices[:, :, None], dim=1)
 
     loss = 0
 

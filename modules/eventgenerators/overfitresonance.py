@@ -564,26 +564,51 @@ class Envelopes(Lookup):
 #         return x, before_upsample
 
 
+# class PeriodicDeformations(nn.Module):
+#     def __init__(self, in_channels: int, channels: int, frames: int, full_size):
+#         super().__init__()
+#         self.in_channels = in_channels
+#         self.channels = channels
+#         self.frames = frames
+
 class Deformations(Lookup):
 
     def __init__(self, n_items: int, channels: int, frames: int, full_size: int):
-        super().__init__(n_items, channels * frames, selection_type='relu')
+
+        values_per_item = 3 # phase, frequency, amplitude
+
+        super().__init__(n_items, channels * values_per_item, selection_type='relu')
         self.full_size = full_size
         self.channels = channels
         self.frames = frames
+        self.values_per_item = values_per_item
 
-    def postprocess_results(self, items: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Reshape so that the values are (..., channels, frames).  Apply
-        softmax to the channel dimension and then upscale to full samplerate
-        """
-        shape = items.shape[:-1]
-        x = items.reshape(*shape, self.channels, self.frames)
+    def postprocess_results(self, items: torch.Tensor) -> torch.Tensor:
+        t = torch.linspace(-np.pi, np.pi, self.frames, device=items.device)[None, None, None, :]
+        items = items.view(*items.shape[:-1], self.channels, self.values_per_item)
+
+        phases = items[..., 0:1] * np.pi
+        freqs = items[..., 1:2] * np.pi
+        amps = items[..., 2:3]
+
+        x = amps * torch.sin((phases + freqs) * t)
         x = torch.softmax(x, dim=-2)
-        # x = torch.relu(x)
         before_upsample = x
-        # TODO: Does this work, or should softmax be applied _after_?
         x = interpolate_last_axis(x, desired_size=self.full_size)
         return x, before_upsample
+
+    # def postprocess_results(self, items: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    #     """Reshape so that the values are (..., channels, frames).  Apply
+    #     softmax to the channel dimension and then upscale to full samplerate
+    #     """
+    #     shape = items.shape[:-1]
+    #     x = items.reshape(*shape, self.channels, self.frames)
+    #     x = torch.softmax(x, dim=-2)
+    #     # x = torch.relu(x)
+    #     before_upsample = x
+    #     # TODO: Does this work, or should softmax be applied _after_?
+    #     x = interpolate_last_axis(x, desired_size=self.full_size)
+    #     return x, before_upsample
 
 
 
@@ -698,11 +723,11 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
         self.mix_shape = (1, n_events, 2)
         self.amplitude_shape = (1, n_events, 1)
 
-        # verbs = NeuralReverb.tensors_from_directory(Config.impulse_response_path(), n_samples, normalize=True)
-        # n_verbs = verbs.shape[0]
-        # self.n_verbs = n_verbs
-        #
-        # self.room_shape = (1, n_events, n_verbs)
+        verbs = NeuralReverb.tensors_from_directory(Config.impulse_response_path(), n_samples, normalize=True)
+        n_verbs = verbs.shape[0]
+        self.n_verbs = n_verbs
+
+        self.room_shape = (1, n_events, n_verbs)
 
         self.n_resonances = n_resonances
 
@@ -728,7 +753,7 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
         self.n = SampleLookup(
             n_noise_filters, noise_filter_samples, windowed=False, randomize_phases=False)
 
-        # self.verb = Lookup(n_verbs, n_samples, initialize=lambda x: verbs, fixed=True, selection_type='relu')
+        self.verb = Lookup(n_verbs, n_samples, initialize=lambda x: verbs, fixed=True, selection_type='relu')
 
         # TODO: replace this with a small MLP instead
         self.e = Envelopes(
@@ -741,11 +766,13 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
 
         self.n_decays = n_decays
 
+        deformation_frames = n_samples // 1024
+
         # self.d = Decays(n_decays, n_frames, n_samples, base_resonance=0.5)
-        self.warp = Deformations(n_deformations, instr_expressivity, n_frames, n_samples)
+        self.warp = Deformations(n_deformations, instr_expressivity, deformation_frames, n_samples)
         # self.warp = ConvDeformations(self.context_dim, instr_expressivity, n_frames, n_samples, 32)
 
-        self.noise_warp = Deformations(noise_deformations, noise_expressivity, n_frames, n_samples)
+        self.noise_warp = Deformations(noise_deformations, noise_expressivity, deformation_frames, n_samples)
         # self.noise_warp = ConvDeformations(self.context_dim, noise_expressivity, n_frames, n_samples, 32)
 
         self.scheduler = DiracScheduler(
@@ -776,8 +803,8 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
             decays=(self.instr_expressivity, self.n_decays,),
             mixes=(2,),
             amplitudes=(1,),
-            # room_choice=(self.n_verbs,),
-            # room_mix=(2,),
+            room_choice=(self.n_verbs,),
+            room_mix=(2,),
         )
 
         if self.fine_positioning:
@@ -797,8 +824,8 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
             mixes: torch.Tensor,
             amplitudes: torch.Tensor,
             times: torch.Tensor,
-            # room_choice: torch.Tensor,
-            # room_mix: torch.Tensor,
+            room_choice: torch.Tensor,
+            room_mix: torch.Tensor,
             fine: Union[torch.Tensor, None] = None) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
 
         intermediates = {}
@@ -881,13 +908,13 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
         intermediates['dry'] = final
 
         # apply reverb
-        # verb = self.verb.forward(room_choice)
-        # wet = fft_convolve(verb, final.view(*verb.shape))
-        # verb_mix = torch.softmax(room_mix, dim=-1)[:, :, None, :]
-        # stacked = torch.stack([wet, final.view(*verb.shape)], dim=-1)
-        # stacked = stacked * verb_mix
-        #
-        # final = stacked.sum(dim=-1)
+        verb = self.verb.forward(room_choice)
+        wet = fft_convolve(verb, final.view(*verb.shape))
+        verb_mix = torch.softmax(room_mix, dim=-1)[:, :, None, :]
+        stacked = torch.stack([wet, final.view(*verb.shape)], dim=-1)
+        stacked = stacked * verb_mix
+
+        final = stacked.sum(dim=-1)
 
         intermediates['wet'] = final
 
@@ -920,8 +947,8 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
             mixes: torch.Tensor,
             amplitudes: torch.Tensor,
             times: torch.Tensor,
-            # room_choice: torch.Tensor,
-            # room_mix: torch.Tensor,
+            room_choice: torch.Tensor,
+            room_mix: torch.Tensor,
             fine: Union[torch.Tensor, None] = None) -> torch.Tensor:
 
         scheduled, intermediates = self.forward_with_intermediate_steps(
@@ -936,8 +963,8 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
             mixes,
             amplitudes,
             times,
-            # room_choice,
-            # room_mix,
+            room_choice,
+            room_mix,
             fine)
 
         return scheduled

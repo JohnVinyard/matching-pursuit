@@ -679,15 +679,15 @@ def load_model(wavetable_device: str = 'cpu') -> nn.Module:
 
 
     model = IterativeDecompositionModel(
-        in_channels=1024,
+        in_channels=1025,
         hidden_channels=hidden_channels,
         with_activation_norm=True,
         resonance_model=OverfitResonanceModel(
             n_noise_filters=64,
             noise_expressivity=2,
-            noise_filter_samples=128,
+            noise_filter_samples=32,
             noise_deformations=32,
-            instr_expressivity=8,
+            instr_expressivity=4,
             n_events=1,
             n_resonances=4096,
             n_envelopes=64,
@@ -700,9 +700,10 @@ def load_model(wavetable_device: str = 'cpu') -> nn.Module:
             wavetable_device=wavetable_device,
             fine_positioning=True,
             fft_resonance=True,
+            context_dim=context_dim
         ))
 
-    with open('iterativedecomposition17.dat', 'rb') as f:
+    with open('iterativedecomposition18.dat', 'rb') as f:
         model.load_state_dict(torch.load(f, map_location=lambda storage, loc: storage))
 
     print('Total parameters', count_parameters(model))
@@ -800,7 +801,7 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
 
     deformations = make_matrix_component(logger, max_norm(intermediates['deformations']), 'deformations')
 
-    residuals = residuals.view(n_events, 1024, -1).data.cpu().numpy()
+    residuals = residuals.view(n_events, 1025, -1).data.cpu().numpy()
     residuals = residuals[:, ::-1, :]
     print('RESIDUAL', residuals.min(), residuals.max())
     residuals = np.log(residuals + 1e-6)
