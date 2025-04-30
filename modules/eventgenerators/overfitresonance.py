@@ -7,7 +7,7 @@ from torch.nn import functional as F
 
 from config import Config
 from modules import interpolate_last_axis, select_items, NeuralReverb, SSM, sparse_softmax, sparsify, max_norm, \
-    fft_frequency_recompose
+    fft_frequency_recompose, unit_norm
 from modules.eventgenerators.generator import EventGenerator
 from modules.eventgenerators.schedule import DiracScheduler
 from modules.iterative import TensorTransform
@@ -317,10 +317,12 @@ class FFTResonanceLookup(Lookup):
             self.n_frames,
             apply_decay=True,
             start_phase=phases,
-            start_mags=starts
+            start_mags=starts,
+            log_space_scan=True
         )
 
         items = items.view(batch, n_events, expressivity, -1)
+        # items = unit_norm(items, dim=-1)
         return items
 
 
@@ -526,8 +528,9 @@ class Envelopes(Lookup):
         # envelope = envelope - torch.min(envelope, dim=-1, keepdim=True)[0]
         # envelope = envelope / (torch.max(envelope, dim=-1, keepdim=True)[0] + 1e-8)
 
-        amp = interpolate_last_axis(envelope, desired_size=self.full_size)
-        amp = amp * torch.zeros_like(amp).uniform_(-1, 1)
+        amp = sparsify(envelope, n_to_keep=64)
+        amp = interpolate_last_axis(amp, desired_size=self.full_size)
+        # amp = amp * torch.zeros_like(amp).uniform_(-1, 1)
         diff = self.padded_size - self.full_size
         padding = torch.zeros((amp.shape[:-1] + (diff,)), device=amp.device)
         amp = torch.cat([amp, padding], dim=-1)
@@ -575,40 +578,39 @@ class Deformations(Lookup):
 
     def __init__(self, n_items: int, channels: int, frames: int, full_size: int):
 
-        values_per_item = 3 # phase, frequency, amplitude
+        # values_per_item = 3 # phase, frequency, amplitude
 
-        super().__init__(n_items, channels * values_per_item, selection_type='relu')
+        super().__init__(n_items, channels * frames, selection_type='relu')
         self.full_size = full_size
         self.channels = channels
         self.frames = frames
-        self.values_per_item = values_per_item
+        # self.values_per_item = values_per_item
 
-    def postprocess_results(self, items: torch.Tensor) -> torch.Tensor:
-        t = torch.linspace(-np.pi, np.pi, self.frames, device=items.device)[None, None, None, :]
-        items = items.view(*items.shape[:-1], self.channels, self.values_per_item)
+    # def postprocess_results(self, items: torch.Tensor) -> torch.Tensor:
+    #     t = torch.linspace(-np.pi, np.pi, self.frames, device=items.device)[None, None, None, :]
+    #     items = items.view(*items.shape[:-1], self.channels, self.values_per_item)
+    #
+    #     phases = items[..., 0:1] * np.pi
+    #     freqs = items[..., 1:2] * np.pi
+    #     amps = items[..., 2:3]
+    #
+    #     x = amps * torch.sin((phases + freqs) * t)
+    #     x = torch.softmax(x, dim=-2)
+    #     before_upsample = x
+    #     x = interpolate_last_axis(x, desired_size=self.full_size)
+    #     return x, before_upsample
 
-        phases = items[..., 0:1] * np.pi
-        freqs = items[..., 1:2] * np.pi
-        amps = items[..., 2:3]
-
-        x = amps * torch.sin((phases + freqs) * t)
+    def postprocess_results(self, items: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Reshape so that the values are (..., channels, frames).  Apply
+        softmax to the channel dimension and then upscale to full samplerate
+        """
+        shape = items.shape[:-1]
+        x = items.reshape(*shape, self.channels, self.frames)
         x = torch.softmax(x, dim=-2)
+        # x = torch.relu(x)
         before_upsample = x
         x = interpolate_last_axis(x, desired_size=self.full_size)
         return x, before_upsample
-
-    # def postprocess_results(self, items: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    #     """Reshape so that the values are (..., channels, frames).  Apply
-    #     softmax to the channel dimension and then upscale to full samplerate
-    #     """
-    #     shape = items.shape[:-1]
-    #     x = items.reshape(*shape, self.channels, self.frames)
-    #     x = torch.softmax(x, dim=-2)
-    #     # x = torch.relu(x)
-    #     before_upsample = x
-    #     # TODO: Does this work, or should softmax be applied _after_?
-    #     x = interpolate_last_axis(x, desired_size=self.full_size)
-    #     return x, before_upsample
 
 
 
@@ -766,7 +768,8 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
 
         self.n_decays = n_decays
 
-        deformation_frames = n_samples // 1024
+        # deformation_frames = n_samples // 1024
+        deformation_frames = n_frames
 
         # self.d = Decays(n_decays, n_frames, n_samples, base_resonance=0.5)
         self.warp = Deformations(n_deformations, instr_expressivity, deformation_frames, n_samples)
@@ -908,15 +911,15 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
         intermediates['dry'] = final
 
         # apply reverb
-        verb = self.verb.forward(room_choice)
-        wet = fft_convolve(verb, final.view(*verb.shape))
-        verb_mix = torch.softmax(room_mix, dim=-1)[:, :, None, :]
-        stacked = torch.stack([wet, final.view(*verb.shape)], dim=-1)
-        stacked = stacked * verb_mix
-
-        final = stacked.sum(dim=-1)
-
-        intermediates['wet'] = final
+        # verb = self.verb.forward(room_choice)
+        # wet = fft_convolve(verb, final.view(*verb.shape))
+        # verb_mix = torch.softmax(room_mix, dim=-1)[:, :, None, :]
+        # stacked = torch.stack([wet, final.view(*verb.shape)], dim=-1)
+        # stacked = stacked * verb_mix
+        #
+        # final = stacked.sum(dim=-1)
+        #
+        # intermediates['wet'] = final
 
         # apply amplitudes
         final = final.view(-1, self.n_events, self.n_samples)

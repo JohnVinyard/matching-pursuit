@@ -174,7 +174,8 @@ def freq_domain_transfer_function_to_resonance(
         n_frames: int,
         apply_decay: bool = True,
         start_phase: Union[None, torch.Tensor] = None,
-        start_mags: Union[None, torch.Tensor] = None) -> torch.Tensor:
+        start_mags: Union[None, torch.Tensor] = None,
+        log_space_scan: bool = True) -> torch.Tensor:
 
     step_size = window_size // 2
     total_samples = step_size * n_frames
@@ -196,10 +197,14 @@ def freq_domain_transfer_function_to_resonance(
         res
     ], dim=-1)
 
+
     if apply_decay:
-        res = torch.log(res + 1e-12)
-        res = torch.cumsum(res, dim=-1)
-        res = torch.exp(res)
+        if log_space_scan:
+            res = torch.log(res + 1e-12)
+            res = torch.cumsum(res, dim=-1)
+            res = torch.exp(res)
+        else:
+            res = torch.cumprod(res, dim=-1)
 
     # remove the final frame
     spec = res[..., :n_frames]

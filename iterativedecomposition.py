@@ -206,15 +206,15 @@ def transform(x: torch.Tensor):
 
 def loss_transform(x: torch.Tensor) -> torch.Tensor:
     batch, n_events, time = x.shape
-    x = flattened_multiband_spectrogram(
-        x,
-        {
-            'a': (64, 16)
-        },
-        512
-    )
-    # x = stft(x, transform_window_size, transform_step_size, pad=True)
-    # x = x.view(batch, n_events, -1)
+    # x = flattened_multiband_spectrogram(
+    #     x,
+    #     {
+    #         'a': (64, 16)
+    #     },
+    #     512
+    # )
+    x = stft(x, transform_window_size, transform_step_size, pad=True)
+    x = x.view(batch, n_events, -1)
     return x
 
 
@@ -246,7 +246,7 @@ class PhysicalModel(nn.Module):
         batch, cpd, frames = control.shape
         # control = control.permute(0, 2, 1)
 
-        control = sparsify(control / (control.sum() + 1e-8), self.max_active)
+        control = sparsify(control, self.max_active)
         # control = torch.relu(control)
 
         # control = control[:, :, :frames // 4]
@@ -362,7 +362,8 @@ class MultiRNN(EventGenerator, nn.Module):
         self.control_planes = Lookup(
             n_control_planes,
             n_frames * control_plane_dim,
-            initialize=lambda x: torch.zeros_like(x).uniform_(0, 1))
+            initialize=lambda x: torch.zeros_like(x).uniform_(0, 1),
+            selection_type='relu')
 
         self.verb = Lookup(n_verbs, n_samples, initialize=lambda x: verbs, fixed=True)
 
@@ -416,12 +417,12 @@ class MultiRNN(EventGenerator, nn.Module):
                 final = samples * hard_voice_choice[b, e, active_voice]
 
                 # apply reverb
-                verb = self.verb.forward(room_choice[b: b + 1, e: e + 1, :])
-                wet = fft_convolve(verb, final.view(*verb.shape))
-                verb_mix = torch.softmax(room_mix[b: b + 1, e: e + 1, :], dim=-1)[:, :, None, :]
-                stacked = torch.stack([wet, final.view(*verb.shape)], dim=-1)
-                stacked = stacked * verb_mix
-                final = stacked.sum(dim=-1)
+                # verb = self.verb.forward(room_choice[b: b + 1, e: e + 1, :])
+                # wet = fft_convolve(verb, final.view(*verb.shape))
+                # verb_mix = torch.softmax(room_mix[b: b + 1, e: e + 1, :], dim=-1)[:, :, None, :]
+                # stacked = torch.stack([wet, final.view(*verb.shape)], dim=-1)
+                # stacked = stacked * verb_mix
+                # final = stacked.sum(dim=-1)
 
                 final = final * torch.abs(amplitudes[b, e])
 
@@ -655,23 +656,23 @@ class Model(nn.Module):
         else:
             spec = audio
 
-        loss = 0
+        # loss = 0
 
         for i in range(n_events):
-            start_norm = torch.norm(spec.view(batch_size, -1))
+            start_norm = torch.norm(spec.reshape(batch_size, -1))
 
             v, sched = self.encode(spec)
             vecs.append(v)
             schedules.append(sched)
             ch = self.generate(v, sched)
 
-
             current = transform(ch)
 
             spec = (spec - current).clone().detach()
-            end_norm = torch.norm(spec.view(batch_size, -1))
-            diff = -(start_norm - end_norm)
-            loss = loss + diff.sum()
+            # end_norm = torch.norm(spec.reshape(batch_size, -1))
+
+            # d = -(start_norm - end_norm)
+            # loss = loss + d.sum()
 
             channels.append(ch)
             residuals.append(spec[:, None, :, :].clone().detach())
@@ -781,7 +782,6 @@ def train_and_monitor(
                 noise_filter_samples=32,
                 noise_deformations=32,
                 instr_expressivity=4,
-                # instr_expressivity=1,
                 n_events=1,
                 n_resonances=4096,
                 n_envelopes=64,
@@ -819,20 +819,20 @@ def train_and_monitor(
             #     n_samples=n_samples,
             #     n_frames=n_frames,
             #     n_events=n_events)
-            resonance_model = ConvSTFT(fine_positioning=False)
+            # resonance_model = ConvSTFT(fine_positioning=False)
 
-            # window_size = 512
-            # rnn_frames = n_samples // (window_size // 2)
-            #
-            # resonance_model = MultiRNN(
-            #     n_voices=8,
-            #     n_control_planes=256,
-            #     control_plane_dim=32,
-            #     hidden_dim=64,
-            #     control_plane_sparsity=128,
-            #     window_size=window_size,
-            #     n_frames=rnn_frames,
-            #     fine_positioning=False)
+            window_size = 512
+            rnn_frames = n_samples // (window_size // 2)
+
+            resonance_model = MultiRNN(
+                n_voices=1,
+                n_control_planes=256,
+                control_plane_dim=32,
+                hidden_dim=64,
+                control_plane_sparsity=128,
+                window_size=window_size,
+                n_frames=rnn_frames,
+                fine_positioning=False)
         else:
             raise ValueError(f'Unknown model type {model_type}')
 
@@ -894,7 +894,14 @@ def train_and_monitor(
 
                 # loss = loss_model.compute_multiband_loss(target, recon_summed, 64, 32)
                 # loss = loss_model.multiband_noise_loss(target, recon_summed, 64, 16)
-                loss = iterative_loss(target, recon, loss_transform, ratio_loss=False)
+
+                loss = iterative_loss(
+                    target,
+                    recon,
+                    loss_transform,
+                    ratio_loss=True,
+                    sort_channels=True)
+                # loss = loss + reconstruction_loss(target, recon_summed)
 
 
             scaler.scale(loss).backward()
