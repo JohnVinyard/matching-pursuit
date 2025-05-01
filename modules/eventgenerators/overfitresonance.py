@@ -277,11 +277,12 @@ class MultibandResonanceLookup(Lookup):
         full = fft_frequency_recompose(bands, desired_size=self.padded_samples)
         full = full[..., :self.padded_samples // 2]
         full = full.view(batch, n_events, expressivity, -1)
+        # full = unit_norm(full)
         return full
 
 
 class FFTResonanceLookup(Lookup):
-    def __init__(self, n_items: int, n_samples: int, window_size: int):
+    def __init__(self, n_items: int, n_samples: int, window_size: int, base_resonance: float = 0.5):
 
         def init(x):
             return torch.zeros_like(x).uniform_(-6, 6) * torch.zeros_like(x).bernoulli_(p=0.01)
@@ -293,11 +294,12 @@ class FFTResonanceLookup(Lookup):
 
         super().__init__(n_items, n_coeffs, initialize=init, selection_type='relu')
 
-
+        self.base_resonance = base_resonance
         self.window_size = window_size
         self.n_coeffs = n_coeffs
         self.step_size = step_size
         self.n_frames = n_samples // self.step_size
+        self.span = 1 - self.base_resonance
 
     def postprocess_results(self, items: torch.Tensor) -> torch.Tensor:
 
@@ -305,7 +307,7 @@ class FFTResonanceLookup(Lookup):
 
         # mags = torch.sigmoid(items) * 0.9999
 
-        mags = torch.sigmoid(items[..., :self.chunk_size]) * 0.9999
+        mags = self.base_resonance + ((torch.sigmoid(items[..., :self.chunk_size]) * 0.9999) * self.span)
 
         phases = torch.tanh(items[..., self.chunk_size: self.chunk_size * 2]) * np.pi
 
@@ -497,22 +499,24 @@ class Envelopes(Lookup):
             n_items: int,
             n_samples: int,
             full_size: int,
-            padded_size: int):
+            padded_size: int,
+            max_impulses: int):
 
-        def init(x: torch.Tensor):
-            ramp = torch.linspace(1, 0, n_samples, device=x.device)[None, :]
-            exp = torch.linspace(2, 40, n_items, device=x.device)[:, None]
-            x = ramp ** exp
-            return x
+        # def init(x: torch.Tensor):
+        #     ramp = torch.linspace(1, 0, n_samples, device=x.device)[None, :]
+        #     exp = torch.linspace(2, 40, n_items, device=x.device)[:, None]
+        #     x = ramp ** exp
+        #     return x
 
         super().__init__(
             n_items,
-            n_samples,
-            initialize=init,
+            n_samples * max_impulses,
+            # initialize=init,
             selection_type='relu'
         )
         self.full_size = full_size
         self.padded_size = padded_size
+        self.max_impulses = max_impulses
 
     # def preprocess_items(self, items: torch.Tensor) -> torch.Tensor:
     #     """Ensure that we have all values between 0 and 1
@@ -522,13 +526,17 @@ class Envelopes(Lookup):
     def postprocess_results(self, envelope: torch.Tensor) -> torch.Tensor:
         """Scale up to sample rate and multiply with noise
         """
-        envelope = torch.relu(envelope)
+
+        envelope = envelope.view(*envelope.shape[:-1], self.max_impulses, -1)
+        # envelope = torch.relu(envelope)
+        envelope = sparse_softmax(envelope, dim=-1, normalize=False)
+        amp = torch.sum(envelope, dim=-2)
 
         # scale so we always have a max of one and min of zero
         # envelope = envelope - torch.min(envelope, dim=-1, keepdim=True)[0]
         # envelope = envelope / (torch.max(envelope, dim=-1, keepdim=True)[0] + 1e-8)
 
-        amp = sparsify(envelope, n_to_keep=64)
+        # amp = sparsify(envelope, n_to_keep=64)
         amp = interpolate_last_axis(amp, desired_size=self.full_size)
         # amp = amp * torch.zeros_like(amp).uniform_(-1, 1)
         diff = self.padded_size - self.full_size
@@ -762,7 +770,9 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
             n_envelopes,
             n_samples=128,
             full_size=8192,
-            padded_size=self.n_samples)
+            padded_size=self.n_samples,
+            max_impulses=32)
+
         # self.e = ConvEnvelopes(
         #     n_samples=128, full_size=8192, padded_size=self.n_samples, context_dim=self.context_dim, channels=32)
 
@@ -919,11 +929,12 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
         #
         # final = stacked.sum(dim=-1)
         #
-        # intermediates['wet'] = final
+
+        intermediates['wet'] = final
 
         # apply amplitudes
         final = final.view(-1, self.n_events, self.n_samples)
-        final = final * torch.abs(amplitudes)
+        # final = final * torch.abs(amplitudes)
 
 
         scheduled = self.scheduler.schedule(times, final)

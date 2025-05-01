@@ -779,7 +779,7 @@ def train_and_monitor(
             resonance_model = OverfitResonanceModel(
                 n_noise_filters=64,
                 noise_expressivity=2,
-                noise_filter_samples=32,
+                noise_filter_samples=128,
                 noise_deformations=32,
                 instr_expressivity=4,
                 n_events=1,
