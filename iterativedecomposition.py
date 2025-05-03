@@ -899,7 +899,7 @@ def train_and_monitor(
                     target,
                     recon,
                     loss_transform,
-                    ratio_loss=True,
+                    ratio_loss=False,
                     sort_channels=True)
                 # loss = loss + reconstruction_loss(target, recon_summed)
 

@@ -208,7 +208,8 @@ class SampleResonanceLookup(Lookup):
         super().__init__(n_items, n_samples, initialize=init, selection_type='relu')
 
     def postprocess_results(self, items: torch.Tensor) -> torch.Tensor:
-        items = max_norm(items, dim=-1)
+        # items = max_norm(items, dim=-1)
+        items = unit_norm(items)
         return items
 
 class MultibandResonanceLookup(Lookup):
@@ -218,6 +219,7 @@ class MultibandResonanceLookup(Lookup):
             n_items: int,
             n_samples: int,
             smallest_band_size: int = 512,
+            base_resonance: float = 0.2,
             window_size: int = 64):
 
         def init(x):
@@ -231,12 +233,15 @@ class MultibandResonanceLookup(Lookup):
         band_sizes = [2**x for x in range(small_size_log2, full_size_log2, 1)]
         n_bands = len(band_sizes)
 
+
         n_coeffs = window_size // 2 + 1
         # magnitude and phase for each band
         params_per_band = n_coeffs * 3
         total_params_per_item = params_per_band * n_bands
         super().__init__(n_items, total_params_per_item, selection_type='relu', initialize=init)
 
+        self.base_resonance = base_resonance
+        self.resonance_span = 1 - base_resonance
         self.frames_per_band = [(size // step_size) for size in band_sizes]
         self.total_frames = (n_samples // step_size) * 2
         self.band_sizes = band_sizes
@@ -260,7 +265,7 @@ class MultibandResonanceLookup(Lookup):
             phase = band_params[:, :, :, self.n_coeffs:self.n_coeffs * 2]
             start = band_params[:, :, :, -self.n_coeffs:]
 
-            mag = torch.sigmoid(mag) * 0.9999
+            mag = self.base_resonance + ((torch.sigmoid(mag) * self.resonance_span) * 0.9999)
             phase = torch.tanh(phase) * np.pi
             start = torch.sigmoid(start)
 
@@ -277,7 +282,7 @@ class MultibandResonanceLookup(Lookup):
         full = fft_frequency_recompose(bands, desired_size=self.padded_samples)
         full = full[..., :self.padded_samples // 2]
         full = full.view(batch, n_events, expressivity, -1)
-        # full = unit_norm(full)
+        full = unit_norm(full)
         return full
 
 
@@ -324,7 +329,7 @@ class FFTResonanceLookup(Lookup):
         )
 
         items = items.view(batch, n_events, expressivity, -1)
-        # items = unit_norm(items, dim=-1)
+        items = unit_norm(items, dim=-1)
         return items
 
 
@@ -399,7 +404,10 @@ class SampleLookup(Lookup):
         else:
             initializer = None
 
-        super().__init__(n_items, n_samples, initialize=initializer, selection_type='relu')
+        def sample_lookup_init(x: torch.Tensor) -> torch.Tensor:
+            return torch.zeros_like(x).uniform_(-1, 1)
+
+        super().__init__(n_items, n_samples, initialize=sample_lookup_init, selection_type='relu')
         self.randomize_phases = randomize_phases
         self.flatten_kernel_size = flatten_kernel_size
         self.windowed = windowed
@@ -430,6 +438,8 @@ class SampleLookup(Lookup):
         if self.windowed:
             x = x * torch.hamming_window(x.shape[-1], device=x.device)
 
+        # TODO: Unit norm
+        x = unit_norm(x)
         return x
 
 
@@ -759,6 +769,8 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
         # they are largely redundant (think exponential vs.
         # self.r = SampleLookup(n_resonances, n_samples, flatten_kernel_size=2048, randomize_phases=False)
         # self.r = F0ResonanceLookup(n_resonances, n_samples)
+
+
 
         self.n = SampleLookup(
             n_noise_filters, noise_filter_samples, windowed=False, randomize_phases=False)
