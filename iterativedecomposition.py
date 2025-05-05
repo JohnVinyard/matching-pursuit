@@ -12,7 +12,7 @@ from config import Config
 from conjure import LmdbCollection, serve_conjure, loggers, SupportedContentType, NumpySerializer, NumpyDeserializer
 from data import AudioIterator
 from modules import stft, sparsify, sparsify_vectors, iterative_loss, max_norm, flattened_multiband_spectrogram, \
-    sparse_softmax, positional_encoding, NeuralReverb
+    sparse_softmax, positional_encoding, NeuralReverb, LinearOutputStack
 from modules.anticausal import AntiCausalAnalysis
 from modules.eventgenerators.convimpulse import ConvImpulseEventGenerator
 from modules.eventgenerators.generator import EventGenerator, ShapeSpec
@@ -260,6 +260,59 @@ class PhysicalModel(nn.Module):
         return samples
 
 
+class PosEncodedSTFT(EventGenerator, nn.Module):
+
+    @property
+    def shape_spec(self) -> ShapeSpec:
+        return dict(
+            latent=(context_dim,)
+        )
+
+    def __init__(self, fine_positioning: bool = False, n_pos_coeffs: int = 64):
+        super().__init__()
+        self.window_size = 512
+        self.step_size = self.window_size // 2
+        self.n_coeffs = self.window_size // 2 + 1
+        self.total_coeffs = self.n_coeffs * 2
+        self.fine_positioning = fine_positioning
+        self.frame_ratio = n_samples / (self.window_size // 2)
+
+        self.pos = nn.Parameter(torch.zeros(1, n_frames, n_pos_coeffs).uniform_(-0.01, 0.01))
+
+        self.scheduler = DiracScheduler(
+            n_events, start_size=n_frames, n_samples=n_samples, pre_sparse=True)
+
+        self.proj = nn.Linear(context_dim, n_pos_coeffs)
+        self.to_frames = LinearOutputStack(
+            channels=128,
+            layers=3,
+            out_channels=self.n_coeffs * 2,
+            in_channels=n_pos_coeffs)
+
+    def forward(self, latent: torch.Tensor, times: torch.Tensor) -> torch.Tensor:
+        batch_size = latent.shape[0]
+
+        x = self.proj(latent)
+
+        x = x + self.pos
+        final = self.to_frames(x)
+
+        final = final.view(batch_size, -1, self.n_coeffs, 2)
+
+        # final = final.view(batch_size, self.n_coeffs, 2, -1).permute(0, 3, 1, 2)
+        final = torch.view_as_complex(final.contiguous())
+        final = torch.fft.irfft(final)
+        final = overlap_add(final[:, None, :, :], apply_window=True)
+        final = final[..., :n_samples]
+
+
+        scheduled = self.scheduler.schedule(times, final)
+
+
+        return scheduled
+
+
+
 class ConvSTFT(EventGenerator, nn.Module):
 
     def __init__(self, fine_positioning: bool = False):
@@ -270,6 +323,7 @@ class ConvSTFT(EventGenerator, nn.Module):
         self.total_coeffs = self.n_coeffs * 2
         self.fine_positioning = fine_positioning
         self.frame_ratio = n_samples / (self.window_size // 2)
+
 
         self.net = ConvUpsample(
             latent_dim=context_dim,
@@ -784,9 +838,9 @@ def train_and_monitor(
                 instr_expressivity=4,
                 n_events=1,
                 n_resonances=4096,
-                n_envelopes=64,
+                n_envelopes=256,
                 n_decays=64,
-                n_deformations=128,
+                n_deformations=256,
                 n_samples=n_samples,
                 n_frames=n_frames,
                 samplerate=samplerate,
@@ -810,7 +864,7 @@ def train_and_monitor(
                 samplerate=samplerate,
                 n_resonance_octaves=64,
                 n_frames=n_frames,
-                wavetable_resonance=True,
+                wavetable_resonance=False,
                 hierarchical_scheduler=False
             )
         elif model_type == 'ssm':
@@ -820,19 +874,20 @@ def train_and_monitor(
             #     n_frames=n_frames,
             #     n_events=n_events)
             # resonance_model = ConvSTFT(fine_positioning=False)
+            resonance_model = PosEncodedSTFT(fine_positioning=False)
 
-            window_size = 512
-            rnn_frames = n_samples // (window_size // 2)
-
-            resonance_model = MultiRNN(
-                n_voices=1,
-                n_control_planes=256,
-                control_plane_dim=32,
-                hidden_dim=64,
-                control_plane_sparsity=128,
-                window_size=window_size,
-                n_frames=rnn_frames,
-                fine_positioning=False)
+            # window_size = 512
+            # rnn_frames = n_samples // (window_size // 2)
+            #
+            # resonance_model = MultiRNN(
+            #     n_voices=1,
+            #     n_control_planes=256,
+            #     control_plane_dim=32,
+            #     hidden_dim=64,
+            #     control_plane_sparsity=128,
+            #     window_size=window_size,
+            #     n_frames=rnn_frames,
+            #     fine_positioning=False)
         else:
             raise ValueError(f'Unknown model type {model_type}')
 
