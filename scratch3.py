@@ -710,7 +710,7 @@ if __name__ == '__main__':
     resting = torch.zeros(batch_size, n_events, instrument_dim)
     masses = torch.zeros_like(resting).uniform_(1, 100)
     tensions = torch.zeros_like(resting).uniform_(1, 10)
-    gains = torch.zeros_like(resting).uniform_(0.1, 10)
+    # gains = torch.zeros_like(resting).uniform_(0.1, 10)
 
     to_samples = \
         torch.zeros(transform_block_size, instrument_dim).uniform_(-1, 1) \
@@ -755,7 +755,7 @@ if __name__ == '__main__':
         # clear forces
         acceleration *= 0
 
-        block = (force @ to_samples.T) #* torch.norm(displacement)
+        block = (displacement @ to_samples.T) #* torch.norm(displacement)
 
 
         block = block.view(batch_size, n_events, n_coeffs, 2)

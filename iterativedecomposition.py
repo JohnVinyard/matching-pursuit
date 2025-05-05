@@ -12,7 +12,7 @@ from config import Config
 from conjure import LmdbCollection, serve_conjure, loggers, SupportedContentType, NumpySerializer, NumpyDeserializer
 from data import AudioIterator
 from modules import stft, sparsify, sparsify_vectors, iterative_loss, max_norm, flattened_multiband_spectrogram, \
-    sparse_softmax, positional_encoding, NeuralReverb, LinearOutputStack
+    sparse_softmax, positional_encoding, NeuralReverb, LinearOutputStack, gammatone_filter_bank
 from modules.anticausal import AntiCausalAnalysis
 from modules.eventgenerators.convimpulse import ConvImpulseEventGenerator
 from modules.eventgenerators.generator import EventGenerator, ShapeSpec
@@ -260,6 +260,107 @@ class PhysicalModel(nn.Module):
         return samples
 
 
+class EnergyBasedEventGenerator(EventGenerator, nn.Module):
+
+    def __init__(self, instrument_dim: int):
+        super().__init__()
+        self.instrument_dim = instrument_dim
+
+        self.block_size = 512
+        self.n_coeffs = self.block_size // 2 + 1
+        self.total_complex_coeffs = self.n_coeffs * 2
+
+        self.n_frames = 512
+
+        transform_block_size = self.total_complex_coeffs
+
+        n_filters = self.n_coeffs
+        filters = gammatone_filter_bank(n_filters, self.block_size, device, band_spacing='geometric')
+        filters = torch.fft.rfft(filters, dim=-1)
+        self.register_buffer('filters', filters)
+
+        self.to_samples = nn.Parameter(torch.zeros(transform_block_size, self.instrument_dim)).uniform_(-1, 1)
+
+    @property
+    def shape_spec(self) -> ShapeSpec:
+        return dict(
+            # resting_state = (self.instrument_dim,),
+            masses = (self.instrument_dim,),
+            tensions = (self.instrument_dim,),
+            gains = (self.instrument_dim,),
+            damping = (1,),
+            forces = (self.instrument_dim, self.n_frames)
+        )
+
+    def forward(
+            self,
+            masses: torch.Tensor,
+            tensions: torch.Tensor,
+            gains: torch.Tensor,
+            damping: torch.Tensor,
+            forces: torch.Tensor) -> torch.Tensor:
+
+        batch, n_events, dim = masses.shape
+        resting = torch.zeros_like(masses)
+
+        velocity = torch.zeros_like(resting)
+        acceleration = torch.zeros_like(resting)
+
+        state = torch.zeros_like(resting)
+
+
+        displacement = torch.zeros_like(state)
+        blocks = []
+
+        for i in range(self.n_frames):
+            # calculate new displacement
+            displacement = (state - resting)
+
+            acceleration += (-displacement * tensions) / masses
+
+            # accumulate forces
+            # apply any forces from outside the system
+            acceleration += forces[:, :, :, i] / masses
+
+            # apply forces
+            velocity += acceleration
+            state += velocity
+
+            # clear
+            # apply damping (this could vary over time)
+            velocity *= damping
+            # velocity[torch.abs(velocity) < 1e-6] = 0
+
+            force = masses * acceleration
+
+            # clear forces
+            acceleration *= 0
+
+            block = (force @ self.to_samples.T)  # * torch.norm(displacement)
+
+            block = block.view(batch, n_events, self.n_coeffs, 2)
+            block = torch.view_as_complex(block)
+
+            block = block @ self.filters
+
+            block = torch.fft.irfft(block, dim=-1)
+
+            # print(torch.norm(displacement), torch.norm(block))
+            blocks.append(block[:, :, None, :])
+
+        # plt.matshow(np.abs(torch.stack(disp, dim=0).data.cpu().numpy().squeeze()))
+        # plt.show()
+
+        blocks = torch.cat(blocks, dim=-2)
+        # print(blocks.shape)
+        # samples = blocks.view(batch_size, n_events, -1)
+        samples = overlap_add(blocks, apply_window=True)
+        return samples
+
+
+
+
+
 class PosEncodedSTFT(EventGenerator, nn.Module):
 
     @property
@@ -287,7 +388,8 @@ class PosEncodedSTFT(EventGenerator, nn.Module):
             channels=128,
             layers=3,
             out_channels=self.n_coeffs * 2,
-            in_channels=n_pos_coeffs)
+            in_channels=n_pos_coeffs,
+            activation=torch.tanh)
 
     def forward(self, latent: torch.Tensor, times: torch.Tensor) -> torch.Tensor:
         batch_size = latent.shape[0]
@@ -302,7 +404,7 @@ class PosEncodedSTFT(EventGenerator, nn.Module):
         # final = final.view(batch_size, self.n_coeffs, 2, -1).permute(0, 3, 1, 2)
         final = torch.view_as_complex(final.contiguous())
         final = torch.fft.irfft(final)
-        final = overlap_add(final[:, None, :, :], apply_window=True)
+        final = overlap_add(final[:, None, :, :], apply_window=False)
         final = final[..., :n_samples]
 
 
