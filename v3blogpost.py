@@ -399,16 +399,17 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
     impulse_spec = librosa.cqt(intermediates['impulse'].data.cpu().numpy().reshape((-1,)), n_bins=n_bins)
     impulse_spec = impulse_spec[:, :128]
     impulse_spec = make_matrix_component(
-        logger, np.flipud(np.abs(impulse_spec)), 'impulsespec', height=200)
+        logger, np.log(1 + np.flipud(np.abs(impulse_spec))), 'impulsespec', height=200, cmap='gray')
 
     resonance_spec = librosa.cqt(intermediates['dry'].data.cpu().numpy().reshape((-1,)), n_bins=n_bins)
     resonance_spec = resonance_spec[:, :128]
     resonance_spec = make_matrix_component(
-        logger, np.flipud(np.abs(resonance_spec)), 'resonancespec', height=200)
+        logger, np.log(1 + np.flipud(np.abs(resonance_spec))), 'resonancespec', height=200, cmap='gray')
 
     reverb_spec = librosa.cqt(intermediates['wet'].data.cpu().numpy().reshape((-1,)), n_bins=n_bins)
     reverb_spec = reverb_spec[:, :128]
-    reverb_spec = make_matrix_component(logger, np.flipud(np.abs(reverb_spec)), 'reverbspec', height=200)
+    reverb_spec = make_matrix_component(
+        logger, np.log(1 + np.flipud(np.abs(reverb_spec))), 'reverbspec', height=200, cmap='gray')
 
     deformations = make_matrix_component(
         logger, max_norm(intermediates['deformations']), 'deformations', height=200)
