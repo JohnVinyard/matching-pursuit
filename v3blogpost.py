@@ -151,426 +151,6 @@ arbitrary lengths.
 # example_1
 
 
-"""[markdown]
-
-## Example 2
-
-"""
-
-"""[markdown]
-
-### Original Audio
-
-"""
-# example_2.orig_audio
-
-# example_2.orig_spec
-
-"""[markdown]
-
-### Reconstruction
-
-We mask the second half of the input audio to enable the streaming algorithm, so only the first half of the input audio is reproduced.
-
-"""
-
-# example_2.recon_audio
-
-# example_2.recon_spec
-
-"""[markdown]
-
-### Individual Event Intermediate Steps
-
-"""
-
-# example_2.impulse
-# example_2.resonance
-# example_2.wet
-# example_2.deformations
-
-
-"""[markdown]
-
-### Decomposition
-
-We can see that while energy is removed at each step, removed segments do not map cleanly onto audio "events" as a human listener would typically conceive of them.  Future work will move toward fewer and more meaningul events via induced sparsity and/or clustering of events.
-
-"""
-
-# example_2.decomposition
-
-
-"""[markdown]
-
-### Randomized
-
-"""
-
-"""[markdown]
-
-Here, we generate random event vectors with the original event times.
-"""
-
-# example_2.random_events
-
-"""[markdown]
-
-Here we use the original event vectors, but generate random times.
-
-"""
-
-# example_2.random_times
-
-"""[markdown]
-
-### Random Perturbations
-
-Each event vector is "perturbed" or moved in the same direction in event space by adding a random event vector with
-small magnitude
-
-"""
-
-# example_2.perturbed
-
-"""[markdown]
-
-### Event Vectors
-
-Different stopping conditions might be chosen during inference (e.g. norm of the residual) but during training, we remove energy for 32 steps.  Each event vector is of dimension 32.  The decoder generates an event from this vector, which is then scheduled.  
-
-
-
-"""
-
-# example_2.latents
-
-
-"""[markdown]
-
-### Event Scatterplot
-
-Time is along the x-axis, and a 32D -> 1D projection of event vectors using t-SNE constitutes the distribution along the y-axis.  Colors are produced via a random projection from 32D -> 3D (RGB).  Here it becomes clear that there are many redundant/overlapping events.  Future work will stress more sparsity and less event overlap, hopefully increasing interpretability further.
-
-"""
-
-# example_2.scatterplot
-
-
-"""[markdown]
-
-## Example 3
-
-"""
-
-"""[markdown]
-
-### Original Audio
-
-"""
-# example_3.orig_audio
-
-# example_3.orig_spec
-
-"""[markdown]
-
-### Reconstruction
-
-We mask the second half of the input audio to enable the streaming algorithm, so only the first half of the input audio is reproduced.
-
-"""
-
-# example_3.recon_audio
-
-# example_3.recon_spec
-
-"""[markdown]
-
-### Individual Event Intermediate Steps
-
-"""
-
-# example_3.impulse
-# example_3.resonance
-# example_3.wet
-# example_3.deformations
-
-"""[markdown]
-
-### Decomposition
-
-We can see that while energy is removed at each step, removed segments do not map cleanly onto audio "events" as a human listener would typically conceive of them.  Future work will move toward fewer and more meaningul events via induced sparsity and/or clustering of events.
-
-"""
-
-# example_3.decomposition
-
-
-"""[markdown]
-
-### Randomized
-
-"""
-
-"""[markdown]
-
-Here, we generate random event vectors with the original event times.
-"""
-
-# example_3.random_events
-
-"""[markdown]
-
-Here we use the original event vectors, but generate random times.
-
-"""
-
-# example_3.random_times
-
-"""[markdown]
-
-### Random Perturbations
-
-Each event vector is "perturbed" or moved in the same direction in event space by adding a random event vector with
-small magnitude
-
-"""
-
-# example_3.perturbed
-
-
-"""[markdown]
-
-### Event Vectors
-
-Different stopping conditions might be chosen during inference (e.g. norm of the residual) but during training, we remove energy for 32 steps.  Each event vector is of dimension 32.  The decoder generates an event from this vector, which is then scheduled.  
-
-
-
-"""
-
-# example_3.latents
-
-
-"""[markdown]
-
-### Event Scatterplot
-
-Time is along the x-axis, and a 32D -> 1D projection of event vectors using t-SNE constitutes the distribution along the y-axis.  Colors are produced via a random projection from 32D -> 3D (RGB).  Here it becomes clear that there are many redundant/overlapping events.  Future work will stress more sparsity and less event overlap, hopefully increasing interpretability further.
-
-"""
-
-# example_3.scatterplot
-
-"""[markdown]
-
-## Example 4
-
-"""
-
-"""[markdown]
-
-### Original Audio
-
-"""
-# example_4.orig_audio
-
-# example_4.orig_spec
-
-"""[markdown]
-
-### Reconstruction
-
-We mask the second half of the input audio to enable the streaming algorithm, so only the first half of the input audio is reproduced.
-
-"""
-
-# example_4.recon_audio
-
-# example_4.recon_spec
-
-"""[markdown]
-
-### Individual Event Intermediate Steps
-
-"""
-
-# example_4.impulse
-# example_4.resonance
-# example_4.wet
-# example_4.deformations
-
-
-"""[markdown]
-
-### Decomposition
-
-We can see that while energy is removed at each step, removed segments do not map cleanly onto audio "events" as a human listener would typically conceive of them.  Future work will move toward fewer and more meaningul events via induced sparsity and/or clustering of events.
-
-"""
-
-# example_4.decomposition
-
-
-"""[markdown]
-
-### Randomized
-
-"""
-
-"""[markdown]
-
-Here, we generate random event vectors with the original event times.
-"""
-
-# example_4.random_events
-
-"""[markdown]
-
-Here we use the original event vectors, but generate random times.
-
-"""
-
-# example_4.random_times
-
-"""[markdown]
-
-### Random Perturbations
-
-Each event vector is "perturbed" or moved in the same direction in event space by adding a random event vector with
-small magnitude
-
-"""
-
-# example_4.perturbed
-
-"""[markdown]
-
-### Event Vectors
-
-Different stopping conditions might be chosen during inference (e.g. norm of the residual) but during training, we remove energy for 32 steps.  Each event vector is of dimension 32.  The decoder generates an event from this vector, which is then scheduled.  
-
-
-
-"""
-
-# example_4.latents
-
-
-"""[markdown]
-
-### Event Scatterplot
-
-Time is along the x-axis, and a 32D -> 1D projection of event vectors using t-SNE constitutes the distribution along the y-axis.  Colors are produced via a random projection from 32D -> 3D (RGB).  Here it becomes clear that there are many redundant/overlapping events.  Future work will stress more sparsity and less event overlap, hopefully increasing interpretability further.
-
-"""
-
-# example_4.scatterplot
-
-
-"""[markdown]
-
-## Example 5
-
-"""
-
-"""[markdown]
-
-### Original Audio
-
-"""
-# example_5.orig_audio
-
-# example_5.orig_spec
-
-"""[markdown]
-
-### Reconstruction
-
-We mask the second half of the input audio to enable the streaming algorithm, so only the first half of the input audio is reproduced.
-
-"""
-
-# example_5.recon_audio
-
-# example_5.recon_spec
-
-"""[markdown]
-
-### Individual Event Intermediate Steps
-
-"""
-
-# example_5.impulse
-# example_5.resonance
-# example_5.wet
-# example_5.deformations
-
-"""[markdown]
-
-### Decomposition
-
-We can see that while energy is removed at each step, removed segments do not map cleanly onto audio "events" as a human listener would typically conceive of them.  Future work will move toward fewer and more meaningul events via induced sparsity and/or clustering of events.
-
-"""
-
-# example_5.decomposition
-
-
-"""[markdown]
-
-### Randomized
-
-"""
-
-"""[markdown]
-
-Here, we generate random event vectors with the original event times.
-"""
-
-# example_5.random_events
-
-"""[markdown]
-
-Here we use the original event vectors, but generate random times.
-
-"""
-
-# example_5.random_times
-
-"""[markdown]
-
-### Random Perturbations
-
-Each event vector is "perturbed" or moved in the same direction in event space by adding a random event vector with
-small magnitude
-
-"""
-
-# example_5.perturbed
-
-"""[markdown]
-
-### Event Vectors
-
-Different stopping conditions might be chosen during inference (e.g. norm of the residual) but during training, we remove energy for 32 steps.  Each event vector is of dimension 32.  The decoder generates an event from this vector, which is then scheduled.  
-
-
-
-"""
-
-# example_5.latents
-
-
-"""[markdown]
-
-### Event Scatterplot
-
-Time is along the x-axis, and a 32D -> 1D projection of event vectors using t-SNE constitutes the distribution along the y-axis.  Colors are produced via a random projection from 32D -> 3D (RGB).  Here it becomes clear that there are many redundant/overlapping events.  Future work will stress more sparsity and less event overlap, hopefully increasing interpretability further.
-
-"""
-
-# example_5.scatterplot
 
 
 n_samples = 2 ** 17
@@ -880,21 +460,62 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
     latents = ImageComponent(event_vectors.public_uri, height=200, title='latent event vectors', full_width=False)
 
     composite = CompositeComponent(
+        header='## Example 2',
+        orig_header='### Original Audio',
         orig_audio=orig_audio_component,
-        recon_audio=recon_audio_component,
-        latents=latents,
-        scatterplot=scatterplot_component,
-        random_events=random_events_component,
-        random_times=random_times_component,
-        perturbed=perturbed_component,
-        decomposition=movie,
         orig_spec=original_spec,
+        recon_header='### Reconstruction',
+        recon_content='''We mask the second half of the input audio to enable the streaming algorithm, so only the first half of the input audio is reproduced.''',
+        recon_audio=recon_audio_component,
         recon_spec=recon_spec,
+        scatterplot_header='''### Event Scatterplot''',
+        scatterplot_content='''
+                Time is along the x-axis, and a 32D -> 1D projection of event vectors using t-SNE constitutes the distribution along the y-axis.  
+                Colors are produced via a random projection from 32D -> 3D (RGB).  Here it becomes clear that there are 
+                many redundant/overlapping events.  Future work will stress more sparsity and less event overlap, 
+                hopefully increasing interpretability further.
+            ''',
+        scatterplot=scatterplot_component,
+        intermediates_header='''### Individual Event Intermediate Steps''',
+        intermediate_content='''
+            Here, we choose an individual event at random and demonstrate the intermediate decoder steps, including the
+            original energy "impulse", the choice of resonance, and finally, the choice of a room impulse response.
+        ''',
+        impulse_header='''#### Energy Impulse''',
         impulse=impulse_audio_component,
+        resonance_header='''#### Energy Convolved with Chosen Resonances''',
         resonance=resonance_audio_component,
-        wet=reverb_audio_component,
+        deformation_header='''#### Deformation/Interpolation Between Chosen Resonances Over Time''',
         deformations=deformations,
-        # **event_components
+        verb_header='''#### Signal Convolved with Room Impulse Response''',
+        wet=reverb_audio_component,
+        decomposition_header='''### Decomposition Process''',
+        decomposition_content='''
+            We can see that while energy is removed at each step, removed segments do not map cleanly onto audio "events" as a human listener would typically conceive of them.  Future work will move toward fewer and more meaningul events via induced sparsity and/or clustering of events.
+        ''',
+        decomposition=movie,
+        randomized_header='### Randomized',
+        random_events_content='''
+            Here, we generate random event vectors with the original event times.
+        ''',
+        random_events=random_events_component,
+        random_times_content='''
+            Here we use the original event vectors, but choose random times.
+        ''',
+        random_times=random_times_component,
+        perturbed_header='### Random Perturbations',
+        perturbed_content='''
+            Each event vector is "perturbed" or moved in the same direction in event space by adding a random event vector with
+            small magnitude
+        ''',
+        perturbed=perturbed_component,
+        latents_header='''### Event Vectors''',
+        latents_content='''
+            Different stopping conditions might be chosen during inference (e.g. norm of the residual) but during training, we remove energy for 32 steps.  
+            Each event vector is of dimension 32.  The decoder generates an event from this vector, which is then scheduled.
+        ''',
+        latents=latents,
+
     )
 
     return composite

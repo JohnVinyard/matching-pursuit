@@ -300,6 +300,10 @@ class EnergyBasedEventGenerator(EventGenerator, nn.Module):
             damping: torch.Tensor,
             forces: torch.Tensor) -> torch.Tensor:
 
+        masses = torch.abs(masses)
+        tensions = torch.abs(tensions)
+        damping = torch.sigmoid(damping)
+
         batch, n_events, dim = masses.shape
         resting = torch.zeros_like(masses)
 
