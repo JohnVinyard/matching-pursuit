@@ -149,6 +149,10 @@ arbitrary lengths.
 """
 
 # example_1
+# example_2
+# example_3
+# example_4
+# example_5
 
 
 
@@ -353,9 +357,19 @@ def make_audio_component(
     audio_component = AudioComponent(meta.public_uri, height=100, color=audio_color)
     return audio_component
 
-def make_matrix_component(logger: Logger, samples: torch.Tensor, key: str) -> ImageComponent:
-    _, meta = logger.log_matrix(key, samples[0, 0, :, :])
-    component = ImageComponent(meta.public_uri, height=100)
+def make_matrix_component(
+        logger: Logger,
+        samples: torch.Tensor,
+        key: str,
+        cmap: str = 'hot',
+        height: int = 100) -> ImageComponent:
+
+    try:
+        _, meta = logger.log_matrix_with_cmap(key, samples[0, 0, :, :], cmap=cmap)
+    except IndexError:
+        _, meta = logger.log_matrix_with_cmap(key, samples, cmap=cmap)
+
+    component = ImageComponent(meta.public_uri, height=height)
     return component
 
 def reconstruction_section(logger: Logger) -> CompositeComponent:
@@ -369,7 +383,7 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
     # logger.log
 
     # choose one of the earliest/most prominent events
-    random_event_index = np.random.randint(0, n_events // 4)
+    random_event_index = np.random.randint(0, n_events)
     _, intermediates = model.generate(
         vectors[:, random_event_index:random_event_index + 1, :],
         times[:, random_event_index:random_event_index + 1, :],
@@ -379,11 +393,28 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
     resonance_audio_component = make_audio_component(logger, max_norm(intermediates['dry']), 'dry')
     reverb_audio_component = make_audio_component(logger, max_norm(intermediates['wet']), 'wet')
 
-    deformations = make_matrix_component(logger, max_norm(intermediates['deformations']), 'deformations')
+    # TODO: These three lines are an incredibly common pattern, they should be at most 2
+    n_bins = 84
+
+    impulse_spec = librosa.cqt(intermediates['impulse'].data.cpu().numpy().reshape((-1,)), n_bins=n_bins)
+    impulse_spec = impulse_spec[:, :128]
+    impulse_spec = make_matrix_component(
+        logger, np.flipud(np.abs(impulse_spec)), 'impulsespec', height=200)
+
+    resonance_spec = librosa.cqt(intermediates['dry'].data.cpu().numpy().reshape((-1,)), n_bins=n_bins)
+    resonance_spec = resonance_spec[:, :128]
+    resonance_spec = make_matrix_component(
+        logger, np.flipud(np.abs(resonance_spec)), 'resonancespec', height=200)
+
+    reverb_spec = librosa.cqt(intermediates['wet'].data.cpu().numpy().reshape((-1,)), n_bins=n_bins)
+    reverb_spec = reverb_spec[:, :128]
+    reverb_spec = make_matrix_component(logger, np.flipud(np.abs(reverb_spec)), 'reverbspec', height=200)
+
+    deformations = make_matrix_component(
+        logger, max_norm(intermediates['deformations']), 'deformations', height=200)
 
     residuals = residuals.view(n_events, 1025, -1).data.cpu().numpy()
     residuals = residuals[:, ::-1, :]
-    print('RESIDUAL', residuals.min(), residuals.max())
     residuals = np.log(residuals + 1e-6)
     t = residuals.shape[-1]
     residuals = residuals[..., :t // 2]
@@ -422,7 +453,6 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
 
     scatterplot_events, _ = process_events2(logger, events, vectors, times, total_seconds)
 
-    print(scatterplot_events)
 
     # sum together all events
     summed = torch.sum(events, dim=1, keepdim=True)
@@ -431,8 +461,7 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
     # _, original = logger.log_sound(f'original', samples)
     # _, reconstruction = logger.log_sound(f'reconstruction', summed)
 
-    # TODO: These three lines are an incredibly common pattern, they should be at most 2
-    n_bins = 84
+
     original_spec = librosa.cqt(samples.data.cpu().numpy().reshape((-1,)), n_bins=n_bins)
     _, original_spec = logger.log_matrix_with_cmap('origspec', np.flipud(np.abs(original_spec)), cmap='hot')
     original_spec = ImageComponent(original_spec.public_uri, height=200, title='Original')
@@ -469,55 +498,49 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
         recon_audio=recon_audio_component,
         recon_spec=recon_spec,
         scatterplot_header='''### Event Scatterplot''',
-        scatterplot_content='''
-                Time is along the x-axis, and a 32D -> 1D projection of event vectors using t-SNE constitutes the distribution along the y-axis.  
+        scatterplot_content='''Time is along the x-axis, and a 32D -> 1D projection of event vectors using t-SNE constitutes the distribution along the y-axis.  
                 Colors are produced via a random projection from 32D -> 3D (RGB).  Here it becomes clear that there are 
                 many redundant/overlapping events.  Future work will stress more sparsity and less event overlap, 
                 hopefully increasing interpretability further.
             ''',
         scatterplot=scatterplot_component,
         intermediates_header='''### Individual Event Intermediate Steps''',
-        intermediate_content='''
-            Here, we choose an individual event at random and demonstrate the intermediate decoder steps, including the
+        intermediate_content='''Here, we choose an individual event at random and demonstrate the intermediate decoder steps, including the
             original energy "impulse", the choice of resonance, and finally, the choice of a room impulse response.
         ''',
         impulse_header='''#### Energy Impulse''',
         impulse=impulse_audio_component,
+        impulse_spec=impulse_spec,
         resonance_header='''#### Energy Convolved with Chosen Resonances''',
         resonance=resonance_audio_component,
+        resonance_spec=resonance_spec,
         deformation_header='''#### Deformation/Interpolation Between Chosen Resonances Over Time''',
         deformations=deformations,
         verb_header='''#### Signal Convolved with Room Impulse Response''',
         wet=reverb_audio_component,
+        reverb_spec=reverb_spec,
         decomposition_header='''### Decomposition Process''',
-        decomposition_content='''
-            We can see that while energy is removed at each step, removed segments do not map cleanly onto audio "events" as a human listener would typically conceive of them.  Future work will move toward fewer and more meaningul events via induced sparsity and/or clustering of events.
+        decomposition_content='''We can see that while energy is removed at each step, removed segments do not map cleanly onto audio "events" as a human listener would typically conceive of them.  Future work will move toward fewer and more meaningul events via induced sparsity and/or clustering of events.
         ''',
         decomposition=movie,
         randomized_header='### Randomized',
-        random_events_content='''
-            Here, we generate random event vectors with the original event times.
+        random_events_content='''Here, we generate random event vectors with the original event times.
         ''',
         random_events=random_events_component,
-        random_times_content='''
-            Here we use the original event vectors, but choose random times.
+        random_times_content='''Here we use the original event vectors, but choose random times.
         ''',
         random_times=random_times_component,
         perturbed_header='### Random Perturbations',
-        perturbed_content='''
-            Each event vector is "perturbed" or moved in the same direction in event space by adding a random event vector with
+        perturbed_content='''Each event vector is "perturbed" or moved in the same direction in event space by adding a random event vector with
             small magnitude
         ''',
         perturbed=perturbed_component,
         latents_header='''### Event Vectors''',
-        latents_content='''
-            Different stopping conditions might be chosen during inference (e.g. norm of the residual) but during training, we remove energy for 32 steps.  
+        latents_content='''Different stopping conditions might be chosen during inference (e.g. norm of the residual) but during training, we remove energy for 32 steps.  
             Each event vector is of dimension 32.  The decoder generates an event from this vector, which is then scheduled.
         ''',
         latents=latents,
-
     )
-
     return composite
 
 
