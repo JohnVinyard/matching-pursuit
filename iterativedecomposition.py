@@ -4,28 +4,26 @@ from typing import Union, Tuple
 import matplotlib
 import numpy as np
 import torch
+from sympy.physics.units import acceleration
 from torch import nn
-from torch.nn.utils import clip_grad_value_
 from torch.optim import Adam
 
 from config import Config
 from conjure import LmdbCollection, serve_conjure, loggers, SupportedContentType, NumpySerializer, NumpyDeserializer
 from data import AudioIterator
-from modules import stft, sparsify, sparsify_vectors, iterative_loss, max_norm, flattened_multiband_spectrogram, \
+from modules import stft, sparsify, sparsify_vectors, iterative_loss, max_norm, \
     sparse_softmax, positional_encoding, NeuralReverb, LinearOutputStack, gammatone_filter_bank
 from modules.anticausal import AntiCausalAnalysis
 from modules.eventgenerators.convimpulse import ConvImpulseEventGenerator
 from modules.eventgenerators.generator import EventGenerator, ShapeSpec
-from modules.eventgenerators.overfitresonance import OverfitResonanceModel, Lookup, WavetableModel
+from modules.eventgenerators.overfitresonance import OverfitResonanceModel, Lookup
 from modules.eventgenerators.schedule import DiracScheduler
 from modules.eventgenerators.splat import SplattingEventGenerator
-from modules.infoloss import CorrelationLoss
 from modules.mixer import MixerStack
 from modules.multiheadtransform import MultiHeadTransform
 from modules.overlap_add import overlap_add
 from modules.transfer import fft_convolve
 from modules.upsample import ConvUpsample
-from spiking import AutocorrelationLoss, SpikingModel
 from util import device, encode_audio, make_initializer
 
 matplotlib.use('Qt5Agg')
@@ -73,8 +71,6 @@ def fft_shift(a: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
     spec = spec * shift
 
     samples = torch.fft.irfft(spec, dim=-1, norm='ortho')
-    # samples = samples[..., :n_samples]
-    # samples = torch.relu(samples)
     return samples
 
 
@@ -279,7 +275,10 @@ class EnergyBasedEventGenerator(EventGenerator, nn.Module):
         filters = torch.fft.rfft(filters, dim=-1)
         self.register_buffer('filters', filters)
 
-        self.to_samples = nn.Parameter(torch.zeros(transform_block_size, self.instrument_dim)).uniform_(-1, 1)
+        self.to_samples = nn.Parameter(torch.zeros(transform_block_size, self.instrument_dim).uniform_(-1, 1))
+
+        self.scheduler = DiracScheduler(
+            n_events, start_size=n_frames, n_samples=n_samples, pre_sparse=True)
 
     @property
     def shape_spec(self) -> ShapeSpec:
@@ -298,7 +297,8 @@ class EnergyBasedEventGenerator(EventGenerator, nn.Module):
             tensions: torch.Tensor,
             gains: torch.Tensor,
             damping: torch.Tensor,
-            forces: torch.Tensor) -> torch.Tensor:
+            forces: torch.Tensor,
+            times: torch.Tensor) -> torch.Tensor:
 
         masses = torch.abs(masses)
         tensions = torch.abs(tensions)
@@ -320,32 +320,33 @@ class EnergyBasedEventGenerator(EventGenerator, nn.Module):
             # calculate new displacement
             displacement = (state - resting)
 
-            acceleration += (-displacement * tensions) / masses
+            acceleration = acceleration + ((-displacement * tensions) / masses)
 
             # accumulate forces
             # apply any forces from outside the system
-            acceleration += forces[:, :, :, i] / masses
+            acceleration = acceleration + (forces[:, :, :, i] / masses)
 
             # apply forces
-            velocity += acceleration
-            state += velocity
+            velocity = velocity + acceleration
+            state + state + velocity
 
             # clear
             # apply damping (this could vary over time)
-            velocity *= damping
+            velocity = velocity * damping
             # velocity[torch.abs(velocity) < 1e-6] = 0
 
             force = masses * acceleration
 
             # clear forces
-            acceleration *= 0
+            acceleration = acceleration * 0
 
+            # TODO: this could all happen outside the loop
             block = (force @ self.to_samples.T)  # * torch.norm(displacement)
 
             block = block.view(batch, n_events, self.n_coeffs, 2)
             block = torch.view_as_complex(block)
 
-            block = block @ self.filters
+            block = block.to(torch.complex64) @ self.filters
 
             block = torch.fft.irfft(block, dim=-1)
 
@@ -358,7 +359,10 @@ class EnergyBasedEventGenerator(EventGenerator, nn.Module):
         blocks = torch.cat(blocks, dim=-2)
         # print(blocks.shape)
         # samples = blocks.view(batch_size, n_events, -1)
-        samples = overlap_add(blocks, apply_window=True)
+        samples = overlap_add(blocks, apply_window=True)[..., :n_samples]
+
+
+        samples = self.scheduler.schedule(times, samples)
         return samples
 
 
@@ -639,7 +643,6 @@ class Model(nn.Module):
             do_norm=False,
             with_activation_norm=with_activation_norm)
 
-        # self.encoder = MixerEncoder(in_channels=in_channels, hidden=hidden_channels, out_channels=hidden_channels)
 
         self.to_event_vectors = nn.Conv1d(hidden_channels, context_dim, 1, 1, 0)
         self.to_event_switch = nn.Conv1d(hidden_channels, 1, 1, 1, 0)
@@ -656,9 +659,6 @@ class Model(nn.Module):
 
         self.reservoir_size = 256
         self.reservoir = np.zeros((self.reservoir_size, self.context_dim), dtype=np.float32)
-        # self.scheduling_mean: float = 1e-3
-        # self.scheduling_std: float = 1e-3
-
         self.apply(initializer)
 
     def embed_events(self, vectors: torch.Tensor, times: torch.Tensor) -> torch.Tensor:
@@ -816,23 +816,14 @@ class Model(nn.Module):
         else:
             spec = audio
 
-        # loss = 0
-
         for i in range(n_events):
-            start_norm = torch.norm(spec.reshape(batch_size, -1))
 
             v, sched = self.encode(spec)
             vecs.append(v)
             schedules.append(sched)
             ch = self.generate(v, sched)
-
             current = transform(ch)
-
             spec = (spec - current).clone().detach()
-            # end_norm = torch.norm(spec.reshape(batch_size, -1))
-
-            # d = -(start_norm - end_norm)
-            # loss = loss + d.sum()
 
             channels.append(ch)
             residuals.append(spec[:, None, :, :].clone().detach())
@@ -862,18 +853,6 @@ class Model(nn.Module):
 def to_numpy(x: torch.Tensor):
     return x.data.cpu().numpy()
 
-
-def todos():
-    todo_items = [
-        'Explore complex loss once again',
-        'Explore self-supervised learning',
-
-        'Explore iterative decomposition with all vectors defined up-front',
-        'Not enough expressive power when transforming from single event vector to different elements/atoms;  some parameters are frozen',
-        'Does basic FFT resonance also struggle with the _same_ deformations each time',
-    ]
-    for item in todo_items:
-        print(f'TODO: {item}')
 
 def train_and_monitor(
         batch_size: int = 8,
@@ -956,6 +935,8 @@ def train_and_monitor(
                 fft_resonance=True,
                 context_dim=context_dim
             )
+        elif model_type == 'osc':
+            resonance_model = EnergyBasedEventGenerator(instrument_dim=32)
         elif model_type == 'conv':
             resonance_model = ConvImpulseEventGenerator(
                 context_dim=context_dim,
@@ -1124,7 +1105,7 @@ if __name__ == '__main__':
         '--model-type',
         type=str,
         required=True,
-        choices=['lookup', 'conv', 'splat', 'ssm'])
+        choices=['lookup', 'conv', 'splat', 'ssm', 'osc'])
     parser.add_argument(
         '--save-data',
         required=False,

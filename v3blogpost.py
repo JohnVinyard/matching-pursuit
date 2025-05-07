@@ -372,7 +372,7 @@ def make_matrix_component(
     component = ImageComponent(meta.public_uri, height=height)
     return component
 
-def reconstruction_section(logger: Logger) -> CompositeComponent:
+def reconstruction_section(logger: Logger, example_number: int) -> CompositeComponent:
     model = load_model()
 
     # get a random audio segment
@@ -490,7 +490,7 @@ def reconstruction_section(logger: Logger) -> CompositeComponent:
     latents = ImageComponent(event_vectors.public_uri, height=200, title='latent event vectors', full_width=False)
 
     composite = CompositeComponent(
-        header='## Example 2',
+        header=f'## Example {example_number}',
         orig_header='### Original Audio',
         orig_audio=orig_audio_component,
         orig_spec=original_spec,
@@ -571,11 +571,11 @@ def demo_page_dict() -> Dict[str, any]:
     streaming = streaming_section(logger)
 
     print('Creating reconstruction examples')
-    example_1 = reconstruction_section(logger)
-    example_2 = reconstruction_section(logger)
-    example_3 = reconstruction_section(logger)
-    example_4 = reconstruction_section(logger)
-    example_5 = reconstruction_section(logger)
+    example_1 = reconstruction_section(logger, 1)
+    example_2 = reconstruction_section(logger, 2)
+    example_3 = reconstruction_section(logger, 3)
+    example_4 = reconstruction_section(logger, 4)
+    example_5 = reconstruction_section(logger, 5)
 
     citation = CitationComponent(
         tag='johnvinyarditerativedecompositionv3',
