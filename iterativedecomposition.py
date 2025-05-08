@@ -4,7 +4,6 @@ from typing import Union, Tuple
 import matplotlib
 import numpy as np
 import torch
-from sympy.physics.units import acceleration
 from torch import nn
 from torch.optim import Adam
 
@@ -23,7 +22,6 @@ from modules.mixer import MixerStack
 from modules.multiheadtransform import MultiHeadTransform
 from modules.overlap_add import overlap_add
 from modules.transfer import fft_convolve
-from modules.upsample import ConvUpsample
 from util import device, encode_audio, make_initializer
 
 matplotlib.use('Qt5Agg')
@@ -52,14 +50,16 @@ initializer = make_initializer(0.02)
 
 
 def fft_shift(a: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
+    """
+    Time shift a by shift in the frequency domain
+    """
+
     # this is here to make the shift value interpretable
     shift = (1 - shift)
 
     n_samples = a.shape[-1]
 
     shift_samples = (shift * n_samples * 0.5)
-
-    # a = F.pad(a, (0, n_samples * 2))
 
     spec = torch.fft.rfft(a, dim=-1, norm='ortho')
 
@@ -202,13 +202,6 @@ def transform(x: torch.Tensor):
 
 def loss_transform(x: torch.Tensor) -> torch.Tensor:
     batch, n_events, time = x.shape
-    # x = flattened_multiband_spectrogram(
-    #     x,
-    #     {
-    #         'a': (64, 16)
-    #     },
-    #     512
-    # )
     x = stft(x, transform_window_size, transform_step_size, pad=True)
     x = x.view(batch, n_events, -1)
     return x
@@ -303,9 +296,8 @@ class EnergyBasedEventGenerator(EventGenerator, nn.Module):
             forces: torch.Tensor,
             times: torch.Tensor) -> torch.Tensor:
 
-        forces = forces * 0.001
-        masses = torch.abs(masses) * 0.1
-        tensions = torch.abs(tensions) * 0.01
+        masses = 1 + torch.abs(masses) * 100
+        tensions = torch.abs(tensions) * 10
         damping = self.base_damping + (torch.sigmoid(damping) * self.span * 0.9999)
 
         # forces = sparsify(forces, 32)
@@ -334,7 +326,7 @@ class EnergyBasedEventGenerator(EventGenerator, nn.Module):
 
             # apply forces
             velocity = velocity + acceleration
-            state + state + velocity
+            state = state + velocity
 
             # clear
             # apply damping (this could vary over time)
@@ -432,64 +424,6 @@ class PosEncodedSTFT(EventGenerator, nn.Module):
 
 
 
-class ConvSTFT(EventGenerator, nn.Module):
-
-    def __init__(self, fine_positioning: bool = False):
-        super().__init__()
-        self.window_size = 512
-        self.step_size = self.window_size // 2
-        self.n_coeffs = self.window_size // 2 + 1
-        self.total_coeffs = self.n_coeffs * 2
-        self.fine_positioning = fine_positioning
-        self.frame_ratio = n_samples / (self.window_size // 2)
-
-
-        self.net = ConvUpsample(
-            latent_dim=context_dim,
-            channels=128,
-            start_size=8,
-            end_size=n_frames,
-            mode='learned',
-            out_channels=self.total_coeffs,
-            from_latent=True,
-            weight_norm=True,
-            batch_norm=False
-        )
-
-        self.scheduler = DiracScheduler(
-            n_events, start_size=n_frames, n_samples=n_samples, pre_sparse=True)
-
-    def forward(self, latent, times: torch.Tensor, fine: Union[torch.Tensor, None] = None) -> torch.Tensor:
-
-        batch_size = latent.shape[0]
-
-        final = self.net.forward(latent)
-
-        final = final.view(batch_size, self.n_coeffs, 2, -1).permute(0, 3, 1, 2)
-        final = torch.view_as_complex(final.contiguous())
-        final = torch.fft.irfft(final, norm='ortho')
-        final = overlap_add(final[:, None, :, :], apply_window=True)
-        final = final[..., :n_samples]
-
-        scheduled = self.scheduler.schedule(times, final)
-
-        if fine is not None:
-            fine_shifts = torch.tanh(fine) * self.frame_ratio
-            scheduled = fft_shift(scheduled, fine_shifts)
-            scheduled = scheduled[..., :n_samples]
-
-        return scheduled
-
-    @property
-    def shape_spec(self) -> ShapeSpec:
-        params = dict(
-            latent=(context_dim,),
-        )
-
-        if self.fine_positioning:
-            params['fine'] = (1,)
-
-        return params
 
 class MultiRNN(EventGenerator, nn.Module):
 
@@ -614,6 +548,9 @@ class MultiRNN(EventGenerator, nn.Module):
 
 
 class MixerEncoder(nn.Module):
+    """
+    MLP-Mixer-like architecture for the encoder/analysis portion of the network
+    """
     def __init__(self, in_channels: int, hidden: int, out_channels: int):
         super().__init__()
         self.encoder = MixerStack(
@@ -1009,12 +946,6 @@ def train_and_monitor(
 
         optim = Adam(model.parameters(), lr=1e-4)
 
-        # TODO: compute loss in decomposition loop
-        # TODO: don't sort by norm;  compute loss in original order
-        # TODO: Should resonances always be unit norm for energy preservation?
-
-        # loss_model = AutocorrelationLoss(64, 64).to(device)
-        # loss_model = CorrelationLoss(n_elements=1024).to(device)
 
         for i, item in enumerate(iter(stream)):
             optim.zero_grad()
@@ -1024,7 +955,7 @@ def train_and_monitor(
                 orig_audio(target)
                 recon, encoded, scheduling = model.iterative(target)
 
-                sparsity_loss = torch.abs(encoded).sum()
+                sparsity_loss = torch.abs(scheduling).sum()
 
                 norms = torch.norm(recon, dim=-1)
                 norms, indices = torch.sort(norms, dim=-1)
@@ -1032,7 +963,6 @@ def train_and_monitor(
                 dist(norms)
 
                 recon_summed = torch.sum(recon, dim=1, keepdim=True)
-                # print(recon_summed.min(), recon_summed.max(), recon_summed.mean(), recon_summed.std())
                 recon_audio(max_norm(recon_summed))
 
                 envelopes(max_norm(scheduling[0]))
@@ -1045,22 +975,16 @@ def train_and_monitor(
                 target = target * weighting
                 recon_summed = recon_summed * weighting
 
-                # loss = loss_model.compute_multiband_loss(target, recon_summed, 64, 32)
-                # loss = loss_model.multiband_noise_loss(target, recon_summed, 64, 16)
-
                 loss = iterative_loss(
                     target,
                     recon,
                     loss_transform,
                     ratio_loss=False,
                     sort_channels=True)
-                # loss = loss + sparsity_loss
-
-                # loss = loss + reconstruction_loss(target, recon_summed)
+                loss = loss + sparsity_loss
 
 
             scaler.scale(loss).backward()
-            # clip_grad_value_(model.parameters(), 0.5)
             scaler.step(optim)
             scaler.update()
             print(i, loss.item())

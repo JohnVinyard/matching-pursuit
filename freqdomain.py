@@ -476,7 +476,7 @@ class EnergyBasedEventGenerator(nn.Module):
         self.n_coeffs = self.block_size // 2 + 1
         self.total_complex_coeffs = self.n_coeffs * 2
 
-        self.base_damping = 0.9
+        self.base_damping = 0.5
         self.span = 1 - self.base_damping
 
         self.n_frames = 512
@@ -496,14 +496,11 @@ class EnergyBasedEventGenerator(nn.Module):
             self,
             masses: torch.Tensor,
             tensions: torch.Tensor,
-            gains: torch.Tensor,
             damping: torch.Tensor,
-            forces: torch.Tensor,
-            times: torch.Tensor) -> torch.Tensor:
+            forces: torch.Tensor) -> torch.Tensor:
 
-        forces = forces * 0.001
-        masses = torch.abs(masses) * 0.1
-        tensions = torch.abs(tensions) * 0.01
+        masses = 1 + (torch.abs(masses) * 100)
+        tensions = 0.01 + (torch.abs(tensions) * 10)
         damping = self.base_damping + (torch.sigmoid(damping) * self.span * 0.9999)
 
         # forces = sparsify(forces, 32)
@@ -532,7 +529,7 @@ class EnergyBasedEventGenerator(nn.Module):
 
             # apply forces
             velocity = velocity + acceleration
-            state + state + velocity
+            state = state + velocity
 
             # clear
             # apply damping (this could vary over time)
@@ -546,8 +543,16 @@ class EnergyBasedEventGenerator(nn.Module):
 
             block = (force @ self.to_samples.T)  # * torch.norm(displacement)
 
+            block = block.view(-1, n_events, self.n_coeffs, 2)
+            block = torch.view_as_complex(block)
+
+            block = block @ self.filters
+
+            block = torch.fft.irfft(block, dim=-1)
+
             # print(torch.norm(displacement), torch.norm(block))
             blocks.append(block[:, :, None, :])
+
 
         # plt.matshow(np.abs(torch.stack(disp, dim=0).data.cpu().numpy().squeeze()))
         # plt.show()
@@ -555,21 +560,11 @@ class EnergyBasedEventGenerator(nn.Module):
         blocks = torch.cat(blocks, dim=-2)
 
 
-        # TODO: this could all happen outside the loop
-
-        blocks = blocks.view(batch, n_events, -1, self.n_coeffs, 2)
-        blocks = torch.view_as_complex(blocks)
-
-        blocks = blocks.to(torch.complex64) @ self.filters
-
-        blocks = torch.fft.irfft(blocks, dim=-1, norm='ortho')
-
         # print(blocks.shape)
         # samples = blocks.view(batch_size, n_events, -1)
         samples = overlap_add(blocks, apply_window=True)[..., :n_samples]
 
 
-        samples = self.scheduler.schedule(times, samples)
         return samples
 
 class OverfitAudioNetwork(nn.Module):
@@ -585,7 +580,7 @@ class OverfitAudioNetwork(nn.Module):
             samplerate: int = 22050,
             deformations_enabled: bool = False,
             preserve_energy: bool = False,
-            block_size: int = 256,
+            block_size: int = 512,
     ):
 
         super().__init__()
@@ -645,20 +640,17 @@ class OverfitAudioNetwork(nn.Module):
         #     max_gain=5,
         #     window_size=window_size)
 
-        '''
-        masses: torch.Tensor,
-            tensions: torch.Tensor,
-            gains: torch.Tensor,
-            damping: torch.Tensor,
-            forces: torch.Tensor,
-            times: torch.Tensor
-        '''
 
         self.network = EnergyBasedEventGenerator(instrument_dim=control_plane_dim)
 
-        control_plane = torch.zeros(1, control_plane_dim, self.block_frames).uniform_(-1, 1)
+        control_plane = torch.zeros(1, 1, control_plane_dim, self.n_frames).uniform_(-0.01, 0.01)
         self.control_plane = nn.Parameter(control_plane)
         self.control_plane_dim = control_plane_dim
+
+        self.masses = nn.Parameter(torch.zeros(1, 1, control_plane_dim).uniform_(0, 1))
+        self.tensions = nn.Parameter(torch.zeros(1, 1, control_plane_dim).uniform_(0, 1))
+        self.damping = nn.Parameter(torch.zeros(1, 1, control_plane_dim).uniform_(-6, 6))
+
 
         self.param_count = count_parameters(self.network)
 
@@ -697,15 +689,19 @@ class OverfitAudioNetwork(nn.Module):
 
     def random(self):
         cp = torch.zeros_like(self.control_plane).bernoulli_(p=0.001)
-        cp = cp * torch.zeros_like(cp).uniform_(0, self.control_signal.max().item())
+        cp = cp * torch.zeros_like(cp).uniform_(0, 0.01)
         result = self.forward(sig=cp)
         return result
 
     def forward(self, sig=None):
         cs = sig if sig is not None else self.control_signal
-        # result = self._upsampled_control_plane(cs)
-        result = self.network.forward(cs)
+        result = self.network.forward(
+            masses=self.masses,
+            tensions=self.tensions,
+            damping=self.damping,
+            forces=cs)
         return result, cs
+
 
 
 def transform(x: torch.Tensor):
@@ -841,8 +837,8 @@ def train_and_monitor_overfit_model(
             recon_audio(max_norm(recon.sum(dim=1, keepdim=True)))
 
             # loss = loss_model.compute_multiband_loss(target, recon)
-            loss = loss_model.multiband_noise_loss(target, recon, 64, 16) #+ window_loss
-            # loss = reconstruction_loss(recon, target)
+            # loss = loss_model.multiband_noise_loss(target, recon, 64, 16) #+ window_loss
+            loss = reconstruction_loss(recon, target)
             # recon_loss = recon_loss + loss_model.noise_loss(target, recon)
             # loss = loss + sparsity_loss(control_signal)
 
