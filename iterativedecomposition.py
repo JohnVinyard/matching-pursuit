@@ -266,13 +266,16 @@ class EnergyBasedEventGenerator(EventGenerator, nn.Module):
         self.n_coeffs = self.block_size // 2 + 1
         self.total_complex_coeffs = self.n_coeffs * 2
 
+        self.base_damping = 0.9
+        self.span = 1 - self.base_damping
+
         self.n_frames = 512
 
         transform_block_size = self.total_complex_coeffs
 
         n_filters = self.n_coeffs
         filters = gammatone_filter_bank(n_filters, self.block_size, device, band_spacing='geometric')
-        filters = torch.fft.rfft(filters, dim=-1)
+        filters = torch.fft.rfft(filters, dim=-1, norm='ortho')
         self.register_buffer('filters', filters)
 
         self.to_samples = nn.Parameter(torch.zeros(transform_block_size, self.instrument_dim).uniform_(-1, 1))
@@ -300,9 +303,12 @@ class EnergyBasedEventGenerator(EventGenerator, nn.Module):
             forces: torch.Tensor,
             times: torch.Tensor) -> torch.Tensor:
 
-        masses = torch.abs(masses)
-        tensions = torch.abs(tensions)
-        damping = torch.sigmoid(damping)
+        forces = forces * 0.001
+        masses = torch.abs(masses) * 0.1
+        tensions = torch.abs(tensions) * 0.01
+        damping = self.base_damping + (torch.sigmoid(damping) * self.span * 0.9999)
+
+        # forces = sparsify(forces, 32)
 
         batch, n_events, dim = masses.shape
         resting = torch.zeros_like(masses)
@@ -340,15 +346,7 @@ class EnergyBasedEventGenerator(EventGenerator, nn.Module):
             # clear forces
             acceleration = acceleration * 0
 
-            # TODO: this could all happen outside the loop
             block = (force @ self.to_samples.T)  # * torch.norm(displacement)
-
-            block = block.view(batch, n_events, self.n_coeffs, 2)
-            block = torch.view_as_complex(block)
-
-            block = block.to(torch.complex64) @ self.filters
-
-            block = torch.fft.irfft(block, dim=-1)
 
             # print(torch.norm(displacement), torch.norm(block))
             blocks.append(block[:, :, None, :])
@@ -357,6 +355,17 @@ class EnergyBasedEventGenerator(EventGenerator, nn.Module):
         # plt.show()
 
         blocks = torch.cat(blocks, dim=-2)
+
+
+        # TODO: this could all happen outside the loop
+
+        blocks = blocks.view(batch, n_events, -1, self.n_coeffs, 2)
+        blocks = torch.view_as_complex(blocks)
+
+        blocks = blocks.to(torch.complex64) @ self.filters
+
+        blocks = torch.fft.irfft(blocks, dim=-1, norm='ortho')
+
         # print(blocks.shape)
         # samples = blocks.view(batch_size, n_events, -1)
         samples = overlap_add(blocks, apply_window=True)[..., :n_samples]
@@ -780,7 +789,7 @@ class Model(nn.Module):
 
             spec[:, :, i: i + frame_window_size] = residual_spec
 
-            # KLUDGE: this step should be derived
+            # KLUDGE: this step size should be derived
             start_sample = i * 256
             end_sample = start_sample + window_size
             segments[:, :, start_sample: end_sample] += channels
@@ -1015,6 +1024,8 @@ def train_and_monitor(
                 orig_audio(target)
                 recon, encoded, scheduling = model.iterative(target)
 
+                sparsity_loss = torch.abs(encoded).sum()
+
                 norms = torch.norm(recon, dim=-1)
                 norms, indices = torch.sort(norms, dim=-1)
                 norms = max_norm(norms)
@@ -1043,6 +1054,8 @@ def train_and_monitor(
                     loss_transform,
                     ratio_loss=False,
                     sort_channels=True)
+                # loss = loss + sparsity_loss
+
                 # loss = loss + reconstruction_loss(target, recon_summed)
 
 

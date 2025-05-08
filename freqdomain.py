@@ -13,6 +13,7 @@ from data import get_one_audio_segment
 from modules import flattened_multiband_spectrogram, max_norm, stft, sparsify, \
     gammatone_filter_bank
 from modules.infoloss import CorrelationLoss
+from modules.overlap_add import overlap_add
 from modules.transfer import fft_convolve, freq_domain_transfer_function_to_resonance
 from modules.upsample import upsample_with_holes
 from util import device, make_initializer, count_parameters, playable
@@ -465,6 +466,111 @@ class ResonanceLayer(nn.Module):
 
         return routed, output
 
+class EnergyBasedEventGenerator(nn.Module):
+
+    def __init__(self, instrument_dim: int):
+        super().__init__()
+        self.instrument_dim = instrument_dim
+
+        self.block_size = 512
+        self.n_coeffs = self.block_size // 2 + 1
+        self.total_complex_coeffs = self.n_coeffs * 2
+
+        self.base_damping = 0.9
+        self.span = 1 - self.base_damping
+
+        self.n_frames = 512
+
+        transform_block_size = self.total_complex_coeffs
+
+        n_filters = self.n_coeffs
+        filters = gammatone_filter_bank(n_filters, self.block_size, device, band_spacing='geometric')
+        filters = torch.fft.rfft(filters, dim=-1, norm='ortho')
+        self.register_buffer('filters', filters)
+
+        self.to_samples = nn.Parameter(torch.zeros(transform_block_size, self.instrument_dim).uniform_(-1, 1))
+
+
+
+    def forward(
+            self,
+            masses: torch.Tensor,
+            tensions: torch.Tensor,
+            gains: torch.Tensor,
+            damping: torch.Tensor,
+            forces: torch.Tensor,
+            times: torch.Tensor) -> torch.Tensor:
+
+        forces = forces * 0.001
+        masses = torch.abs(masses) * 0.1
+        tensions = torch.abs(tensions) * 0.01
+        damping = self.base_damping + (torch.sigmoid(damping) * self.span * 0.9999)
+
+        # forces = sparsify(forces, 32)
+
+        batch, n_events, dim = masses.shape
+        resting = torch.zeros_like(masses)
+
+        velocity = torch.zeros_like(resting)
+        acceleration = torch.zeros_like(resting)
+
+        state = torch.zeros_like(resting)
+
+
+        displacement = torch.zeros_like(state)
+        blocks = []
+
+        for i in range(self.n_frames):
+            # calculate new displacement
+            displacement = (state - resting)
+
+            acceleration = acceleration + ((-displacement * tensions) / masses)
+
+            # accumulate forces
+            # apply any forces from outside the system
+            acceleration = acceleration + (forces[:, :, :, i] / masses)
+
+            # apply forces
+            velocity = velocity + acceleration
+            state + state + velocity
+
+            # clear
+            # apply damping (this could vary over time)
+            velocity = velocity * damping
+            # velocity[torch.abs(velocity) < 1e-6] = 0
+
+            force = masses * acceleration
+
+            # clear forces
+            acceleration = acceleration * 0
+
+            block = (force @ self.to_samples.T)  # * torch.norm(displacement)
+
+            # print(torch.norm(displacement), torch.norm(block))
+            blocks.append(block[:, :, None, :])
+
+        # plt.matshow(np.abs(torch.stack(disp, dim=0).data.cpu().numpy().squeeze()))
+        # plt.show()
+
+        blocks = torch.cat(blocks, dim=-2)
+
+
+        # TODO: this could all happen outside the loop
+
+        blocks = blocks.view(batch, n_events, -1, self.n_coeffs, 2)
+        blocks = torch.view_as_complex(blocks)
+
+        blocks = blocks.to(torch.complex64) @ self.filters
+
+        blocks = torch.fft.irfft(blocks, dim=-1, norm='ortho')
+
+        # print(blocks.shape)
+        # samples = blocks.view(batch_size, n_events, -1)
+        samples = overlap_add(blocks, apply_window=True)[..., :n_samples]
+
+
+        samples = self.scheduler.schedule(times, samples)
+        return samples
 
 class OverfitAudioNetwork(nn.Module):
     def __init__(
@@ -510,9 +616,7 @@ class OverfitAudioNetwork(nn.Module):
         #     normalize=True,
         #     device=None)
 
-        control_plane = torch.zeros(1, control_plane_dim, self.block_frames).uniform_(-1, 1)
-        self.control_plane = nn.Parameter(control_plane)
-        self.control_plane_dim = control_plane_dim
+
 
         # establish deformation matrix (batch, control_plane_dim, n_frames, low_rank_deformation_dim)
         # dm = [
@@ -534,12 +638,27 @@ class OverfitAudioNetwork(nn.Module):
         #     preserve_energy=preserve_energy
         # )
 
-        self.network = Stack(
-            n_blocks=n_layers,
-            block_size=self.block_size,
-            base_resonance=0.5,
-            max_gain=5,
-            window_size=window_size)
+        # self.network = Stack(
+        #     n_blocks=n_layers,
+        #     block_size=self.block_size,
+        #     base_resonance=0.5,
+        #     max_gain=5,
+        #     window_size=window_size)
+
+        '''
+        masses: torch.Tensor,
+            tensions: torch.Tensor,
+            gains: torch.Tensor,
+            damping: torch.Tensor,
+            forces: torch.Tensor,
+            times: torch.Tensor
+        '''
+
+        self.network = EnergyBasedEventGenerator(instrument_dim=control_plane_dim)
+
+        control_plane = torch.zeros(1, control_plane_dim, self.block_frames).uniform_(-1, 1)
+        self.control_plane = nn.Parameter(control_plane)
+        self.control_plane_dim = control_plane_dim
 
         self.param_count = count_parameters(self.network)
 
@@ -752,46 +871,46 @@ def train_and_monitor_overfit_model(
 
 
 if __name__ == '__main__':
-    # train_and_monitor_overfit_model(
-    #     n_samples=2 ** 17,
-    #     samplerate=22050,
-    # )
+    train_and_monitor_overfit_model(
+        n_samples=2 ** 17,
+        samplerate=22050,
+    )
     # train_and_monitor_auto_encoder(batch_size=2)
 
-    control_plane_dim = 16
-    n_resonances = 16
-    n_deformations = 4
-
-    layer = ResonanceLayer(
-        n_frames=128,
-        n_samples=2**16,
-        control_plane_dim=control_plane_dim,
-        n_resonances=n_resonances,
-        n_deformations=n_deformations,
-        window_size=2048,
-        base_resonance=0.1,
-        max_gain=2)
-
-
-    control_plane = torch.zeros(3, control_plane_dim, n_frames).bernoulli_(p=0.01)
-    plt.matshow(control_plane.data.cpu().numpy()[0])
-    plt.show()
-
-    mix = torch.zeros(3, 2).uniform_(0, 1)
-
-    x, output = layer.forward(control_plane, mix)
-
-    print(output.shape)
-    spec = stft(output, 2048, 256, pad=True)
-    print(spec.shape)
-
-    # print(spech.)
-    plt.matshow(spec.data.cpu().numpy()[0].reshape((-1, 1025)))
-    plt.show()
-
-    x = playable(output, 22050, normalize=True)
-    listen_to_sound(x)
-
-
-    # print(x.shape, output.shape)
-
+    # control_plane_dim = 16
+    # n_resonances = 16
+    # n_deformations = 4
+    #
+    # layer = ResonanceLayer(
+    #     n_frames=128,
+    #     n_samples=2**16,
+    #     control_plane_dim=control_plane_dim,
+    #     n_resonances=n_resonances,
+    #     n_deformations=n_deformations,
+    #     window_size=2048,
+    #     base_resonance=0.1,
+    #     max_gain=2)
+    #
+    #
+    # control_plane = torch.zeros(3, control_plane_dim, n_frames).bernoulli_(p=0.01)
+    # plt.matshow(control_plane.data.cpu().numpy()[0])
+    # plt.show()
+    #
+    # mix = torch.zeros(3, 2).uniform_(0, 1)
+    #
+    # x, output = layer.forward(control_plane, mix)
+    #
+    # print(output.shape)
+    # spec = stft(output, 2048, 256, pad=True)
+    # print(spec.shape)
+    #
+    # # print(spech.)
+    # plt.matshow(spec.data.cpu().numpy()[0].reshape((-1, 1025)))
+    # plt.show()
+    #
+    # x = playable(output, 22050, normalize=True)
+    # listen_to_sound(x)
+    #
+    #
+    # # print(x.shape, output.shape)
+    #

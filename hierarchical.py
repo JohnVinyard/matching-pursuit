@@ -158,8 +158,8 @@ class OverfitHierarchicalEvents(nn.Module):
             events: torch.Tensor,
             times: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         for i in range(self.event_levels - 1):
-            # scale = 1 / (i + 1)
-            scale = 1
+            scale = 1 / (i + 1)
+            # scale = 1
 
             # TODO: consider bringing back scaling as we approach the leaves of the tree
             events = \
@@ -258,7 +258,7 @@ def overfit():
 
     model = OverfitHierarchicalEvents(
         n_samples, samplerate, n_events, context_dim=event_dim).to(device)
-    optim = Adam(model.parameters(), lr=1e-3)
+    optim = Adam(model.parameters(), lr=1e-4)
 
     # loss_model = CorrelationLoss(n_elements=512).to(device)
 
@@ -288,7 +288,7 @@ def overfit():
         # loss = loss_model.forward(target, recon_summed)
         # loss = loss_model.compute_multiband_loss(target, recon_summed, 64, 16)
 
-        loss = iterative_loss(target, recon, loss_transform, ratio_loss=True)
+        loss = iterative_loss(target, recon, loss_transform, ratio_loss=False)
 
         # loss = reconstruction_loss(target, recon_summed)
         # t = loss_model.forward(target)

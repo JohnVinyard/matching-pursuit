@@ -118,7 +118,6 @@ class EvolvingFilteredResonance(nn.Module):
             start_filter_stds: torch.Tensor,
             end_filter_means: torch.Tensor,
             end_filter_stds: torch.Tensor):
-
         batch, n_events, n_samples = resonances.shape
         assert n_samples == self.n_samples
 
@@ -284,18 +283,19 @@ class SplattingEventGenerator(nn.Module, EventGenerator):
         else:
             return self.forward_f0(*args, **kwargs)
 
-    def forward_wavetable(self,
-                          env: torch.Tensor,
-                          mix: torch.Tensor,
-                          decay_choice: torch.Tensor,
-                          filter_decay: torch.Tensor,
-                          resonance_choice: torch.Tensor,
-                          noise_filter: torch.Tensor,
-                          resonance_filter_1: torch.Tensor,
-                          resonance_filter_2: torch.Tensor,
-                          amp: torch.Tensor,
-                          verb_params: torch.Tensor,
-                          times: torch.Tensor) -> torch.Tensor:
+    def forward_wavetable(
+            self,
+            env: torch.Tensor,
+            mix: torch.Tensor,
+            decay_choice: torch.Tensor,
+            filter_decay: torch.Tensor,
+            resonance_choice: torch.Tensor,
+            noise_filter: torch.Tensor,
+            resonance_filter_1: torch.Tensor,
+            resonance_filter_2: torch.Tensor,
+            amp: torch.Tensor,
+            verb_params: torch.Tensor,
+            times: torch.Tensor) -> torch.Tensor:
 
         batch = env.shape[0]
 
@@ -395,8 +395,8 @@ class SplattingEventGenerator(nn.Module, EventGenerator):
 
         # decays = self.amp_envelope_generator.forward(decay_choice)
 
-        decaying_resonance = filtered_resonance #* decays
-        decaying_resonance2 = filt_res_2 #* decays
+        decaying_resonance = filtered_resonance  # * decays
+        decaying_resonance2 = filt_res_2  # * decays
 
         positioned_noise = self.env_and_position.forward(
             signals=filtered_noise,

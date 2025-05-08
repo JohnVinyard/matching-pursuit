@@ -6,6 +6,10 @@ The work is currently focused on "natural" sounds, and leverages
 knowledge about physics, acoustics, and human perception to remove 
 perceptually-irrelevant or redundant information.
 
+Here is a [paper](https://blog.cochlea.xyz/toward-a-sparse-and-interpretable-audio-codec.pdf) that covers 
+the current state of this work.  The "entrypoint" for training a model like the one described in the paper
+is in [`iterativedecomposition.py`](iterativedecomposition.py).
+
 The basis of modern-day, lossy audio codecs is a model that slices audio into
 fixed-size and fixed-rate "frames" or "windows" of audio.  This is even true of 
 cutting-edge , ["neural" audio codecs such as Descript's Audio Codec](https://descript.notion.site/Descript-Audio-Codec-11389fce0ce2419in%20a891d6591a68f814d5). 
