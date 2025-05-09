@@ -7,21 +7,18 @@ import torch
 from torch import nn
 from torch.optim import Adam
 
-from config import Config
 from conjure import LmdbCollection, serve_conjure, loggers, SupportedContentType, NumpySerializer, NumpyDeserializer
 from data import AudioIterator
 from modules import stft, sparsify, sparsify_vectors, iterative_loss, max_norm, \
-    sparse_softmax, positional_encoding, NeuralReverb, LinearOutputStack, gammatone_filter_bank
+    sparse_softmax, positional_encoding, LinearOutputStack
 from modules.anticausal import AntiCausalAnalysis
-from modules.eventgenerators.convimpulse import ConvImpulseEventGenerator
 from modules.eventgenerators.generator import EventGenerator, ShapeSpec
-from modules.eventgenerators.overfitresonance import OverfitResonanceModel, Lookup
+from modules.eventgenerators.overfitresonance import OverfitResonanceModel
 from modules.eventgenerators.schedule import DiracScheduler
 from modules.eventgenerators.splat import SplattingEventGenerator
 from modules.mixer import MixerStack
 from modules.multiheadtransform import MultiHeadTransform
 from modules.overlap_add import overlap_add
-from modules.transfer import fft_convolve
 from util import device, encode_audio, make_initializer
 
 matplotlib.use('Qt5Agg')
@@ -74,120 +71,6 @@ def fft_shift(a: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
     return samples
 
 
-def run_layer(
-        control_plane: torch.Tensor,
-        mapping: torch.Tensor,
-        decays: torch.Tensor,
-        out_mapping: torch.Tensor,
-        audio_mapping: torch.Tensor,
-        gains: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-
-    batch_size, control_plane_dim, frames = control_plane.shape
-
-
-    x = mapping @ control_plane
-    orig = x
-    decays = decays.view(batch_size, control_plane_dim, 1).repeat(1, 1, frames)
-
-    decays = torch.log(1e-12 + decays)
-    decays = torch.cumsum(decays, dim=-1)
-    decays = torch.exp(decays)
-
-    x = fft_convolve(x, decays)
-    x = (out_mapping @ x) + orig
-
-    cp = torch.tanh(x * gains.view(batch_size, control_plane_dim, 1))
-
-    audio = audio_mapping @ cp
-    audio = audio.permute(0, 2, 1).view(batch_size, frames, -1, 2)
-    audio = torch.view_as_complex(audio.contiguous())
-    audio = torch.fft.irfft(audio, norm='ortho')
-
-    audio = overlap_add(audio[:, None, :, :], apply_window=True)
-    audio = audio[..., :n_samples]
-
-    return audio, cp
-
-
-class Block(nn.Module):
-    def __init__(
-            self,
-            block_size,
-            base_resonance: float = 0.5,
-            max_gain: float = 5,
-            window_size: Union[int, None] = None):
-
-        super().__init__()
-        self.block_size = block_size
-        self.base_resonance = base_resonance
-        self.resonance_span = 1 - base_resonance
-        self.max_gain = max_gain
-        self.window_size = window_size or block_size
-        self.n_coeffs = window_size // 2 + 1
-        self.total_coeffs = self.n_coeffs * 2
-
-        self.w1 = nn.Parameter(torch.zeros(block_size, block_size).uniform_(-0.01, 0.01))
-        self.w2 = nn.Parameter(torch.zeros(block_size, block_size).uniform_(-0.01, 0.01))
-        self.audio = nn.Parameter(torch.zeros(self.total_coeffs, block_size).uniform_(-0.01, 0.01))
-
-
-        self.decays = nn.Parameter(torch.zeros(block_size).uniform_(0.001, 0.99))
-        self.gains = nn.Parameter(torch.zeros(block_size).uniform_(-3, 3))
-
-    def forward(self, cp: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        output, cp = run_layer(
-            torch.relu(cp),
-            self.w1,
-            self.base_resonance + torch.sigmoid(self.decays) * self.resonance_span,
-            self.w2,
-            self.audio,
-            torch.sigmoid(self.gains) * self.max_gain)
-        return output, cp
-
-
-class Stack(nn.Module):
-    def __init__(
-            self,
-            n_blocks,
-            block_size,
-            base_resonance: float = 0.5,
-            max_gain: float = 5,
-            window_size: Union[int, None] = None):
-        super().__init__()
-        self.block_size = block_size
-        self.n_blocks = n_blocks
-        self.window_size = window_size
-
-        self.mix = nn.Parameter(torch.zeros(n_blocks).uniform_(-1, 1))
-        self.blocks = nn.ModuleList([
-            Block(
-                block_size,
-                base_resonance,
-                max_gain,
-                window_size = window_size
-            ) for _ in range(n_blocks)
-        ])
-
-    def forward(self, cp):
-        batch_size, channels, frames = cp.shape
-
-        working_control_plane = cp
-
-        total_samples = frames * (self.window_size // 2)
-
-        channels = torch.zeros(
-            batch_size, self.n_blocks, total_samples, device=cp.device)
-
-        for i, block in enumerate(self.blocks):
-            output, working_control_plane = block(working_control_plane)
-            channels[:, i: i + 1, :] = output
-
-        mix = torch.softmax(self.mix, dim=-1)
-        mixed = channels.permute(0, 2, 1) @ mix
-        mixed = mixed.view(batch_size, 1, total_samples)
-        return max_norm(mixed)
-
-
 
 
 def transform(x: torch.Tensor):
@@ -211,162 +94,6 @@ def reconstruction_loss(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     a = stft(a, 2048, 256, pad=True, return_complex=True)
     b = stft(b, 2048, 256, pad=True, return_complex=True)
     return torch.abs(a - b).sum()
-
-
-class PhysicalModel(nn.Module):
-
-    def __init__(
-            self,
-            control_plane_dim: int = 16,
-            hidden_dim: int = 128,
-            max_active: int = 64,
-            window_size: int = 1024):
-        super().__init__()
-        self.control_plane_dim = control_plane_dim
-        self.hidden_dim = hidden_dim
-        self.max_active = max_active
-        self.window_size = window_size
-
-        self.net = Stack(
-            3, self.control_plane_dim, base_resonance=0.5, max_gain=5, window_size=self.window_size)
-
-
-    def forward(self, control: torch.Tensor) -> torch.Tensor:
-        batch, cpd, frames = control.shape
-        # control = control.permute(0, 2, 1)
-
-        control = sparsify(control, self.max_active)
-        # control = torch.relu(control)
-
-        # control = control[:, :, :frames // 4]
-
-        # proj = self.in_projection(control)
-        result = self.net.forward(control)
-        # result = self.out_projection(result)
-
-        samples = result.view(batch, -1, n_samples)
-        # samples = torch.sin(samples)
-        return samples
-
-
-class EnergyBasedEventGenerator(EventGenerator, nn.Module):
-
-    def __init__(self, instrument_dim: int):
-        super().__init__()
-        self.instrument_dim = instrument_dim
-
-        self.block_size = 512
-        self.n_coeffs = self.block_size // 2 + 1
-        self.total_complex_coeffs = self.n_coeffs * 2
-
-        self.base_damping = 0.9
-        self.span = 1 - self.base_damping
-
-        self.n_frames = 512
-
-        transform_block_size = self.total_complex_coeffs
-
-        n_filters = self.n_coeffs
-        filters = gammatone_filter_bank(n_filters, self.block_size, device, band_spacing='geometric')
-        filters = torch.fft.rfft(filters, dim=-1, norm='ortho')
-        self.register_buffer('filters', filters)
-
-        self.to_samples = nn.Parameter(torch.zeros(transform_block_size, self.instrument_dim).uniform_(-1, 1))
-
-        self.scheduler = DiracScheduler(
-            n_events, start_size=n_frames, n_samples=n_samples, pre_sparse=True)
-
-    @property
-    def shape_spec(self) -> ShapeSpec:
-        return dict(
-            # resting_state = (self.instrument_dim,),
-            masses = (self.instrument_dim,),
-            tensions = (self.instrument_dim,),
-            gains = (self.instrument_dim,),
-            damping = (1,),
-            forces = (self.instrument_dim, self.n_frames)
-        )
-
-    def forward(
-            self,
-            masses: torch.Tensor,
-            tensions: torch.Tensor,
-            gains: torch.Tensor,
-            damping: torch.Tensor,
-            forces: torch.Tensor,
-            times: torch.Tensor) -> torch.Tensor:
-
-        masses = 1 + torch.abs(masses) * 100
-        tensions = torch.abs(tensions) * 10
-        damping = self.base_damping + (torch.sigmoid(damping) * self.span * 0.9999)
-
-        # forces = sparsify(forces, 32)
-
-        batch, n_events, dim = masses.shape
-        resting = torch.zeros_like(masses)
-
-        velocity = torch.zeros_like(resting)
-        acceleration = torch.zeros_like(resting)
-
-        state = torch.zeros_like(resting)
-
-
-        displacement = torch.zeros_like(state)
-        blocks = []
-
-        for i in range(self.n_frames):
-            # calculate new displacement
-            displacement = (state - resting)
-
-            acceleration = acceleration + ((-displacement * tensions) / masses)
-
-            # accumulate forces
-            # apply any forces from outside the system
-            acceleration = acceleration + (forces[:, :, :, i] / masses)
-
-            # apply forces
-            velocity = velocity + acceleration
-            state = state + velocity
-
-            # clear
-            # apply damping (this could vary over time)
-            velocity = velocity * damping
-            # velocity[torch.abs(velocity) < 1e-6] = 0
-
-            force = masses * acceleration
-
-            # clear forces
-            acceleration = acceleration * 0
-
-            block = (force @ self.to_samples.T)  # * torch.norm(displacement)
-
-            # print(torch.norm(displacement), torch.norm(block))
-            blocks.append(block[:, :, None, :])
-
-        # plt.matshow(np.abs(torch.stack(disp, dim=0).data.cpu().numpy().squeeze()))
-        # plt.show()
-
-        blocks = torch.cat(blocks, dim=-2)
-
-
-        # TODO: this could all happen outside the loop
-
-        blocks = blocks.view(batch, n_events, -1, self.n_coeffs, 2)
-        blocks = torch.view_as_complex(blocks)
-
-        blocks = blocks.to(torch.complex64) @ self.filters
-
-        blocks = torch.fft.irfft(blocks, dim=-1, norm='ortho')
-
-        # print(blocks.shape)
-        # samples = blocks.view(batch_size, n_events, -1)
-        samples = overlap_add(blocks, apply_window=True)[..., :n_samples]
-
-
-        samples = self.scheduler.schedule(times, samples)
-        return samples
-
-
 
 
 
@@ -425,128 +152,6 @@ class PosEncodedSTFT(EventGenerator, nn.Module):
 
 
 
-class MultiRNN(EventGenerator, nn.Module):
-
-    def __init__(
-            self,
-            n_voices: int = 8,
-            n_control_planes: int = 512,
-            control_plane_dim: int = 16,
-            hidden_dim: int = 128,
-            n_frames: int = 128,
-            control_plane_sparsity: int = 32,
-            window_size: int = 1024,
-            n_events: int = 1,
-            n_samples: int = n_samples,
-            fine_positioning: bool = False):
-        super().__init__()
-        self.n_voices = n_voices
-        self.n_control_planes = n_control_planes
-        self.control_plane_dim = control_plane_dim
-        self.n_frames = n_frames
-        self.fine_positioning = fine_positioning
-        self.n_events = n_events
-        self.n_samples = n_samples
-
-        self.samples_per_frame = n_samples // n_frames
-        self.frame_ratio = self.samples_per_frame / n_samples
-
-        verbs = NeuralReverb.tensors_from_directory(Config.impulse_response_path(), n_samples, normalize=True)
-        n_verbs = verbs.shape[0]
-        self.n_verbs = n_verbs
-
-        self.voices = nn.ModuleList([
-            PhysicalModel(
-                control_plane_dim=control_plane_dim,
-                hidden_dim=hidden_dim,
-                max_active=control_plane_sparsity,
-                window_size=window_size, )
-            for _ in range(self.n_voices)
-        ])
-
-        self.room_shape = (1, n_events, n_verbs)
-
-        self.control_planes = Lookup(
-            n_control_planes,
-            n_frames * control_plane_dim,
-            initialize=lambda x: torch.zeros_like(x).uniform_(0, 1),
-            selection_type='relu')
-
-        self.verb = Lookup(n_verbs, n_samples, initialize=lambda x: verbs, fixed=True)
-
-        self.scheduler = DiracScheduler(
-            self.n_events, start_size=n_frames, n_samples=self.n_samples, pre_sparse=True)
-
-    @property
-    def shape_spec(self) -> ShapeSpec:
-        params = dict(
-            voice=(self.n_voices,),
-            control_plane_choice=(self.n_control_planes,),
-            amplitudes=(1,),
-            room_choice=(self.n_verbs,),
-            room_mix=(2,),
-        )
-
-        if self.fine_positioning:
-            params['fine'] = (1,)
-
-        return params
-
-    def forward(
-            self,
-            voice: torch.Tensor,
-            control_plane_choice: torch.Tensor,
-            amplitudes: torch.Tensor,
-            room_choice: torch.Tensor,
-            room_mix: torch.Tensor,
-            times: torch.Tensor,
-            fine: Union[torch.Tensor, None] = None) -> torch.Tensor:
-
-        batch, n_events, _ = voice.shape
-
-        final_events = torch.zeros((batch, n_events, self.n_samples), device=voice.device)
-
-        hard_voice_choice = sparse_softmax(voice, normalize=True)
-        voice_indices = torch.argmax(hard_voice_choice, dim=-1, keepdim=True)
-
-        for b in range(batch):
-            for e in range(n_events):
-                active_voice = voice_indices[b, e]
-
-                cp = self\
-                    .control_planes.forward(control_plane_choice[b, e].view(1, 1, self.n_control_planes))\
-                    .view(1, self.control_plane_dim, self.n_frames)
-
-                samples = self.voices[active_voice.item()].forward(cp)
-
-                # as in switch transformer, multiply samples by winning (sparse) softmax element
-                # so gradients can flow through to the "router"
-                final = samples * hard_voice_choice[b, e, active_voice]
-
-                # apply reverb
-                # verb = self.verb.forward(room_choice[b: b + 1, e: e + 1, :])
-                # wet = fft_convolve(verb, final.view(*verb.shape))
-                # verb_mix = torch.softmax(room_mix[b: b + 1, e: e + 1, :], dim=-1)[:, :, None, :]
-                # stacked = torch.stack([wet, final.view(*verb.shape)], dim=-1)
-                # stacked = stacked * verb_mix
-                # final = stacked.sum(dim=-1)
-
-                final = final * torch.abs(amplitudes[b, e])
-
-                scheduled = self.scheduler.schedule(times[b: b + 1, e: e + 1], final)
-
-                if fine is not None:
-                    fine_shifts = torch.tanh(fine) * self.frame_ratio
-                    scheduled = fft_shift(scheduled, fine_shifts[b: b + 1, e: e + 1, :])
-                    scheduled = scheduled[..., :self.n_samples]
-
-
-                final_events[b: b + 1, e: e + 1, :] = scheduled
-
-        return final_events
-
-
-
 class MixerEncoder(nn.Module):
     """
     MLP-Mixer-like architecture for the encoder/analysis portion of the network
@@ -580,6 +185,11 @@ class Model(nn.Module):
         self.in_channels = in_channels
         self.hidden_channels = hidden_channels
 
+        # TODO: Try out different encoder architectures here, including:
+        # - transformer
+        # - MLP Mixer
+        # - UNet
+        # - RNN ?
         self.encoder = AntiCausalAnalysis(
             in_channels=in_channels,
             channels=hidden_channels,
@@ -603,11 +213,16 @@ class Model(nn.Module):
             shapes=self.resonance.shape_spec,
         )
 
+        # hang on to recent event vectors and use reservoir sampling
+        # to grab them at random
         self.reservoir_size = 256
         self.reservoir = np.zeros((self.reservoir_size, self.context_dim), dtype=np.float32)
         self.apply(initializer)
 
     def embed_events(self, vectors: torch.Tensor, times: torch.Tensor) -> torch.Tensor:
+        """
+        Create an embedding of the concatenation of the event and one-hot time vectors
+        """
         pe = positional_encoding(sequence_length=n_frames, n_freqs=context_dim, device=vectors.device)
         times = times @ pe.T
         embeddings = torch.cat([vectors, times], dim=-1)
@@ -698,11 +313,8 @@ class Model(nn.Module):
         samps = audio.shape[-1]
 
         window_size = n_samples
-        step_size = n_samples // 2
 
-        print('========================')
         spec = transform(audio)
-        print(spec.shape)
         batch, channels, time = spec.shape
 
         frame_window_size = n_frames
@@ -881,50 +493,21 @@ def train_and_monitor(
                 fft_resonance=True,
                 context_dim=context_dim
             )
-        elif model_type == 'osc':
-            resonance_model = EnergyBasedEventGenerator(instrument_dim=32)
-        elif model_type == 'conv':
-            resonance_model = ConvImpulseEventGenerator(
-                context_dim=context_dim,
-                impulse_size=8192,
-                resonance_size=n_samples,
-                samplerate=samplerate,
-                n_samples=n_samples,
-            )
         elif model_type == 'splat':
             resonance_model = SplattingEventGenerator(
                 n_samples=n_samples,
                 samplerate=samplerate,
                 n_resonance_octaves=64,
                 n_frames=n_frames,
-                wavetable_resonance=False,
+                wavetable_resonance=True,
                 hierarchical_scheduler=False
             )
-        elif model_type == 'ssm':
-            # resonance_model = WavetableModel(
-            #     n_items=512,
-            #     n_samples=n_samples,
-            #     n_frames=n_frames,
-            #     n_events=n_events)
-            # resonance_model = ConvSTFT(fine_positioning=False)
+        elif model_type == 'pos':
             resonance_model = PosEncodedSTFT(fine_positioning=False)
 
-            # window_size = 512
-            # rnn_frames = n_samples // (window_size // 2)
-            #
-            # resonance_model = MultiRNN(
-            #     n_voices=1,
-            #     n_control_planes=256,
-            #     control_plane_dim=32,
-            #     hidden_dim=64,
-            #     control_plane_sparsity=128,
-            #     window_size=window_size,
-            #     n_frames=rnn_frames,
-            #     fine_positioning=False)
         else:
             raise ValueError(f'Unknown model type {model_type}')
 
-        print(resonance_model.shape_spec)
 
         model = Model(
             resonance_model=resonance_model,
@@ -1012,7 +595,6 @@ def train_and_monitor(
 
                     random_audio(max_norm(rnd))
                     reservoir(max_norm(torch.from_numpy(model.reservoir)))
-                    # random_vecs(max_norm(vecs[0]))
 
 
             # if i % 1000 == 0:
@@ -1042,7 +624,7 @@ if __name__ == '__main__':
         '--model-type',
         type=str,
         required=True,
-        choices=['lookup', 'conv', 'splat', 'ssm', 'osc'])
+        choices=['lookup', 'splat', 'pos'])
     parser.add_argument(
         '--save-data',
         required=False,
