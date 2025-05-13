@@ -184,10 +184,10 @@ def freq_domain_transfer_function_to_resonance(
 
     group_delay = torch.linspace(0, np.pi, expected_coeffs)
 
-    res = coeffs.view(-1, expected_coeffs, 1).repeat(1, 1, n_frames)
+    res = coeffs.reshape(-1, expected_coeffs, 1).repeat(1, 1, n_frames)
 
     if start_mags is not None:
-        start_mags = start_mags.view(res.shape[0], expected_coeffs, 1)
+        start_mags = start_mags.reshape(res.shape[0], expected_coeffs, 1)
     else:
         start_mags = torch.ones(res.shape[0], expected_coeffs, 1, device=res.device)
 
@@ -217,7 +217,7 @@ def freq_domain_transfer_function_to_resonance(
 
     if start_phase is not None:
         # apply constant offset to each FFT bin
-        phase = phase + start_phase.view(-1, 1, 1, expected_coeffs)
+        phase = phase + start_phase.reshape(-1, 1, 1, expected_coeffs)
 
     # convert from polar coordinates
     spec = spec * torch.exp(1j * phase)

@@ -13,12 +13,13 @@ from modules import stft, sparsify, sparsify_vectors, iterative_loss, max_norm, 
     sparse_softmax, positional_encoding, LinearOutputStack
 from modules.anticausal import AntiCausalAnalysis
 from modules.eventgenerators.generator import EventGenerator, ShapeSpec
-from modules.eventgenerators.overfitresonance import OverfitResonanceModel
+from modules.eventgenerators.overfitresonance import OverfitResonanceModel, Lookup
 from modules.eventgenerators.schedule import DiracScheduler
 from modules.eventgenerators.splat import SplattingEventGenerator
 from modules.mixer import MixerStack
 from modules.multiheadtransform import MultiHeadTransform
 from modules.overlap_add import overlap_add
+from ssm import control_plane_dim
 from util import device, encode_audio, make_initializer
 
 matplotlib.use('Qt5Agg')
@@ -44,6 +45,72 @@ transform_step_size = 256
 n_frames = n_samples // transform_step_size
 
 initializer = make_initializer(0.02)
+
+class RNNEventGenerator(nn.Module):
+    """
+    A state-space model-like module, with one additional matrix, used to project the control
+    signal into the shape of each audio frame.
+
+    The final output is produced by overlap-adding the windows/frames of audio into a single
+    1D signal.
+    """
+
+    def __init__(
+            self,
+            control_plane_dim: int,
+            input_dim: int,
+            state_matrix_dim: int,
+            state_dim: int,
+            window_size: int):
+
+        super().__init__()
+        self.state_matrix_dim = state_matrix_dim
+        self.input_dim = input_dim
+        self.control_plane_dim = control_plane_dim
+
+        self.net = nn.RNN(
+            input_size=input_dim,
+            hidden_size=state_matrix_dim,
+            num_layers=1,
+            nonlinearity='tanh',
+            bias=False,
+            batch_first=True)
+
+        # matrix mapping control signal to audio frame dimension
+        self.proj = nn.Parameter(
+            torch.zeros(control_plane_dim, input_dim).uniform_(-0.01, 0.01)
+        )
+
+        self.out_proj = nn.Linear(state_dim, window_size, bias=False)
+
+        self.apply(initializer)
+
+    def forward(self, control: torch.Tensor) -> torch.Tensor:
+        """
+        (batch, control_plane, time) -> (batch, window_size, time)
+        """
+
+        batch, cpd, frames = control.shape
+        assert cpd == self.control_plane_dim
+
+        control = control.permute(0, 2, 1)
+
+        # try to ensure that the input signal only includes low-frequency info
+        proj = control @ self.proj
+
+        # proj = F.interpolate(proj, size=self.input_dim, mode='linear')
+        # proj = proj * torch.zeros_like(proj).uniform_(-1, 1)
+        # proj = proj * torch.hann_window(self.input_dim, device=proj.device)
+
+        assert proj.shape == (batch, frames, self.input_dim)
+        result, hidden = self.net.forward(proj)
+
+        result = self.out_proj(result)
+
+        result = result.view(batch, 1, -1)
+        result = torch.sin(result)
+        return result
+
 
 
 def fft_shift(a: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
@@ -91,8 +158,8 @@ def loss_transform(x: torch.Tensor) -> torch.Tensor:
 
 
 def reconstruction_loss(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    a = stft(a, 2048, 256, pad=True, return_complex=True)
-    b = stft(b, 2048, 256, pad=True, return_complex=True)
+    a = stft(a, 2048, 256, pad=True)
+    b = stft(b, 2048, 256, pad=True)
     return torch.abs(a - b).sum()
 
 
@@ -121,8 +188,8 @@ class PosEncodedSTFT(EventGenerator, nn.Module):
 
         self.proj = nn.Linear(context_dim, n_pos_coeffs)
         self.to_frames = LinearOutputStack(
-            channels=128,
-            layers=3,
+            channels=512,
+            layers=5,
             out_channels=self.n_coeffs * 2,
             in_channels=n_pos_coeffs,
             activation=torch.tanh)
@@ -150,6 +217,54 @@ class PosEncodedSTFT(EventGenerator, nn.Module):
         return scheduled
 
 
+class RNNEventGeneratorWrapper(EventGenerator, nn.Module):
+
+    @property
+    def shape_spec(self) -> ShapeSpec:
+        return dict(
+            params=(context_dim,)
+        )
+
+    def __init__(self):
+        super().__init__()
+
+        # TODO: This needs works and is very confused, state_dim and state_matrix_dim
+        # are "tied" (must be the same) without being explicit about that, or just collapsing
+        # them into a single parameter.
+        n_items = 256
+        state_matrix_dim = 128
+        # the size of each, half-lapped audio "frame"
+        window_size = 128
+        # the dimensionality of the control plane or control signal
+        self.control_plane_dim = 128
+        # the dimensionality of the state vector, or hidden state for the RNN
+        state_dim = state_matrix_dim
+        input_dim = control_plane_dim
+        self.n_frames = n_samples // input_dim
+        self.proj = nn.Linear(context_dim, n_items)
+
+        self.net = RNNEventGenerator(
+            control_plane_dim=self.control_plane_dim,
+            input_dim=input_dim,
+            state_matrix_dim=state_matrix_dim,
+            state_dim=state_dim,
+            window_size=window_size)
+
+        self.control_plane_lookup = Lookup(
+            n_items=n_items, n_samples=control_plane_dim * self.n_frames, selection_type='relu')
+
+        self.scheduler = DiracScheduler(
+            n_events, start_size=n_frames, n_samples=n_samples, pre_sparse=True)
+
+    def forward(self, params: torch.Tensor, times: torch.Tensor) -> torch.Tensor:
+        batch_size = params.shape[0]
+        x = params
+        x = self.proj(x)
+        x = self.control_plane_lookup.forward(x).view(batch_size, self.control_plane_dim, -1)
+        x = self.net(x)
+        x = self.scheduler.schedule(times, x)
+
+        return x
 
 
 class MixerEncoder(nn.Module):
@@ -472,6 +587,8 @@ def train_and_monitor(
         scaler = torch.cuda.amp.GradScaler()
 
         hidden_channels = 512
+
+        # decide which event decoder variant we should build
         if model_type == 'lookup':
             resonance_model = OverfitResonanceModel(
                 n_noise_filters=64,
@@ -504,6 +621,8 @@ def train_and_monitor(
             )
         elif model_type == 'pos':
             resonance_model = PosEncodedSTFT(fine_positioning=False)
+        elif model_type == 'rnn':
+            resonance_model = RNNEventGeneratorWrapper()
 
         else:
             raise ValueError(f'Unknown model type {model_type}')
@@ -538,7 +657,7 @@ def train_and_monitor(
                 orig_audio(target)
                 recon, encoded, scheduling = model.iterative(target)
 
-                sparsity_loss = torch.abs(scheduling).sum()
+                # sparsity_loss = torch.abs(scheduling).sum() * 10
 
                 norms = torch.norm(recon, dim=-1)
                 norms, indices = torch.sort(norms, dim=-1)
@@ -558,13 +677,16 @@ def train_and_monitor(
                 target = target * weighting
                 recon_summed = recon_summed * weighting
 
+                # loss from iterative_loss will be negative since we're maximizing
+                # the amount of energy removed
                 loss = iterative_loss(
                     target,
                     recon,
                     loss_transform,
                     ratio_loss=False,
                     sort_channels=True)
-                loss = loss + sparsity_loss
+                # loss = loss + sparsity_loss
+                # loss = loss + reconstruction_loss(target, recon_summed)
 
 
             scaler.scale(loss).backward()
@@ -573,6 +695,8 @@ def train_and_monitor(
             print(i, loss.item())
 
             optim.zero_grad()
+
+
 
             if i % 10 == 0:
                 # TODO: sample scale/amplitude of one-hot time vectors
@@ -624,7 +748,7 @@ if __name__ == '__main__':
         '--model-type',
         type=str,
         required=True,
-        choices=['lookup', 'splat', 'pos'])
+        choices=['lookup', 'splat', 'pos', 'rnn'])
     parser.add_argument(
         '--save-data',
         required=False,
