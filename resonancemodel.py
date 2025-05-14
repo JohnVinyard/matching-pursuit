@@ -2,13 +2,19 @@ from typing import Tuple, Union, Optional
 
 import numpy as np
 import torch
+from conjure import serve_conjure
 from torch import nn
+from torch.optim import Adam
 
-from modules import max_norm, interpolate_last_axis
+import conjure
+from data import get_one_audio_segment
+from modules import max_norm, interpolate_last_axis, stft
+from modules.infoloss import CorrelationLoss
 from modules.transfer import freq_domain_transfer_function_to_resonance, fft_convolve
 from modules.upsample import upsample_with_holes, ensure_last_axis_length
-from util import playable
-from util.playable import listen_to_sound
+from spiking import SpikingModel, AutocorrelationLoss
+from util import playable, device
+from util.playable import listen_to_sound, encode_audio
 
 
 def execute_layer(
@@ -38,7 +44,6 @@ def execute_layer(
     # TODO: einops
     routed = (control_signal.permute(0, 1, 3, 2) @ routing).permute(0, 1, 3, 2)
 
-    routed = torch.relu(routed)
     before_upsample = routed
 
     step_size = window_size // 2
@@ -70,7 +75,7 @@ def execute_layer(
     base_deformation[:, :, 0:1, :] = 1
     d = base_deformation + deformations
     d = torch.softmax(d, dim=-2)
-    d = d.view(batch_size, n_events, 1, expressivity, def_frames)
+    d = d.view(batch, n_events, 1, expressivity, def_frames)
     d = interpolate_last_axis(d, n_samples)
 
     x = d * conv
@@ -100,10 +105,11 @@ class ResonanceLayer(nn.Module):
         self.n_samples = n_samples
         self.base_resonance = base_resonance
 
+        resonance_coeffs = resonance_window_size // 2 + 1
+
         self.router = nn.Parameter(
             torch.zeros((self.control_plane_dim, self.n_resonances)).uniform_(-1, 1))
-        # self.deformations = nn.Parameter(
-        #     torch.zeros((batch_size, n_events, expressivity, n_frames)).uniform_(-0.01, 0.01))
+
 
         def init_resonance() -> torch.Tensor:
             # base resonance
@@ -183,44 +189,106 @@ class ResonanceStack(nn.Module):
         return final.view(batch_size, n_events, self.n_samples)
 
 
-if __name__ == '__main__':
+class OverfitResonanceStack(nn.Module):
+
+    def __init__(
+        self,
+        n_layers: int,
+        n_samples: int,
+        resonance_window_size: int,
+        control_plane_dim: int,
+        n_resonances: int,
+        expressivity: int,
+        n_frames: int,
+        base_resonance: float = 0.5):
+
+        super().__init__()
+        self.expressivity = expressivity
+        self.n_resonances = n_resonances
+        self.control_plane_dim = control_plane_dim
+        self.resonance_window_size = resonance_window_size
+        self.n_samples = n_samples
+        self.base_resonance = base_resonance
+
+        control_plane = torch.zeros(
+            (1, 1, control_plane_dim, n_frames)) \
+            .uniform_(- 0.01, 0.01)
+
+        self.control_plane = nn.Parameter(control_plane)
+
+        deformations = torch.zeros(
+            (1, 1, expressivity, n_frames)).uniform_(-0.01, 0.01)
+        self.deformations = nn.Parameter(deformations)
+
+        self.network = ResonanceStack(
+            n_layers=n_layers,
+            n_samples=n_samples,
+            resonance_window_size=resonance_window_size,
+            control_plane_dim=control_plane_dim,
+            n_resonances=n_resonances,
+            expressivity=expressivity,
+            base_resonance=0.01
+        )
+
+
+    def forward(self):
+        x = self.network.forward(self.control_plane, self.deformations)
+        return x
+
+
+def overfit_model():
     n_samples = 2 ** 16
     resonance_window_size = 2048
-    resonance_coeffs = resonance_window_size // 2 + 1
+    step_size = 256
+    n_frames = n_samples // step_size
+    # resonance_coeffs = resonance_window_size // 2 + 1
 
-    control_plane_dim = 16
-    n_resonances = 16
+    control_plane_dim = 64
+    n_resonances = 64
     expressivity = 1
 
-    batch_size = 1
-    n_events = 1
+    loss_model = CorrelationLoss(n_elements=512).to(device)
+    # loss_model = SpikingModel(64, 64, 64, 64, 64).to(device)
+    # loss_model = AutocorrelationLoss(64, 64).to(device)
 
-    # TODO: There is no need for control signal and deformations to have
-    # the same sampling rate, in fact, deformations should likely be slower
-    samples_per_frame = 128
-    n_frames = n_samples // samples_per_frame
-    device = torch.device('cuda')
-
-    control_plane = torch.zeros(
-        (batch_size, n_events, control_plane_dim, n_frames), device=device) \
-        .bernoulli_(p=0.0005)
-
-    deformations = torch.zeros(
-        (batch_size, n_events, expressivity, n_frames), device=device).uniform_(-0.01, 0.01)
-
-    network = ResonanceStack(
+    target = get_one_audio_segment(n_samples)
+    model = OverfitResonanceStack(
         n_layers=3,
         n_samples=n_samples,
         resonance_window_size=resonance_window_size,
         control_plane_dim=control_plane_dim,
         n_resonances=n_resonances,
         expressivity=expressivity,
-        base_resonance=0.01
+        base_resonance=0.01,
+        n_frames=n_frames
     ).to(device)
+    optimizer = Adam(model.parameters(), lr=1e-3)
+    collection = conjure.LmdbCollection(path='resonancemodel')
+    t, r = conjure.loggers(
+        ['target', 'recon'], 'audio/wav', encode_audio, collection)
 
-    final = network.forward(control_plane, deformations)
-    print(final.shape)
+    serve_conjure([t, r], port=9999, n_workers=1)
 
-    final = max_norm(final)
-    p = playable(final, 22050, normalize=False, pad_with_silence=True)
-    listen_to_sound(p, True)
+    t(max_norm(target))
+
+    def train():
+        iteration = 0
+
+        while True:
+            optimizer.zero_grad()
+            recon = model.forward()
+            r(max_norm(recon))
+            # loss = torch.abs(x - y).sum()
+            loss = loss_model.multiband_noise_loss(target, recon, 64, 16)
+            # loss = loss_model.compute_multiband_loss(target, recon)
+            # loss = loss_model.compute_multiband_loss(target, recon, 64, 16)
+            loss.backward()
+            optimizer.step()
+            print(iteration, loss.item())
+            iteration += 1
+
+    train()
+
+if __name__ == '__main__':
+
+    overfit_model()
