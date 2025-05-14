@@ -8,7 +8,7 @@ from torch.optim import Adam
 
 import conjure
 from data import get_one_audio_segment
-from modules import max_norm, interpolate_last_axis, stft
+from modules import max_norm, interpolate_last_axis, stft, sparsify
 from modules.infoloss import CorrelationLoss
 from modules.transfer import freq_domain_transfer_function_to_resonance, fft_convolve
 from modules.upsample import upsample_with_holes, ensure_last_axis_length
@@ -59,7 +59,7 @@ def execute_layer(
         n_resonance_frames,
         apply_decay=True,
         start_phase=torch.tanh(phase) * np.pi,
-        start_mags=torch.sigmoid(amp),
+        start_mags=torch.abs(amp),
         log_space_scan=True)
     res = res.view(1, 1, n_resonances, expressivity, n_samples)
 
@@ -80,9 +80,11 @@ def execute_layer(
 
     x = d * conv
     x = torch.sum(x, dim=-2)
-    x = torch.tanh(x * torch.abs(gains.view(1, 1, n_resonances, 1)))
 
-    summed = torch.sum(x, dim=-2, keepdim=True)
+    summed = torch.tanh(x * torch.abs(gains.view(1, 1, n_resonances, 1)))
+
+    summed = torch.sum(summed, dim=-2, keepdim=True)
+
     return summed, before_upsample
 
 
@@ -113,7 +115,7 @@ class ResonanceLayer(nn.Module):
 
         def init_resonance() -> torch.Tensor:
             # base resonance
-            res  = torch.zeros((n_resonances, resonance_coeffs, 1)).uniform_(-6, 6)
+            res  = torch.zeros((n_resonances, resonance_coeffs, 1)).uniform_(0.01, 1)
             # variations or deformations of the base resonance
             deformation = torch.zeros((1, resonance_coeffs, expressivity)).uniform_(-0.02, 0.02)
             # expand into (n_resonances, n_deformations)
@@ -125,7 +127,7 @@ class ResonanceLayer(nn.Module):
             decay=init_resonance(),
         ))
 
-        self.gains = nn.Parameter(torch.zeros((n_resonances, 1)).uniform_(0.01, 10))
+        self.gains = nn.Parameter(torch.zeros((n_resonances, 1)).uniform_(0.01, 1.1))
 
     def forward(self, control_signal: torch.Tensor, deformations: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         output, fwd = execute_layer(
@@ -209,10 +211,11 @@ class OverfitResonanceStack(nn.Module):
         self.resonance_window_size = resonance_window_size
         self.n_samples = n_samples
         self.base_resonance = base_resonance
+        self.n_frames = n_frames
 
         control_plane = torch.zeros(
             (1, 1, control_plane_dim, n_frames)) \
-            .uniform_(- 0.01, 0.01)
+            .uniform_(-0.01, 0.01)
 
         self.control_plane = nn.Parameter(control_plane)
 
@@ -232,9 +235,20 @@ class OverfitResonanceStack(nn.Module):
 
 
     def forward(self):
-        x = self.network.forward(self.control_plane, self.deformations)
+        cp = self.control_plane #/ self.control_plane.sum()
+        cp = cp.view(1, self.control_plane_dim, self.n_frames)
+        cp = sparsify(cp, n_to_keep=256)
+        cp = cp.view(1, 1, self.control_plane_dim, self.n_frames)
+        # cp = torch.relu(cp)
+        x = self.network.forward(cp, self.deformations)
         return x
 
+def l0_norm(x: torch.Tensor):
+    mask = (x > 0).float()
+    forward = mask
+    backward = x
+    y = backward + (forward - backward).detach()
+    return y.sum()
 
 def overfit_model():
     n_samples = 2 ** 16
@@ -245,9 +259,9 @@ def overfit_model():
 
     control_plane_dim = 64
     n_resonances = 64
-    expressivity = 1
+    expressivity = 4
 
-    loss_model = CorrelationLoss(n_elements=512).to(device)
+    # loss_model = CorrelationLoss(n_elements=2048).to(device)
     # loss_model = SpikingModel(64, 64, 64, 64, 64).to(device)
     # loss_model = AutocorrelationLoss(64, 64).to(device)
 
@@ -278,10 +292,11 @@ def overfit_model():
             optimizer.zero_grad()
             recon = model.forward()
             r(max_norm(recon))
-            # loss = torch.abs(x - y).sum()
-            loss = loss_model.multiband_noise_loss(target, recon, 64, 16)
-            # loss = loss_model.compute_multiband_loss(target, recon)
-            # loss = loss_model.compute_multiband_loss(target, recon, 64, 16)
+            x = stft(target, 2048, 256, pad=True)
+            y = stft(recon, 2048, 256, pad=True)
+            loss = torch.abs(x - y).sum()
+            # loss = loss_model.multiband_noise_loss(target, recon, 64, 16)
+            # loss = loss_model.compute_multiband_loss(recon, target)
             loss.backward()
             optimizer.step()
             print(iteration, loss.item())

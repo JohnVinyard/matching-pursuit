@@ -271,14 +271,14 @@ class SpikingModel(nn.Module):
         y = normalized
 
 
-        # fwd = (normalized > 0).float()
+        fwd = (normalized > 0).float()
 
-        # back = normalized
+        back = normalized
 
         # layer one of spiking response.  Unit responses propagate forward,
         # initial real-values propagate backward
 
-        # y = back + (fwd - back).detach()
+        y = back + (fwd - back).detach()
 
         # print(f'Channel {audio.shape[-1]} with sparsity {(fwd.sum() / fwd.numel())} and {fwd.sum()} non-zero elements')
 
