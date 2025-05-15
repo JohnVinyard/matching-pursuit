@@ -16,6 +16,7 @@ from modules.eventgenerators.generator import EventGenerator, ShapeSpec
 from modules.eventgenerators.overfitresonance import OverfitResonanceModel, Lookup
 from modules.eventgenerators.schedule import DiracScheduler
 from modules.eventgenerators.splat import SplattingEventGenerator
+from modules.iterative import sort_channels_descending_norm
 from modules.mixer import MixerStack
 from modules.multiheadtransform import MultiHeadTransform
 from modules.overlap_add import overlap_add
@@ -402,23 +403,30 @@ class Model(nn.Module):
             device=device,
             batch_size: int = 1) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
+        # how many total events will we need for this batch size?
         total_needed = batch_size * n_events
+
+        # select total_needed events from the reservoir
         indices = np.random.permutation(self.reservoir_size)[:total_needed]
         vecs = self.reservoir[indices]
+
         vecs = torch.from_numpy(vecs).to(device).float()
         vecs = vecs.view(batch_size, n_events, self.context_dim)
 
-
+        # generate random times for the events
         raw_times = torch.zeros(batch_size, n_events, n_frames, device=device).normal_(-1, 1)
         raw_times[:, :, n_frames // 2:] = 0
         times = sparse_softmax(
             raw_times, normalize=True, dim=-1)
 
+        # assign amplitudes to the dirac impulses and "sparsify", making
+        # approximately 50% of the events silent
         times = \
             times * \
             torch.zeros_like(times).uniform_(0, 1) \
             * torch.zeros_like(times).bernoulli_(p=0.5)
 
+        # generate the events
         final = torch.cat(
             [self.generate(vecs[:, i:i + 1, :], times[:, i:i + 1, :]) for i in range(n_events)], dim=1)
 
@@ -698,27 +706,40 @@ def train_and_monitor(
 
 
 
-            if i % 10 == 0:
-                # TODO: sample scale/amplitude of one-hot time vectors
-                # for completely realistic ground-truth generations.
-                # Then, sort both by descending norm and compare the spectrograms
-                # of each
-                with torch.no_grad():
-                    self_supervised_batch_size = 1
-                    # Generate a random sequence using random event vectors from the recent past
-                    rnd, vecs, times = model.random_sequence(batch_size=self_supervised_batch_size)
 
-                    # normalize such that the loudest channel peaks at 1
-                    random_seq = rnd
-                    random_seq = random_seq.view(self_supervised_batch_size, -1)
-                    random_seq = max_norm(random_seq)
-                    random_seq = random_seq.view(self_supervised_batch_size, n_events, n_samples)
+            # TODO: sample scale/amplitude of one-hot time vectors
+            # for completely realistic ground-truth generations.
+            # Then, sort both by descending norm and compare the spectrograms
+            # of each
+            with torch.no_grad():
+                self_supervised_batch_size = 1
+                # Generate a random sequence using random event vectors from the recent past
+                rnd, vecs, times = model.random_sequence(batch_size=self_supervised_batch_size)
 
-                    rnd = torch.sum(random_seq, dim=1, keepdim=True)
+                # normalize such that the loudest channel peaks at 1
+                random_seq = rnd
+                random_seq = random_seq.view(self_supervised_batch_size, -1)
+                random_seq = max_norm(random_seq)
+                random_seq = random_seq.view(self_supervised_batch_size, n_events, n_samples)
 
+                rnd = torch.sum(random_seq, dim=1, keepdim=True)
 
-                    random_audio(max_norm(rnd))
-                    reservoir(max_norm(torch.from_numpy(model.reservoir)))
+                random_audio(max_norm(rnd))
+                reservoir(max_norm(torch.from_numpy(model.reservoir)))
+
+            if i > 100:
+                # self-supervised loss kicks in
+                ss_target = sort_channels_descending_norm(random_seq)
+                ss_target = loss_transform(ss_target)
+
+                ss, _, _ = model.iterative(rnd)
+                ss_recon = sort_channels_descending_norm(ss)
+                ss_recon = loss_transform(ss_recon)
+
+                ss_loss = torch.abs(ss_target - ss_recon).sum() * 1e-3
+                ss_loss.backward()
+                optim.step()
+                print('SS', i, ss_loss.item())
 
 
             # if i % 1000 == 0:
