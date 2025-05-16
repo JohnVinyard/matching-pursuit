@@ -1,4 +1,4 @@
-from typing import Tuple, Union, Optional
+from typing import Tuple
 
 import numpy as np
 import torch
@@ -9,13 +9,9 @@ from torch.optim import Adam
 
 import conjure
 from data import get_one_audio_segment
-from modules import max_norm, interpolate_last_axis, stft, sparsify, unit_norm, flattened_multiband_spectrogram
-from modules.infoloss import CorrelationLoss
+from modules import max_norm, interpolate_last_axis, sparsify, unit_norm, flattened_multiband_spectrogram
 from modules.transfer import freq_domain_transfer_function_to_resonance, fft_convolve
-from modules.upsample import upsample_with_holes, ensure_last_axis_length
-from spiking import SpikingModel, AutocorrelationLoss
-from util import playable, device
-from util.playable import listen_to_sound, encode_audio
+from util import device, encode_audio
 
 
 def execute_layer(
@@ -228,10 +224,14 @@ class OverfitResonanceStack(nn.Module):
             control_plane_dim=control_plane_dim,
             n_resonances=n_resonances,
             expressivity=expressivity,
-            base_resonance=0.01
+            base_resonance=base_resonance
         )
 
-    def _process_control_plane(self, cp: torch.Tensor, n_to_keep: int = 256) -> torch.Tensor:
+    def _process_control_plane(
+            self,
+            cp: torch.Tensor,
+            n_to_keep: int = 256) -> torch.Tensor:
+
         cp = cp.view(1, self.control_plane_dim, self.n_frames)
         cp = sparsify(cp, n_to_keep=n_to_keep)
         cp = cp.view(1, 1, self.control_plane_dim, self.n_frames)
@@ -240,9 +240,6 @@ class OverfitResonanceStack(nn.Module):
     @property
     def control_signal(self):
         cp = self.control_plane
-        # cp = cp.view(1, self.control_plane_dim, self.n_frames)
-        # cp = sparsify(cp, n_to_keep=256)
-        # cp = cp.view(1, 1, self.control_plane_dim, self.n_frames)
         cp = self._process_control_plane(cp)
         return cp
 
@@ -250,8 +247,8 @@ class OverfitResonanceStack(nn.Module):
         rcp = torch \
             .zeros_like(self.control_plane) \
             .uniform_(
-                self.control_plane.min().item(),
-                self.control_plane.max().item())
+            self.control_plane.min().item(),
+            self.control_plane.max().item())
 
         rcp = self._process_control_plane(rcp, n_to_keep=32)
         x = self.forward(rcp, torch.zeros_like(self.deformations))
@@ -263,10 +260,6 @@ class OverfitResonanceStack(nn.Module):
             deformations: torch.Tensor = None):
         cp = cp if cp is not None else self.control_signal  # / self.control_plane.sum()
         deformations = deformations if deformations is not None else self.deformations
-        # cp = cp.view(1, self.control_plane_dim, self.n_frames)
-        # cp = sparsify(cp, n_to_keep=256)
-        # cp = cp.view(1, 1, self.control_plane_dim, self.n_frames)
-        # cp = torch.relu(cp)
         x = self.network.forward(cp, deformations)
         return x
 
@@ -284,15 +277,10 @@ def overfit_model():
     resonance_window_size = 2048
     step_size = 256
     n_frames = n_samples // step_size
-    # resonance_coeffs = resonance_window_size // 2 + 1
 
     control_plane_dim = 64
     n_resonances = 64
     expressivity = 4
-
-    loss_model = CorrelationLoss(n_elements=512).to(device)
-    # loss_model = SpikingModel(64, 64, 64, 64, 64).to(device)
-    # loss_model = AutocorrelationLoss(64, 64).to(device)
 
     target = get_one_audio_segment(n_samples)
     model = OverfitResonanceStack(
@@ -338,16 +326,10 @@ def overfit_model():
             r(max_norm(recon))
             c(model.control_signal[0, 0])
 
-
-            x = flattened_multiband_spectrogram(target, { 's': (64, 16)})
-            y = flattened_multiband_spectrogram(recon, { 's': (64, 16)})
-            # x = stft(target, 2048, 256, pad=True)
-            # y = stft(recon, 2048, 256, pad=True)
+            x = flattened_multiband_spectrogram(target, {'s': (64, 16)})
+            y = flattened_multiband_spectrogram(recon, {'s': (64, 16)})
             loss = torch.abs(x - y).sum()
 
-            # loss = loss_model.compute_multiband_loss(target, recon)
-            # loss = loss_model.multiband_noise_loss(target, recon, 64, 16)
-            # loss = loss_model.compute_multiband_loss(recon, target, 64, 16)
             loss.backward()
             optimizer.step()
             print(iteration, loss.item())

@@ -395,25 +395,6 @@ class FFTResonanceLookup(Lookup):
         return items
 
 
-class F0ResonanceLookup(Lookup):
-    def __init__(self, n_items: int, n_samples: int):
-        super().__init__(n_items, n_samples=3)
-        self.f0 = F0Resonance(n_octaves=16, n_samples=n_samples)
-        self.audio_samples = n_samples
-
-    def postprocess_results(self, items: torch.Tensor) -> torch.Tensor:
-        batch, n_events, expressivity, _ = items.shape
-
-        items = items.view(batch * n_events, expressivity, 3)
-
-        f0 = items[..., :1]
-        spacing = items[..., 1:2]
-        decays = items[..., 2:]
-        res = self.f0.forward(
-            f0=f0, decay_coefficients=decays, freq_spacing=spacing, sigmoid_decay=True, apply_exponential_decay=True)
-        res = res.view(batch, n_events, expressivity, self.audio_samples)
-        return res
-
 
 class WavetableLookup(Lookup):
     def __init__(
@@ -815,16 +796,10 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
         self.n_resonances = n_resonances
 
         if fft_resonance:
-            # TODO: Replace this with a small MLP that maps from context_dim to n_coeffs * 2
-            # self.r = MultibandResonanceLookup(n_resonances, n_samples)
-            self.r = FFTResonanceLookup(n_resonances, n_samples, 2048)
-            # self.r = FFTResonanceMLP(
-            #     input_channels=self.context_dim,
-            #     hidden_channels=256,
-            #     n_samples=self.n_samples,
-            #     window_size=2048,
-            #     base_resonance=0.5)
+            # self.r = MultibandResonanceLookup(n_resonances, n_samples, base_resonance=0.5)
+            self.r = FFTResonanceLookup(n_resonances, n_samples, 2048, base_resonance=0.1)
             # self.r = SampleResonanceLookup(n_resonances, n_samples)
+            # self.r = F0ResonanceLookup(n_resonances, n_samples)
         else:
             self.r = WavetableLookup(
                 n_resonances,

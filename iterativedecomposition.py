@@ -10,7 +10,7 @@ from torch.optim import Adam
 from conjure import LmdbCollection, serve_conjure, loggers, SupportedContentType, NumpySerializer, NumpyDeserializer
 from data import AudioIterator
 from modules import stft, sparsify, sparsify_vectors, iterative_loss, max_norm, \
-    sparse_softmax, positional_encoding, LinearOutputStack
+    sparse_softmax, positional_encoding, LinearOutputStack, pos_encoded
 from modules.anticausal import AntiCausalAnalysis
 from modules.eventgenerators.generator import EventGenerator, ShapeSpec
 from modules.eventgenerators.overfitresonance import OverfitResonanceModel, Lookup
@@ -165,58 +165,6 @@ def reconstruction_loss(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 
 
-class PosEncodedSTFT(EventGenerator, nn.Module):
-
-    @property
-    def shape_spec(self) -> ShapeSpec:
-        return dict(
-            latent=(context_dim,)
-        )
-
-    def __init__(self, fine_positioning: bool = False, n_pos_coeffs: int = 64):
-        super().__init__()
-        self.window_size = 512
-        self.step_size = self.window_size // 2
-        self.n_coeffs = self.window_size // 2 + 1
-        self.total_coeffs = self.n_coeffs * 2
-        self.fine_positioning = fine_positioning
-        self.frame_ratio = n_samples / (self.window_size // 2)
-
-        self.pos = nn.Parameter(torch.zeros(1, n_frames, n_pos_coeffs).uniform_(-0.01, 0.01))
-
-        self.scheduler = DiracScheduler(
-            n_events, start_size=n_frames, n_samples=n_samples, pre_sparse=True)
-
-        self.proj = nn.Linear(context_dim, n_pos_coeffs)
-        self.to_frames = LinearOutputStack(
-            channels=512,
-            layers=5,
-            out_channels=self.n_coeffs * 2,
-            in_channels=n_pos_coeffs,
-            activation=torch.tanh)
-
-    def forward(self, latent: torch.Tensor, times: torch.Tensor) -> torch.Tensor:
-        batch_size = latent.shape[0]
-
-        x = self.proj(latent)
-
-        x = x + self.pos
-        final = self.to_frames(x)
-
-        final = final.view(batch_size, -1, self.n_coeffs, 2)
-
-        # final = final.view(batch_size, self.n_coeffs, 2, -1).permute(0, 3, 1, 2)
-        final = torch.view_as_complex(final.contiguous())
-        final = torch.fft.irfft(final)
-        final = overlap_add(final[:, None, :, :], apply_window=False)
-        final = final[..., :n_samples]
-
-
-        scheduled = self.scheduler.schedule(times, final)
-
-
-        return scheduled
-
 
 class RNNEventGeneratorWrapper(EventGenerator, nn.Module):
 
@@ -316,8 +264,10 @@ class Model(nn.Module):
             with_activation_norm=with_activation_norm)
 
 
-        self.to_event_vectors = nn.Conv1d(hidden_channels, context_dim, 1, 1, 0)
-        self.to_event_switch = nn.Conv1d(hidden_channels, 1, 1, 1, 0)
+        self.to_event_vectors = nn.Conv1d(
+            hidden_channels, context_dim, 1, 1, 0)
+        self.to_event_switch = nn.Conv1d(
+            hidden_channels, 1, 1, 1, 0)
         self.resonance = resonance_model
 
         self.context_dim = context_dim
@@ -588,7 +538,7 @@ def train_and_monitor(
         f'training on {n_seconds} of audio and {n_events} events with {model_type} event generator')
     print('==========================================')
 
-    model_filename = 'iterativedecomposition18.dat'
+    model_filename = 'iterativedecomposition19.dat'
 
     def train():
 
@@ -627,14 +577,11 @@ def train_and_monitor(
                 wavetable_resonance=True,
                 hierarchical_scheduler=False
             )
-        elif model_type == 'pos':
-            resonance_model = PosEncodedSTFT(fine_positioning=False)
         elif model_type == 'rnn':
             resonance_model = RNNEventGeneratorWrapper()
 
         else:
             raise ValueError(f'Unknown model type {model_type}')
-
 
         model = Model(
             resonance_model=resonance_model,
@@ -769,7 +716,7 @@ if __name__ == '__main__':
         '--model-type',
         type=str,
         required=True,
-        choices=['lookup', 'splat', 'pos', 'rnn'])
+        choices=['lookup', 'splat', 'rnn'])
     parser.add_argument(
         '--save-data',
         required=False,
