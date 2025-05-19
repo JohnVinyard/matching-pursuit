@@ -9,62 +9,26 @@ from torch.optim import Adam
 
 import conjure
 from data import get_one_audio_segment
-from modules import max_norm, interpolate_last_axis, sparsify, unit_norm, flattened_multiband_spectrogram
+from modules import max_norm, interpolate_last_axis, sparsify, unit_norm, flattened_multiband_spectrogram, \
+    fft_frequency_recompose
 from modules.transfer import freq_domain_transfer_function_to_resonance, fft_convolve
+from modules.upsample import ensure_last_axis_length
+from spiking import SpikingModel
 from util import device, encode_audio
 
 MaterializeResonances = Callable[..., torch.Tensor]
 
 
-def materialize_fft_resonances(
-        window_size: int,
-        base_resonance: float,
-        n_samples: int,
-        amp: torch.Tensor,
-        phase: torch.Tensor,
-        decay: torch.Tensor) -> torch.Tensor:
-
-    res_span = 1 - base_resonance
-    res_factor = 0.9
-
-    n_resonances, n_coeffs, expressivity = amp.shape
-
-    step_size = window_size // 2
-    n_resonance_frames = n_samples // step_size
-
-    amp = amp.permute(0, 2, 1)
-    phase = phase.permute(0, 2, 1)
-    decay = decay.permute(0, 2, 1)
-
-    # materialize resonances
-    res = freq_domain_transfer_function_to_resonance(
-        window_size,
-        base_resonance + ((torch.sigmoid(decay) * res_span) * res_factor),
-        n_resonance_frames,
-        apply_decay=True,
-        start_phase=torch.tanh(phase) * np.pi,
-        start_mags=torch.abs(amp),
-        log_space_scan=True)
-    res = res.view(1, 1, n_resonances, expressivity, n_samples)
-    return res
 
 def execute_layer(
         control_signal: torch.Tensor,
         routing: torch.Tensor,
-        # resonances: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
-        materialize_resonances: MaterializeResonances,
-        materialize_resonance_args: Any,
+        # materialize_resonances: MaterializeResonances,
+        res: torch.Tensor,
         deformations: torch.Tensor,
         gains: torch.Tensor,
-        n_samples: int,
-        window_size: int,
-        base_resonance: float = 0.5) -> Tuple[torch.Tensor, torch.Tensor]:
+        window_size: int) -> Tuple[torch.Tensor, torch.Tensor]:
 
-
-    # amp, phase, decay = resonances
-
-    # res_span = 1 - base_resonance
-    # res_factor = 0.9
 
     # n_resonances, n_coeffs, expressivity = amp.shape
     batch, n_events, control_plane_dim, frames = control_signal.shape
@@ -80,24 +44,13 @@ def execute_layer(
     before_upsample = routed
 
     step_size = window_size // 2
-    n_resonance_frames = n_samples // step_size
+    # n_resonance_frames = n_samples // step_size
 
-    # amp = amp.permute(0, 2, 1)
-    # phase = phase.permute(0, 2, 1)
-    # decay = decay.permute(0, 2, 1)
-    # # materialize resonances
-    # res = freq_domain_transfer_function_to_resonance(
-    #     window_size,
-    #     base_resonance + ((torch.sigmoid(decay) * res_span) * res_factor),
-    #     n_resonance_frames,
-    #     apply_decay=True,
-    #     start_phase=torch.tanh(phase) * np.pi,
-    #     start_mags=torch.abs(amp),
-    #     log_space_scan=True)
-    # res = res.view(1, 1, n_resonances, expressivity, n_samples)
-
-    res = materialize_resonances(*materialize_resonance_args)
+    # res = materialize_resonances()
     _, _, n_resonances, expressivity, n_samples = res.shape
+
+    # ensure that resonances all have unit norm so that control
+    # plane energy drives overall loudness/response
     res = unit_norm(res)
 
     # "route" energy from control plane to resonances
@@ -127,6 +80,173 @@ def execute_layer(
     return summed, before_upsample
 
 
+class MultibandFFTResonanceBlock(nn.Module):
+
+    def __init__(
+            self,
+            n_resonances: int,
+            n_samples: int,
+            expressivity: int,
+            smallest_band_size: int = 512,
+            base_resonance: float = 0.2,
+            window_size: int = 64):
+
+        super().__init__()
+
+        # def init(x):
+        #     return torch.zeros_like(x).uniform_(-6, 6) * torch.zeros_like(x).bernoulli_(p=0.01)
+
+        step_size = window_size // 2
+
+        full_size_log2 = int(np.log2(n_samples))
+        small_size_log2 = int(np.log2(smallest_band_size))
+        band_sizes = [2 ** x for x in range(small_size_log2, full_size_log2, 1)]
+        n_bands = len(band_sizes)
+
+        n_coeffs = window_size // 2 + 1
+        # magnitude and phase for each band
+        params_per_band = n_coeffs * 3
+        total_params_per_item = params_per_band * n_bands
+
+        def init_resonance() -> torch.Tensor:
+            # base resonance
+            res = torch.zeros((n_resonances, total_params_per_item, 1)).uniform_(0.01, 1)
+            # variations or deformations of the base resonance
+            deformation = torch.zeros((1, total_params_per_item, expressivity)).uniform_(-0.02, 0.02)
+            # expand into (n_resonances, n_deformations)
+            return res + deformation
+
+        self.resonances = nn.ParameterDict(dict(
+            amp=init_resonance(),
+            phase=init_resonance(),
+            decay=init_resonance(),
+        ))
+        # super().__init__(n_items, total_params_per_item, selection_type='relu', initialize=init)
+
+        self.n_samples = n_samples
+        self.n_resonances = n_resonances
+        self.base_resonance = base_resonance
+        self.resonance_span = 1 - base_resonance
+        self.frames_per_band = [(size // step_size) for size in band_sizes]
+        self.total_frames = (n_samples // step_size) * 2
+        self.band_sizes = band_sizes
+        self.n_bands = n_bands
+        self.params_per_band = params_per_band
+        self.n_coeffs = n_coeffs
+        self.window_size = window_size
+        # self.padded_samples = n_samples * 2
+        self.expressivity = expressivity
+
+    def forward(self) -> torch.Tensor:
+        # batch, n_events, expressivity, n_params = items.shape
+
+        bands = dict()
+
+        for i, size in enumerate(self.band_sizes):
+            start = i * self.params_per_band
+            stop = start + self.params_per_band
+
+            # band_params = items[:, :, :, start: stop]
+
+            mag = self.resonances['decay'][:, :self.n_coeffs, :]
+            phase = self.resonances['phase'][:, self.n_coeffs:self.n_coeffs * 2, :]
+            start = self.resonances['amp'][:, -self.n_coeffs:, :]
+
+            mag = self.base_resonance + ((torch.sigmoid(mag) * self.resonance_span) * 0.9999)
+            phase = torch.tanh(phase) * np.pi
+            start = torch.sigmoid(start)
+
+            band = freq_domain_transfer_function_to_resonance(
+                window_size=self.window_size,
+                coeffs=mag,
+                n_frames=self.frames_per_band[i],
+                apply_decay=True,
+                start_phase=phase,
+                start_mags=start
+            )
+            bands[size] = band
+            # bands[size] = ensure_last_axis_length(band, size * 2)
+
+        full = fft_frequency_recompose(bands, desired_size=self.n_samples)
+        full = full[..., :self.n_samples]
+        full = full.reshape(1, 1, self.n_resonances, self.expressivity, -1)
+        # full = unit_norm(full)
+        return full
+
+class FFTResonanceBlock(nn.Module):
+    def __init__(
+            self,
+            n_samples: int,
+            resonance_window_size: int,
+            n_resonances: int,
+            expressivity: int,
+            base_resonance: float = 0.5):
+
+        super().__init__()
+        self.n_samples = n_samples
+        self.resonance_window_size = resonance_window_size
+        self.n_resonances = n_resonances
+        self.expressivity = expressivity
+        self.base_resonance = base_resonance
+
+        resonance_coeffs = resonance_window_size // 2 + 1
+
+        def init_resonance() -> torch.Tensor:
+            # base resonance
+            res = torch.zeros((n_resonances, resonance_coeffs, 1)).uniform_(0.01, 1)
+            # variations or deformations of the base resonance
+            deformation = torch.zeros((1, resonance_coeffs, expressivity)).uniform_(-0.02, 0.02)
+            # expand into (n_resonances, n_deformations)
+            return res + deformation
+
+        self.resonances = nn.ParameterDict(dict(
+            amp=init_resonance(),
+            phase=init_resonance(),
+            decay=init_resonance(),
+        ))
+
+    def _materialize_fft_resonances(
+            self,
+            window_size: int,
+            base_resonance: float,
+            n_samples: int,
+            amp: torch.Tensor,
+            phase: torch.Tensor,
+            decay: torch.Tensor) -> torch.Tensor:
+        res_span = 1 - base_resonance
+        res_factor = 0.9
+
+        n_resonances, n_coeffs, expressivity = amp.shape
+
+        step_size = window_size // 2
+        n_resonance_frames = n_samples // step_size
+
+        amp = amp.permute(0, 2, 1)
+        phase = phase.permute(0, 2, 1)
+        decay = decay.permute(0, 2, 1)
+
+        # materialize resonances
+        res = freq_domain_transfer_function_to_resonance(
+            window_size,
+            base_resonance + ((torch.sigmoid(decay) * res_span) * res_factor),
+            n_resonance_frames,
+            apply_decay=True,
+            start_phase=torch.tanh(phase) * np.pi,
+            start_mags=torch.abs(amp),
+            log_space_scan=True)
+        res = res.view(1, 1, n_resonances, expressivity, n_samples)
+        return res
+
+    def forward(self, *args) -> torch.Tensor:
+        return self._materialize_fft_resonances(
+            self.resonance_window_size,
+            self.base_resonance,
+            self.n_samples,
+            self.resonances['amp'],
+            self.resonances['phase'],
+            self.resonances['decay']
+        )
+
 class ResonanceLayer(nn.Module):
 
     def __init__(
@@ -150,19 +270,29 @@ class ResonanceLayer(nn.Module):
         self.router = nn.Parameter(
             torch.zeros((self.control_plane_dim, self.n_resonances)).uniform_(-1, 1))
 
-        def init_resonance() -> torch.Tensor:
-            # base resonance
-            res = torch.zeros((n_resonances, resonance_coeffs, 1)).uniform_(0.01, 1)
-            # variations or deformations of the base resonance
-            deformation = torch.zeros((1, resonance_coeffs, expressivity)).uniform_(-0.02, 0.02)
-            # expand into (n_resonances, n_deformations)
-            return res + deformation
+        self.resonance = FFTResonanceBlock(
+            n_samples, resonance_window_size, n_resonances, expressivity, base_resonance)
+        # self.resonance = MultibandFFTResonanceBlock(
+        #     n_resonances,
+        #     n_samples,
+        #     expressivity,
+        #     smallest_band_size=512,
+        #     base_resonance=0.02,
+        #     window_size=64)
 
-        self.resonances = nn.ParameterDict(dict(
-            amp=init_resonance(),
-            phase=init_resonance(),
-            decay=init_resonance(),
-        ))
+        # def init_resonance() -> torch.Tensor:
+        #     # base resonance
+        #     res = torch.zeros((n_resonances, resonance_coeffs, 1)).uniform_(0.01, 1)
+        #     # variations or deformations of the base resonance
+        #     deformation = torch.zeros((1, resonance_coeffs, expressivity)).uniform_(-0.02, 0.02)
+        #     # expand into (n_resonances, n_deformations)
+        #     return res + deformation
+        #
+        # self.resonances = nn.ParameterDict(dict(
+        #     amp=init_resonance(),
+        #     phase=init_resonance(),
+        #     decay=init_resonance(),
+        # ))
 
         self.gains = nn.Parameter(torch.zeros((n_resonances, 1)).uniform_(0.01, 1.1))
 
@@ -171,24 +301,15 @@ class ResonanceLayer(nn.Module):
             control_signal: torch.Tensor,
             deformations: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
 
+        res = self.resonance.forward()
+
         output, fwd = execute_layer(
             control_signal,
             self.router,
-            # tuple(self.resonances.values()),
-            materialize_fft_resonances,
-            (
-                self.resonance_window_size,
-                self.base_resonance,
-                self.n_samples,
-                self.resonances['amp'],
-                self.resonances['phase'],
-                self.resonances['decay'],
-            ),
+            res,
             deformations,
             self.gains,
             self.n_samples,
-            self.resonance_window_size,
-            self.base_resonance
         )
         return output, fwd
 
@@ -335,7 +456,7 @@ def l0_norm(x: torch.Tensor):
 
 
 def overfit_model():
-    n_samples = 2 ** 18
+    n_samples = 2 ** 17
     resonance_window_size = 2048
     step_size = 256
     n_frames = n_samples // step_size
@@ -346,7 +467,7 @@ def overfit_model():
 
     target = get_one_audio_segment(n_samples)
     model = OverfitResonanceStack(
-        n_layers=2,
+        n_layers=3,
         n_samples=n_samples,
         resonance_window_size=resonance_window_size,
         control_plane_dim=control_plane_dim,

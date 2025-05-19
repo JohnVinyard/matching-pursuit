@@ -24,7 +24,12 @@ def  pdf2(means, stds, n_elements, normalize=True):
     return prob
 
 
-def gamma_pdf(shape: torch.Tensor, rate: torch.Tensor, n_elements: int, normalize: bool = True):
+def gamma_pdf(
+        shape: torch.Tensor,
+        rate: torch.Tensor,
+        n_elements: int,
+        normalize: bool = True):
+
     """
     Probability density function for a gamma distribution
     """

@@ -693,7 +693,8 @@ def train_and_monitor(
                 weighting = max_ss_weight
 
 
-            ss_loss = torch.abs(ss_target - ss_recon).sum() * weighting
+            # KLUDGE:  How do I represent this stateful loss function?
+            ss_loss = torch.abs(ss_target - ss_recon).sum() * max_ss_weight
             ss_loss.backward()
             optim.step()
             print('SS', i, ss_loss.item(), weighting)
