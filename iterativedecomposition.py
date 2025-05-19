@@ -515,8 +515,8 @@ def train_and_monitor(
         encode_audio,
         collection)
 
-    envelopes, latents, reservoir, dist = loggers(
-        ['envelopes', 'latents', 'reservoir', 'dist'],
+    envelopes, latents, reservoir, dist, self_supervised = loggers(
+        ['envelopes', 'latents', 'reservoir', 'dist', 'selfsupervised'],
         SupportedContentType.Spectrogram.value,
         to_numpy,
         collection,
@@ -530,7 +530,8 @@ def train_and_monitor(
         envelopes,
         latents,
         reservoir,
-        dist
+        dist,
+        self_supervised
     ], port=9999, n_workers=1)
 
     print('==========================================')
@@ -603,6 +604,8 @@ def train_and_monitor(
 
         optim = Adam(model.parameters(), lr=1e-4)
 
+        max_ss_weight = 0.1
+        ss_weights = torch.linspace(0, max_ss_weight, 8192, device=device) ** 2
 
         for i, item in enumerate(iter(stream)):
             optim.zero_grad()
@@ -674,19 +677,31 @@ def train_and_monitor(
                 random_audio(max_norm(rnd))
                 reservoir(max_norm(torch.from_numpy(model.reservoir)))
 
-            if i > 100:
-                # self-supervised loss kicks in
-                ss_target = sort_channels_descending_norm(random_seq)
-                ss_target = loss_transform(ss_target)
+            # self-supervised loss kicks in
+            ss_target = sort_channels_descending_norm(random_seq)
+            sorted_ss_target = ss_target
+            ss_target = loss_transform(ss_target)
 
-                ss, _, _ = model.iterative(rnd)
-                ss_recon = sort_channels_descending_norm(ss)
-                ss_recon = loss_transform(ss_recon)
+            ss, _, _ = model.iterative(rnd)
+            ss_recon = sort_channels_descending_norm(ss)
+            ss_recon_orig = ss_recon
+            ss_recon = loss_transform(ss_recon)
 
-                ss_loss = torch.abs(ss_target - ss_recon).sum() * 1e-3
-                ss_loss.backward()
-                optim.step()
-                print('SS', i, ss_loss.item())
+            try:
+                weighting = ss_weights[i]
+            except IndexError:
+                weighting = max_ss_weight
+
+
+            ss_loss = torch.abs(ss_target - ss_recon).sum() * weighting
+            ss_loss.backward()
+            optim.step()
+            print('SS', i, ss_loss.item(), weighting)
+
+            rnd_norms = torch.norm(sorted_ss_target, dim=-1, keepdim=True)
+            recon_norms = torch.norm(ss_recon_orig, dim=-1, keepdim=True)
+            all_norms = torch.cat([rnd_norms, recon_norms], dim=-1)
+            self_supervised(all_norms[0])
 
 
             # if i % 1000 == 0:
