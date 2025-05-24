@@ -222,3 +222,5 @@ class InstrumentStack(nn.Module):
         output = output * mx[:, :, :, None]
         output = torch.sum(output, dim=2)
         return output
+
+
