@@ -141,7 +141,7 @@ class Model(nn.Module):
 
         self.network = LinearOutputStack(
             channels=model_dim,
-            layers=2,
+            layers=5,
             out_channels=1,
             in_channels=model_dim,
             activation=lambda x: torch.selu(x),
@@ -238,29 +238,31 @@ def train_model(
     for i in count():
         optim.zero_grad()
         
-        if not overfit or i == 0:
-            print(f'Generating batch for iteration {i}')
-            target, start_times, durations, envelopes = generate_training_batch(
-                n_examples=batch_size,
-                resolution=n_samples,
-                envelope_resolution=envelope_resolution,
-                device=device)
-
 
         with torch.no_grad():
-            # generate random instrument "latents"
-            latents = torch.zeros(batch_size, n_events, latent_dim, device=device).uniform_(-1, 1)
 
-            # generate times
-            times = torch\
-                .linspace(0, 1, n_samples, device=device)\
-                .view(1, 1, n_samples)\
-                .repeat(batch_size, 1, 1)
+            if not overfit or i == 0:
+                print(f'Generating batch for iteration {i}')
+                target, start_times, durations, envelopes = generate_training_batch(
+                    n_examples=batch_size,
+                    resolution=n_samples,
+                    envelope_resolution=envelope_resolution,
+                    device=device)
 
-            times = pos_encoding_model.forward(times)
+                # generate random instrument "latents"
+                latents = torch.zeros(batch_size, n_events, latent_dim, device=device).uniform_(-1, 1)
 
-            embedded_starts = pos_encoding_model.forward(start_times.view(batch_size, 1, 1))
-            embedded_durations = pos_encoding_model.forward(durations.view(batch_size, 1, 1))
+                # generate times
+                times = torch\
+                    .linspace(0, 1, n_samples, device=device)\
+                    .view(1, 1, n_samples)\
+                    .repeat(batch_size, 1, 1)
+
+                times = pos_encoding_model.forward(times)
+
+                embedded_starts = pos_encoding_model.forward(start_times.view(batch_size, 1, 1))
+                embedded_durations = pos_encoding_model.forward(durations.view(batch_size, 1, 1))
+
 
         recon = model.forward(
             embedded_starts,
@@ -303,9 +305,9 @@ def train_model(
 if __name__ == '__main__':
     train_model(
         batch_size=8,
-        n_samples=8192,
+        n_samples=2**15,
         samplerate=22050,
-        envelope_step_size=64,
-        envelope_window_size=128,
+        envelope_window_size=512,
+        envelope_step_size=256,
         overfit=True,
         device=torch.device('cuda'))
