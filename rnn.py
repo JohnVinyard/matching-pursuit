@@ -1,4 +1,7 @@
 # the size, in samples of the audio segment we'll overfit
+from modules.normal_pdf import gamma_pdf
+from spiking import SpikingModel, AutocorrelationLoss
+
 n_samples = 2 ** 18
 
 # the samplerate, in hz, of the audio signal
@@ -42,6 +45,11 @@ import json
 init_weights = make_initializer(0.05)
 
 
+# thanks to https://discuss.pytorch.org/t/how-do-i-check-the-number-of-parameters-of-a-model/4325/9
+def count_parameters(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+
 class SSM(nn.Module):
     """
     A state-space model-like module, with one additional matrix, used to project the control
@@ -72,6 +80,9 @@ class SSM(nn.Module):
 
         self.out_proj = nn.Linear(state_dim, window_size, bias=False)
 
+        self.shape = nn.Parameter(torch.zeros(window_size).uniform_(-0.01, 1))
+        self.rate = nn.Parameter(torch.zeros(window_size).uniform_(-0.01, 1))
+
         self.apply(init_weights)
 
     def forward(self, control: torch.Tensor) -> torch.Tensor:
@@ -87,6 +98,17 @@ class SSM(nn.Module):
         # try to ensure that the input signal only includes low-frequency info
         proj = control @ self.proj
 
+        # gamma = gamma_pdf(
+        #     1e-8 + torch.abs(self.shape),
+        #     1e-8 + torch.abs(self.rate),
+        #     window_size
+        # )
+        #
+        # print(proj.shape, gamma.shape)
+        # proj = proj @ gamma
+
+        # proj = proj * torch.hamming_window(proj.shape[-1], device=proj.device)[None, None, :]
+
         # proj = F.interpolate(proj, size=self.input_dim, mode='linear')
         # proj = proj * torch.zeros_like(proj).uniform_(-1, 1)
         # proj = proj * torch.hann_window(self.input_dim, device=proj.device)
@@ -97,7 +119,9 @@ class SSM(nn.Module):
         result = self.out_proj(result)
 
         result = result.view(batch, 1, -1)
+        # result = torch.cumsum(result, dim=-1)
         result = torch.sin(result)
+        # result = torch.tanh(result)
         return result
 
 
@@ -112,12 +136,14 @@ class OverfitControlPlane(nn.Module):
             input_dim: int,
             state_matrix_dim: int,
             n_samples: int,
-            n_events: int):
+            n_events: int,
+            sparsity: int = 128):
         super().__init__()
         self.ssm = SSM(control_plane_dim, input_dim, state_matrix_dim)
         self.n_samples = n_samples
         self.n_frames = n_samples // input_dim
         self.n_events = n_events
+        self.sparsity = sparsity
 
         self.control = nn.Parameter(
             torch.zeros(1, control_plane_dim, self.n_frames).uniform_(0, 0.1))
@@ -128,8 +154,14 @@ class OverfitControlPlane(nn.Module):
 
     @property
     def control_signal(self) -> torch.Tensor:
-        s = sparsify(self.control, n_to_keep=128)
+        s = sparsify(self.control, n_to_keep=self.sparsity)
         return torch.relu(s)
+
+    @property
+    def compression_rate(self):
+        active = (self.control_signal > 0).sum().item()
+
+        return (count_parameters(self.ssm) + active) / self.n_samples
 
     # TODO: probability should scale with time _only_, so control plane size does not matter
     def random(self, p=0.0001):
@@ -163,9 +195,10 @@ def transform(x: torch.Tensor):
     return flattened_multiband_spectrogram(
         x,
         stft_spec={
-            'long': (128, 64),
-            'short': (64, 32),
-            'xs': (16, 8),
+            # 'long': (128, 64),
+            # 'short': (64, 32),
+            # 'xs': (16, 8),
+            'spec': (64, 16)
         },
         smallest_band_size=512)
 
@@ -184,7 +217,7 @@ def sparsity_loss(c: torch.Tensor) -> torch.Tensor:
     """
     Compute the l1 norm of the control signal
     """
-    return torch.abs(c).sum() * 1e-2
+    return torch.abs(c).sum()
 
 
 def to_numpy(x: torch.Tensor):
@@ -200,7 +233,8 @@ def construct_experiment_model(state_dict: Union[None, dict] = None) -> OverfitC
         input_dim=window_size,
         state_matrix_dim=state_dim,
         n_samples=n_samples,
-        n_events=n_active_sites
+        n_events=n_active_sites,
+        sparsity=256
     )
     model = model.to(device)
 
@@ -252,16 +286,19 @@ def train_and_monitor():
         random_audio,
     ], port=9999, n_workers=1)
 
-    loss_model = CorrelationLoss().to(device)
+    # loss_model = CorrelationLoss().to(device)
+    # loss_model = SpikingModel(64, 64, 64, 64, 64).to(device)
+
+    # loss_model = CorrelationLoss(n_elements=512).to(device)
+    loss_model = AutocorrelationLoss(64, 64).to(device)
 
     def train(target: torch.Tensor):
+        # try:
+        #     sd = torch.load('rnn.dat')
+        # except IOError:
+        #     sd = None
 
-        try:
-            sd = torch.load('rnn.dat')
-        except IOError:
-            sd = None
-
-        model = construct_experiment_model(state_dict=sd)
+        model = construct_experiment_model()
 
         optim = Adam(model.parameters(), lr=1e-3)
 
@@ -269,10 +306,18 @@ def train_and_monitor():
             optim.zero_grad()
             recon = model.forward()
             recon_audio(max_norm(recon))
-            loss = \
-                reconstruction_loss(recon, target) \
-                + loss_model.multiband_noise_loss(target, recon, window_size=32, step=16) \
-                # + sparsity_loss(model.control_signal)
+
+            loss = reconstruction_loss(recon, target)
+
+            # loss = loss_model.compute_multiband_loss(target, recon, 64, 16)
+
+            # loss = loss_model.forward(target, recon)
+
+            # loss = loss_model.compute_multiband_loss(target, recon)
+            # loss = \
+            #     reconstruction_loss(recon, target) \
+            #     + loss_model.multiband_noise_loss(target, recon, 64, 16) \
+            # + sparsity_loss(model.control_signal)
 
             envelopes(model.control_signal.view(control_plane_dim, -1) / (model.control_signal.max() + 1e-8))
             loss.backward()
@@ -286,16 +331,17 @@ def train_and_monitor():
                 iteration,
                 loss.item(),
                 active,
-                model.control_signal.min().item(),
-                model.control_signal.max().item()
+                model.compression_rate,
+                # model.control_signal.min().item(),
+                # model.control_signal.max().item()
             )
 
             with torch.no_grad():
                 rnd = model.random()
                 random_audio(rnd)
 
-            if iteration % 100 == 0:
-                torch.save(model.state_dict(), 'rnn.dat')
+            # if iteration % 100 == 0:
+            #     torch.save(model.state_dict(), 'rnn.dat')
 
     train(target)
 

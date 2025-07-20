@@ -2,7 +2,7 @@ from typing import List
 import torch
 from torch import nn
 from data.audioiter import AudioIterator
-from modules import stft
+from modules import stft, sparsify
 from modules.auditory import gammatone_filter_bank
 from modules.decompose import fft_frequency_decompose
 from modules.fft import fft_convolve, n_fft_coeffs
@@ -128,6 +128,10 @@ class OverfitInstrument(nn.Module):
             n_layers=layers,
             learnable_resonances=self.learnable_resonances
         )
+
+    @property
+    def sparse_energy(self):
+        return sparsify(self.energy, n_to_keep=32)
     
     def with_random_excitement(self, energy: torch.Tensor) -> torch.Tensor:
         assert energy.shape == self.energy.shape
@@ -142,7 +146,7 @@ class OverfitInstrument(nn.Module):
     
     def forward(self) -> torch.Tensor:
         result = self.stack.forward(
-            energy=self.energy, 
+            energy=self.sparse_energy,
             transforms=self.shapes, 
             decays=self.decays, 
             mix=self.mix)
@@ -259,7 +263,7 @@ def train(target: torch.Tensor):
         recon = model.forward()
         recon_audio(max_norm(recon))
         
-        energy(model.energy)
+        energy(model.sparse_energy)
         shape(model.shapes[0])
         
         # energy_loss = torch.abs(model.energy).sum() * 1e-3
@@ -275,7 +279,7 @@ def train(target: torch.Tensor):
         optim.step()
         print(loss.item())
         
-        re = torch.zeros_like(model.energy).bernoulli_(p=0.001)
+        re = torch.zeros_like(model.energy).bernoulli_(p=0.01)
         random_excitement_energy(re)
         rnd = model.with_random_excitement(re)
         random_excitement(max_norm(rnd))

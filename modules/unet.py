@@ -1,6 +1,7 @@
 from torch import nn
 import torch
 import numpy as np
+from torch.nn import Identity
 
 from modules.stft import stft
 from torch.nn.utils import weight_norm
@@ -67,10 +68,17 @@ class DownsamplingDiscriminator(nn.Module):
 
 
 class UNet(nn.Module):
-    def __init__(self, channels, is_disc: bool = False):
+    def __init__(self, channels, is_disc: bool = False, norm: bool = True):
         super().__init__()
         self.channels = channels
         self.is_disc = is_disc
+        self.norm = norm
+
+        def norm_layer():
+            if norm:
+                return nn.BatchNorm1d(self.channels)
+            else:
+                return Identity()
 
         if self.is_disc:
             self.disc = nn.Conv1d(channels, 1, kernel_size=4, stride=4, padding=0)
@@ -81,7 +89,7 @@ class UNet(nn.Module):
                 nn.Dropout(0.1),
                 nn.Conv1d(channels, channels, 3, 2, 1),
                 nn.LeakyReLU(0.2),
-                nn.BatchNorm1d(channels)
+                norm_layer()
             ),
 
             # 32
@@ -89,7 +97,7 @@ class UNet(nn.Module):
                 nn.Dropout(0.1),
                 nn.Conv1d(channels, channels, 3, 2, 1),
                 nn.LeakyReLU(0.2),
-                nn.BatchNorm1d(channels)
+                norm_layer()
             ),
 
             # 16
@@ -97,7 +105,7 @@ class UNet(nn.Module):
                 nn.Dropout(0.1),
                 nn.Conv1d(channels, channels, 3, 2, 1),
                 nn.LeakyReLU(0.2),
-                nn.BatchNorm1d(channels)
+                norm_layer()
             ),
 
             # 8
@@ -105,7 +113,7 @@ class UNet(nn.Module):
                 nn.Dropout(0.1),
                 nn.Conv1d(channels, channels, 3, 2, 1),
                 nn.LeakyReLU(0.2),
-                nn.BatchNorm1d(channels)
+                norm_layer()
             ),
 
             # 4
@@ -113,7 +121,7 @@ class UNet(nn.Module):
                 nn.Dropout(0.1),
                 nn.Conv1d(channels, channels, 3, 2, 1),
                 nn.LeakyReLU(0.2),
-                nn.BatchNorm1d(channels)
+                norm_layer()
             ),
         )
 
@@ -123,14 +131,14 @@ class UNet(nn.Module):
                 nn.Dropout(0.1),
                 nn.ConvTranspose1d(channels, channels, 4, 2, 1),
                 nn.LeakyReLU(0.2),
-                nn.BatchNorm1d(channels)
+                norm_layer()
             ),
             # 16
             nn.Sequential(
                 nn.Dropout(0.1),
                 nn.ConvTranspose1d(channels, channels, 4, 2, 1),
                 nn.LeakyReLU(0.2),
-                nn.BatchNorm1d(channels)
+                norm_layer()
             ),
 
             # 32
@@ -138,7 +146,7 @@ class UNet(nn.Module):
                 nn.Dropout(0.1),
                 nn.ConvTranspose1d(channels, channels, 4, 2, 1),
                 nn.LeakyReLU(0.2),
-                nn.BatchNorm1d(channels)
+                norm_layer()
             ),
 
             # 64
@@ -146,7 +154,7 @@ class UNet(nn.Module):
                 nn.Dropout(0.1),
                 nn.ConvTranspose1d(channels, channels, 4, 2, 1),
                 nn.LeakyReLU(0.2),
-                nn.BatchNorm1d(channels)
+                norm_layer()
             ),
 
             # 128
@@ -154,7 +162,7 @@ class UNet(nn.Module):
                 nn.Dropout(0.1),
                 nn.ConvTranspose1d(channels, channels, 4, 2, 1),
                 nn.LeakyReLU(0.2),
-                nn.BatchNorm1d(channels)
+                norm_layer()
             ),
         )
 

@@ -1,10 +1,11 @@
+from random import choice
 from typing import Literal, Tuple
 from conjure import loggers, LmdbCollection, NumpyDeserializer, SupportedContentType, \
     NumpySerializer, serve_conjure
 from torch import nn
 import torch
 import numpy as np
-from modules import LinearOutputStack, unit_norm, max_norm
+from modules import LinearOutputStack, unit_norm, max_norm, sparse_softmax
 from modules.normal_pdf import gamma_pdf
 from modules.reds import interpolate_last_axis
 from util import make_initializer, encode_audio
@@ -118,6 +119,7 @@ class UnitNorm(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return unit_norm(x)
 
+
 class Model(nn.Module):
 
     def __init__(
@@ -137,16 +139,34 @@ class Model(nn.Module):
         self.embed_properties = nn.Linear(latent_dim, model_dim)
         self.embed_positions = nn.Linear(pos_encoding_dim, model_dim)
 
+        self.up_proj = nn.Linear(model_dim * 4, model_dim)
+
         self.weighting = nn.Parameter(torch.zeros(1).fill_(1))
 
         self.network = LinearOutputStack(
             channels=model_dim,
-            layers=5,
+            layers=2,
             out_channels=1,
             in_channels=model_dim,
             activation=lambda x: torch.selu(x),
             # norm=lambda channels: nn.LayerNorm([channels,])
         )
+
+        self.env = LinearOutputStack(
+            channels=model_dim,
+            layers=2,
+            out_channels=1,
+            in_channels=model_dim,
+            activation=lambda x: torch.selu(x)
+        )
+
+        # self.to_mask = nn.Linear(model_dim, 2)
+        # self.to_samples = nn.Linear(model_dim, 1)
+        #
+        # on_off = torch.zeros(2)
+        # on_off[0] = 1
+        #
+        # self.register_buffer('on_off', on_off)
 
         self.apply(initializer)
 
@@ -157,7 +177,6 @@ class Model(nn.Module):
             envelope: torch.Tensor,
             event_properties: torch.Tensor,
             pos: torch.Tensor) -> torch.Tensor:
-
         resolution = pos.shape[-1]
 
         batch, n_events = start.shape[:2]
@@ -170,15 +189,39 @@ class Model(nn.Module):
         duration = self.embed_duration(duration)
         envelope = self.embed_envelope(envelope)
         props = self.embed_properties(event_properties)
-        pos = self.embed_positions(pos.permute(0, 1, 3, 2))\
+        pos = self.embed_positions(pos.permute(0, 1, 3, 2)) \
             .view(batch, resolution, self.model_dim)
 
+        x = torch.cat([start, duration, envelope, props], dim=-1)
+        x = self.up_proj(x)
 
-        x = start + duration + envelope + props + pos
+        orig = x + pos
 
-        x = self.network(x)
+        x = self.network(orig)
+        env = torch.relu(self.env(orig))
+
+        x = x * env
+
+        # mask = self.to_mask(x)
+        # mask = torch.softmax(mask, dim=-1)
+        # mask = mask @ self.on_off
+        #
+        # samples = self.to_samples(x)
+        # x = mask[..., None] * samples
+
         x = x.view(batch, n_events, resolution)
         return x
+
+
+def l0_norm(x: torch.Tensor):
+    mask = (x > 0).float()
+
+    forward = mask
+    backward = x
+
+    y = backward + (forward - backward).detach()
+
+    return y.sum()
 
 
 def train_model(
@@ -189,23 +232,22 @@ def train_model(
         overfit: bool = False,
         envelope_window_size: int = 512,
         envelope_step_size: int = 512):
-
     n_events = 1
-    n_bands = 256
+    n_bands = 512
+    max_freq = 2048
     envelope_resolution = 128
     latent_dim = 64
 
-    model_dim = 128
+    model_dim = 512
 
     pos_encoding_model = PosEncoder(
-        n_bands=n_bands, band_type='linear', max_freq=2048).to(device)
+        n_bands=n_bands, band_type='linear', max_freq=max_freq).to(device)
 
     model = Model(
         envelope_resolution=envelope_resolution,
         latent_dim=latent_dim,
         pos_encoding_dim=pos_encoding_model.total_bands,
         model_dim=model_dim).to(device)
-
 
     def to_numpy(x: torch.Tensor) -> np.ndarray:
         return x.data.cpu().numpy()
@@ -234,10 +276,8 @@ def train_model(
             log_audio
         ], port=9999, n_workers=1)
 
-
     for i in count():
         optim.zero_grad()
-        
 
         with torch.no_grad():
 
@@ -253,16 +293,15 @@ def train_model(
                 latents = torch.zeros(batch_size, n_events, latent_dim, device=device).uniform_(-1, 1)
 
                 # generate times
-                times = torch\
-                    .linspace(0, 1, n_samples, device=device)\
-                    .view(1, 1, n_samples)\
+                times = torch \
+                    .linspace(0, 1, n_samples, device=device) \
+                    .view(1, 1, n_samples) \
                     .repeat(batch_size, 1, 1)
 
                 times = pos_encoding_model.forward(times)
 
                 embedded_starts = pos_encoding_model.forward(start_times.view(batch_size, 1, 1))
                 embedded_durations = pos_encoding_model.forward(durations.view(batch_size, 1, 1))
-
 
         recon = model.forward(
             embedded_starts,
@@ -275,25 +314,40 @@ def train_model(
 
         pool_window_size = envelope_window_size
         pool_step_size = envelope_step_size
+
         target_downsampled = F.avg_pool1d(
             torch.abs(target), pool_window_size, pool_step_size, pool_step_size)
         recon_downsampled = F.avg_pool1d(
             torch.abs(recon), pool_window_size, pool_step_size, pool_step_size)
 
-
         log_target(target_downsampled[:, 0, :])
         log_recon(recon_downsampled[:, 0, :])
 
-        target_on = target_downsampled > 0
-        target_off = target_downsampled == 0
+        # target_on = target_downsampled > 0
+        # target_off = target_downsampled == 0
+        #
+        # off_count = target_off.sum()
+        # on_count = target_on.sum()
+        #
+        # off = torch.abs((target_downsampled * target_off) - (recon_downsampled * target_off)).sum() / off_count
+        # on = torch.abs((target_downsampled * target_on) - (recon_downsampled * target_on)).sum() / on_count
+        #
+        # loss = off + on
+        #
+        #
 
-        off_count = target_off.sum()
-        on_count = target_on.sum()
+        # loss = torch.abs(target_downsampled - recon_downsampled).sum()
 
-        off = torch.abs((target_downsampled * target_off) - (recon_downsampled * target_off)).sum() / off_count
-        on = torch.abs((target_downsampled * target_on) - (recon_downsampled * target_on)).sum() / on_count
+        # target_norm = torch.abs(target_downsampled).sum(dim=-1)
+        # recon_norm = torch.abs(recon_downsampled).sum(dim=-1)
+        # norm_diff = torch.abs(target_norm - recon_norm).sum() / target_downsampled.numel()
+        # loss = loss + norm_diff
 
-        loss = off + on
+        start_norm = torch.norm(target_downsampled, dim=-1)
+        residual = target_downsampled - recon_downsampled
+        end_norm = torch.norm(residual, dim=-1)
+        diff = -(start_norm - end_norm)
+        loss = diff.sum()
 
         loss.backward()
         optim.step()
@@ -301,13 +355,12 @@ def train_model(
         print(i, loss.item())
 
 
-
 if __name__ == '__main__':
     train_model(
-        batch_size=8,
-        n_samples=2**15,
+        batch_size=4,
+        n_samples=2 ** 15,
         samplerate=22050,
         envelope_window_size=512,
-        envelope_step_size=256,
-        overfit=True,
+        envelope_step_size=128,
+        overfit=False,
         device=torch.device('cuda'))

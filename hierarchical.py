@@ -124,11 +124,11 @@ class OverfitHierarchicalEvents(nn.Module):
         self.event_generator = SplattingEventGenerator(
             n_samples=n_samples,
             samplerate=samplerate,
-            n_resonance_octaves=32,
+            n_resonance_octaves=16,
             n_frames=n_samples // 256,
             hard_reverb_choice=False,
             hierarchical_scheduler=True,
-            wavetable_resonance=False,
+            wavetable_resonance=True,
         )
         self.transform = MultiHeadTransform(
             self.context_dim, hidden_channels=128, shapes=self.event_generator.shape_spec, n_layers=1)
@@ -158,8 +158,8 @@ class OverfitHierarchicalEvents(nn.Module):
             events: torch.Tensor,
             times: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         for i in range(self.event_levels - 1):
-            scale = 1 / (i + 1)
-            # scale = 1
+            # scale = 1 / (i + 1)
+            scale = 1
 
             # TODO: consider bringing back scaling as we approach the leaves of the tree
             events = \
@@ -198,9 +198,9 @@ def loss_transform(x: torch.Tensor) -> torch.Tensor:
     return flattened_multiband_spectrogram(
         x,
         stft_spec={
-            'long': (128, 64),
-            'short': (64, 32),
-            'xs': (16, 8),
+            # 'long': (128, 64),
+            'short': (64, 16),
+            # 'xs': (16, 8),
         },
         smallest_band_size=512)
     # return stft(x, 2048, 256, pad=True)
@@ -215,12 +215,17 @@ def reconstruction_loss(target: torch.Tensor, recon: torch.Tensor) -> torch.Tens
 def to_numpy(x: torch.Tensor):
     return x.data.cpu().numpy()
 
+# thanks to https://discuss.pytorch.org/t/how-do-i-check-the-number-of-parameters-of-a-model/4325/9
+def count_parameters(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-def overfit():
-    n_samples = 2 ** 16
-    samplerate = 22050
-    n_events = 32
-    event_dim = 16
+
+def overfit(
+        n_samples: int = 2**15,
+        samplerate: int = 22050,
+        event_dim: int = 16,
+        n_events: int = 32):
+
 
     # Begin: this would be a nice little helper to wrap up
     collection = LmdbCollection(path='hierarchical')
@@ -258,13 +263,9 @@ def overfit():
 
     model = OverfitHierarchicalEvents(
         n_samples, samplerate, n_events, context_dim=event_dim).to(device)
-    optim = Adam(model.parameters(), lr=1e-4)
+    optim = Adam(model.parameters(), lr=1e-3)
 
-    # loss_model = CorrelationLoss(n_elements=512).to(device)
-
-    # loss_model = AutocorrelationLoss(64, 64).to(device)
-    # loss_model = SpikingModel(64, 64, 64, memory_size=16).to(device)
-    # loss_model = CorrelationLoss(512).to(device)
+    # loss_model = SpikingModel(16, 16, 16, 16, 32).to(device)
 
     for i in count():
         optim.zero_grad()
@@ -285,21 +286,20 @@ def overfit():
         perturbed_summed = max_norm(perturbed_summed)
         perturbed_audio(perturbed_summed)
 
-        # loss = loss_model.forward(target, recon_summed)
+        loss = reconstruction_loss(target, recon_summed)
+
+        # loss = loss_model.compute_multiband_loss(target, recon)
+        # loss = loss_model.compute_loss(target, recon)
         # loss = loss_model.compute_multiband_loss(target, recon_summed, 64, 16)
 
-        loss = iterative_loss(target, recon, loss_transform, ratio_loss=False)
+        # loss = iterative_loss(target, recon, loss_transform, ratio_loss=True)
 
-        # loss = reconstruction_loss(target, recon_summed)
-        # t = loss_model.forward(target)
-        # r = loss_model.forward(recon_summed)
-        # loss = torch.abs(t - r).sum()
-        # loss = loss_model.compute_multiband_loss(target, recon_summed, 64, 16)
-        # loss = loss_model.multiband_noise_loss(target, recon_summed, 128, 32)
+        compression_ratio = count_parameters(model) / n_samples
+
 
         loss.backward()
         optim.step()
-        print(i, loss.item())
+        print(i, loss.item(), compression_ratio)
 
 def process_events2(
         logger: Logger,
@@ -387,7 +387,7 @@ def reconstruction_section(logger: Logger, samplerate: int, context_dim: int, n_
     model = OverfitHierarchicalEvents(
         n_samples, samplerate, n_events, context_dim=event_dim).to(device)
     optim = Adam(model.parameters(), lr=1e-3)
-    loss_model = CorrelationLoss(n_elements=512).to(device)
+    # loss_model = CorrelationLoss(n_elements=512).to(device)
 
     for i in range(n_iterations):
         optim.zero_grad()
@@ -513,6 +513,9 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     if args.mode == 'train':
-        overfit()
+        overfit(
+            n_samples=2**16,
+            n_events=32
+        )
     else:
         generate_demo_page()

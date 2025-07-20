@@ -1,3 +1,4 @@
+from typing import List, Union
 
 from config.dotenv import Config
 from data.datastore import batch_stream
@@ -13,7 +14,7 @@ def audio_stream(
         normalize=False,
         as_torch=True,
         step_size=1,
-        pattern='*.wav',
+        pattern: Union[str, List[str]] ='*.wav',
         return_indices=False,
         audio_path: str = None):
 

@@ -1,4 +1,4 @@
-from typing import Union, Optional
+from typing import Union, Optional, List
 
 from .audiostream import audio_stream
 import torch
@@ -14,7 +14,7 @@ class AudioIterator(object):
             normalize=False,
             overfit=False,
             step_size=1,
-            pattern='*.wav',
+            pattern: Union[str, List[str]] ='*.wav',
             as_torch=True,
             return_indices=False,
             audio_path: str = None):

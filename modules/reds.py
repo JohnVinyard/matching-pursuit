@@ -122,10 +122,12 @@ class F0Resonance(nn.Module):
 
         # assert n_elements == self.n_f0_elements
 
-        f0 = torch.abs(
-            f0  # @ self.powers
-        )
+        # f0 = torch.abs(
+        #     f0  # @ self.powers
+        # )
+        f0 = (f0 % 1) ** 2
         f0 = f0.view(batch, n_events, 1)
+        print(f0)
 
         # print(decay_coefficients.shape, f0.shape)
 
@@ -156,8 +158,8 @@ class F0Resonance(nn.Module):
         assert f0s.shape == (batch, n_events, self.n_octaves)
 
         # filter out anything above nyquist
-        mask = f0s < 1
-        f0s = f0s * mask
+        # mask = f0s < 1
+        # f0s = f0s * mask
 
         # generate sine waves
         f0s = f0s.view(batch, n_events, self.n_octaves, 1).repeat(1, 1, 1, self.n_samples)
@@ -180,7 +182,9 @@ class F0Resonance(nn.Module):
             print(osc.shape, ramp.shape)
             osc = osc * ramp
 
+        # sum over all harmonics
         osc = torch.sum(osc, dim=2)
+
         osc = max_norm(osc, dim=-1)
 
         assert osc.shape == (batch, n_events, self.n_samples)

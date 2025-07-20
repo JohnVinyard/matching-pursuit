@@ -14,11 +14,12 @@ from modules import max_norm, interpolate_last_axis, sparsify, unit_norm, flatte
 from modules.transfer import freq_domain_transfer_function_to_resonance, fft_convolve
 from modules.upsample import ensure_last_axis_length
 from spiking import SpikingModel
-from util import device, encode_audio
+from util import device, encode_audio, make_initializer
 
 MaterializeResonances = Callable[..., torch.Tensor]
 
 
+init_weights = make_initializer(0.02)
 
 def execute_layer(
         control_signal: torch.Tensor,
@@ -276,7 +277,7 @@ class ResonanceLayer(nn.Module):
         #     n_resonances,
         #     n_samples,
         #     expressivity,
-        #     smallest_band_size=512,
+        #     smallest_band_size=2048,
         #     base_resonance=0.02,
         #     window_size=64)
 
@@ -402,10 +403,12 @@ class OverfitResonanceStack(nn.Module):
             base_resonance=base_resonance
         )
 
+        self.apply(init_weights)
+
     def _process_control_plane(
             self,
             cp: torch.Tensor,
-            n_to_keep: int = 256) -> torch.Tensor:
+            n_to_keep: int = 128) -> torch.Tensor:
 
         cp = cp.view(1, self.control_plane_dim, self.n_frames)
         cp = sparsify(cp, n_to_keep=n_to_keep)
@@ -458,7 +461,7 @@ def l0_norm(x: torch.Tensor):
 def overfit_model():
     n_samples = 2 ** 17
     resonance_window_size = 2048
-    step_size = 256
+    step_size = 1024
     n_frames = n_samples // step_size
 
     control_plane_dim = 64
@@ -467,7 +470,7 @@ def overfit_model():
 
     target = get_one_audio_segment(n_samples)
     model = OverfitResonanceStack(
-        n_layers=3,
+        n_layers=2,
         n_samples=n_samples,
         resonance_window_size=resonance_window_size,
         control_plane_dim=control_plane_dim,

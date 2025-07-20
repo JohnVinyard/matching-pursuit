@@ -10,17 +10,15 @@ from torch.optim import Adam
 from conjure import LmdbCollection, serve_conjure, loggers, SupportedContentType, NumpySerializer, NumpyDeserializer
 from data import AudioIterator
 from modules import stft, sparsify, sparsify_vectors, iterative_loss, max_norm, \
-    sparse_softmax, positional_encoding, LinearOutputStack, pos_encoded
+    sparse_softmax, positional_encoding, UNet, flattened_multiband_spectrogram
 from modules.anticausal import AntiCausalAnalysis
-from modules.eventgenerators.generator import EventGenerator, ShapeSpec
-from modules.eventgenerators.overfitresonance import OverfitResonanceModel, Lookup
-from modules.eventgenerators.schedule import DiracScheduler
-from modules.eventgenerators.splat import SplattingEventGenerator
+from modules.eventgenerators.generator import EventGenerator
+from modules.eventgenerators.overfitresonance import OverfitResonanceModel, SimpleEventGenerator
+from modules.infoloss import CorrelationLoss
 from modules.iterative import sort_channels_descending_norm
 from modules.mixer import MixerStack
 from modules.multiheadtransform import MultiHeadTransform
-from modules.overlap_add import overlap_add
-from ssm import control_plane_dim
+from spiking import SpikingModel, AutocorrelationLoss
 from util import device, encode_audio, make_initializer
 
 matplotlib.use('Qt5Agg')
@@ -42,76 +40,9 @@ n_seconds = n_samples / samplerate
 transform_window_size = 2048
 transform_step_size = 256
 
-
 n_frames = n_samples // transform_step_size
 
 initializer = make_initializer(0.02)
-
-class RNNEventGenerator(nn.Module):
-    """
-    A state-space model-like module, with one additional matrix, used to project the control
-    signal into the shape of each audio frame.
-
-    The final output is produced by overlap-adding the windows/frames of audio into a single
-    1D signal.
-    """
-
-    def __init__(
-            self,
-            control_plane_dim: int,
-            input_dim: int,
-            state_matrix_dim: int,
-            state_dim: int,
-            window_size: int):
-
-        super().__init__()
-        self.state_matrix_dim = state_matrix_dim
-        self.input_dim = input_dim
-        self.control_plane_dim = control_plane_dim
-
-        self.net = nn.RNN(
-            input_size=input_dim,
-            hidden_size=state_matrix_dim,
-            num_layers=1,
-            nonlinearity='tanh',
-            bias=False,
-            batch_first=True)
-
-        # matrix mapping control signal to audio frame dimension
-        self.proj = nn.Parameter(
-            torch.zeros(control_plane_dim, input_dim).uniform_(-0.01, 0.01)
-        )
-
-        self.out_proj = nn.Linear(state_dim, window_size, bias=False)
-
-        self.apply(initializer)
-
-    def forward(self, control: torch.Tensor) -> torch.Tensor:
-        """
-        (batch, control_plane, time) -> (batch, window_size, time)
-        """
-
-        batch, cpd, frames = control.shape
-        assert cpd == self.control_plane_dim
-
-        control = control.permute(0, 2, 1)
-
-        # try to ensure that the input signal only includes low-frequency info
-        proj = control @ self.proj
-
-        # proj = F.interpolate(proj, size=self.input_dim, mode='linear')
-        # proj = proj * torch.zeros_like(proj).uniform_(-1, 1)
-        # proj = proj * torch.hann_window(self.input_dim, device=proj.device)
-
-        assert proj.shape == (batch, frames, self.input_dim)
-        result, hidden = self.net.forward(proj)
-
-        result = self.out_proj(result)
-
-        result = result.view(batch, 1, -1)
-        result = torch.sin(result)
-        return result
-
 
 
 def fft_shift(a: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
@@ -139,8 +70,6 @@ def fft_shift(a: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
     return samples
 
 
-
-
 def transform(x: torch.Tensor):
     batch_size, n_events = x.shape[:2]
 
@@ -155,6 +84,7 @@ def loss_transform(x: torch.Tensor) -> torch.Tensor:
     batch, n_events, time = x.shape
     x = stft(x, transform_window_size, transform_step_size, pad=True)
     x = x.view(batch, n_events, -1)
+    # x = flattened_multiband_spectrogram(x, {'spec': (64, 16)})
     return x
 
 
@@ -164,62 +94,25 @@ def reconstruction_loss(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     return torch.abs(a - b).sum()
 
 
-
-
-class RNNEventGeneratorWrapper(EventGenerator, nn.Module):
-
-    @property
-    def shape_spec(self) -> ShapeSpec:
-        return dict(
-            params=(context_dim,)
-        )
-
+class Discriminator(nn.Module):
     def __init__(self):
         super().__init__()
+        self.net = UNet(channels=1025, is_disc=True, norm=False)
+        self.apply(initializer)
 
-        # TODO: This needs works and is very confused, state_dim and state_matrix_dim
-        # are "tied" (must be the same) without being explicit about that, or just collapsing
-        # them into a single parameter.
-        n_items = 256
-        state_matrix_dim = 128
-        # the size of each, half-lapped audio "frame"
-        window_size = 128
-        # the dimensionality of the control plane or control signal
-        self.control_plane_dim = 128
-        # the dimensionality of the state vector, or hidden state for the RNN
-        state_dim = state_matrix_dim
-        input_dim = control_plane_dim
-        self.n_frames = n_samples // input_dim
-        self.proj = nn.Linear(context_dim, n_items)
-
-        self.net = RNNEventGenerator(
-            control_plane_dim=self.control_plane_dim,
-            input_dim=input_dim,
-            state_matrix_dim=state_matrix_dim,
-            state_dim=state_dim,
-            window_size=window_size)
-
-        self.control_plane_lookup = Lookup(
-            n_items=n_items, n_samples=control_plane_dim * self.n_frames, selection_type='relu')
-
-        self.scheduler = DiracScheduler(
-            n_events, start_size=n_frames, n_samples=n_samples, pre_sparse=True)
-
-    def forward(self, params: torch.Tensor, times: torch.Tensor) -> torch.Tensor:
-        batch_size = params.shape[0]
-        x = params
-        x = self.proj(x)
-        x = self.control_plane_lookup.forward(x).view(batch_size, self.control_plane_dim, -1)
-        x = self.net(x)
-        x = self.scheduler.schedule(times, x)
-
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        spec = stft(x, 2048, 256, pad=True).view(x.shape[0], -1, 1025).permute(0, 2, 1)
+        x = self.net(spec)
         return x
+
+
 
 
 class MixerEncoder(nn.Module):
     """
     MLP-Mixer-like architecture for the encoder/analysis portion of the network
     """
+
     def __init__(self, in_channels: int, hidden: int, out_channels: int):
         super().__init__()
         self.encoder = MixerStack(
@@ -235,6 +128,7 @@ class MixerEncoder(nn.Module):
         x = self.encoder(x)
         x = self.out(x)
         return x
+
 
 class Model(nn.Module):
 
@@ -262,7 +156,6 @@ class Model(nn.Module):
             pos_encodings=False,
             do_norm=False,
             with_activation_norm=with_activation_norm)
-
 
         self.to_event_vectors = nn.Conv1d(
             hidden_channels, context_dim, 1, 1, 0)
@@ -448,7 +341,6 @@ class Model(nn.Module):
             spec = audio
 
         for i in range(n_events):
-
             v, sched = self.encode(spec)
             vecs.append(v)
             schedules.append(sched)
@@ -488,7 +380,6 @@ def to_numpy(x: torch.Tensor):
 def train_and_monitor(
         batch_size: int = 8,
         overfit: bool = False,
-        model_type: str = 'conv',
         wipe_old_data: bool = True,
         fine_positioning: bool = False,
         save_and_load_weights: bool = False):
@@ -499,7 +390,8 @@ def train_and_monitor(
         n_samples=n_samples,
         samplerate=samplerate,
         normalize=True,
-        overfit=overfit)
+        overfit=overfit,
+        pattern=['*.wav', '*.mp3'])
 
     collection = LmdbCollection(path='iterativedecomposition')
 
@@ -510,7 +402,7 @@ def train_and_monitor(
     collection = LmdbCollection(path='iterativedecomposition')
 
     recon_audio, orig_audio, random_audio = loggers(
-        ['recon', 'orig', 'random',],
+        ['recon', 'orig', 'random', ],
         'audio/wav',
         encode_audio,
         collection)
@@ -531,15 +423,15 @@ def train_and_monitor(
         latents,
         reservoir,
         dist,
-        self_supervised
+        # self_supervised
     ], port=9999, n_workers=1)
 
     print('==========================================')
     print(
-        f'training on {n_seconds} of audio and {n_events} events with {model_type} event generator')
+        f'training on {n_seconds} of audio and {n_events} events with')
     print('==========================================')
 
-    model_filename = 'iterativedecomposition19.dat'
+    model_filename = 'iterativedecomposition21.dat'
 
     def train():
 
@@ -547,49 +439,40 @@ def train_and_monitor(
 
         hidden_channels = 512
 
-        # decide which event decoder variant we should build
-        if model_type == 'lookup':
-            resonance_model = OverfitResonanceModel(
-                n_noise_filters=64,
-                noise_expressivity=2,
-                noise_filter_samples=128,
-                noise_deformations=32,
-                instr_expressivity=4,
-                n_events=1,
-                n_resonances=4096,
-                n_envelopes=256,
-                n_decays=64,
-                n_deformations=256,
-                n_samples=n_samples,
-                n_frames=n_frames,
-                samplerate=samplerate,
-                hidden_channels=hidden_channels,
-                wavetable_device=device,
-                fine_positioning=fine_positioning,
-                fft_resonance=True,
-                context_dim=context_dim
-            )
-        elif model_type == 'splat':
-            resonance_model = SplattingEventGenerator(
-                n_samples=n_samples,
-                samplerate=samplerate,
-                n_resonance_octaves=64,
-                n_frames=n_frames,
-                wavetable_resonance=True,
-                hierarchical_scheduler=False
-            )
-        elif model_type == 'rnn':
-            resonance_model = RNNEventGeneratorWrapper()
+        resonance_model = OverfitResonanceModel(
+            n_noise_filters=64,
+            noise_expressivity=2,
+            noise_filter_samples=128,
+            noise_deformations=32,
+            instr_expressivity=4,
+            n_events=1,
+            n_resonances=4096,
+            n_envelopes=256,
+            n_decays=64,
+            n_deformations=256,
+            n_samples=n_samples,
+            n_frames=n_frames,
+            samplerate=samplerate,
+            hidden_channels=hidden_channels,
+            wavetable_device=device,
+            fine_positioning=fine_positioning,
+            fft_resonance=True,
+            context_dim=context_dim
+        )
 
-        else:
-            raise ValueError(f'Unknown model type {model_type}')
+        # resonance_model = SimpleEventGenerator(
+        #     context_dim=context_dim,
+        #     n_frames=n_frames,
+        #     n_samples=n_samples,
+        #     n_events=1,
+        #     channels=256
+        # )
 
         model = Model(
             resonance_model=resonance_model,
             in_channels=1025,
             hidden_channels=hidden_channels,
             with_activation_norm=True).to(device)
-
 
         if save_and_load_weights:
             # KLUDGE: Unless the same command line arguments are used, this will
@@ -601,11 +484,21 @@ def train_and_monitor(
             except IOError:
                 print('No model weights to load')
 
+        # disc = Discriminator().to(device)
 
         optim = Adam(model.parameters(), lr=1e-4)
+        # disc_optim = Adam(disc.parameters(), lr=1e-3)
+
 
         max_ss_weight = 0.1
-        ss_weights = torch.linspace(0, max_ss_weight, 8192, device=device) ** 2
+        # ss_weights = torch.linspace(0, max_ss_weight, 8192, device=device) ** 2
+
+
+        # disc_loss_factor = 100
+
+        # loss_model = SpikingModel(64, 64, 64, 64, 64).to(device)
+        # loss_model = CorrelationLoss(n_elements=512).to(device)
+        loss_model = AutocorrelationLoss(64, 64).to(device)
 
         for i, item in enumerate(iter(stream)):
             optim.zero_grad()
@@ -614,8 +507,6 @@ def train_and_monitor(
                 target = item.view(batch_size, 1, n_samples).to(device)
                 orig_audio(target)
                 recon, encoded, scheduling = model.iterative(target)
-
-                # sparsity_loss = torch.abs(scheduling).sum() * 10
 
                 norms = torch.norm(recon, dim=-1)
                 norms, indices = torch.sort(norms, dim=-1)
@@ -628,12 +519,13 @@ def train_and_monitor(
                 envelopes(max_norm(scheduling[0]))
                 latents(max_norm(encoded[0]).float())
 
-
                 weighting = torch.ones_like(target)
                 weighting[..., n_samples // 2:] = torch.linspace(1, 0, n_samples // 2, device=weighting.device) ** 8
 
                 target = target * weighting
                 recon_summed = recon_summed * weighting
+
+
 
                 # loss from iterative_loss will be negative since we're maximizing
                 # the amount of energy removed
@@ -643,18 +535,26 @@ def train_and_monitor(
                     loss_transform,
                     ratio_loss=False,
                     sort_channels=True)
-                # loss = loss + sparsity_loss
-                # loss = loss + reconstruction_loss(target, recon_summed)
 
+
+                # disc_j = disc.forward(recon_summed)
+                # disc_loss = torch.abs(1 - disc_j).sum()
+                # loss = loss #+ (disc_loss * disc_loss_factor)
 
             scaler.scale(loss).backward()
             scaler.step(optim)
             scaler.update()
             print(i, loss.item())
-
             optim.zero_grad()
 
-
+            # train discriminator
+            # disc_optim.zero_grad()
+            # rj = disc.forward(target)
+            # fj = disc.forward(recon_summed.clone().detach())
+            # disc_loss = torch.abs(1 - rj).sum() + torch.abs(0 - fj).sum()
+            # disc_loss.backward()
+            # disc_optim.step()
+            # print('D', disc_loss.item())
 
 
             # TODO: sample scale/amplitude of one-hot time vectors
@@ -677,33 +577,31 @@ def train_and_monitor(
                 random_audio(max_norm(rnd))
                 reservoir(max_norm(torch.from_numpy(model.reservoir)))
 
-            # self-supervised loss kicks in
-            ss_target = sort_channels_descending_norm(random_seq)
-            sorted_ss_target = ss_target
-            ss_target = loss_transform(ss_target)
-
-            ss, _, _ = model.iterative(rnd)
-            ss_recon = sort_channels_descending_norm(ss)
-            ss_recon_orig = ss_recon
-            ss_recon = loss_transform(ss_recon)
-
-            try:
-                weighting = ss_weights[i]
-            except IndexError:
-                weighting = max_ss_weight
-
-
-            # KLUDGE:  How do I represent this stateful loss function?
-            ss_loss = torch.abs(ss_target - ss_recon).sum() * max_ss_weight
-            ss_loss.backward()
-            optim.step()
-            print('SS', i, ss_loss.item(), weighting)
-
-            rnd_norms = torch.norm(sorted_ss_target, dim=-1, keepdim=True)
-            recon_norms = torch.norm(ss_recon_orig, dim=-1, keepdim=True)
-            all_norms = torch.cat([rnd_norms, recon_norms], dim=-1)
-            self_supervised(all_norms[0])
-
+            # ss_target = sort_channels_descending_norm(random_seq)
+            # sorted_ss_target = ss_target
+            # ss_target = loss_transform(ss_target)
+            #
+            # ss, _, _ = model.iterative(rnd)
+            # ss_recon = sort_channels_descending_norm(ss)
+            # ss_recon_orig = ss_recon
+            # ss_recon = loss_transform(ss_recon)
+            #
+            # try:
+            #     weighting = ss_weights[i]
+            # except IndexError:
+            #     weighting = max_ss_weight
+            #
+            #
+            # # KLUDGE:  How do I represent this stateful loss function?
+            # ss_loss = torch.abs(ss_target - ss_recon).sum() * weighting
+            # ss_loss.backward()
+            # optim.step()
+            # print('SS', i, ss_loss.item(), weighting)
+            #
+            # rnd_norms = torch.norm(sorted_ss_target, dim=-1, keepdim=True)
+            # recon_norms = torch.norm(ss_recon_orig, dim=-1, keepdim=True)
+            # all_norms = torch.cat([rnd_norms, recon_norms], dim=-1)
+            # self_supervised(all_norms[0])
 
             # if i % 1000 == 0:
             #     with torch.no_grad():
@@ -728,11 +626,6 @@ if __name__ == '__main__':
         action='store_true',
         default=False,
     )
-    parser.add_argument(
-        '--model-type',
-        type=str,
-        required=True,
-        choices=['lookup', 'splat', 'rnn'])
     parser.add_argument(
         '--save-data',
         required=False,
@@ -760,7 +653,6 @@ if __name__ == '__main__':
     train_and_monitor(
         batch_size=1 if args.overfit else args.batch_size,
         overfit=args.overfit,
-        model_type=args.model_type,
         wipe_old_data=not args.save_data,
         fine_positioning=bool(args.fine_positioning),
         save_and_load_weights=args.save_and_load_weights

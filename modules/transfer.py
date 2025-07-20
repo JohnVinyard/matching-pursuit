@@ -219,11 +219,12 @@ def freq_domain_transfer_function_to_resonance(
         # apply constant offset to each FFT bin
         phase = phase + start_phase.reshape(-1, 1, 1, expected_coeffs)
 
+
     # convert from polar coordinates
     spec = spec * torch.exp(1j * phase)
 
     windowed = torch.fft.irfft(spec, dim=-1).view(-1, 1, n_frames, window_size)
-    audio = overlap_add(windowed, apply_window=True)[..., :total_samples]
+    audio = overlap_add(windowed, apply_window=False)[..., :total_samples]
     audio = audio.view(-1, 1, total_samples)
     audio = max_norm(audio)
     return audio

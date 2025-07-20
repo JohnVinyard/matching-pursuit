@@ -246,6 +246,16 @@ class SpikingModel(nn.Module):
         loss = torch.abs(t - r).sum()
         return loss
 
+    def compute_masked_loss(self, target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
+        t = self.forward(target)
+        r = self.forward(recon)
+
+        mask = t == 1
+
+        loss = torch.abs(t[mask] - r[mask]).sum()
+        return loss
+
+
     def forward(self, audio: torch.Tensor):
         batch = audio.shape[-1]
 

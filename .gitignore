@@ -59,6 +59,7 @@ hierarchical
 mp
 spiking
 audiooperator
+texture
 
 rnn.dat
 
@@ -81,6 +82,8 @@ iterativedecomposition16.dat
 iterativedecomposition17.dat
 iterativedecomposition18.dat
 iterativedecomposition19.dat
+iterativedecomposition20.dat
+iterativedecomposition21.dat
 
 iterativedecomposition_speech.dat
 

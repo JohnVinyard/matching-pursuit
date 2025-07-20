@@ -31,7 +31,7 @@ transform_step_size = 1024
 samplerate = 22050
 n_frames = n_samples // transform_step_size
 
-initializer = make_initializer(0.05)
+initializer = make_initializer(0.01)
 
 
 def stft_transform(x: torch.Tensor):
@@ -488,7 +488,7 @@ class EnergyBasedEventGenerator(nn.Module):
         filters = torch.fft.rfft(filters, dim=-1, norm='ortho')
         self.register_buffer('filters', filters)
 
-        self.to_samples = nn.Parameter(torch.zeros(transform_block_size, self.instrument_dim).uniform_(-1, 1))
+        self.to_samples = nn.Parameter(torch.zeros(self.block_size, self.instrument_dim).uniform_(-1, 1))
 
 
 
@@ -543,12 +543,15 @@ class EnergyBasedEventGenerator(nn.Module):
 
             block = (force @ self.to_samples.T)  # * torch.norm(displacement)
 
-            block = block.view(-1, n_events, self.n_coeffs, 2)
-            block = torch.view_as_complex(block)
+            block = torch.sin(block)
 
-            block = block @ self.filters
+            # block = block.view(-1, n_events, self.n_coeffs, 2)
+            # block = torch.view_as_complex(block)
 
-            block = torch.fft.irfft(block, dim=-1)
+            # block = block @ self.filters
+
+            # block = torch.fft.irfft(block, dim=-1)
+            # block = torch.
 
             # print(torch.norm(displacement), torch.norm(block))
             blocks.append(block[:, :, None, :])
@@ -656,7 +659,7 @@ class OverfitAudioNetwork(nn.Module):
 
     @property
     def control_signal(self):
-        return torch.relu(sparsify(self.control_plane + torch.zeros_like(self.control_plane).uniform_(-1e-4, 1e-4), n_to_keep=128))
+        return sparsify(self.control_plane, n_to_keep=128)
 
     @property
     def nonzero_count(self):
@@ -709,14 +712,15 @@ def transform(x: torch.Tensor):
     Decompose audio into sub-bands of varying sample rate, and compute spectrogram with
     varying time-frequency tradeoffs on each band.
     """
-    return flattened_multiband_spectrogram(
-        x,
-        stft_spec={
-            'long': (128, 64),
-            'short': (64, 32),
-            'xs': (16, 8),
-        },
-        smallest_band_size=512)
+    # return flattened_multiband_spectrogram(
+    #     x,
+    #     stft_spec={
+    #         'long': (128, 64),
+    #         'short': (64, 32),
+    #         'xs': (16, 8),
+    #     },
+    #     smallest_band_size=512)
+    return stft(x, 2048, 256, pad=True)
 
 
 def reconstruction_loss(recon: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -817,13 +821,13 @@ def train_and_monitor_overfit_model(
         rnd,
     ], port=9999, n_workers=1)
 
-    loss_model = CorrelationLoss(n_elements=2048).to(device)
+    # loss_model = CorrelationLoss(n_elements=2048).to(device)
     # loss_model = SpikingModel(64, 64, 64, 64).to(device)
 
     def train(target: torch.Tensor):
         model = construct_experiment_model(n_samples=n_samples)
 
-        optim = Adam(model.parameters(), lr=1e-3)
+        optim = Adam(model.parameters(), lr=1e-4)
 
         for iteration in count():
             optim.zero_grad()

@@ -66,7 +66,7 @@ class Resonance(nn.Module):
         # frequencies, hence `n_resonances // 4`
         f0s = musical_scale_hz(start_midi=21, stop_midi=106, n_steps=n_resonances // 4)
         waves = make_waves(n_samples, f0s, samplerate)
-        self.register_buffer('waves', waves.view(1, n_resonances, n_samples))
+        self.register_buffer('waves', waves.view(1, n_resonances, n_samples), persistent=False)
 
     def forward(self, choice: torch.Tensor):
         batch, n_events, n_resonances = choice.shape
@@ -234,7 +234,7 @@ class SplattingEventGenerator(nn.Module, EventGenerator):
         self.n_octaves = n_resonance_octaves
         self.wavetable_resonance = wavetable_resonance
 
-        self.n_resonance = 512
+        self.n_resonance = 1024
 
         if wavetable_resonance:
             self.resonance_generator = Resonance(
@@ -247,7 +247,7 @@ class SplattingEventGenerator(nn.Module, EventGenerator):
 
         self.noise_generator = BandPassFilteredNoise(n_samples)
         self.amp_envelope_generator = ExponentialDecayEnvelope(
-            base_resonance=0.5,
+            base_resonance=0.1,
             n_frames=n_frames,
             n_samples=n_samples)
         self.evolving_resonance = EvolvingFilteredResonance(
@@ -343,18 +343,20 @@ class SplattingEventGenerator(nn.Module, EventGenerator):
         # assert final.shape == (1, n_atoms, exp.n_samples)
 
         final = final.view(batch, -1, self.n_samples)
-        # final = unit_norm(final, dim=-1)
+        final = unit_norm(final, dim=-1)
 
         amps = torch.abs(amp)
         final = final * amps
 
-        final = self.scheduler.schedule(times, final)
-
         # rm is a one-hot room choice
         # mx is a two-element, softmax distribution
         final = self.verb.forward(verb_params, final)
+        # final = unit_norm(final)
+
+        final = self.scheduler.schedule(times, final)
 
         return final
+
 
     def forward_f0(
             self,

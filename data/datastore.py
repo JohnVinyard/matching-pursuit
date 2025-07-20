@@ -1,4 +1,4 @@
-from typing import Iterable, Tuple
+from typing import Iterable, Tuple, List, Union
 from librosa import load, to_mono
 from fnmatch import fnmatch
 import os
@@ -13,10 +13,19 @@ from data.conjure import LmdbCollection, cache
 collection = LmdbCollection('audio')
 
 
-def iter_files(base_path, pattern):
+def iter_files(base_path, pattern: Union[str, List[str]]):
+
+    def file_is_match(path: str, pattern: Union[str, List[str]]):
+
+        if isinstance(pattern, str):
+            return fnmatch(path, pattern)
+        else:
+            return any(fnmatch(path, p) for p in pattern)
+
     for dirpath, _, filenames in os.walk(base_path):
         audio_files = filter(
-            lambda x: fnmatch(x, pattern),
+            # lambda x: fnmatch(x, pattern),
+            lambda x: file_is_match(x, pattern),
             (os.path.join(dirpath, fn) for fn in filenames))
         yield from audio_files
 
@@ -102,13 +111,15 @@ def iter_audio_segments(
 
 def batch_stream(
         path,
-        pattern,
+        pattern:  Union[str, List[str]],
         batch_size,
         n_samples,
         overfit=False,
         normalize=False,
         step_size=1,
         return_indices=False):
+
+    # TODO: This can be memoized/cached
     paths = list(iter_files(path, pattern))
 
     batch_size = 1 if overfit else batch_size
@@ -119,6 +130,7 @@ def batch_stream(
 
         for i in range(batch_size):
             path = choice(paths)
+            print('PATH CHOSEN', path)
             data = audio(path)
 
             # pad to ensure that the sample length is at least n_samples

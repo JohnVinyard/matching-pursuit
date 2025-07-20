@@ -31,13 +31,14 @@ First, we'll set up high-level parameters for the experiment
 """
 
 # the size, in samples of the audio segment we'll overfit
-n_samples = 2 ** 18
+n_samples = 2 ** 17
 
 # the samplerate, in hz, of the audio signal
 samplerate = 22050
 
 # derived, the total number of seconds of audio
 n_seconds = n_samples / samplerate
+print('N SECONDS', n_seconds)
 
 # the size of each, half-lapped audio "frame"
 window_size = 128
@@ -92,7 +93,7 @@ from torch import nn
 from itertools import count
 
 from data import get_one_audio_segment
-from modules import max_norm, flattened_multiband_spectrogram, sparsify
+from modules import max_norm, flattened_multiband_spectrogram, sparsify, stft
 from torch.optim import Adam
 
 from util import device, encode_audio, make_initializer
@@ -157,6 +158,8 @@ class InstrumentModel(nn.Module):
 
         self.out_proj = nn.Linear(state_dim, window_size, bias=False)
 
+        # self.factor = nn.Parameter(torch.zeros(1).fill_(20))
+
         self.apply(init_weights)
 
     def forward(self, control: torch.Tensor) -> torch.Tensor:
@@ -181,7 +184,8 @@ class InstrumentModel(nn.Module):
         result = self.out_proj(result)
 
         result = result.view(batch, 1, -1)
-        result = torch.sin(result)
+        # result = torch.tanh(result)
+        # result = torch.sin(result * self.factor)
         return result
 
 
@@ -235,9 +239,12 @@ class OverfitControlPlane(nn.Module):
             self.vectors = nn.Parameter(torch.zeros(1, n_events, control_plane_dim, 1).uniform_(-1, 1))
 
         else:
-            # TODO: This should be a number of positioned events
             self.control = nn.Parameter(
-                torch.zeros(1, control_plane_dim, self.n_frames).uniform_(-3, 3))
+                torch.zeros(1, control_plane_dim, self.n_frames).uniform_(0, 0.1))
+
+            # TODO: This should be a number of positioned events
+            # self.control = nn.Parameter(
+            #     torch.zeros(1, control_plane_dim, self.n_frames).uniform_(-3, 3))
 
     def _get_mapping(self, n_components: int) -> np.ndarray:
         cs = self.control_signal.data.cpu().numpy() \
@@ -254,6 +261,9 @@ class OverfitControlPlane(nn.Module):
 
     def get_accelerometer_mapping(self) -> np.ndarray:
         return self._get_mapping(n_components=3)
+
+    def get_hand_tracking_mapping(self) -> np.ndarray:
+        return self._get_mapping(n_components=21)
 
     @property
     def control_signal_display(self) -> np.ndarray:
@@ -338,6 +348,7 @@ def generate_param_dict(
         serializer.to_bytes(named_params['weight_hh_l0'].data.cpu().numpy().T)).decode()
     params['control_plane_mapping'] = b64encode(serializer.to_bytes(model.get_control_plane_mapping().T)).decode()
     params['accelerometer_mapping'] = b64encode(serializer.to_bytes(model.get_accelerometer_mapping().T)).decode()
+    params['hand_tracking_mapping'] = b64encode(serializer.to_bytes(model.get_hand_tracking_mapping().T)).decode()
     _, meta = logger.log_json(key, params)
     return params, meta
 
@@ -367,15 +378,15 @@ def transform(x: torch.Tensor):
     Decompose audio into sub-bands of varying sample rate, and compute spectrogram with
     varying time-frequency tradeoffs on each band.
     """
-    return flattened_multiband_spectrogram(
-        x,
-        stft_spec={
-            'long': (128, 64),
-            'short': (64, 32),
-            'xs': (16, 8),
-        },
-        smallest_band_size=512)
-
+    # return flattened_multiband_spectrogram(
+    #     x,
+    #     stft_spec={
+    #         # 'long': (128, 64),
+    #         # 'short': (64, 32),
+    #         'xs': (64, 16),
+    #     },
+    #     smallest_band_size=512)
+    return stft(x, 2048, 256, pad=True)
 
 def reconstruction_loss(recon: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     """
@@ -484,7 +495,7 @@ def demo_page_dict(n_iterations: int = 100, n_examples: int = 5) -> Dict[str, an
             target: torch.Tensor,
             iterations: int):
 
-        loss_model = CorrelationLoss().to(device)
+        # loss_model = CorrelationLoss().to(device)
 
         while True:
             model = construct_experiment_model()
@@ -694,7 +705,7 @@ def train_and_monitor():
         random_audio,
     ], port=9999, n_workers=1)
 
-    loss_model = CorrelationLoss().to(device)
+    # loss_model = CorrelationLoss().to(device)
 
     def train(target: torch.Tensor):
         model = construct_experiment_model()
@@ -705,17 +716,23 @@ def train_and_monitor():
             optim.zero_grad()
             recon = model.forward()
             recon_audio(max_norm(recon))
-            loss = \
-                loss_model.multiband_noise_loss(target, recon, window_size=32, step=16) \
-                + reconstruction_loss(recon, target)
+            # loss = \
+            #     loss_model.multiband_noise_loss(target, recon, window_size=32, step=16) \
+            #     + reconstruction_loss(recon, target)
+            loss = reconstruction_loss(recon, target)
 
             envelopes(model.control_signal.view(control_plane_dim, -1))
             loss.backward()
 
-            clip_grad_value_(model.parameters(), 0.5)
+            # clip_grad_value_(model.parameters(), 0.5)
 
             optim.step()
             print(iteration, loss.item())
+
+            # if iteration == 2000:
+            #     print('Changing learning rate')
+            #     for g in optim.param_groups:
+            #         g['lr'] = 0.001
 
             with torch.no_grad():
                 rnd = model.random()
