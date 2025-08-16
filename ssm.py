@@ -19,6 +19,7 @@ a state-space model "extracted" from an audio segment.
 Feel free to [jump ahead](#Examples) if you're curious to hear all the audio examples first!
 
 """
+from modules.overlap_add import overlap_add
 
 # example_1.random_component
 
@@ -31,7 +32,7 @@ First, we'll set up high-level parameters for the experiment
 """
 
 # the size, in samples of the audio segment we'll overfit
-n_samples = 2 ** 17
+n_samples = 2 ** 18
 
 # the samplerate, in hz, of the audio signal
 samplerate = 22050
@@ -50,12 +51,7 @@ control_plane_dim = 64
 state_dim = 128
 
 # the number of (batch, control_plane_dim, frames) elements allowed to be non-zero
-n_active_sites = 128
-
-sparse_events = False
-
-n_events = 128
-
+n_active_sites = None
 
 """[markdown]
 
@@ -85,7 +81,7 @@ We'll start with some boring imports.
 
 """
 
-from typing import Dict, Union
+from typing import Dict, Union, Tuple
 
 import numpy as np
 import torch
@@ -108,7 +104,7 @@ from modules.infoloss import CorrelationLoss
 from base64 import b64encode
 from sklearn.decomposition import PCA
 from modules.transfer import hierarchical_dirac, fft_convolve
-
+from torch.nn import functional as F
 
 remote_collection_name = 'state-space-model-demo-3'
 
@@ -162,7 +158,7 @@ class InstrumentModel(nn.Module):
 
         self.apply(init_weights)
 
-    def forward(self, control: torch.Tensor) -> torch.Tensor:
+    def forward(self, control: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         (batch, control_plane, time) -> (batch, window_size, time)
         """
@@ -183,10 +179,17 @@ class InstrumentModel(nn.Module):
 
         result = self.out_proj(result)
 
+        end_values = result[:, 0:-1, -1]
+        start_values = result[:, 1:, 0]
+
+        diff = start_values - end_values
+
         result = result.view(batch, 1, -1)
+
+        # result = torch.cumsum(result, dim=-1)
         # result = torch.tanh(result)
-        # result = torch.sin(result * self.factor)
-        return result
+        # result = torch.sin(result)
+        return result, diff
 
 
 """[markdown]
@@ -220,31 +223,16 @@ class OverfitControlPlane(nn.Module):
             control_plane_dim: int,
             input_dim: int,
             state_matrix_dim: int,
-            n_samples: int,
-            n_events: int = n_events,
-            sparse_events: bool = False):
+            n_samples: int):
 
         super().__init__()
         self.ssm = InstrumentModel(control_plane_dim, input_dim, state_matrix_dim)
         self.n_samples = n_samples
         self.n_frames = n_samples // input_dim
         self.control_plane_dim = control_plane_dim
-        self.n_events = n_events
-        self.sparse_events = sparse_events
 
-        if self.sparse_events:
-            self.times = nn.Parameter(
-                torch.zeros(1, n_events, int(np.log2(self.n_frames)), 2).uniform_(-1, 1)
-            )
-            self.vectors = nn.Parameter(torch.zeros(1, n_events, control_plane_dim, 1).uniform_(-1, 1))
-
-        else:
-            self.control = nn.Parameter(
-                torch.zeros(1, control_plane_dim, self.n_frames).uniform_(0, 0.1))
-
-            # TODO: This should be a number of positioned events
-            # self.control = nn.Parameter(
-            #     torch.zeros(1, control_plane_dim, self.n_frames).uniform_(-3, 3))
+        self.control = nn.Parameter(
+            torch.zeros(1, control_plane_dim, self.n_frames).uniform_(0, 0.1))
 
     def _get_mapping(self, n_components: int) -> np.ndarray:
         cs = self.control_signal.data.cpu().numpy() \
@@ -263,7 +251,9 @@ class OverfitControlPlane(nn.Module):
         return self._get_mapping(n_components=3)
 
     def get_hand_tracking_mapping(self) -> np.ndarray:
-        return self._get_mapping(n_components=21)
+        mapping = self._get_mapping(n_components=21)
+        print(mapping.shape)
+        return mapping
 
     @property
     def control_signal_display(self) -> np.ndarray:
@@ -285,14 +275,10 @@ class OverfitControlPlane(nn.Module):
 
     @property
     def control_signal(self) -> torch.Tensor:
-        if self.sparse_events:
-            cp = self._materialize_control_signal(self.times, self.vectors)
+        if n_active_sites is not None:
+            cp = sparsify(self.control, n_to_keep=n_active_sites)
         else:
-            if n_active_sites is not None:
-                cp = sparsify(self.control, n_to_keep=n_active_sites)
-            else:
-                cp = self.control
-
+            cp = self.control
 
         cp = torch.relu(cp)
         return cp
@@ -303,14 +289,8 @@ class OverfitControlPlane(nn.Module):
         Produces a random, sparse control signal, emulating short, transient bursts
         of energy into the system modelled by the `SSM`
         """
-        if self.sparse_events:
-            cp = self._materialize_control_signal(
-                torch.zeros_like(self.times).uniform_(-1, 1),
-                torch.zeros_like(self.vectors).uniform_(0, 1)
-            )
-        else:
-            cp = torch.zeros_like(self.control, device=self.control.device).bernoulli_(p=p)
-        audio = self.forward(sig=cp)
+        cp = torch.zeros_like(self.control, device=self.control.device).bernoulli_(p=p)
+        audio, _ = self.forward(sig=cp)
         return max_norm(audio)
 
     def rolled_control_plane(self):
@@ -320,10 +300,10 @@ class OverfitControlPlane(nn.Module):
         """
         indices = torch.randperm(control_plane_dim)
         cp = self.control_signal[:, indices, :]
-        audio = self.forward(sig=cp)
+        audio, _ = self.forward(sig=cp)
         return max_norm(audio)
 
-    def forward(self, sig=None):
+    def forward(self, sig=None) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Inject energy defined by `sig` (or by the `control` parameters encapsulated by this class)
         into the system modelled by `SSM`
@@ -350,6 +330,8 @@ def generate_param_dict(
     params['accelerometer_mapping'] = b64encode(serializer.to_bytes(model.get_accelerometer_mapping().T)).decode()
     params['hand_tracking_mapping'] = b64encode(serializer.to_bytes(model.get_hand_tracking_mapping().T)).decode()
     _, meta = logger.log_json(key, params)
+
+    print('WEIGHTS URI', meta.public_uri.geturl())
     return params, meta
 
 
@@ -378,15 +360,16 @@ def transform(x: torch.Tensor):
     Decompose audio into sub-bands of varying sample rate, and compute spectrogram with
     varying time-frequency tradeoffs on each band.
     """
-    # return flattened_multiband_spectrogram(
-    #     x,
-    #     stft_spec={
-    #         # 'long': (128, 64),
-    #         # 'short': (64, 32),
-    #         'xs': (64, 16),
-    #     },
-    #     smallest_band_size=512)
-    return stft(x, 2048, 256, pad=True)
+    return flattened_multiband_spectrogram(
+        x,
+        stft_spec={
+            # 'long': (128, 64),
+            # 'short': (64, 32),
+            'xs': (64, 16),
+        },
+        smallest_band_size=512)
+    # return stft(x, 2048, 256, pad=True)
+
 
 def reconstruction_loss(recon: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     """
@@ -418,11 +401,11 @@ in addition to percussive instruments, where this approach really seems to shine
 """
 
 
-def sparsity_loss(c: torch.Tensor) -> torch.Tensor:
-    """
-    Compute the l1 norm of the control signal
-    """
-    return torch.abs(c).sum() * 10
+# def sparsity_loss(c: torch.Tensor) -> torch.Tensor:
+#     """
+#     Compute the l1 norm of the control signal
+#     """
+#     return torch.abs(c).sum() * 10
 
 
 def to_numpy(x: torch.Tensor):
@@ -439,7 +422,6 @@ def construct_experiment_model(state_dict: Union[None, dict] = None) -> OverfitC
         input_dim=window_size,
         state_matrix_dim=state_dim,
         n_samples=n_samples,
-        sparse_events=sparse_events,
     )
     model = model.to(device)
 
@@ -485,6 +467,24 @@ this post.
 """
 
 
+def l0_norm(x: torch.Tensor):
+    mask = (x > 0).float()
+
+    forward = mask
+    backward = x
+
+    y = backward + (forward - backward).detach()
+
+    return y.sum()
+
+
+def l1_norm(x: torch.Tensor):
+    return torch.abs(x).sum()
+
+def sparsity_loss(x: torch.Tensor) -> torch.Tensor:
+    return l1_norm(x) * 0.1
+
+
 def demo_page_dict(n_iterations: int = 100, n_examples: int = 5) -> Dict[str, any]:
     print(f'Generating article, training models for {n_iterations} iterations')
 
@@ -503,10 +503,8 @@ def demo_page_dict(n_iterations: int = 100, n_examples: int = 5) -> Dict[str, an
 
             for iteration in range(iterations):
                 optim.zero_grad()
-                recon = model.forward()
-                loss = reconstruction_loss(recon, target)
-                if not sparse_events:
-                    loss = loss + sparsity_loss(model.control_signal)
+                recon, diff = model.forward()
+                loss = reconstruction_loss(recon, target) + sparsity_loss(model.control_signal)
 
                 if torch.isnan(loss).any():
                     print(f'detected NaN at iteration {iteration}')
@@ -530,6 +528,7 @@ def demo_page_dict(n_iterations: int = 100, n_examples: int = 5) -> Dict[str, an
             compression_ratio = total_params / n_samples
 
             print('COMPRESSION RATIO', compression_ratio * 100)
+            print('CONTROL SIGNAL', model.control_signal.min().item(), model.control_signal.max().item())
             break
 
         return model.state_dict()
@@ -552,7 +551,7 @@ def demo_page_dict(n_iterations: int = 100, n_examples: int = 5) -> Dict[str, an
         hydrated = construct_experiment_model(state_dict)
 
         with torch.no_grad():
-            recon = hydrated.forward()
+            recon, diff = hydrated.forward()
             random = hydrated.random()
             rolled = hydrated.rolled_control_plane()
 
@@ -637,7 +636,7 @@ def demo_page_dict(n_iterations: int = 100, n_examples: int = 5) -> Dict[str, an
     for i in range(n_examples):
         examples[f'example_{i + 1}'] = train_model_and_produce_content_section(
             n_iterations=n_iterations,
-            number=i+1
+            number=i + 1
         )
 
     citation = CitationComponent(
@@ -658,7 +657,7 @@ def demo_page_dict(n_iterations: int = 100, n_examples: int = 5) -> Dict[str, an
     return demo_page
 
 
-def generate_demo_page(iterations: int = 500, n_examples: int = 5):
+def generate_demo_page(iterations: int = 10000, n_examples: int = 1):
     display = demo_page_dict(n_iterations=iterations, n_examples=n_examples)
     conjure_article(
         __file__,
@@ -714,12 +713,9 @@ def train_and_monitor():
 
         for iteration in count():
             optim.zero_grad()
-            recon = model.forward()
+            recon, diff = model.forward()
             recon_audio(max_norm(recon))
-            # loss = \
-            #     loss_model.multiband_noise_loss(target, recon, window_size=32, step=16) \
-            #     + reconstruction_loss(recon, target)
-            loss = reconstruction_loss(recon, target)
+            loss = reconstruction_loss(recon, target) + sparsity_loss(model.control_signal)
 
             envelopes(model.control_signal.view(control_plane_dim, -1))
             loss.backward()

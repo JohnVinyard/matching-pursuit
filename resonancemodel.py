@@ -10,16 +10,15 @@ from torch.optim import Adam
 import conjure
 from data import get_one_audio_segment
 from modules import max_norm, interpolate_last_axis, sparsify, unit_norm, flattened_multiband_spectrogram, \
-    fft_frequency_recompose
+    fft_frequency_recompose, stft, HyperNetworkLayer
 from modules.transfer import freq_domain_transfer_function_to_resonance, fft_convolve
-from modules.upsample import ensure_last_axis_length
-from spiking import SpikingModel
+from modules.upsample import upsample_with_holes, ensure_last_axis_length
 from util import device, encode_audio, make_initializer
 
 MaterializeResonances = Callable[..., torch.Tensor]
 
-
 init_weights = make_initializer(0.02)
+
 
 def execute_layer(
         control_signal: torch.Tensor,
@@ -29,8 +28,6 @@ def execute_layer(
         deformations: torch.Tensor,
         gains: torch.Tensor,
         window_size: int) -> Tuple[torch.Tensor, torch.Tensor]:
-
-
     # n_resonances, n_coeffs, expressivity = amp.shape
     batch, n_events, control_plane_dim, frames = control_signal.shape
     batch, n_events, expressivity, def_frames = deformations.shape
@@ -56,18 +53,29 @@ def execute_layer(
 
     # "route" energy from control plane to resonances
     routed = routed.view(batch, n_events, n_resonances, 1, frames)
-    # routed = upsample_with_holes(routed, n_samples)
-    routed = interpolate_last_axis(routed, n_samples)
-    routed = routed * torch.zeros_like(routed).uniform_(-1, 1)
 
-    # convolve control plane with resonances
+    # convolve with noise impulse
+    routed = upsample_with_holes(routed, n_samples)
+    impulse = torch.hamming_window(128, device=routed.device)
+    impulse = impulse * torch.zeros_like(impulse).uniform_(-1, 1)
+    impulse = ensure_last_axis_length(impulse, n_samples)
+    impulse = impulse.view(1, 1, 1, 1, n_samples)
+    routed = fft_convolve(impulse, routed)
+
+    # interpolate and multiply with noise
+    # routed = interpolate_last_axis(routed, n_samples)
+    # routed = routed * torch.zeros_like(routed).uniform_(-1, 1)
+
+    # convolve control plane with all resonances
     conv = fft_convolve(routed, res)
 
     # interpolate between variations on each resonance
     base_deformation = torch.zeros_like(deformations)
     base_deformation[:, :, 0:1, :] = 1
     d = base_deformation + deformations
+    # d = deformations
     d = torch.softmax(d, dim=-2)
+    # d = torch.relu(d)
     d = d.view(batch, n_events, 1, expressivity, def_frames)
     d = interpolate_last_axis(d, n_samples)
 
@@ -91,7 +99,6 @@ class MultibandFFTResonanceBlock(nn.Module):
             smallest_band_size: int = 512,
             base_resonance: float = 0.2,
             window_size: int = 64):
-
         super().__init__()
 
         # def init(x):
@@ -174,6 +181,118 @@ class MultibandFFTResonanceBlock(nn.Module):
         # full = unit_norm(full)
         return full
 
+
+def damped_harmonic_oscillator(
+        time: torch.Tensor,
+        mass: torch.Tensor,
+        damping: torch.Tensor,
+        tension: torch.Tensor,
+        initial_displacement: torch.Tensor,
+        initial_velocity: float,
+) -> torch.Tensor:
+    _, n_samples = time.shape
+    # mass = mass.view(n_osc, 1)
+    # damping = damping.view(n_osc, 1)
+    # tension = tension.view(n_osc, 1)
+    # initial_displacement = initial_displacement.view(n_osc, 1)
+    # initial_velocity = initial_velocity.view(n_osc, 1)
+
+    x = (damping / (2 * mass))
+    omega = torch.sqrt(tension - (x ** 2))
+    phi = torch.arctan((initial_velocity + (x * initial_displacement) / (initial_displacement * omega)))
+    # phi = torch.atan2(
+    #     (initial_velocity + (x * initial_displacement)),
+    #     (initial_displacement * omega)
+    # )
+    a = initial_displacement / torch.cos(phi)
+    z = a * torch.exp(-x * time) * torch.cos(omega * time - phi)
+    return z
+
+
+class DampedHarmonicOscillatorBlock(nn.Module):
+    def __init__(
+            self,
+            n_samples: int,
+            n_oscillators: int,
+            n_resonances: int,
+            expressivity: int):
+        super().__init__()
+        self.n_samples = n_samples
+        self.n_oscillators = n_oscillators
+        self.n_resonances = n_resonances
+        self.expressivity = expressivity
+
+        self.mass = nn.Parameter(
+            torch.zeros(n_oscillators, n_resonances, expressivity) \
+                .uniform_(-2, 2))
+
+        self.damping = nn.Parameter(
+            torch.zeros(n_oscillators, n_resonances, expressivity) \
+                .uniform_(0.1, 1.1))
+
+        self.tension = nn.Parameter(
+            torch.zeros(n_oscillators, n_resonances, expressivity) \
+                .uniform_(4, 9))
+
+        self.initial_displacement = nn.Parameter(
+            torch.zeros(n_oscillators, n_resonances, expressivity) \
+                .uniform_(-1, 2))
+
+    def _materialize_resonances(self, device: torch.device):
+        time = torch.linspace(0, 1, self.n_samples, device=device) \
+            .view(1, self.n_samples)
+        x = damped_harmonic_oscillator(
+            time,
+            # 1e-8 + self.mass.view(-1, 1) ** 2,
+            1e-8 + (10 ** self.mass.view(-1, 1)),
+            1e-8 + self.damping.view(-1, 1) ** 2,
+            # 1e-8 + self.tension.view(-1, 1) ** 2,
+            1e-8 + (10 ** self.tension.view(-1, 1)),
+            1e-8 + (10 ** self.initial_displacement.view(-1, 1)),
+            # 1e-8 + self.initial_displacement.view(-1, 1) ** 2,
+            0
+        )
+        print(x.shape)
+        x = x.view(self.n_oscillators, self.n_resonances, self.expressivity, self.n_samples)
+        x = torch.sum(x, dim=0)
+        return x.view(1, 1, self.n_resonances, self.expressivity, self.n_samples)
+
+    def forward(self) -> torch.Tensor:
+        return self._materialize_resonances(self.damping.device)
+
+
+class LatentResonanceBlock(nn.Module):
+    def __init__(
+            self,
+            n_samples: int,
+            n_resonances: int,
+            expressivity: int,
+            latent_dim: int):
+
+        super().__init__()
+        self.n_samples = n_samples
+        self.n_resonances = n_resonances
+        self.expressivity = expressivity
+        self.latent_dim = latent_dim
+
+        n_coeffs = n_samples // 2 + 1
+        total_coeffs = n_coeffs * 2
+
+
+        self.mapping = HyperNetworkLayer(latent_dim, latent_dim, latent_dim, total_coeffs, bias=False)
+        self.layer_latents = nn.Parameter(
+            torch.zeros(n_resonances, latent_dim).uniform_(-1, 1))
+        self.resonances = nn.Parameter(
+            torch.zeros(n_resonances, expressivity, latent_dim).uniform_(-1, 1))
+
+    def forward(self) -> torch.Tensor:
+        w, fwd = self.mapping.forward(self.layer_latents)
+        mapped = fwd(self.resonances)
+        mapped = mapped.view(self.n_resonances, self.expressivity, -1, 2)
+        mapped = torch.view_as_complex(mapped)
+        res = torch.fft.irfft(mapped)
+        return res.view(1, 1, self.n_resonances, self.expressivity, self.n_samples)
+
 class FFTResonanceBlock(nn.Module):
     def __init__(
             self,
@@ -182,7 +301,6 @@ class FFTResonanceBlock(nn.Module):
             n_resonances: int,
             expressivity: int,
             base_resonance: float = 0.5):
-
         super().__init__()
         self.n_samples = n_samples
         self.resonance_window_size = resonance_window_size
@@ -248,6 +366,7 @@ class FFTResonanceBlock(nn.Module):
             self.resonances['decay']
         )
 
+
 class ResonanceLayer(nn.Module):
 
     def __init__(
@@ -271,14 +390,22 @@ class ResonanceLayer(nn.Module):
         self.router = nn.Parameter(
             torch.zeros((self.control_plane_dim, self.n_resonances)).uniform_(-1, 1))
 
+        # self.resonance = DampedHarmonicOscillatorBlock(
+        #     n_samples, 32, n_resonances, expressivity
+        # )
+
+        # self.resonance = LatentResonanceBlock(
+        #     n_samples, n_resonances, expressivity, latent_dim=16)
+
         self.resonance = FFTResonanceBlock(
             n_samples, resonance_window_size, n_resonances, expressivity, base_resonance)
+
         # self.resonance = MultibandFFTResonanceBlock(
         #     n_resonances,
         #     n_samples,
         #     expressivity,
         #     smallest_band_size=2048,
-        #     base_resonance=0.02,
+        #     base_resonance=0.00001,
         #     window_size=64)
 
         # def init_resonance() -> torch.Tensor:
@@ -301,9 +428,8 @@ class ResonanceLayer(nn.Module):
             self,
             control_signal: torch.Tensor,
             deformations: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-
         res = self.resonance.forward()
-
+        print(res.shape)
         output, fwd = execute_layer(
             control_signal,
             self.router,
@@ -409,7 +535,6 @@ class OverfitResonanceStack(nn.Module):
             self,
             cp: torch.Tensor,
             n_to_keep: int = 128) -> torch.Tensor:
-
         cp = cp.view(1, self.control_plane_dim, self.n_frames)
         cp = sparsify(cp, n_to_keep=n_to_keep)
         cp = cp.view(1, 1, self.control_plane_dim, self.n_frames)
@@ -459,24 +584,26 @@ def l0_norm(x: torch.Tensor):
 
 
 def overfit_model():
-    n_samples = 2 ** 17
+    n_samples = 2 ** 16
     resonance_window_size = 2048
     step_size = 1024
     n_frames = n_samples // step_size
 
-    control_plane_dim = 64
-    n_resonances = 64
+    # KLUDGE: control_plane_dim and n_resonances
+    # must have the same value
+    control_plane_dim = 32
+    n_resonances = 32
     expressivity = 4
 
     target = get_one_audio_segment(n_samples)
     model = OverfitResonanceStack(
-        n_layers=2,
+        n_layers=1,
         n_samples=n_samples,
         resonance_window_size=resonance_window_size,
         control_plane_dim=control_plane_dim,
         n_resonances=n_resonances,
         expressivity=expressivity,
-        base_resonance=0.01,
+        base_resonance=0.5,
         n_frames=n_frames
     ).to(device)
     optimizer = Adam(model.parameters(), lr=1e-2)
@@ -514,6 +641,8 @@ def overfit_model():
 
             x = flattened_multiband_spectrogram(target, {'s': (64, 16)})
             y = flattened_multiband_spectrogram(recon, {'s': (64, 16)})
+            # x = stft(target, 2048, 256, pad=True)
+            # y = stft(recon, 2048, 256, pad=True)
             loss = torch.abs(x - y).sum()
 
             loss.backward()

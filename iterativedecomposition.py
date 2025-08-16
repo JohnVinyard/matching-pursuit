@@ -13,7 +13,7 @@ from modules import stft, sparsify, sparsify_vectors, iterative_loss, max_norm, 
     sparse_softmax, positional_encoding, UNet, flattened_multiband_spectrogram
 from modules.anticausal import AntiCausalAnalysis
 from modules.eventgenerators.generator import EventGenerator
-from modules.eventgenerators.overfitresonance import OverfitResonanceModel, SimpleEventGenerator
+from modules.eventgenerators.overfitresonance import OverfitResonanceModel, SimpleEventGenerator, WavetableModel
 from modules.infoloss import CorrelationLoss
 from modules.iterative import sort_channels_descending_norm
 from modules.mixer import MixerStack
@@ -439,26 +439,27 @@ def train_and_monitor(
 
         hidden_channels = 512
 
-        resonance_model = OverfitResonanceModel(
-            n_noise_filters=64,
-            noise_expressivity=2,
-            noise_filter_samples=128,
-            noise_deformations=32,
-            instr_expressivity=4,
-            n_events=1,
-            n_resonances=4096,
-            n_envelopes=256,
-            n_decays=64,
-            n_deformations=256,
-            n_samples=n_samples,
-            n_frames=n_frames,
-            samplerate=samplerate,
-            hidden_channels=hidden_channels,
-            wavetable_device=device,
-            fine_positioning=fine_positioning,
-            fft_resonance=True,
-            context_dim=context_dim
-        )
+        # resonance_model = OverfitResonanceModel(
+        #     n_noise_filters=64,
+        #     noise_expressivity=2,
+        #     noise_filter_samples=128,
+        #     noise_deformations=32,
+        #     instr_expressivity=4,
+        #     n_events=1,
+        #     n_resonances=4096,
+        #     n_envelopes=256,
+        #     n_decays=64,
+        #     n_deformations=256,
+        #     n_samples=n_samples,
+        #     n_frames=n_frames,
+        #     samplerate=samplerate,
+        #     hidden_channels=hidden_channels,
+        #     wavetable_device=device,
+        #     fine_positioning=fine_positioning,
+        #     fft_resonance=True,
+        #     context_dim=context_dim
+        # )
+        resonance_model = WavetableModel(n_items=512, n_samples=n_samples, n_frames=n_frames, n_events=1)
 
         # resonance_model = SimpleEventGenerator(
         #     context_dim=context_dim,

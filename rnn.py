@@ -80,9 +80,6 @@ class SSM(nn.Module):
 
         self.out_proj = nn.Linear(state_dim, window_size, bias=False)
 
-        self.shape = nn.Parameter(torch.zeros(window_size).uniform_(-0.01, 1))
-        self.rate = nn.Parameter(torch.zeros(window_size).uniform_(-0.01, 1))
-
         self.apply(init_weights)
 
     def forward(self, control: torch.Tensor) -> torch.Tensor:

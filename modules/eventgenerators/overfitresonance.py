@@ -630,7 +630,7 @@ class WavetableModel(nn.Module, EventGenerator):
         self.n_frames = n_frames
         self.n_events = n_events
 
-        self.items = Lookup(n_items, 16384, fixed=False, selection_type='softmax')
+        self.items = Lookup(n_items, 16384, fixed=False, selection_type='relu')
         verbs = NeuralReverb.tensors_from_directory(Config.impulse_response_path(), n_samples)
         n_verbs = verbs.shape[0]
         self.n_verbs = n_verbs
@@ -658,6 +658,7 @@ class WavetableModel(nn.Module, EventGenerator):
 
         dry = self.items.forward(mix)
         dry = dry + torch.zeros_like(dry).uniform_(-1e-7, 1e-7)
+        dry = unit_norm(dry)
 
         dry = F.pad(dry, (0, self.n_samples - dry.shape[-1]))
         verb = self.verb.forward(room_choice)
