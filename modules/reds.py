@@ -103,6 +103,8 @@ class F0Resonance(nn.Module):
         self.n_samples = n_samples
 
         # self.register_buffer('powers', 1 / 2 ** (torch.arange(1, 1 + n_f0_elements, 1)))
+
+
         self.register_buffer('factors', factors)
 
         self.min_freq = self.min_hz / (samplerate // 2)
@@ -125,7 +127,7 @@ class F0Resonance(nn.Module):
         # f0 = torch.abs(
         #     f0  # @ self.powers
         # )
-        f0 = (f0 % 1) ** 2
+        f0 = f0 ** 2
         f0 = f0.view(batch, n_events, 1)
         print(f0)
 

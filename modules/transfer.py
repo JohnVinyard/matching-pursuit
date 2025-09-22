@@ -175,14 +175,14 @@ def freq_domain_transfer_function_to_resonance(
         apply_decay: bool = True,
         start_phase: Union[None, torch.Tensor] = None,
         start_mags: Union[None, torch.Tensor] = None,
-        log_space_scan: bool = True) -> torch.Tensor:
-
+        log_space_scan: bool = True,
+        phase_dither: torch.Tensor = None) -> torch.Tensor:
     step_size = window_size // 2
     total_samples = step_size * n_frames
 
     expected_coeffs = window_size // 2 + 1
 
-    group_delay = torch.linspace(0, np.pi, expected_coeffs)
+    group_delay = torch.linspace(0, np.pi, expected_coeffs, device=coeffs.device)
 
     res = coeffs.reshape(-1, expected_coeffs, 1).repeat(1, 1, n_frames)
 
@@ -197,7 +197,6 @@ def freq_domain_transfer_function_to_resonance(
         res
     ], dim=-1)
 
-
     if apply_decay:
         if log_space_scan:
             res = torch.log(res + 1e-12)
@@ -210,15 +209,21 @@ def freq_domain_transfer_function_to_resonance(
     spec = res[..., :n_frames]
     spec = spec.view(-1, expected_coeffs, n_frames).permute(0, 2, 1).view(-1, 1, n_frames, expected_coeffs)
 
-    phase = torch.zeros_like(spec).uniform_(-np.pi, np.pi)
+    phase = torch.zeros_like(spec)
+    # .uniform_(-np.pi, np.pi)
     gd = group_delay[None, None, None, :]
     phase[:, :, :, :] = gd
+
+    if phase_dither is not None:
+        # print(phase_dither.shape, phase.shape, group_delay.shape)
+        # TODO: Experimental
+        phase = phase + (torch.zeros_like(phase).uniform_(-1, 1) * group_delay[None, None, None, :] * phase_dither[:, None, :, :])
+
     phase = torch.cumsum(phase, dim=2)
 
     if start_phase is not None:
         # apply constant offset to each FFT bin
         phase = phase + start_phase.reshape(-1, 1, 1, expected_coeffs)
-
 
     # convert from polar coordinates
     spec = spec * torch.exp(1j * phase)

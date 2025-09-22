@@ -20,6 +20,8 @@ Feel free to [jump ahead](#Examples) if you're curious to hear all the audio exa
 
 """
 from modules.overlap_add import overlap_add
+from modules.upsample import ensure_last_axis_length
+from util.music import midi_to_hz
 
 # example_1.random_component
 
@@ -51,7 +53,7 @@ control_plane_dim = 64
 state_dim = 128
 
 # the number of (batch, control_plane_dim, frames) elements allowed to be non-zero
-n_active_sites = None
+n_active_sites = 512
 
 """[markdown]
 
@@ -89,7 +91,7 @@ from torch import nn
 from itertools import count
 
 from data import get_one_audio_segment
-from modules import max_norm, flattened_multiband_spectrogram, sparsify, stft
+from modules import max_norm, flattened_multiband_spectrogram, sparsify, stft, interpolate_last_axis
 from torch.optim import Adam
 
 from util import device, encode_audio, make_initializer
@@ -102,7 +104,7 @@ from torch.nn.utils.clip_grad import clip_grad_value_
 from argparse import ArgumentParser
 from modules.infoloss import CorrelationLoss
 from base64 import b64encode
-from sklearn.decomposition import PCA
+from sklearn.decomposition import PCA, SparsePCA, FastICA
 from modules.transfer import hierarchical_dirac, fft_convolve
 from torch.nn import functional as F
 
@@ -124,6 +126,32 @@ Note that there is a slight deviation from the canonical SSM in that we have a f
 init_weights = make_initializer(0.05)
 
 
+
+def fft_shift(a: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
+    # this is here to make the shift value interpretable
+    shift = (1 - shift)
+
+    n_samples = a.shape[-1]
+
+    shift_samples = (shift * n_samples * 0.5)
+
+    # a = F.pad(a, (0, n_samples * 2))
+
+    spec = torch.fft.rfft(a, dim=-1, norm='ortho')
+
+    n_coeffs = spec.shape[-1]
+    shift = (torch.arange(0, n_coeffs, device=a.device) * 2j * np.pi) / n_coeffs
+
+    shift = torch.exp(shift * shift_samples)
+
+    spec = spec * shift
+
+    samples = torch.fft.irfft(spec, dim=-1, norm='ortho')
+    # samples = samples[..., :n_samples]
+    # samples = torch.relu(samples)
+    return samples
+
+
 class InstrumentModel(nn.Module):
     """
     A state-space model-like module, with one additional matrix, used to project the control
@@ -139,6 +167,14 @@ class InstrumentModel(nn.Module):
         self.input_dim = input_dim
         self.control_plane_dim = control_plane_dim
 
+        self.samplerate = samplerate
+        self.min_hz = 20
+        self.max_hz = 10000
+
+        self.min_freq = self.min_hz / (samplerate // 2)
+        self.max_freq = self.max_hz / (samplerate // 2)
+        self.freq_range = self.max_freq - self.min_freq
+
         self.net = nn.RNN(
             input_size=input_dim,
             hidden_size=state_matrix_dim,
@@ -152,9 +188,15 @@ class InstrumentModel(nn.Module):
             torch.zeros(control_plane_dim, input_dim).uniform_(-0.01, 0.01)
         )
 
+        self.window_size = window_size
+
         self.out_proj = nn.Linear(state_dim, window_size, bias=False)
 
-        # self.factor = nn.Parameter(torch.zeros(1).fill_(20))
+
+        n_freqs = 32
+        self.n_freqs = n_freqs
+        self.to_amp = nn.Linear(state_dim, n_freqs, bias=False)
+        self.to_freq = nn.Linear(state_dim, n_freqs, bias=True)
 
         self.apply(init_weights)
 
@@ -170,26 +212,45 @@ class InstrumentModel(nn.Module):
 
         # try to ensure that the input signal only includes low-frequency info
         proj = control @ self.proj
-        # proj = F.interpolate(proj, size=self.input_dim, mode='linear')
-        # proj = proj * torch.zeros_like(proj).uniform_(-1, 1)
-        # proj = proj * torch.hann_window(self.input_dim, device=proj.device)
+        # window = torch.hamming_window(proj.shape[-1], device=proj.device)[None, None, :]
+        # proj = proj * window
 
         assert proj.shape == (batch, frames, self.input_dim)
-        result, hidden = self.net.forward(proj)
+        x, hidden = self.net.forward(proj)
 
-        result = self.out_proj(result)
+        amps = self.to_amp(x).permute(0, 2, 1) ** 2
+        freqs = torch.sigmoid(self.to_freq(x).permute(0, 2, 1)) * 128
+        freqs = 440 * (2 ** ((freqs - 69) / 12))
+        freqs = freqs / (22050 / 2)
 
-        end_values = result[:, 0:-1, -1]
-        start_values = result[:, 1:, 0]
 
-        diff = start_values - end_values
+        orig_freqs = freqs
 
-        result = result.view(batch, 1, -1)
 
-        # result = torch.cumsum(result, dim=-1)
-        # result = torch.tanh(result)
+        amps = interpolate_last_axis(amps, n_samples)
+        freqs = interpolate_last_axis(freqs, n_samples)
+
+        osc = torch.sin(torch.cumsum(freqs * 2 * np.pi, dim=-1))
+
+        result = amps * osc
+        result = torch.sum(result, dim=1, keepdim=True)
+
+
+
+
+        # result = self.out_proj(x)
+        # conv = self.out_conv(x)
+        # result = fft_convolve(result, conv)
+        #
+        # end_values = result[:, 0:-1, -1]
+        # start_values = result[:, 1:, 0]
+        #
+        # diff = start_values - end_values
+        # result = result.reshape(batch, 1, -1)
+
         # result = torch.sin(result)
-        return result, diff
+
+        return result, 0
 
 
 """[markdown]
@@ -237,7 +298,7 @@ class OverfitControlPlane(nn.Module):
     def _get_mapping(self, n_components: int) -> np.ndarray:
         cs = self.control_signal.data.cpu().numpy() \
             .reshape(self.control_plane_dim, self.n_frames).T
-        pca = PCA(n_components=n_components)
+        pca = SparsePCA(n_components=n_components)
         pca.fit(cs)
         print(pca.components_.min(), pca.components_.max())
         # this will be of shape (n_components, control_plane_dim)
@@ -251,7 +312,7 @@ class OverfitControlPlane(nn.Module):
         return self._get_mapping(n_components=3)
 
     def get_hand_tracking_mapping(self) -> np.ndarray:
-        mapping = self._get_mapping(n_components=21)
+        mapping = self._get_mapping(n_components=21 * 3)
         print(mapping.shape)
         return mapping
 
@@ -481,6 +542,7 @@ def l0_norm(x: torch.Tensor):
 def l1_norm(x: torch.Tensor):
     return torch.abs(x).sum()
 
+
 def sparsity_loss(x: torch.Tensor) -> torch.Tensor:
     return l1_norm(x) * 0.1
 
@@ -504,7 +566,7 @@ def demo_page_dict(n_iterations: int = 100, n_examples: int = 5) -> Dict[str, an
             for iteration in range(iterations):
                 optim.zero_grad()
                 recon, diff = model.forward()
-                loss = reconstruction_loss(recon, target) + sparsity_loss(model.control_signal)
+                loss = reconstruction_loss(recon, target) + ((diff ** 2).sum() * 100) #+ sparsity_loss(model.control_signal)
 
                 if torch.isnan(loss).any():
                     print(f'detected NaN at iteration {iteration}')
@@ -706,6 +768,8 @@ def train_and_monitor():
 
     # loss_model = CorrelationLoss().to(device)
 
+    # filt = torch.ones(n_samples // 128, device=device).view(1, 1, -1)
+
     def train(target: torch.Tensor):
         model = construct_experiment_model()
 
@@ -713,9 +777,18 @@ def train_and_monitor():
 
         for iteration in count():
             optim.zero_grad()
-            recon, diff = model.forward()
+            recon, _ = model.forward()
+
+            # filtered = F.conv1d(recon, filt, stride=1, padding=n_samples, dilation=128)
+            # print(filtered.shape)
+
             recon_audio(max_norm(recon))
-            loss = reconstruction_loss(recon, target) + sparsity_loss(model.control_signal)
+            # loss = reconstruction_loss(recon, target) #+ (diff ** 2).sum() #+ sparsity_loss(model.control_signal)
+            # loss = reconstruction_loss(recon, target) #+ sparsity_loss(model.control_signal)
+            # + (sparsity_loss(model.control_signal) * 0) \
+            # + torch.abs(filtered).sum()
+
+            loss = reconstruction_loss(recon, target)
 
             envelopes(model.control_signal.view(control_plane_dim, -1))
             loss.backward()

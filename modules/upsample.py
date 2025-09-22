@@ -19,7 +19,7 @@ def upsample_with_holes(low_sr: torch.Tensor, desired_size: int) -> torch.Tensor
     return upsampled
 
 
-def interpolate_last_axis(low_sr: torch.Tensor, desired_size) -> torch.Tensor:
+def interpolate_last_axis(low_sr: torch.Tensor, desired_size, mode='linear') -> torch.Tensor:
     """A convenience wrapper around `torch.nn.functional.interpolate` to allow
     for an arbitrary number of leading dimensions
     """
@@ -28,7 +28,7 @@ def interpolate_last_axis(low_sr: torch.Tensor, desired_size) -> torch.Tensor:
     last_dim = low_sr.shape[-1]
     
     reshaped = low_sr.reshape(-1, 1, last_dim)
-    upsampled = F.interpolate(reshaped, mode='linear', size=desired_size)
+    upsampled = F.interpolate(reshaped, mode=mode, size=desired_size)
     upsampled = upsampled.reshape(*new_shape)
     return upsampled
 

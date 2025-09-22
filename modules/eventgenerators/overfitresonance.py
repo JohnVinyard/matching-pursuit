@@ -281,7 +281,6 @@ class MultibandResonanceLookup(Lookup):
         return full
 
 
-
 class FFTResonanceLookup(Lookup):
     def __init__(self, n_items: int, n_samples: int, window_size: int, base_resonance: float = 0.5):
         def init(x):
@@ -293,7 +292,6 @@ class FFTResonanceLookup(Lookup):
         step_size = window_size // 2
 
         super().__init__(n_items, n_coeffs, initialize=init, selection_type='relu')
-
 
         self.base_resonance = base_resonance
         self.window_size = window_size
@@ -326,7 +324,6 @@ class FFTResonanceLookup(Lookup):
         items = items.view(batch, n_events, expressivity, -1)
         items = unit_norm(items, dim=-1)
         return items
-
 
 
 class WavetableLookup(Lookup):
@@ -426,7 +423,6 @@ class EnvelopesMLP(nn.Module):
             env_samples: int,
             full_size: int,
             padded_size: int):
-
         super().__init__()
         self.input_channels = input_channels
         self.env_samples = env_samples
@@ -465,7 +461,6 @@ class Envelopes(Lookup):
         #     exp = torch.linspace(2, 40, n_items, device=x.device)[:, None]
         #     x = ramp ** exp
         #     return x
-
 
         super().__init__(
             n_items,
@@ -574,6 +569,7 @@ class DeformationsMLP(nn.Module):
         x = interpolate_last_axis(x, desired_size=self.full_size)
         return x, before_upsample
 
+
 class Deformations(Lookup):
 
     def __init__(self, n_items: int, channels: int, frames: int, full_size: int):
@@ -613,7 +609,92 @@ class Deformations(Lookup):
         return x, before_upsample
 
 
+class AudioModelEventGenerator(nn.Module, EventGenerator):
 
+    @property
+    def shape_spec(self) -> ShapeSpec:
+        return dict(
+            params=(self.n_items,),
+            amp=(1,)
+        )
+
+    def __init__(
+            self,
+            n_items: int,
+            n_samples: int,
+            n_frames: int,
+            n_events: int,
+            samplerate: int,
+            context_dim: int):
+
+        super().__init__()
+
+        self.context_dim = context_dim
+        self.latent_dim = 32
+        self.n_events = n_events
+        self.n_frames = n_frames
+        self.n_samples = n_samples
+        self.n_items = n_items
+
+        def initialize(x: torch.Tensor) -> torch.Tensor:
+            noise = torch.zeros_like(x)
+            noise = noise.view(-1, self.latent_dim, self.n_frames).uniform_(-0.01, 0.01)
+            env = torch.linspace(1, 0, self.n_frames, device=x.device).view(1, 1, self.n_frames)
+            decay =  torch.zeros(self.n_items, self.latent_dim).uniform_(2, 200).view(self.n_items, self.latent_dim, 1)
+            x = noise * (env ** decay)
+            x = x.view(self.n_items, -1)
+            return x
+
+        self.items = Lookup(n_items, n_samples=self.latent_dim * self.n_frames, selection_type='relu', initialize=initialize)
+        self.phase_items = Lookup(n_items, n_samples=self.latent_dim * self.n_frames, selection_type='relu')
+
+        step_size = self.n_samples // self.n_frames
+        window_size = step_size * 2
+        n_coeffs = window_size // 2 + 1
+
+        # self.to_mag = LinearOutputStack(channels=128, layers=3, out_channels=n_coeffs, in_channels=self.latent_dim)
+        # self.to_phase = LinearOutputStack(channels=128, layers=3, out_channels=n_coeffs, in_channels=self.latent_dim)
+
+        self.to_mag = nn.Linear(self.latent_dim, n_coeffs)
+        self.to_phase = nn.Linear(self.latent_dim, n_coeffs)
+
+        self.register_buffer('group_delay',  torch.linspace(0, np.pi, n_coeffs))
+
+        self.scheduler = DiracScheduler(
+            self.n_events, start_size=self.n_frames, n_samples=self.n_samples, pre_sparse=True)
+
+    def forward(self, params: torch.Tensor, times: torch.Tensor, amp: torch.Tensor) -> torch.Tensor:
+        x = params
+        batch, n_items = x.shape[:2]
+
+        items = self.items.forward(x)
+        pi = self.phase_items(x)
+
+        items = items.view(-1, self.latent_dim, self.n_frames).permute(0, 2, 1)
+        pi = pi.view(-1, self.latent_dim, self.n_frames).permute(0, 2, 1)
+
+        mag = self.to_mag(items)
+        phase = self.to_phase(pi)
+
+        b = mag.shape[0]
+        mag = torch.abs(mag.view(b, self.n_frames, -1))
+        phase = phase.view(b, self.n_frames, -1) * self.group_delay[None, None, :] * 1e-3
+
+
+        gd = self.group_delay.view(1, 1, -1).repeat(1, self.n_frames, 1)
+        phase = gd + (phase * torch.zeros_like(phase).uniform_(-1, 1))
+
+        phase = torch.cumsum(phase, dim=1)
+
+        x = mag * torch.exp(1j * phase)
+
+        x = torch.fft.irfft(x, dim=-1)
+        x = overlap_add(x[:, None, :, :])[..., :self.n_samples]
+
+        x = x * torch.abs(amp)
+
+        final = self.scheduler.schedule(times, x)
+        return final
 
 
 class WavetableModel(nn.Module, EventGenerator):
@@ -623,14 +704,50 @@ class WavetableModel(nn.Module, EventGenerator):
             n_items: int,
             n_samples: int,
             n_frames: int,
-            n_events: int):
+            n_events: int,
+            expressivity: int,
+            n_deformations: int = 128,
+            wavetable_samples: int = 16384,
+            lowest_band: int = 512):
         super().__init__()
         self.n_items = n_items
         self.n_samples = n_samples
         self.n_frames = n_frames
         self.n_events = n_events
+        self.wavetable_samples = wavetable_samples
+        self.lowest_band = lowest_band
+        self.expressivity = expressivity
+        self.n_deformations = n_deformations
 
-        self.items = Lookup(n_items, 16384, fixed=False, selection_type='relu')
+        start = int(np.log2(self.lowest_band))
+        end = int(np.log2(wavetable_samples))
+        self.n_bands = end - start
+
+        def init(x: torch.Tensor) -> torch.Tensor:
+            noise = torch.zeros_like(x).uniform_(-0.1, 0.1)
+            env = torch.linspace(1, 0, x.shape[-1])
+            decays = torch.zeros(x.shape[0]).uniform_(10, 100)
+            x = noise * (env[None, :] ** decays[:, None])
+            return x
+
+        # self.items = Lookup(
+        #     n_items,
+        #     self.wavetable_samples,
+        #     fixed=False,
+        #     selection_type='identity',
+        #     initialize=init)
+
+        self.items = nn.ModuleDict({
+            str(2 ** size): Lookup(n_items, 2 ** size, fixed=False, selection_type='identity', initialize=init)
+            for size in range(start, end)
+        })
+
+        self.warp = Deformations(
+            n_items=128,
+            channels=self.expressivity,
+            frames=128,
+            full_size=n_samples)
+
         verbs = NeuralReverb.tensors_from_directory(Config.impulse_response_path(), n_samples)
         n_verbs = verbs.shape[0]
         self.n_verbs = n_verbs
@@ -642,7 +759,8 @@ class WavetableModel(nn.Module, EventGenerator):
     def shape_spec(self) -> ShapeSpec:
         return dict(
             amplitudes=(1,),
-            mix=(self.n_items,),
+            mix=(self.expressivity, self.n_items * self.n_bands,),
+            warp=(self.n_deformations,),
             room_choice=(self.n_verbs,),
             room_mix=(2,),
         )
@@ -651,16 +769,34 @@ class WavetableModel(nn.Module, EventGenerator):
             self,
             amplitudes: torch.Tensor,
             mix: torch.Tensor,
+            warp: torch.Tensor,
             room_choice: torch.Tensor,
             room_mix: torch.Tensor,
             times: torch.Tensor) -> torch.Tensor:
         batch_size = amplitudes.shape[0]
 
-        dry = self.items.forward(mix)
-        dry = dry + torch.zeros_like(dry).uniform_(-1e-7, 1e-7)
-        dry = unit_norm(dry)
+        bands = {}
+        for i, pair in enumerate(self.items.items()):
+            size, lookup = pair
+            mx = mix[:, :, :, i * self.n_items: (i + 1) * self.n_items]
+            bnd = lookup.forward(mx)
+            bands[int(size)] = bnd.view(batch_size, self.expressivity, -1)
+
+        dry = fft_frequency_recompose(bands, self.wavetable_samples)
+        dry = dry.view(batch_size, self.expressivity, -1)
+
+        d, _ = self.warp.forward(warp)
+
+        dry = dry.view(batch_size, self.expressivity, -1)
 
         dry = F.pad(dry, (0, self.n_samples - dry.shape[-1]))
+
+        dry = dry[:, None, :, :] * d
+        dry = torch.sum(dry, dim=2)
+
+        # print(dry.shape, d.shape)
+        # raise Exception('blah')
+
         verb = self.verb.forward(room_choice)
         wet = fft_convolve(dry, verb)
 
@@ -673,6 +809,7 @@ class WavetableModel(nn.Module, EventGenerator):
         final = self.scheduler.schedule(times, final)
         return final
 
+
 class SimpleEventGenerator(nn.Module, EventGenerator):
 
     @property
@@ -680,7 +817,6 @@ class SimpleEventGenerator(nn.Module, EventGenerator):
         params = dict(
             param=(self.context_dim,)
         )
-
 
         return params
 
@@ -840,8 +976,6 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
             with_noise=True
         )
 
-
-
         # self.e = ConvEnvelopes(
         #     n_samples=128, full_size=8192, padded_size=self.n_samples, context_dim=self.context_dim, channels=32)
 
@@ -857,7 +991,11 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
         #     frames=deformation_frames,
         #     full_size=n_samples)
 
-        self.warp = Deformations(n_deformations, instr_expressivity, deformation_frames, n_samples)
+        self.warp = Deformations(
+            n_deformations,
+            instr_expressivity,
+            deformation_frames,
+            n_samples)
 
         self.noise_warp = Deformations(noise_deformations, noise_expressivity, deformation_frames, n_samples)
 
@@ -867,8 +1005,6 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
         else:
             self.scheduler = DiracScheduler(
                 self.n_events, start_size=n_frames, n_samples=self.n_samples, pre_sparse=True)
-
-
 
         # self.scheduler = FFTShiftScheduler(self.n_events)
 
@@ -1003,7 +1139,6 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
         stacked = stacked * verb_mix
 
         final = stacked.sum(dim=-1)
-
 
         intermediates['wet'] = final
 

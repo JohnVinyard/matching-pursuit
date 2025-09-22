@@ -7,7 +7,7 @@ from util.music import musical_scale_hz
 from torch.nn import functional as F
 from typing import Literal
 
-SelectionType = Literal['sparse_softmax', 'gumbel_softmax', 'softmax', 'relu']
+SelectionType = Literal['sparse_softmax', 'gumbel_softmax', 'softmax', 'relu', 'identity']
 
 
 def hard_choice(
@@ -16,6 +16,8 @@ def hard_choice(
 
     if selection_type == 'sparse_softmax':
         selections = sparse_softmax(selections, normalize=True, dim=-1)
+    elif selection_type == 'identity':
+        return selections
     elif selection_type == 'gumbel_softmax':
         selections = F.gumbel_softmax(selections, tau=0.1, hard=True, dim=-1)
     elif selection_type == 'softmax':

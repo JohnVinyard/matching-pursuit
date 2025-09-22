@@ -128,7 +128,7 @@ class OverfitHierarchicalEvents(nn.Module):
             n_frames=n_samples // 256,
             hard_reverb_choice=False,
             hierarchical_scheduler=True,
-            wavetable_resonance=True,
+            wavetable_resonance=False,
         )
         self.transform = MultiHeadTransform(
             self.context_dim, hidden_channels=128, shapes=self.event_generator.shape_spec, n_layers=1)
@@ -286,13 +286,13 @@ def overfit(
         perturbed_summed = max_norm(perturbed_summed)
         perturbed_audio(perturbed_summed)
 
-        loss = reconstruction_loss(target, recon_summed)
+        # loss = reconstruction_loss(target, recon_summed)
 
         # loss = loss_model.compute_multiband_loss(target, recon)
         # loss = loss_model.compute_loss(target, recon)
         # loss = loss_model.compute_multiband_loss(target, recon_summed, 64, 16)
 
-        # loss = iterative_loss(target, recon, loss_transform, ratio_loss=True)
+        loss = iterative_loss(target, recon, loss_transform, ratio_loss=False)
 
         compression_ratio = count_parameters(model) / n_samples
 

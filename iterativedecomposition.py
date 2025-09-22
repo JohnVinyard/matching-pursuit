@@ -13,7 +13,8 @@ from modules import stft, sparsify, sparsify_vectors, iterative_loss, max_norm, 
     sparse_softmax, positional_encoding, UNet, flattened_multiband_spectrogram
 from modules.anticausal import AntiCausalAnalysis
 from modules.eventgenerators.generator import EventGenerator
-from modules.eventgenerators.overfitresonance import OverfitResonanceModel, SimpleEventGenerator, WavetableModel
+from modules.eventgenerators.overfitresonance import OverfitResonanceModel, SimpleEventGenerator, WavetableModel, \
+    AudioModelEventGenerator
 from modules.infoloss import CorrelationLoss
 from modules.iterative import sort_channels_descending_norm
 from modules.mixer import MixerStack
@@ -81,10 +82,10 @@ def transform(x: torch.Tensor):
 
 
 def loss_transform(x: torch.Tensor) -> torch.Tensor:
-    batch, n_events, time = x.shape
-    x = stft(x, transform_window_size, transform_step_size, pad=True)
-    x = x.view(batch, n_events, -1)
-    # x = flattened_multiband_spectrogram(x, {'spec': (64, 16)})
+    # batch, n_events, time = x.shape
+    # x = stft(x, transform_window_size, transform_step_size, pad=True)
+    # x = x.view(batch, n_events, -1)
+    x = flattened_multiband_spectrogram(x, {'spec': (64, 16)})
     return x
 
 
@@ -459,7 +460,22 @@ def train_and_monitor(
         #     fft_resonance=True,
         #     context_dim=context_dim
         # )
-        resonance_model = WavetableModel(n_items=512, n_samples=n_samples, n_frames=n_frames, n_events=1)
+
+        # resonance_model = WavetableModel(
+        #     n_items=512,
+        #     expressivity=4,
+        #     n_samples=n_samples,
+        #     n_frames=n_frames,
+        #     n_events=1)
+
+        resonance_model = AudioModelEventGenerator(
+            n_items=1024,
+            n_samples=n_samples,
+            n_frames=n_frames,
+            n_events=1,
+            samplerate=samplerate,
+            context_dim=context_dim
+        )
 
         # resonance_model = SimpleEventGenerator(
         #     context_dim=context_dim,
@@ -499,7 +515,7 @@ def train_and_monitor(
 
         # loss_model = SpikingModel(64, 64, 64, 64, 64).to(device)
         # loss_model = CorrelationLoss(n_elements=512).to(device)
-        loss_model = AutocorrelationLoss(64, 64).to(device)
+        # loss_model = AutocorrelationLoss(64, 64).to(device)
 
         for i, item in enumerate(iter(stream)):
             optim.zero_grad()
@@ -536,6 +552,8 @@ def train_and_monitor(
                     loss_transform,
                     ratio_loss=False,
                     sort_channels=True)
+
+                # loss = loss_model.multiband_noise_loss(target, recon_summed, 64, 16)
 
 
                 # disc_j = disc.forward(recon_summed)

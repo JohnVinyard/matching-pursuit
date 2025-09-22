@@ -11,6 +11,7 @@ import conjure
 from data import get_one_audio_segment
 from modules import max_norm, interpolate_last_axis, sparsify, unit_norm, flattened_multiband_spectrogram, \
     fft_frequency_recompose, stft, HyperNetworkLayer
+from modules.infoloss import CorrelationLoss
 from modules.transfer import freq_domain_transfer_function_to_resonance, fft_convolve
 from modules.upsample import upsample_with_holes, ensure_last_axis_length
 from util import device, encode_audio, make_initializer
@@ -18,6 +19,66 @@ from util import device, encode_audio, make_initializer
 MaterializeResonances = Callable[..., torch.Tensor]
 
 init_weights = make_initializer(0.02)
+
+'''
+import numpy as np
+import matplotlib.pyplot as plt
+
+# 1. Define signal parameters
+A = 1.0        # Amplitude
+alpha = 0.5    # Damping factor
+f0 = 5         # Frequency in Hz
+phi = np.pi/4  # Phase in radians
+
+# 2. Define sampling parameters
+Fs = 100       # Sampling frequency (Hz)
+N = 1024       # Number of samples
+T = N / Fs     # Time duration
+
+# 3. Create frequency domain signal
+# Generate frequency axis
+omega0 = 2 * np.pi * f0
+omega = 2 * np.pi * np.fft.fftfreq(N, 1/Fs)
+
+# Compute the frequency domain function X(omega)
+X_omega_pos = (A/2) * np.exp(1j*phi) / (alpha + 1j * (omega - omega0))
+X_omega_neg = (A/2) * np.exp(-1j*phi) / (alpha + 1j * (omega + omega0))
+X_omega = X_omega_pos + X_omega_neg
+
+# 4. Take the inverse FFT to get the time domain signal
+x_t = np.fft.ifft(X_omega) * N
+
+# Optional: Add a windowing function to reduce artifacts
+window = np.hamming(N)
+x_t_windowed = np.fft.ifft(X_omega * window) * N
+
+# Plot the results
+t = np.arange(N) / Fs
+
+plt.figure(figsize=(12, 8))
+
+# Plot time-domain signal
+plt.subplot(2, 1, 1)
+plt.plot(t, np.real(x_t), label='Time-domain signal')
+plt.title('Damped Sinusoid in Time Domain')
+plt.xlabel('Time (s)')
+plt.ylabel('Amplitude')
+plt.grid(True)
+plt.legend()
+
+# Plot frequency-domain magnitude
+plt.subplot(2, 1, 2)
+# The `fftshift` function centers the zero-frequency component
+plt.plot(np.fft.fftshift(omega) / (2 * np.pi), np.fft.fftshift(np.abs(X_omega)))
+plt.title('Magnitude Spectrum in Frequency Domain')
+plt.xlabel('Frequency (Hz)')
+plt.ylabel('Magnitude')
+plt.grid(True)
+plt.xlim([-20, 20])
+plt.tight_layout()
+plt.show()
+
+'''
 
 
 def execute_layer(
@@ -113,7 +174,7 @@ class MultibandFFTResonanceBlock(nn.Module):
 
         n_coeffs = window_size // 2 + 1
         # magnitude and phase for each band
-        params_per_band = n_coeffs * 3
+        params_per_band = n_coeffs * 4
         total_params_per_item = params_per_band * n_bands
 
         def init_resonance() -> torch.Tensor:
@@ -128,6 +189,7 @@ class MultibandFFTResonanceBlock(nn.Module):
             amp=init_resonance(),
             phase=init_resonance(),
             decay=init_resonance(),
+            phase_dither=init_resonance()
         ))
         # super().__init__(n_items, total_params_per_item, selection_type='relu', initialize=init)
 
@@ -158,19 +220,25 @@ class MultibandFFTResonanceBlock(nn.Module):
 
             mag = self.resonances['decay'][:, :self.n_coeffs, :]
             phase = self.resonances['phase'][:, self.n_coeffs:self.n_coeffs * 2, :]
-            start = self.resonances['amp'][:, -self.n_coeffs:, :]
+            start = self.resonances['amp'][:, self.n_coeffs*2:self.n_coeffs*3, :]
+            phase_dither = self.resonances['phase_dither'][:, -self.n_coeffs:, :]
 
-            mag = self.base_resonance + ((torch.sigmoid(mag) * self.resonance_span) * 0.9999)
-            phase = torch.tanh(phase) * np.pi
-            start = torch.sigmoid(start)
+            mag = mag.permute(0, 2, 1)
+            phase = phase.permute(0, 2, 1)
+            start = phase.permute(0, 2, 1)
+            phase_dither = phase_dither.permute(0, 2, 1)
+
+            # print(mag.shape, phase.shape, start.shape, phase_dither.shape)
 
             band = freq_domain_transfer_function_to_resonance(
                 window_size=self.window_size,
-                coeffs=mag,
+                coeffs=self.base_resonance + ((torch.sigmoid(mag) * self.resonance_span) * 0.9999),
                 n_frames=self.frames_per_band[i],
                 apply_decay=True,
-                start_phase=phase,
-                start_mags=start
+                start_phase=torch.tanh(phase) * np.pi,
+                start_mags=start ** 2,
+                phase_dither=torch.tanh(phase_dither),
+                log_space_scan=True
             )
             bands[size] = band
             # bands[size] = ensure_last_axis_length(band, size * 2)
@@ -199,11 +267,11 @@ def damped_harmonic_oscillator(
 
     x = (damping / (2 * mass))
     omega = torch.sqrt(tension - (x ** 2))
-    phi = torch.arctan((initial_velocity + (x * initial_displacement) / (initial_displacement * omega)))
-    # phi = torch.atan2(
-    #     (initial_velocity + (x * initial_displacement)),
-    #     (initial_displacement * omega)
-    # )
+    # phi = torch.arctan((initial_velocity + (x * initial_displacement) / (initial_displacement * omega)))
+    phi = torch.atan2(
+        (initial_velocity + (x * initial_displacement)),
+        (initial_displacement * omega)
+    )
     a = initial_displacement / torch.cos(phi)
     z = a * torch.exp(-x * time) * torch.cos(omega * time - phi)
     return z
@@ -228,7 +296,7 @@ class DampedHarmonicOscillatorBlock(nn.Module):
 
         self.damping = nn.Parameter(
             torch.zeros(n_oscillators, n_resonances, expressivity) \
-                .uniform_(0.1, 1.1))
+                .uniform_(0.5, 1.5))
 
         self.tension = nn.Parameter(
             torch.zeros(n_oscillators, n_resonances, expressivity) \
@@ -238,24 +306,30 @@ class DampedHarmonicOscillatorBlock(nn.Module):
             torch.zeros(n_oscillators, n_resonances, expressivity) \
                 .uniform_(-1, 2))
 
+        self.amplitudes = nn.Parameter(
+            torch.zeros(n_oscillators, n_resonances, expressivity, 1) \
+                .uniform_(-1, 1))
+
     def _materialize_resonances(self, device: torch.device):
         time = torch.linspace(0, 1, self.n_samples, device=device) \
             .view(1, self.n_samples)
         x = damped_harmonic_oscillator(
-            time,
-            # 1e-8 + self.mass.view(-1, 1) ** 2,
-            1e-8 + (10 ** self.mass.view(-1, 1)),
-            1e-8 + self.damping.view(-1, 1) ** 2,
-            # 1e-8 + self.tension.view(-1, 1) ** 2,
-            1e-8 + (10 ** self.tension.view(-1, 1)),
-            1e-8 + (10 ** self.initial_displacement.view(-1, 1)),
-            # 1e-8 + self.initial_displacement.view(-1, 1) ** 2,
-            0
+            time=time,
+            mass=torch.sigmoid(self.mass),
+            # mass=0.2,
+            damping=torch.sigmoid(self.damping) * 10,
+            tension=10 ** self.tension,
+            initial_displacement=self.initial_displacement,
+            initial_velocity=0
         )
-        print(x.shape)
+
         x = x.view(self.n_oscillators, self.n_resonances, self.expressivity, self.n_samples)
+        x = x * self.amplitudes ** 2
         x = torch.sum(x, dim=0)
-        return x.view(1, 1, self.n_resonances, self.expressivity, self.n_samples)
+
+        ramp = torch.ones(self.n_samples, device=device)
+        ramp[:10] = torch.linspace(0, 1, 10, device=device)
+        return x.view(1, 1, self.n_resonances, self.expressivity, self.n_samples) * ramp[None, None, None, None, :]
 
     def forward(self) -> torch.Tensor:
         return self._materialize_resonances(self.damping.device)
@@ -322,6 +396,7 @@ class FFTResonanceBlock(nn.Module):
             amp=init_resonance(),
             phase=init_resonance(),
             decay=init_resonance(),
+            phase_dither=init_resonance()
         ))
 
     def _materialize_fft_resonances(
@@ -331,7 +406,8 @@ class FFTResonanceBlock(nn.Module):
             n_samples: int,
             amp: torch.Tensor,
             phase: torch.Tensor,
-            decay: torch.Tensor) -> torch.Tensor:
+            decay: torch.Tensor,
+            phase_dither: torch.Tensor) -> torch.Tensor:
         res_span = 1 - base_resonance
         res_factor = 0.9
 
@@ -343,6 +419,7 @@ class FFTResonanceBlock(nn.Module):
         amp = amp.permute(0, 2, 1)
         phase = phase.permute(0, 2, 1)
         decay = decay.permute(0, 2, 1)
+        phase_dither = phase_dither.permute(0, 2, 1)
 
         # materialize resonances
         res = freq_domain_transfer_function_to_resonance(
@@ -351,7 +428,8 @@ class FFTResonanceBlock(nn.Module):
             n_resonance_frames,
             apply_decay=True,
             start_phase=torch.tanh(phase) * np.pi,
-            start_mags=torch.abs(amp),
+            start_mags=amp ** 2,
+            phase_dither=torch.tanh(phase_dither),
             log_space_scan=True)
         res = res.view(1, 1, n_resonances, expressivity, n_samples)
         return res
@@ -363,8 +441,8 @@ class FFTResonanceBlock(nn.Module):
             self.n_samples,
             self.resonances['amp'],
             self.resonances['phase'],
-            self.resonances['decay']
-        )
+            self.resonances['decay'],
+            self.resonances['phase_dither'])
 
 
 class ResonanceLayer(nn.Module):
@@ -390,22 +468,22 @@ class ResonanceLayer(nn.Module):
         self.router = nn.Parameter(
             torch.zeros((self.control_plane_dim, self.n_resonances)).uniform_(-1, 1))
 
-        # self.resonance = DampedHarmonicOscillatorBlock(
-        #     n_samples, 32, n_resonances, expressivity
-        # )
+        self.resonance = DampedHarmonicOscillatorBlock(
+            n_samples, 32, n_resonances, expressivity
+        )
 
         # self.resonance = LatentResonanceBlock(
         #     n_samples, n_resonances, expressivity, latent_dim=16)
 
-        self.resonance = FFTResonanceBlock(
-            n_samples, resonance_window_size, n_resonances, expressivity, base_resonance)
+        # self.resonance = FFTResonanceBlock(
+        #     n_samples, resonance_window_size, n_resonances, expressivity, base_resonance)
 
         # self.resonance = MultibandFFTResonanceBlock(
         #     n_resonances,
         #     n_samples,
         #     expressivity,
         #     smallest_band_size=2048,
-        #     base_resonance=0.00001,
+        #     base_resonance=0.01,
         #     window_size=64)
 
         # def init_resonance() -> torch.Tensor:
@@ -593,7 +671,7 @@ def overfit_model():
     # must have the same value
     control_plane_dim = 32
     n_resonances = 32
-    expressivity = 4
+    expressivity = 1
 
     target = get_one_audio_segment(n_samples)
     model = OverfitResonanceStack(
@@ -603,10 +681,10 @@ def overfit_model():
         control_plane_dim=control_plane_dim,
         n_resonances=n_resonances,
         expressivity=expressivity,
-        base_resonance=0.5,
+        base_resonance=0.01,
         n_frames=n_frames
     ).to(device)
-    optimizer = Adam(model.parameters(), lr=1e-2)
+    optimizer = Adam(model.parameters(), lr=1e-3)
     collection = conjure.LmdbCollection(path='resonancemodel')
 
     t, r, rand = conjure.loggers(
@@ -630,6 +708,8 @@ def overfit_model():
 
     t(max_norm(target))
 
+    # loss_model = CorrelationLoss(n_elements=256).to(device)
+
     def train():
         iteration = 0
 
@@ -644,6 +724,8 @@ def overfit_model():
             # x = stft(target, 2048, 256, pad=True)
             # y = stft(recon, 2048, 256, pad=True)
             loss = torch.abs(x - y).sum()
+
+            # loss = loss_model.multiband_noise_loss(target, recon, 64, 16)
 
             loss.backward()
             optimizer.step()
