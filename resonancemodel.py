@@ -258,7 +258,8 @@ def damped_harmonic_oscillator(
         initial_displacement: torch.Tensor,
         initial_velocity: float,
 ) -> torch.Tensor:
-    _, n_samples = time.shape
+    n_samples = time.shape[-1]
+
     # mass = mass.view(n_osc, 1)
     # damping = damping.view(n_osc, 1)
     # tension = tension.view(n_osc, 1)
@@ -273,6 +274,8 @@ def damped_harmonic_oscillator(
         (initial_displacement * omega)
     )
     a = initial_displacement / torch.cos(phi)
+
+    # print(a.shape, x.shape, time.shape, omega.shape, phi.shape)
     z = a * torch.exp(-x * time) * torch.cos(omega * time - phi)
     return z
 
@@ -312,14 +315,16 @@ class DampedHarmonicOscillatorBlock(nn.Module):
 
     def _materialize_resonances(self, device: torch.device):
         time = torch.linspace(0, 1, self.n_samples, device=device) \
-            .view(1, self.n_samples)
+            .view(1, 1, 1, self.n_samples)
+
+
         x = damped_harmonic_oscillator(
             time=time,
-            mass=torch.sigmoid(self.mass),
+            mass=torch.sigmoid(self.mass[..., None]),
             # mass=0.2,
-            damping=torch.sigmoid(self.damping) * 10,
-            tension=10 ** self.tension,
-            initial_displacement=self.initial_displacement,
+            damping=torch.sigmoid(self.damping[..., None]) * 10,
+            tension=10 ** self.tension[..., None],
+            initial_displacement=self.initial_displacement[..., None],
             initial_velocity=0
         )
 
@@ -469,7 +474,7 @@ class ResonanceLayer(nn.Module):
             torch.zeros((self.control_plane_dim, self.n_resonances)).uniform_(-1, 1))
 
         self.resonance = DampedHarmonicOscillatorBlock(
-            n_samples, 32, n_resonances, expressivity
+            n_samples, 64, n_resonances, expressivity
         )
 
         # self.resonance = LatentResonanceBlock(
@@ -671,7 +676,7 @@ def overfit_model():
     # must have the same value
     control_plane_dim = 32
     n_resonances = 32
-    expressivity = 1
+    expressivity = 2
 
     target = get_one_audio_segment(n_samples)
     model = OverfitResonanceStack(
