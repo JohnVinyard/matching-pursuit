@@ -185,6 +185,7 @@ def freq_domain_transfer_function_to_resonance(
     group_delay = torch.linspace(0, np.pi, expected_coeffs, device=coeffs.device)
 
     res = coeffs.reshape(-1, expected_coeffs, 1).repeat(1, 1, n_frames)
+    # print(res.shape)
 
     if start_mags is not None:
         start_mags = start_mags.reshape(res.shape[0], expected_coeffs, 1)

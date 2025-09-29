@@ -9,12 +9,13 @@ from torch.optim import Adam
 
 from conjure import LmdbCollection, numpy_conjure, loggers, serve_conjure, SupportedContentType, NumpySerializer, \
     NumpyDeserializer
-from modules import stft, max_norm, sparse_softmax
-from modules.overlap_add import overlap_add
-from modules.transfer import fft_convolve
-from modules.upsample import upsample_with_holes
+from modules import stft, max_norm, sparse_softmax, interpolate_last_axis, flattened_multiband_spectrogram, \
+    iterative_loss
+from modules.atoms import unit_norm
+from modules.infoloss import CorrelationLoss
+from modules.transfer import fft_convolve, freq_domain_transfer_function_to_resonance
+from modules.upsample import upsample_with_holes, ensure_last_axis_length
 from util import encode_audio, make_initializer, device
-from torch.nn.utils.parametrizations import weight_norm
 from torch.nn import functional as F
 
 collection = LmdbCollection('songsplat')
@@ -24,6 +25,14 @@ DatasetBatch = Tuple[torch.Tensor, torch.Tensor, int, int, int]
 init = make_initializer(0.05)
 
 
+
+def decaying_noise(n_items: int, n_samples: int, low_exp: int, high_exp: int, device: torch.device):
+    t = torch.linspace(1, 0, n_samples, device=device)
+    pos = torch.zeros(n_items, device=device).uniform_(low_exp, high_exp)
+    noise = torch.zeros(n_items, n_samples, device=device).uniform_(-1, 1)
+    return (t[None, :] ** pos[:, None]) * noise
+
+
 # thanks to https://discuss.pytorch.org/t/how-do-i-check-the-number-of-parameters-of-a-model/4325/9
 def count_parameters(model: nn.Module) -> int:
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -31,8 +40,11 @@ def count_parameters(model: nn.Module) -> int:
 
 def time_vector(t: torch.Tensor, total_samples: int, n_channels: int, device: torch.device) -> torch.Tensor:
     freqs = torch.linspace(1, total_samples // 2, n_channels // 2, device=device)[:, None]
-    s = torch.sin(t * freqs)
-    c = torch.cos(t * freqs)
+    scaled = torch.linspace(1, 0, n_channels // 2, device=device)
+
+    s = torch.sin(t * freqs) * scaled[:, None]
+    c = torch.cos(t * freqs) * scaled[:, None]
+
     encoding = torch.cat([t.view(1, -1), s, c], dim=0)
     return encoding
 
@@ -53,9 +65,9 @@ def pos_encoding(
 
     return time_vector(t, total_samples, n_channels, device)
 
-
 def transform(x: torch.Tensor) -> torch.Tensor:
-    return stft(x, 2048, 256, pad=True)
+    return flattened_multiband_spectrogram(x, { 'sm': (64, 16)})
+    # return stft(x, 2048, 256, pad=True)
 
 def loss(recon: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     r = transform(recon)
@@ -63,6 +75,31 @@ def loss(recon: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     l = torch.abs(r - t).sum()
     return l
 
+
+class SimpleLookup(nn.Module):
+    def __init__(
+            self,
+            latent: int,
+            n_items: int,
+            n_samples: int,
+            expressivity: int):
+
+        super().__init__()
+        self.latent = latent
+        self.n_items = n_items
+        self.n_samples = n_samples
+        self.expressivity = expressivity
+
+        self.from_latent = nn.Linear(latent, n_items * expressivity)
+        self.items = nn.Parameter(torch.zeros(n_items, n_samples).uniform_(-0.02, 0.02))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch, n_items, dim = x.shape
+        x = self.from_latent(x)
+        x = torch.relu(x)
+        x = x.view(batch, n_items, self.expressivity, -1)
+        x = x @ self.items
+        return x
 
 class HalfLappedWindowParams:
 
@@ -88,7 +125,6 @@ class HalfLappedWindowParams:
             self, n_frames: int,
             dither: Union[torch.Tensor, None],
             device: torch.device) -> torch.Tensor:
-
         gd = self.group_delay(device)
         gd = gd.view(1, 1, self.n_coeffs).repeat(1, n_frames, 1)
 
@@ -99,6 +135,7 @@ class HalfLappedWindowParams:
         gd = torch.cumsum(gd, dim=1)
         return gd
 
+
 class EventGenerator(nn.Module):
 
     def __init__(
@@ -106,91 +143,139 @@ class EventGenerator(nn.Module):
             latent_dim: int,
             n_frames: int,
             window_size: int,
-            hidden_channels: int,
-            n_layers: int,
-            n_pos_encoding_channels: int):
+            raw_sample_mode: bool = False):
 
         super().__init__()
+        self.raw_sample_mode = raw_sample_mode
         self.latent_dim = latent_dim
         self.n_frames = n_frames
         self.window_size = window_size
-        self.n_pos_encoding_channels = n_pos_encoding_channels
         self.window = HalfLappedWindowParams(window_size)
-        self.hidden_channels = hidden_channels
+        self.n_samples = self.window.total_samples(n_frames)
 
-        # learnable event pos encodings
-        pos_encoding = torch.zeros(1, n_frames, n_pos_encoding_channels).uniform_(-1, 1)
-        decay = torch.linspace(1, 0, n_frames)
-        p = torch.zeros(n_pos_encoding_channels).uniform_(10, 100)
-        self.register_buffer('pos_encoding', pos_encoding * (decay[None, :] ** p[:, None]))
+        if raw_sample_mode:
+            n_items = 512
+            self.net = nn.Linear(latent_dim, n_items, bias=False)
+            self.items = nn.Parameter(
+                decaying_noise(n_items, self.n_samples, 10, 100, device=device) * 1e-3)
+        else:
+            expressivity = 2
+            n_coeffs = self.window.n_coeffs
+            self.expressivity = expressivity
+            self.n_coeffs = n_coeffs
 
-        ep = nn.Linear(n_pos_encoding_channels, hidden_channels)
-        self.embed_pos = weight_norm(ep)
-        ee = nn.Linear(latent_dim, hidden_channels)
-        self.embed_event = weight_norm(ee)
+            n_envelopes = 32
+            n_dither = 16
+            n_resonances = 64
+            n_phase = 8
+            n_deformations = 16
 
-        tm = nn.Linear(hidden_channels, self.window.n_coeffs)
-        self.to_magnitude = weight_norm(tm)
-        td = nn.Linear(hidden_channels, self.window.n_coeffs)
-        self.to_dither = weight_norm(td)
+            # self.to_noise = nn.Linear(latent_dim, n_frames // 4)
+            # self.to_dither = nn.Linear(latent_dim, n_coeffs * expressivity)
+            # self.to_coeffs = nn.Linear(latent_dim, n_coeffs * expressivity)
+            # self.to_phase = nn.Linear(latent_dim, n_coeffs * expressivity)
+            # self.to_deformation = nn.Linear(latent_dim, n_frames * expressivity)
 
-        layers = []
-        for _ in range(n_layers):
-            layer = nn.Linear(hidden_channels, hidden_channels)
-            layer = weight_norm(layer)
-            layers.append(layer)
+            self.to_noise = SimpleLookup(latent_dim, n_envelopes, n_frames // 4, 1)
+            self.to_dither = SimpleLookup(latent_dim, n_dither, n_coeffs, expressivity)
+            self.to_coeffs = SimpleLookup(latent_dim, n_resonances, n_coeffs, expressivity)
+            self.to_phase = SimpleLookup(latent_dim, n_phase, n_coeffs, expressivity)
+            self.to_deformation = SimpleLookup(latent_dim, n_deformations, n_frames, expressivity)
 
-        self.network = nn.ParameterList(layers)
+            self.to_amps = nn.Linear(latent_dim, n_coeffs * expressivity)
+            self.to_mix = nn.Linear(latent_dim, 2)
+
 
     @property
     def total_samples(self):
         return self.window.total_samples(self.n_frames)
 
     def forward(self, events: torch.Tensor) -> torch.Tensor:
-
         batch, n_events, dim = events.shape
 
-        e = self.embed_event(events).view(batch, n_events, 1, self.hidden_channels)
-        p = self.embed_pos(self.pos_encoding).view(1, 1, self.n_frames, self.hidden_channels)
+        if self.raw_sample_mode:
+            x = self.net(events)
+            x = torch.relu(x)
+            x = x @ self.items
+            return x
+        else:
+            dither = self.to_dither(events).view(batch, n_events * self.expressivity, self.n_coeffs)
+            decay = self.to_coeffs(events).view(batch, n_events * self.expressivity, self.n_coeffs)
+            amps = self.to_amps(events).view(batch, n_events * self.expressivity, self.n_coeffs)
+            phase = self.to_phase(events).view(batch, n_events * self.expressivity, self.n_coeffs)
 
-        x = e + p
-        x = x.view(batch, n_events, self.n_frames, self.hidden_channels)
-        for layer in self.network:
-            skip = x
-            x = layer(x)
-            x = torch.selu(x)
-            x = x + skip
+            resonances = freq_domain_transfer_function_to_resonance(
+                window_size=self.window_size,
+                coeffs=torch.sigmoid(decay) * 0.9999,
+                n_frames=self.n_frames,
+                apply_decay=True,
+                start_phase=torch.tanh(phase) *  np.pi,
+                start_mags=amps ** 2,
+                log_space_scan=True,
+                phase_dither=torch.tanh(dither.view(-1, 1, self.n_coeffs))
+            )
 
-        m = torch.abs(self.to_magnitude(x))
-        p = self.to_dither(x)
-        p = self.window.materialize_phase(self.n_frames, p, device=x.device)
+            resonances = resonances.view(batch, n_events, self.expressivity, self.n_samples)
 
-        spec = m * torch.exp(1j * p)
-        windowed = torch.fft.irfft(spec, dim=-1, norm='ortho')
-        samples = overlap_add(windowed, apply_window=True, trim=self.total_samples)
-        samples = samples.view(batch, n_events, 1, -1)
-        return samples
+            n = self.to_noise(events).view(batch, n_events, 1, self.n_frames // 4)
+            n = n ** 2
+            n = interpolate_last_axis(n, desired_size=self.n_samples // 4)
+            n = ensure_last_axis_length(n, desired_size=self.n_samples)
+            n = n * torch.zeros_like(n).uniform_(-1, 1)
+
+            resonances = fft_convolve(resonances, n)
+
+            deformations = self.to_deformation(events).view(batch, n_events, self.expressivity, self.n_frames)
+            deformations = torch.cumsum(deformations, dim=-1)
+            deformations = torch.relu(deformations)
+            deformations = interpolate_last_axis(deformations, desired_size=self.n_samples)
+
+
+            x = resonances * deformations
+            x = torch.sum(x, dim=2)
+
+            mx = self.to_mix(events)
+
+            stacked = torch.stack([n.view(1, -1, self.n_samples), x], dim=-1)
+
+            x = stacked * torch.softmax(mx.view(1, -1, 1, 2), dim=-1)
+
+            x = torch.sum(x, dim=-1)
+            return x
+
+
 
 
 def schedule_events(
         events: torch.Tensor,
         times: torch.Tensor,
         pos_encodings: torch.Tensor,
-        temperature: float) -> torch.Tensor:
-
+        temperature: float) -> Tuple[torch.Tensor, torch.Tensor]:
 
     batch, n_events, n_samples = events.shape
     n_events, pos_encoding_dim = times.shape
     _, n_frames, pos_encoding_dim = pos_encodings.shape
 
+    # print(pos_encodings.shape, times.shape)
+
     pos_encodings = pos_encodings.view(pos_encoding_dim, -1)
 
+
     sim = times @ pos_encodings.T
+
+    # indices = torch.argmax(sim, dim=-1)
+    # print(indices)
+
     # sched = F.gumbel_softmax(sim, tau=temperature, hard=True, dim=-1)
     sched = sparse_softmax(sim, normalize=True)
+    # sched = torch.softmax(sim, dim=-1)
+
+    mx, indices = torch.max(sched, dim=-1)
+
     sched = upsample_with_holes(sched, desired_size=n_samples)
     scheduled = fft_convolve(events, sched)
-    return scheduled
+    return scheduled, mx
+
 
 class Model(nn.Module):
 
@@ -201,12 +286,9 @@ class Model(nn.Module):
             samplerate: int,
             event_latent_dim: int,
             window_size: int,
-            hidden_channels: int,
-            n_layers: int,
             pos_encoding_channels: int,
             n_segment_samples: int,
             events_per_second: float):
-
         super().__init__()
 
         self.n_segment_samples = n_segment_samples
@@ -223,23 +305,29 @@ class Model(nn.Module):
         print('TOTAL EVENTS', self.total_events)
 
         self.events = nn.Parameter(torch.zeros(self.total_events, self.event_latent_dim).uniform_(-1, 1))
-        times = torch.zeros(self.total_events, device=device).uniform_(-1, 1)
-        self.times = nn.Parameter(time_vector(times, self.total_samples, pos_encoding_channels, device))
+        times = torch.zeros(self.total_events, device=device).uniform_(0, 1)
 
+        orig_times = time_vector(times, self.total_samples, pos_encoding_channels, device)
+        self.register_buffer('orig_times', orig_times)
+        self.times = nn.Parameter(orig_times.clone())
 
         n_event_frames = n_segment_samples // self.window_params.step_size
 
         self.generator = EventGenerator(
-            event_latent_dim, n_event_frames, window_size, hidden_channels, n_layers, 128)
+            event_latent_dim, n_event_frames, window_size)
 
         self.apply(init)
+
+    @property
+    def time_change(self):
+        return torch.abs(self.orig_times - self.times).sum()
 
     def forward(
             self,
             pos_encoding: torch.Tensor,
             start_frame: int,
             end_frame: int,
-            temperature: float) -> torch.Tensor:
+            temperature: float) -> Tuple[torch.Tensor, torch.Tensor]:
 
         n_frames = end_frame - start_frame
         n_samples = self.window_params.total_samples(n_frames)
@@ -247,6 +335,11 @@ class Model(nn.Module):
 
         start_rel = early_frame / self.n_frames
         stop_rel = end_frame / self.n_frames
+
+        if start_rel < 0:
+            raise ValueError('skipping too-early segment')
+
+        # print(n_frames, n_samples, start_frame, end_frame, early_frame, start_rel, stop_rel)
 
         # use the linear [0-1] channel to locate events that will affect this interval
         t = self.times[0, :]
@@ -260,14 +353,16 @@ class Model(nn.Module):
             raise ValueError('no events')
 
         samples = self.generator.forward(events[None, ...])
+
+        # print('EVENTS', events.shape, times.shape, samples.shape)
+
         samples = samples.view(1, -1, n_samples)
         padding = torch.zeros_like(samples)
         samples = torch.cat([samples, padding], dim=-1)
 
-        scheduled = schedule_events(samples, times, pos_encoding, temperature=temperature)
+        scheduled, mx = schedule_events(samples, times, pos_encoding, temperature=temperature)
 
-        scheduled = torch.sum(scheduled, dim=1, keepdim=True)
-        return scheduled[:, :, n_samples:]
+        return scheduled[:, :, n_samples:], mx
 
 
 @numpy_conjure(collection)
@@ -282,7 +377,6 @@ def dataset(
         n_segment_samples: int = 2 ** 15,
         window_size: int = 1024,
         n_pos_encoding_channels: int = 64) -> Generator[DatasetBatch, None, None]:
-
     samples = get_samples(path, 22050)
     n_samples = len(samples)
 
@@ -320,35 +414,33 @@ def train(
         device: torch.device,
         n_segment_samples: int = 2 ** 15,
         window_size: int = 1024,
-        n_pos_encoding_channels: int = 64,
-        hidden_channels: int = 128,
-        n_layers: int = 4):
+        n_pos_encoding_channels: int = 64):
     recon_audio, orig_audio = loggers(
         ['recon', 'orig'],
         'audio/wav',
         encode_audio,
         collection)
 
-    encoding, = loggers(
-        ['encoding'],
-        SupportedContentType.Spectrogram.value,
-        to_numpy,
-        collection,
-        NumpySerializer(),
-        NumpyDeserializer())
+    # encoding, = loggers(
+    #     ['encoding'],
+    #     SupportedContentType.Spectrogram.value,
+    #     to_numpy,
+    #     collection,
+    #     NumpySerializer(),
+    #     NumpyDeserializer())
 
     serve_conjure([
         orig_audio,
         recon_audio,
-        encoding
+        # encoding
     ], port=9999, n_workers=1)
 
     iterator = dataset(
-            path=path,
-            device=device,
-            n_segment_samples=n_segment_samples,
-            window_size=window_size,
-            n_pos_encoding_channels=n_pos_encoding_channels)
+        path=path,
+        device=device,
+        n_segment_samples=n_segment_samples,
+        window_size=window_size,
+        n_pos_encoding_channels=n_pos_encoding_channels)
 
     _, _, total_samples, _, _ = next(iterator)
 
@@ -356,15 +448,14 @@ def train(
         total_samples=total_samples,
         n_frames=total_samples // (window_size // 2),
         samplerate=22050,
-        event_latent_dim=8,
-        events_per_second=4,
+        event_latent_dim=32,
+        events_per_second=8,
         window_size=window_size,
-        hidden_channels=hidden_channels,
-        n_layers=n_layers,
         pos_encoding_channels=n_pos_encoding_channels + 1,
         n_segment_samples=n_segment_samples
     ).to(device)
-    optim = Adam(model.parameters(), lr=1e-3)
+
+    optim = Adam(model.parameters(), lr=1e-4)
 
     model_params = count_parameters(model)
 
@@ -374,7 +465,7 @@ def train(
 
         pos, samples, total_samples, start_frame, end_frame = pair
 
-        encoding(pos[0])
+        # encoding(model.times)
 
         # log original audio
         orig_audio(max_norm(samples))
@@ -386,17 +477,25 @@ def train(
             tmp = 1e-4
 
         try:
-            recon = model.forward(pos, start_frame, end_frame, temperature=tmp)
-        except ValueError:
+            recon, mx = model.forward(pos, start_frame, end_frame, temperature=tmp)
+        except ValueError as e:
+            print(e)
             continue
 
-        # log recon audio
-        recon_audio(max_norm(recon))
+        recon_summed = torch.sum(recon, dim=1, keepdim=True)
 
-        l = loss(recon, samples)
+        # log recon audio
+        recon_audio(max_norm(recon_summed))
+
+
+        # print(mx)
+        confidence_loss = torch.abs(0.99 - mx).sum()
+        l = iterative_loss(samples, recon, transform, ratio_loss=False) + confidence_loss
+
+        # l = loss(recon_summed, samples) + confidence_loss
         l.backward()
         optim.step()
-        print(i, l.item(), f'Compression Ratio: {(model_params / total_samples):.2f}')
+        print(i, l.item(), f'Compression Ratio: {(model_params / total_samples):.2f}, change: {model.time_change.item():.4f}')
 
 
 if __name__ == '__main__':
@@ -409,6 +508,4 @@ if __name__ == '__main__':
         torch.device('cuda'),
         n_segment_samples=2 ** 16,
         window_size=1024,
-        n_pos_encoding_channels=4096,
-        hidden_channels=128,
-        n_layers=4)
+        n_pos_encoding_channels=4096)
