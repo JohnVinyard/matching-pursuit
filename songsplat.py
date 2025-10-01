@@ -40,10 +40,10 @@ def count_parameters(model: nn.Module) -> int:
 
 def time_vector(t: torch.Tensor, total_samples: int, n_channels: int, device: torch.device) -> torch.Tensor:
     freqs = torch.linspace(1, total_samples // 2, n_channels // 2, device=device)[:, None]
-    scaled = torch.linspace(1, 0, n_channels // 2, device=device)
+    # scaled = torch.linspace(1, 0, n_channels // 2, device=device)
 
-    s = torch.sin(t * freqs) * scaled[:, None]
-    c = torch.cos(t * freqs) * scaled[:, None]
+    s = torch.sin(t * freqs) #* scaled[:, None]
+    c = torch.cos(t * freqs) #* scaled[:, None]
 
     encoding = torch.cat([t.view(1, -1), s, c], dim=0)
     return encoding
@@ -66,8 +66,8 @@ def pos_encoding(
     return time_vector(t, total_samples, n_channels, device)
 
 def transform(x: torch.Tensor) -> torch.Tensor:
-    # return flattened_multiband_spectrogram(x, { 'sm': (64, 16)})
-    return stft(x, 2048, 256, pad=True)
+    return flattened_multiband_spectrogram(x, { 'sm': (64, 16)})
+    # return stft(x, 2048, 256, pad=True)
 
 def loss(recon: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     r = transform(recon)
@@ -119,7 +119,7 @@ class EventGenerator(nn.Module):
             latent_dim: int,
             n_frames: int,
             window_size: int,
-            raw_sample_mode: bool = True):
+            raw_sample_mode: bool = False):
 
         super().__init__()
         self.raw_sample_mode = raw_sample_mode
@@ -246,8 +246,11 @@ def schedule_events(
     # print(indices)
 
     # sched = F.gumbel_softmax(sim, tau=temperature, hard=True, dim=-1)
-    # sched = sparse_softmax(sim, normalize=True)
-    sched = torch.softmax(sim, dim=-1)
+
+    if np.random.random() > 0.5:
+        sched = sparse_softmax(sim, normalize=True)
+    else:
+        sched = torch.softmax(sim, dim=-1)
 
     mx, indices = torch.max(sched, dim=-1)
 
@@ -444,14 +447,15 @@ def train(
         total_samples=total_samples,
         n_frames=total_samples // (window_size // 2),
         samplerate=22050,
-        event_latent_dim=128,
-        events_per_second=8,
+        event_latent_dim=32,
+        events_per_second=16,
         window_size=window_size,
         pos_encoding_channels=n_pos_encoding_channels + 1,
         n_segment_samples=n_segment_samples
     ).to(device)
 
-    optim = Adam(model.parameters(), lr=1e-3)
+    time_optim = Adam([model.times], lr=1e-3)
+    event_optim = Adam([model.events, *model.generator.parameters()], lr=1e-3)
 
     model_params = count_parameters(model)
 
@@ -466,7 +470,10 @@ def train(
         # log original audio
         orig_audio(max_norm(samples))
 
-        optim.zero_grad()
+        # optim.zero_grad()
+        time_optim.zero_grad()
+        event_optim.zero_grad()
+
         try:
             tmp = tmp_schedule[i]
         except IndexError:
@@ -486,11 +493,15 @@ def train(
 
         # print(mx)
         confidence_loss = torch.abs(0.99 - mx).sum() * 100
-        l = iterative_loss(samples, recon, transform, ratio_loss=False, sort_channels=False) + confidence_loss
+        # l = iterative_loss(samples, recon, transform, ratio_loss=False, sort_channels=True) + confidence_loss
 
-        # l = loss(recon_summed, samples) + confidence_loss
+        l = loss(recon_summed, samples) + confidence_loss
         l.backward()
-        optim.step()
+        if i % 2 == 0:
+            event_optim.step()
+        else:
+            time_optim.step()
+        # optim.step()
         print(i, l.item(), f'N Frames: {n_frames}, Compression Ratio: {(model_params / total_samples):.2f}, change: {model.time_change.item():.4f}')
 
 
