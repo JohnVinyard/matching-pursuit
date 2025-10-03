@@ -76,6 +76,30 @@ def loss(recon: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     return l
 
 
+class SimpleLookup(nn.Module):
+    def __init__(
+            self,
+            latent: int,
+            n_items: int,
+            n_samples: int,
+            expressivity: int):
+
+        super().__init__()
+        self.latent = latent
+        self.n_items = n_items
+        self.n_samples = n_samples
+        self.expressivity = expressivity
+
+        self.from_latent = nn.Linear(latent, n_items * expressivity)
+        self.items = nn.Parameter(torch.zeros(n_items, n_samples).uniform_(-0.02, 0.02))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch, n_items, dim = x.shape
+        x = self.from_latent(x)
+        x = torch.relu(x)
+        x = x.view(batch, n_items, self.expressivity, -1)
+        x = x @ self.items
+        return x
 
 class HalfLappedWindowParams:
 
@@ -144,12 +168,22 @@ class EventGenerator(nn.Module):
             self.resonance_span = 1 - self.base_resonance
 
             # note: the noise envelope is 4x the frame rate, as it is upsampled
+            # self.to_noise = nn.Linear(latent_dim, n_frames)
+            # self.to_dither = nn.Linear(latent_dim, n_coeffs * expressivity)
+            # self.to_coeffs = nn.Linear(latent_dim, n_coeffs * expressivity)
+            # self.to_phase = nn.Linear(latent_dim, n_coeffs * expressivity)
+            # self.to_deformation = nn.Linear(latent_dim, n_frames * expressivity)
+            # self.to_amps = nn.Linear(latent_dim, n_coeffs * expressivity)
+
+            # note: the noise envelope is 4x the frame rate, as it is upsampled
             self.to_noise = nn.Linear(latent_dim, n_frames)
             self.to_dither = nn.Linear(latent_dim, n_coeffs * expressivity)
             self.to_coeffs = nn.Linear(latent_dim, n_coeffs * expressivity)
             self.to_phase = nn.Linear(latent_dim, n_coeffs * expressivity)
             self.to_deformation = nn.Linear(latent_dim, n_frames * expressivity)
             self.to_amps = nn.Linear(latent_dim, n_coeffs * expressivity)
+
+
             self.to_mix = nn.Linear(latent_dim, 2)
             self.to_loudness = nn.Linear(latent_dim, 1)
 
@@ -182,7 +216,7 @@ class EventGenerator(nn.Module):
                 log_space_scan=True,
                 phase_dither=torch.tanh(dither.view(-1, 1, self.n_coeffs))
             )
-            resonances = unit_norm(resonances)
+            # resonances = unit_norm(resonances)
 
             resonances = resonances.view(batch, n_events, self.expressivity, self.n_samples)
 
@@ -245,7 +279,7 @@ def schedule_events(
     # indices = torch.argmax(sim, dim=-1)
     # print(indices)
 
-    # sched = F.gumbel_softmax(sim, tau=temperature, hard=True, dim=-1)
+    # sched = F.gumbel_softmax(sim, tau=temperature, hard=False, dim=-1)
 
     if np.random.random() > 0.5:
         sched = sparse_softmax(sim, normalize=True)
@@ -286,7 +320,7 @@ class Model(nn.Module):
         self.total_events = int(self.total_seconds * self.events_per_second)
         print('TOTAL EVENTS', self.total_events)
 
-        self.events = nn.Parameter(torch.zeros(self.total_events, self.event_latent_dim).uniform_(-1, 1))
+        self.events = nn.Parameter(torch.zeros(self.total_events, self.event_latent_dim).uniform_(-0.01, 0.01))
         times = torch.zeros(self.total_events, device=device).uniform_(0, 1)
 
         orig_times = time_vector(times, self.total_samples, pos_encoding_channels, device)
@@ -355,8 +389,7 @@ class Model(nn.Module):
         # print('EVENTS', events.shape, times.shape, samples.shape)
 
         samples = samples.view(1, -1, n_samples)
-        padding = torch.zeros_like(samples)
-        samples = torch.cat([samples, padding], dim=-1)
+        samples = ensure_last_axis_length(samples, desired_size=n_samples * 2)
 
         scheduled, mx = schedule_events(samples, times, pos_encoding, temperature=temperature)
 
@@ -493,9 +526,9 @@ def train(
 
         # print(mx)
         confidence_loss = torch.abs(0.99 - mx).sum() * 100
-        # l = iterative_loss(samples, recon, transform, ratio_loss=False, sort_channels=True) + confidence_loss
+        l = iterative_loss(samples, recon, transform, ratio_loss=False, sort_channels=False) + confidence_loss
 
-        l = loss(recon_summed, samples) + confidence_loss
+        # l = loss(recon_summed, samples) + confidence_loss
         l.backward()
         if i % 2 == 0:
             event_optim.step()
