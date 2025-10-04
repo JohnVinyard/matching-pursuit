@@ -12,6 +12,7 @@ from conjure import LmdbCollection, numpy_conjure, loggers, serve_conjure, Suppo
 from modules import stft, max_norm, sparse_softmax, interpolate_last_axis, flattened_multiband_spectrogram, \
     iterative_loss
 from modules.atoms import unit_norm
+from modules.eventgenerators.overfitresonance import Envelopes
 from modules.infoloss import CorrelationLoss
 from modules.transfer import fft_convolve, freq_domain_transfer_function_to_resonance
 from modules.upsample import upsample_with_holes, ensure_last_axis_length
@@ -41,10 +42,10 @@ def time_vector(t: torch.Tensor, total_samples: int, n_channels: int, device: to
     freqs = torch.linspace(1, total_samples // 2, n_channels // 2, device=device)[:, None]
     scaled = torch.linspace(1, 0, n_channels // 2, device=device)
 
-    s = torch.sin(t * freqs)  * scaled[:, None]
-    c = torch.cos(t * freqs)  * scaled[:, None]
+    s = torch.sin(t * freqs) * scaled[:, None]
+    c = torch.cos(t * freqs) * scaled[:, None]
 
-    encoding = torch.cat([t.view(1, -1), s, c], dim=0)
+    encoding = torch.cat([s, c], dim=0)
     return encoding
 
 
@@ -65,15 +66,18 @@ def pos_encoding(
     return time_vector(t, total_samples, n_channels, device)
 
 
+loss_model = CorrelationLoss(512).to(device)
+
 def transform(x: torch.Tensor) -> torch.Tensor:
-    # return flattened_multiband_spectrogram(x, {'sm': (64, 16)})
-    return stft(x, 2048, 256, pad=True)
+    return flattened_multiband_spectrogram(x, {'sm': (64, 16)})
+    # return stft(x, 2048, 256, pad=True)
 
 
 def loss(recon: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    r = transform(recon)
-    t = transform(target)
-    l = torch.abs(r - t).sum()
+    # r = transform(recon)
+    # t = transform(target)
+    # l = torch.abs(r - t).sum()
+    l = loss_model.multiband_noise_loss(recon, target, 64, 16)
     return l
 
 
@@ -166,18 +170,29 @@ class EventGenerator(nn.Module):
             self.n_coeffs = n_coeffs
 
             self.base_resonance = 0.02
-            self.resonance_span = 1 - self.base_resonance
+            self.max_resonance = 0.9
+            self.resonance_span = self.max_resonance - self.base_resonance
 
             n_envelopes = 64
-            n_dither = 16
-            n_resonances = 512
-            n_amps = 512
+            n_dither = 64
+            n_resonances = 4096
+            n_amps = 4096
             n_phase = 8
             n_deformations = 32
 
             # note: the noise envelope is 4x the frame rate, as it is upsampled
             # to 1/4 the overall number of frames
-            self.to_noise = SimpleLookup(latent_dim, n_envelopes, n_frames, 1)
+            # self.to_noise = SimpleLookup(latent_dim, n_envelopes, n_frames, 1)
+
+            self.to_env_choice = nn.Linear(latent_dim, n_envelopes)
+            self.to_envelopes = Envelopes(
+                n_items=n_envelopes,
+                n_samples=n_frames,
+                full_size=self.n_samples // 4,
+                padded_size=self.n_samples,
+                max_events=16,
+                with_noise=True)
+
             self.to_dither = SimpleLookup(latent_dim, n_dither, n_coeffs, expressivity)
             self.to_coeffs = SimpleLookup(latent_dim, n_resonances, n_coeffs, expressivity)
             self.to_phase = SimpleLookup(latent_dim, n_phase, n_coeffs, expressivity)
@@ -215,12 +230,11 @@ class EventGenerator(nn.Module):
 
             resonances = freq_domain_transfer_function_to_resonance(
                 window_size=self.window_size,
-                coeffs=self.base_resonance + (torch.clamp(decay, 1e-8, 1) * self.resonance_span * 0.9999),
+                coeffs=self.base_resonance + (torch.sigmoid(decay) * self.resonance_span),
                 n_frames=self.n_frames,
                 apply_decay=True,
                 start_phase=torch.tanh(phase) * np.pi,
-                # start_mags=torch.sigmoid(amps),
-                start_mags=amps ** 2,
+                start_mags=torch.sigmoid(amps),
                 log_space_scan=True,
                 phase_dither=torch.tanh(dither.view(-1, 1, self.n_coeffs))
             )
@@ -228,12 +242,16 @@ class EventGenerator(nn.Module):
 
             resonances = resonances.view(batch, n_events, self.expressivity, self.n_samples)
 
-            n = self.to_noise(events).view(batch, n_events, 1, self.n_frames)
-            n = torch.abs(n)
+            # n = self.to_noise(events).view(batch, n_events, 1, self.n_frames)
+            # n = torch.abs(n)
 
-            n = interpolate_last_axis(n, desired_size=self.n_samples // 4)
-            n = ensure_last_axis_length(n, desired_size=self.n_samples)
-            n = n * torch.zeros_like(n).uniform_(-1, 1)
+            # n = interpolate_last_axis(n, desired_size=self.n_samples // 4)
+            # n = ensure_last_axis_length(n, desired_size=self.n_samples)
+            # n = n * torch.zeros_like(n).uniform_(-1, 1)
+
+            n = self.to_env_choice(events)
+            n = self.to_envelopes.forward(n)
+            n = n.view(batch, n_events, 1, self.n_samples)
 
             resonances = fft_convolve(resonances, n)
 
@@ -273,8 +291,8 @@ def schedule_events(
 
     pos_encodings = pos_encodings.view(pos_encoding_dim, -1)
 
-    # times = unit_norm(times, axis=-1)
-    # pos_encodings = unit_norm(pos_encodings, axis=0)
+    times = unit_norm(times, axis=-1)
+    pos_encodings = unit_norm(pos_encodings, axis=0)
 
     sim = times @ pos_encodings.T
 
@@ -283,10 +301,10 @@ def schedule_events(
 
     # sched = F.gumbel_softmax(sim, tau=temperature, hard=False, dim=-1)
 
-    if np.random.random() > 0.5:
-        sched = sparse_softmax(sim, normalize=True)
-    else:
-        sched = torch.softmax(sim, dim=-1)
+    # if np.random.random() > 0.5:
+    sched = sparse_softmax(sim, normalize=True)
+    # else:
+    #     sched = torch.softmax(sim, dim=-1)
 
     mx, indices = torch.max(sched, dim=-1)
 
@@ -322,10 +340,11 @@ class Model(nn.Module):
         self.total_events = int(self.total_seconds * self.events_per_second)
         print('TOTAL EVENTS', self.total_events)
 
-        self.events = nn.Parameter(torch.zeros(self.total_events, self.event_latent_dim).uniform_(-0.01, 0.01))
+        self.events = nn.Parameter(torch.zeros(self.total_events, self.event_latent_dim).uniform_(-1, 1))
         times = torch.zeros(self.total_events, device=device).uniform_(0, 1)
 
         orig_times = time_vector(times, self.total_samples, pos_encoding_channels, device)
+        orig_times = torch.zeros_like(orig_times).uniform_(-1, 1)
         self.register_buffer('orig_times', orig_times)
         self.times = nn.Parameter(orig_times.clone())
 
@@ -368,8 +387,8 @@ class Model(nn.Module):
         actual = tv.T @ self.times
         indices = torch.argmax(actual, dim=0) / self.n_frames
         t = indices
-        print(t.shape, indices.shape)
-        z = list(zip(t.data.cpu().numpy(), indices.data.cpu().numpy()))
+        # print(t.shape, indices.shape)
+        # z = list(zip(t.data.cpu().numpy(), indices.data.cpu().numpy()))
         # for item in z:
         #     print(item)
 
@@ -426,7 +445,7 @@ def dataset(
 
         # we'll return positions that are twice as long as the segment, beginning one full segment
         # earlier than the samples
-        pos = torch.zeros(1, n_pos_encoding_channels + 1, n_segment_frames * 2, device=device)
+        pos = torch.zeros(1, n_pos_encoding_channels, n_segment_frames * 2, device=device)
 
         start_index = np.random.randint(n_frames - (n_segment_frames - 1))
         end_index = start_index + n_segment_frames
@@ -455,17 +474,18 @@ def train(
         encode_audio,
         collection)
 
-    # encoding, = loggers(
-    #     ['encoding'],
-    #     SupportedContentType.Spectrogram.value,
-    #     to_numpy,
-    #     collection,
-    #     NumpySerializer(),
-    #     NumpyDeserializer())
+    events, = loggers(
+        ['events'],
+        SupportedContentType.Spectrogram.value,
+        to_numpy,
+        collection,
+        NumpySerializer(),
+        NumpyDeserializer())
 
     serve_conjure([
         orig_audio,
         recon_audio,
+        events
         # encoding
     ], port=9999, n_workers=1)
 
@@ -485,12 +505,13 @@ def train(
         event_latent_dim=32,
         events_per_second=16,
         window_size=window_size,
-        pos_encoding_channels=n_pos_encoding_channels + 1,
+        pos_encoding_channels=n_pos_encoding_channels,
         n_segment_samples=n_segment_samples
     ).to(device)
 
-    time_optim = Adam([model.times], lr=1e-3)
-    event_optim = Adam([model.events, *model.generator.parameters()], lr=1e-3)
+    optim = Adam(model.parameters(), lr=1e-3)
+    # time_optim = Adam([model.times], lr=1e-3)
+    # event_optim = Adam([model.events, *model.generator.parameters()], lr=1e-3)
 
     model_params = count_parameters(model)
 
@@ -501,14 +522,14 @@ def train(
         pos, samples, total_samples, start_frame, end_frame, n_frames = pair
 
         # encoding(model.times)
+        events(max_norm(model.events.data))
 
         # log original audio
         orig_audio(max_norm(samples))
 
-        # optim.zero_grad()
-        time_optim.zero_grad()
-        event_optim.zero_grad()
-
+        optim.zero_grad()
+        # time_optim.zero_grad()
+        # event_optim.zero_grad()
         try:
             tmp = tmp_schedule[i]
         except IndexError:
@@ -526,16 +547,16 @@ def train(
         recon_audio(max_norm(recon_summed))
 
         # print(mx)
-        confidence_loss = torch.abs(0.99 - mx).sum() * 100
-        l = iterative_loss(samples, recon, transform, ratio_loss=False, sort_channels=False) + confidence_loss
+        # confidence_loss = torch.abs(0.99 - mx).sum() * 100
+        # l = iterative_loss(samples, recon, transform, ratio_loss=False, sort_channels=False) #+ confidence_loss
 
-        # l = loss(recon_summed, samples) + confidence_loss
+        l = loss(recon_summed, samples)  #+ confidence_loss
         l.backward()
-        if i % 2 == 0:
-            event_optim.step()
-        else:
-            time_optim.step()
-        # optim.step()
+        # if i % 2 == 0:
+        #     event_optim.step()
+        # else:
+        #     time_optim.step()
+        optim.step()
         print(i, l.item(),
               f'N Frames: {n_frames}, Compression Ratio: {(model_params / total_samples):.2f}, change: {model.time_change.item():.4f}')
 
@@ -550,4 +571,4 @@ if __name__ == '__main__':
         torch.device('cuda'),
         n_segment_samples=2 ** 16,
         window_size=1024,
-        n_pos_encoding_channels=4096)
+        n_pos_encoding_channels=256)
