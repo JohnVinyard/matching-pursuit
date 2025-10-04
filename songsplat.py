@@ -10,7 +10,7 @@ from torch.optim import Adam
 from conjure import LmdbCollection, numpy_conjure, loggers, serve_conjure, SupportedContentType, NumpySerializer, \
     NumpyDeserializer
 from modules import stft, max_norm, sparse_softmax, interpolate_last_axis, flattened_multiband_spectrogram, \
-    iterative_loss
+    iterative_loss, LinearOutputStack
 from modules.atoms import unit_norm
 from modules.eventgenerators.overfitresonance import Envelopes
 from modules.infoloss import CorrelationLoss
@@ -39,6 +39,9 @@ def count_parameters(model: nn.Module) -> int:
 
 
 def time_vector(t: torch.Tensor, total_samples: int, n_channels: int, device: torch.device) -> torch.Tensor:
+    factor = np.pi * 2
+    t = t * factor
+
     freqs = torch.linspace(1, total_samples // 2, n_channels // 2, device=device)[:, None]
     scaled = torch.linspace(1, 0, n_channels // 2, device=device)
 
@@ -55,18 +58,19 @@ def pos_encoding(
         total_samples: int,
         n_channels: int,
         device: torch.device) -> torch.Tensor:
+
     start = start_sample / total_samples
     end = stop_sample / total_samples
     n_samples = stop_sample - start_sample
 
-    factor = np.pi * 2
 
-    t = torch.linspace(start * factor, end * factor, n_samples, device=device)[None, :]
+    t = torch.linspace(start, end, n_samples, device=device)[None, :]
 
     return time_vector(t, total_samples, n_channels, device)
 
 
 loss_model = CorrelationLoss(512).to(device)
+
 
 def transform(x: torch.Tensor) -> torch.Tensor:
     return flattened_multiband_spectrogram(x, {'sm': (64, 16)})
@@ -77,7 +81,8 @@ def loss(recon: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     # r = transform(recon)
     # t = transform(target)
     # l = torch.abs(r - t).sum()
-    l = loss_model.multiband_noise_loss(recon, target, 64, 16)
+    # l = loss_model.multiband_noise_loss(recon, target, 64, 16)
+    l = loss_model.forward(target, recon)
     return l
 
 
@@ -94,7 +99,15 @@ class SimpleLookup(nn.Module):
         self.n_samples = n_samples
         self.expressivity = expressivity
 
-        self.from_latent = nn.Linear(latent, n_items * expressivity)
+        self.from_latent = LinearOutputStack(
+            channels=128,
+            layers=2,
+            in_channels=latent,
+            out_channels=n_items * expressivity,
+            norm=lambda channels: nn.LayerNorm([channels, ])
+        )
+
+        # self.from_latent = nn.Linear(latent, n_items * expressivity)
         self.items = nn.Parameter(torch.zeros(n_items, n_samples).uniform_(-0.02, 0.02))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -175,8 +188,8 @@ class EventGenerator(nn.Module):
 
             n_envelopes = 64
             n_dither = 64
-            n_resonances = 4096
-            n_amps = 4096
+            n_resonances = 128
+            n_amps = 128
             n_phase = 8
             n_deformations = 32
 
@@ -287,7 +300,6 @@ def schedule_events(
     n_events, pos_encoding_dim = times.shape
     _, n_frames, pos_encoding_dim = pos_encodings.shape
 
-    # print(pos_encodings.shape, times.shape)
 
     pos_encodings = pos_encodings.view(pos_encoding_dim, -1)
 
@@ -296,8 +308,6 @@ def schedule_events(
 
     sim = times @ pos_encodings.T
 
-    # indices = torch.argmax(sim, dim=-1)
-    # print(indices)
 
     # sched = F.gumbel_softmax(sim, tau=temperature, hard=False, dim=-1)
 
@@ -307,6 +317,7 @@ def schedule_events(
     #     sched = torch.softmax(sim, dim=-1)
 
     mx, indices = torch.max(sched, dim=-1)
+    print(sched.shape, indices.max())
 
     sched = upsample_with_holes(sched, desired_size=n_samples)
     scheduled = fft_convolve(events, sched)
@@ -344,7 +355,7 @@ class Model(nn.Module):
         times = torch.zeros(self.total_events, device=device).uniform_(0, 1)
 
         orig_times = time_vector(times, self.total_samples, pos_encoding_channels, device)
-        orig_times = torch.zeros_like(orig_times).uniform_(-1, 1)
+        # orig_times = torch.zeros_like(orig_times).uniform_(-1, 1)
         self.register_buffer('orig_times', orig_times)
         self.times = nn.Parameter(orig_times.clone())
 
@@ -382,10 +393,14 @@ class Model(nn.Module):
         t = self.times[0, :]
 
         # TODO: Temporary ======================================
+        # create time vectors for every position in the _entire_ song
         z = torch.linspace(0, 1, self.n_frames, device=t.device)
-        tv = time_vector(z, 1024, self.pos_encoding_channels, device)
-        actual = tv.T @ self.times
+        tv = time_vector(z, self.n_frames, self.pos_encoding_channels, device)
+        # print(tv.T.shape, self.times.shape)
+        actual = unit_norm(tv.T, axis=-1) @ unit_norm(self.times, axis=0)
         indices = torch.argmax(actual, dim=0) / self.n_frames
+        print(indices.max())
+        # print(indices.shape, self.n_frames)
         t = indices
         # print(t.shape, indices.shape)
         # z = list(zip(t.data.cpu().numpy(), indices.data.cpu().numpy()))
@@ -414,6 +429,7 @@ class Model(nn.Module):
 
         scheduled, mx = schedule_events(samples, times, pos_encoding, temperature=temperature)
 
+        # print(scheduled.shape)
         return scheduled[:, :, n_samples:], mx
 
 
@@ -430,6 +446,7 @@ def dataset(
         n_segment_samples: int = 2 ** 15,
         window_size: int = 1024,
         n_pos_encoding_channels: int = 64) -> Generator[DatasetBatch, None, None]:
+
     samples = get_samples(path, 22050)
     n_samples = len(samples)
 
@@ -502,7 +519,7 @@ def train(
         total_samples=total_samples,
         n_frames=total_samples // (window_size // 2),
         samplerate=22050,
-        event_latent_dim=32,
+        event_latent_dim=256,
         events_per_second=16,
         window_size=window_size,
         pos_encoding_channels=n_pos_encoding_channels,
@@ -510,8 +527,6 @@ def train(
     ).to(device)
 
     optim = Adam(model.parameters(), lr=1e-3)
-    # time_optim = Adam([model.times], lr=1e-3)
-    # event_optim = Adam([model.events, *model.generator.parameters()], lr=1e-3)
 
     model_params = count_parameters(model)
 
@@ -521,15 +536,12 @@ def train(
 
         pos, samples, total_samples, start_frame, end_frame, n_frames = pair
 
-        # encoding(model.times)
         events(max_norm(model.events.data))
 
         # log original audio
         orig_audio(max_norm(samples))
 
         optim.zero_grad()
-        # time_optim.zero_grad()
-        # event_optim.zero_grad()
         try:
             tmp = tmp_schedule[i]
         except IndexError:
@@ -548,14 +560,11 @@ def train(
 
         # print(mx)
         # confidence_loss = torch.abs(0.99 - mx).sum() * 100
-        # l = iterative_loss(samples, recon, transform, ratio_loss=False, sort_channels=False) #+ confidence_loss
+        # l = iterative_loss(samples, recon, transform, ratio_loss=False, sort_channels=True)  # + confidence_loss
 
+        # print(recon_summed.shape)
         l = loss(recon_summed, samples)  #+ confidence_loss
         l.backward()
-        # if i % 2 == 0:
-        #     event_optim.step()
-        # else:
-        #     time_optim.step()
         optim.step()
         print(i, l.item(),
               f'N Frames: {n_frames}, Compression Ratio: {(model_params / total_samples):.2f}, change: {model.time_change.item():.4f}')
