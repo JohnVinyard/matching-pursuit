@@ -33,6 +33,12 @@ def decaying_noise(n_items: int, n_samples: int, low_exp: int, high_exp: int, de
     return (t[None, :] ** pos[:, None]) * noise
 
 
+def sim(times: torch.Tensor, pos_encodings: torch.Tensor) -> torch.Tensor:
+    # print(times.shape, pos_encodings.shape)
+    # dist = torch.cdist(times, pos_encodings, p=1)
+    # return 1 / dist
+    return times @ pos_encodings.T
+
 # thanks to https://discuss.pytorch.org/t/how-do-i-check-the-number-of-parameters-of-a-model/4325/9
 def count_parameters(model: nn.Module) -> int:
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -42,11 +48,12 @@ def time_vector(t: torch.Tensor, total_samples: int, n_channels: int, device: to
     factor = np.pi * 2
     t = t * factor
 
-    freqs = torch.linspace(1, total_samples // 2, n_channels // 2, device=device)[:, None]
-    scaled = torch.linspace(1, 0, n_channels // 2, device=device)
 
-    s = torch.sin(t * freqs) * scaled[:, None]
-    c = torch.cos(t * freqs) * scaled[:, None]
+    freqs = torch.linspace(1, total_samples // 2, n_channels // 2, device=device)[:, None]
+
+
+    s = torch.sin(t * freqs)
+    c = torch.cos(t * freqs)
 
     encoding = torch.cat([s, c], dim=0)
     return encoding
@@ -247,7 +254,7 @@ class EventGenerator(nn.Module):
                 log_space_scan=True,
                 phase_dither=torch.tanh(dither.view(-1, 1, self.n_coeffs))
             )
-            resonances = unit_norm(resonances)
+            # resonances = unit_norm(resonances)
 
             resonances = resonances.view(batch, n_events, self.expressivity, self.n_samples)
 
@@ -299,21 +306,23 @@ def schedule_events(
 
     pos_encodings = pos_encodings.view(pos_encoding_dim, -1)
 
-    times = unit_norm(times, axis=-1)
-    pos_encodings = unit_norm(pos_encodings, axis=0)
+    # times = unit_norm(times, axis=-1)
+    # pos_encodings = unit_norm(pos_encodings, axis=0)
 
-    sim = times @ pos_encodings.T
+    # sim = times @ pos_encodings.T
+    s = sim(times, pos_encodings)
+    # print('S', s.shape)
 
 
-    # sched = F.gumbel_softmax(sim, tau=temperature, hard=False, dim=-1)
+    # sched = F.gumbel_softmax(s, tau=temperature, hard=False, dim=-1)
 
     # if np.random.random() > 0.5:
-    sched = sparse_softmax(sim, normalize=True)
+    # sched = sparse_softmax(s, normalize=True)
     # else:
-    #     sched = torch.softmax(sim, dim=-1)
+    sched = torch.softmax(s, dim=-1)
 
     mx, indices = torch.max(sched, dim=-1)
-    print(sched.shape, indices.max())
+    print(sched.shape, indices.max().item(), sched.mean().item())
 
     sched = upsample_with_holes(sched, desired_size=n_samples)
     scheduled = fft_convolve(events, sched)
@@ -351,9 +360,9 @@ class Model(nn.Module):
         times = torch.zeros(self.total_events, device=device).uniform_(0, 1)
 
         orig_times = time_vector(times, self.total_samples, pos_encoding_channels, device)
-        # orig_times = torch.zeros_like(orig_times).uniform_(-1, 1)
-        self.register_buffer('orig_times', orig_times)
-        self.times = nn.Parameter(orig_times.clone())
+        orig_times = torch.zeros_like(orig_times).uniform_(-0.01, 0.01)
+        # self.register_buffer('orig_times', orig_times)
+        self.times = nn.Parameter(orig_times)
 
         n_event_frames = n_segment_samples // self.window_params.step_size
 
@@ -362,16 +371,16 @@ class Model(nn.Module):
 
         self.apply(init)
 
-    @property
-    def time_change(self):
-        return torch.abs(self.orig_times - self.times).sum()
+    # @property
+    # def time_change(self):
+    #     return torch.abs(self.orig_times - self.times).sum()
 
     def forward(
             self,
             pos_encoding: torch.Tensor,
             start_frame: int,
             end_frame: int,
-            temperature: float) -> Tuple[torch.Tensor, torch.Tensor]:
+            temperature: float) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
         n_frames = end_frame - start_frame
         n_samples = self.window_params.total_samples(n_frames)
@@ -393,15 +402,13 @@ class Model(nn.Module):
         z = torch.linspace(0, 1, self.n_frames, device=t.device)
         tv = time_vector(z, self.n_frames, self.pos_encoding_channels, device)
         # print(tv.T.shape, self.times.shape)
-        actual = unit_norm(tv.T, axis=-1) @ unit_norm(self.times, axis=0)
+        # actual = tv.T @ self.times
+        actual = sim(tv.T, self.times.T)
+        # print('ACTUAL', actual.shape)
+        oh = sparse_softmax(actual, dim=0, normalize=True)
         indices = torch.argmax(actual, dim=0) / self.n_frames
-        print(indices.max())
-        # print(indices.shape, self.n_frames)
         t = indices
-        # print(t.shape, indices.shape)
-        # z = list(zip(t.data.cpu().numpy(), indices.data.cpu().numpy()))
-        # for item in z:
-        #     print(item)
+
 
         # In theory, if instead of using the first dimension, I compare
         # to _every_ frame to find relevant items, the experiment should
@@ -426,7 +433,7 @@ class Model(nn.Module):
         scheduled, mx = schedule_events(samples, times, pos_encoding, temperature=temperature)
 
         # print(scheduled.shape)
-        return scheduled[:, :, n_samples:], mx
+        return scheduled[:, :, n_samples:], mx, oh
 
 
 @numpy_conjure(collection)
@@ -487,8 +494,8 @@ def train(
         encode_audio,
         collection)
 
-    events, = loggers(
-        ['events'],
+    events, encoding = loggers(
+        ['events', 'encoding'],
         SupportedContentType.Spectrogram.value,
         to_numpy,
         collection,
@@ -498,8 +505,8 @@ def train(
     serve_conjure([
         orig_audio,
         recon_audio,
-        events
-        # encoding
+        events,
+        encoding
     ], port=9999, n_workers=1)
 
     iterator = dataset(
@@ -515,8 +522,8 @@ def train(
         total_samples=total_samples,
         n_frames=total_samples // (window_size // 2),
         samplerate=22050,
-        event_latent_dim=128,
-        events_per_second=16,
+        event_latent_dim=32,
+        events_per_second=32,
         window_size=window_size,
         pos_encoding_channels=n_pos_encoding_channels,
         n_segment_samples=n_segment_samples
@@ -537,6 +544,7 @@ def train(
         # log original audio
         orig_audio(max_norm(samples))
 
+
         optim.zero_grad()
         try:
             tmp = tmp_schedule[i]
@@ -544,10 +552,13 @@ def train(
             tmp = 1e-4
 
         try:
-            recon, mx = model.forward(pos, start_frame, end_frame, temperature=tmp)
+            recon, mx, positions = model.forward(pos, start_frame, end_frame, temperature=tmp)
         except ValueError as e:
             print(e)
             continue
+
+        encoding(positions)
+
 
         recon_summed = torch.sum(recon, dim=1, keepdim=True)
 
@@ -556,14 +567,14 @@ def train(
 
         # print(mx)
         # confidence_loss = torch.abs(0.99 - mx).sum() * 100
-        # l = iterative_loss(samples, recon, transform, ratio_loss=False, sort_channels=True)  # + confidence_loss
+        # l = iterative_loss(samples, recon, transform, ratio_loss=False, sort_channels=True) + confidence_loss
 
         # print(recon_summed.shape)
-        l = loss(recon_summed, samples)  #+ confidence_loss
+        l = loss(recon_summed, samples) #+ confidence_loss
         l.backward()
         optim.step()
         print(i, l.item(),
-              f'N Frames: {n_frames}, Compression Ratio: {(model_params / total_samples):.2f}, change: {model.time_change.item():.4f}')
+              f'N Frames: {n_frames}, Compression Ratio: {(model_params / total_samples):.2f}')
 
 
 if __name__ == '__main__':
@@ -576,4 +587,4 @@ if __name__ == '__main__':
         torch.device('cuda'),
         n_segment_samples=2 ** 16,
         window_size=1024,
-        n_pos_encoding_channels=4096)
+        n_pos_encoding_channels=256)
