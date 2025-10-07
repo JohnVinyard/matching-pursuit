@@ -1,5 +1,5 @@
 import argparse
-from typing import Generator, Tuple
+from typing import Generator, Tuple, Union
 
 import librosa
 import numpy as np
@@ -16,7 +16,7 @@ from util import encode_audio, make_initializer, device
 from torch.nn.utils.parametrizations import weight_norm
 
 collection = LmdbCollection('funcsong')
-
+from copy import deepcopy
 DatasetBatch = Tuple[torch.Tensor, torch.Tensor, int]
 
 init = make_initializer(0.05)
@@ -31,6 +31,8 @@ def transform(x: torch.Tensor) -> torch.Tensor:
     return stft(x, 2048, 256, pad=True)
 
 
+
+
 def loss(recon: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     r = transform(recon)
     t = transform(target)
@@ -42,12 +44,28 @@ class Layer(nn.Module):
 
     def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
-        ln = weight_norm(nn.Linear(in_channels, out_channels, bias=True))
-        self.mn = ln
+        # ln = weight_norm(nn.Linear(in_channels, out_channels, bias=True))
+        # self.mn = ln
+        # self.mn = nn.Linear(in_channels, out_channels)
+        self.mn = nn.Parameter(torch.zeros(in_channels, out_channels))
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def perturbed_weights(self) -> torch.Tensor:
+        return torch.zeros_like(self.mn).normal_(self.mn.mean().item(), self.mn.std().item())
+
+    def forward(self, x: torch.Tensor, perturb_weights: bool = False) -> torch.Tensor:
         skip = x
-        x = self.mn(x)
+        # x = self.mn(x)
+
+        if perturb_weights:
+            pw = self.perturbed_weights()
+            x = pw @ x
+        else:
+            x = self.mn @ x
+
+        # if  is None:
+        #     x = self.mn @ x
+        # else:
+        #     x = alternate_weights @ x
         x = torch.selu(x)
         x = x + skip
         return x
@@ -67,19 +85,25 @@ class Network(nn.Module):
         self.step_size = window_size // 2
         self.n_coeffs = window_size // 2 + 1
         self.n_samples = n_samples
+        self.n_layers = n_layers
 
         self.input = nn.Linear(in_channels, hidden_channels, bias=True)
-        self.network = nn.Sequential(*[Layer(hidden_channels, hidden_channels) for _ in range(n_layers)])
+        # self.network = nn.Sequential(*[Layer(hidden_channels, hidden_channels) for _ in range(n_layers)])
+        self.network = nn.ModuleList([Layer(hidden_channels, hidden_channels) for _ in range(n_layers)])
         self.output = nn.Linear(hidden_channels, self.n_coeffs * 2, bias=False)
 
         self.apply(init)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+
+    def forward(self, x: torch.Tensor, perturbed_layer: int = None) -> torch.Tensor:
         batch, dim, frames = x.shape
 
         x = x.permute(0, 2, 1)
         x = self.input(x)
-        x = self.network(x)
+
+        for i, layer in enumerate(self.network):
+            x = layer(x, i == perturbed_layer)
+
         x = self.output(x)
         x = x.view(batch, frames, self.n_coeffs, 2)
         x = torch.view_as_complex(x)
@@ -160,8 +184,9 @@ def train(
         batch_size: int = 8,
         hidden_channels: int = 128,
         n_layers: int = 4):
-    recon_audio, orig_audio = loggers(
-        ['recon', 'orig'],
+
+    recon_audio, orig_audio, perturbed = loggers(
+        ['recon', 'orig', 'perturbed'],
         'audio/wav',
         encode_audio,
         collection)
@@ -177,6 +202,7 @@ def train(
     serve_conjure([
         orig_audio,
         recon_audio,
+        perturbed,
         encoding
     ], port=9999, n_workers=1)
 
@@ -207,6 +233,10 @@ def train(
         optim.zero_grad()
         recon = model.forward(pos)
 
+        with torch.no_grad():
+            pert = model.forward(pos, perturbed_layer=np.random.randint(0, model.n_layers))
+            perturbed(max_norm(pert))
+
         # log recon audio
         recon_audio(max_norm(recon))
 
@@ -227,6 +257,6 @@ if __name__ == '__main__':
         n_segment_samples=2 ** 16,
         window_size=1024,
         n_pos_encoding_channels=4096,
-        hidden_channels=512,
-        n_layers=6,
+        hidden_channels=128,
+        n_layers=4,
         batch_size=32)

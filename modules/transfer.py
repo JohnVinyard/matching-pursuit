@@ -216,7 +216,7 @@ def freq_domain_transfer_function_to_resonance(
     phase[:, :, :, :] = gd
 
     if phase_dither is not None:
-        # print(phase_dither.shape, phase.shape, group_delay.shape)
+        print(phase_dither.shape, phase.shape, group_delay.shape)
         # TODO: Experimental
         phase = phase + (torch.zeros_like(phase).uniform_(-1, 1) * group_delay[None, None, None, :] * phase_dither[:, None, :, :])
 

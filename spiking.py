@@ -27,7 +27,7 @@ import numpy as np
 
 n_samples = 2 ** 17
 
-init = make_initializer(0.1)
+init = make_initializer(0.02)
 
 
 class LayerNorm(nn.Module):
@@ -82,11 +82,18 @@ class AutoEncoder(nn.Module):
         #     # with_activation_norm=True,
         #     do_norm=True)
 
-        self.to_samples = nn.Conv1d(self.channels, self.n_coeffs * 2, 1, 1, 0)
+        self.to_mag = nn.Linear(self.channels, self.n_coeffs)
+        self.to_phase = nn.Linear(self.channels, self.n_coeffs)
+
+        self.register_buffer('group_delay', torch.linspace(0, np.pi, self.n_coeffs))
+
+        # self.to_samples = nn.Conv1d(self.channels, self.n_coeffs * 2, 1, 1, 0)
 
         self.apply(init)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+
+        n_samples = x.shape[-1]
         orig = x
         batch_size = x.shape[0]
         x = stft(x, self.window_size, self.step_size, pad=True, return_complex=True)
@@ -98,21 +105,42 @@ class AutoEncoder(nn.Module):
 
         x = self.encoder(x)
         x = self.up_proj(x)
-        x = F.dropout(x, 0.01)
-        x = x - x.mean()
-        x = torch.relu(x)
+
+
+        # x = F.dropout(x, 0.01)
+        # x = x - x.mean()
+        # x = torch.relu(x)
         # x = x / (x.sum() + 1e-8)
-        x = sparsify(x, n_to_keep=256)
+        # x = sparsify(x, n_to_keep=256)
         x = self.down_proj(x)
         x = self.decoder(x)
+        x = x.permute(0, 2, 1)
 
+        # print(x.shape)
 
-        x = self.to_samples(x)
-        x = x.view(batch_size, self.n_coeffs, 2, self.n_frames)
-        x = x.permute(0, 3, 1, 2)
-        x = torch.view_as_complex(x.contiguous())
-        x = torch.fft.irfft(x)
-        x = overlap_add(x[:, None, :, :], apply_window=False)[..., :n_samples]
+        mag = self.to_mag(x)
+        phase = torch.tanh(self.to_phase(x))
+
+        b = mag.shape[0]
+        mag = torch.abs(mag.view(b, self.n_frames, -1))
+        phase = phase.view(b, self.n_frames, -1) * self.group_delay[None, None, :]
+
+        gd = self.group_delay.view(1, 1, -1).repeat(1, self.n_frames, 1)
+        phase = gd + (phase * torch.zeros_like(phase).uniform_(-1, 1))
+
+        phase = torch.cumsum(phase, dim=1)
+
+        x = mag * torch.exp(1j * phase)
+
+        x = torch.fft.irfft(x, dim=-1)
+        x = overlap_add(x[:, None, :, :])[..., :n_samples]
+
+        # x = self.to_samples(x)
+        # x = x.view(batch_size, self.n_coeffs, 2, self.n_frames)
+        # x = x.permute(0, 3, 1, 2)
+        # x = torch.view_as_complex(x.contiguous())
+        # x = torch.fft.irfft(x)
+        # x = overlap_add(x[:, None, :, :], apply_window=True)[..., :n_samples]
         # x = torch.tanh(x)
         # x = max_norm(x)
         # x = torch.sin(x)
@@ -278,7 +306,7 @@ class SpikingModel(nn.Module):
         normalized = channels - pooled
         normalized = torch.relu(normalized)
 
-        y = normalized
+        # y = normalized
 
 
         fwd = (normalized > 0).float()
@@ -290,6 +318,7 @@ class SpikingModel(nn.Module):
 
         y = back + (fwd - back).detach()
 
+
         # print(f'Channel {audio.shape[-1]} with sparsity {(fwd.sum() / fwd.numel())} and {fwd.sum()} non-zero elements')
 
         # TODO: Figure out mask here
@@ -298,8 +327,10 @@ class SpikingModel(nn.Module):
         # y = F.pad(y, (0, self.periodicity_size // 4))
         # y = y.unfold(-1, self.periodicity_size, self.periodicity_size // 4)
         # y = torch.abs(torch.fft.rfft(y, dim=-1))
+        #
         # y = y - torch.mean(y, dim=-1, keepdim=True)
-        # # y = y[:, :, 1:, :] - y[:, :, :-1, :]
+        # y = y[:, :, 1:, :] - y[:, :, :-1, :]
+
         # y = torch.relu(y)
         #
         # fwd = (y > 0).float()
@@ -503,8 +534,8 @@ def overfit_model():
         n_channels=64,
         filter_size=64,
         periodicity_size=64,
-        memory_size=16,
-        frame_memory_size=8).to(device)
+        memory_size=64,
+        frame_memory_size=64).to(device)
 
     # ae = AutoEncoder(2048, 256, 32).to(device)
 
@@ -552,5 +583,5 @@ def overfit_model():
 
 
 if __name__ == '__main__':
-    # overfit_model()
-    train_resource_constrained_autoencoder()
+    overfit_model()
+    # train_resource_constrained_autoencoder()

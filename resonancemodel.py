@@ -388,6 +388,7 @@ class FFTResonanceBlock(nn.Module):
         self.base_resonance = base_resonance
 
         resonance_coeffs = resonance_window_size // 2 + 1
+        self.n_coeffs = resonance_coeffs
 
         def init_resonance() -> torch.Tensor:
             # base resonance
@@ -427,6 +428,7 @@ class FFTResonanceBlock(nn.Module):
         phase_dither = phase_dither.permute(0, 2, 1)
 
         # materialize resonances
+        print(amp.shape, decay.shape, phase_dither.shape)
         res = freq_domain_transfer_function_to_resonance(
             window_size,
             base_resonance + ((torch.sigmoid(decay) * res_span) * res_factor),
@@ -434,7 +436,7 @@ class FFTResonanceBlock(nn.Module):
             apply_decay=True,
             start_phase=torch.tanh(phase) * np.pi,
             start_mags=amp ** 2,
-            phase_dither=torch.tanh(phase_dither),
+            phase_dither=torch.tanh(phase_dither).reshape(-1, 1, self.n_coeffs),
             log_space_scan=True)
         res = res.view(1, 1, n_resonances, expressivity, n_samples)
         return res
@@ -473,15 +475,15 @@ class ResonanceLayer(nn.Module):
         self.router = nn.Parameter(
             torch.zeros((self.control_plane_dim, self.n_resonances)).uniform_(-1, 1))
 
-        self.resonance = DampedHarmonicOscillatorBlock(
-            n_samples, 64, n_resonances, expressivity
-        )
+        # self.resonance = DampedHarmonicOscillatorBlock(
+        #     n_samples, 64, n_resonances, expressivity
+        # )
 
         # self.resonance = LatentResonanceBlock(
         #     n_samples, n_resonances, expressivity, latent_dim=16)
 
-        # self.resonance = FFTResonanceBlock(
-        #     n_samples, resonance_window_size, n_resonances, expressivity, base_resonance)
+        self.resonance = FFTResonanceBlock(
+            n_samples, resonance_window_size, n_resonances, expressivity, base_resonance)
 
         # self.resonance = MultibandFFTResonanceBlock(
         #     n_resonances,
@@ -636,7 +638,7 @@ class OverfitResonanceStack(nn.Module):
             self.control_plane.min().item(),
             self.control_plane.max().item())
 
-        rcp = self._process_control_plane(rcp, n_to_keep=32)
+        rcp = self._process_control_plane(rcp, n_to_keep=16)
         x = self.forward(
             rcp, self.deformations if use_learned_deformations else torch.zeros_like(self.deformations))
         return x
@@ -737,7 +739,7 @@ def overfit_model():
             print(iteration, loss.item(), model.compression_ratio(n_samples))
 
             with torch.no_grad():
-                rand(max_norm(model.random(use_learned_deformations=False)))
+                rand(max_norm(model.random(use_learned_deformations=True)))
 
             iteration += 1
 

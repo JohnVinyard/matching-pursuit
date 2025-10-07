@@ -322,7 +322,7 @@ def schedule_events(
     sched = torch.softmax(s, dim=-1)
 
     mx, indices = torch.max(sched, dim=-1)
-    print(sched.shape, indices.max().item(), sched.mean().item())
+    print(sched.shape, indices.max().item(), mx.mean().item())
 
     sched = upsample_with_holes(sched, desired_size=n_samples)
     scheduled = fft_convolve(events, sched)
@@ -360,7 +360,7 @@ class Model(nn.Module):
         times = torch.zeros(self.total_events, device=device).uniform_(0, 1)
 
         orig_times = time_vector(times, self.total_samples, pos_encoding_channels, device)
-        orig_times = torch.zeros_like(orig_times).uniform_(-0.01, 0.01)
+        # orig_times = torch.zeros_like(orig_times).uniform_(-0.01, 0.01)
         # self.register_buffer('orig_times', orig_times)
         self.times = nn.Parameter(orig_times)
 
@@ -587,4 +587,4 @@ if __name__ == '__main__':
         torch.device('cuda'),
         n_segment_samples=2 ** 16,
         window_size=1024,
-        n_pos_encoding_channels=256)
+        n_pos_encoding_channels=4096)
