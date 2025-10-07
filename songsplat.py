@@ -21,7 +21,7 @@ from torch.nn import functional as F
 
 collection = LmdbCollection('songsplat')
 
-DatasetBatch = Tuple[torch.Tensor, torch.Tensor, int, int, int, int]
+DatasetBatch = Tuple[torch.Tensor, int, int, int, int]
 
 init = make_initializer(0.05)
 
@@ -33,48 +33,47 @@ def decaying_noise(n_items: int, n_samples: int, low_exp: int, high_exp: int, de
     return (t[None, :] ** pos[:, None]) * noise
 
 
-def sim(times: torch.Tensor, pos_encodings: torch.Tensor) -> torch.Tensor:
-    # print(times.shape, pos_encodings.shape)
-    # dist = torch.cdist(times, pos_encodings, p=1)
-    # return 1 / dist
-    return times @ pos_encodings.T
+# def sim(times: torch.Tensor, pos_encodings: torch.Tensor) -> torch.Tensor:
+#     # print(times.shape, pos_encodings.shape)
+#     # dist = torch.cdist(times, pos_encodings, p=1)
+#     # return 1 / dist
+#     return times @ pos_encodings.T
 
-# thanks to https://discuss.pytorch.org/t/how-do-i-check-the-number-of-parameters-of-a-model/4325/9
-def count_parameters(model: nn.Module) -> int:
-    return sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-
-def time_vector(t: torch.Tensor, total_samples: int, n_channels: int, device: torch.device) -> torch.Tensor:
-    factor = np.pi * 2
-    t = t * factor
+# # thanks to https://discuss.pytorch.org/t/how-do-i-check-the-number-of-parameters-of-a-model/4325/9
+# def count_parameters(model: nn.Module) -> int:
+#     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
-    freqs = torch.linspace(1, total_samples // 2, n_channels // 2, device=device)[:, None]
+# def time_vector(t: torch.Tensor, total_samples: int, n_channels: int, device: torch.device) -> torch.Tensor:
+#     factor = np.pi * 2
+#     t = t * factor
+#
+#
+#     freqs = torch.linspace(1, total_samples // 2, n_channels // 2, device=device)[:, None]
+#
+#
+#     s = torch.sin(t * freqs)
+#     c = torch.cos(t * freqs)
+#
+#     encoding = torch.cat([s, c], dim=0)
+#     return encoding
 
 
-    s = torch.sin(t * freqs)
-    c = torch.cos(t * freqs)
-
-    encoding = torch.cat([s, c], dim=0)
-    return encoding
-
-
-def pos_encoding(
-        start_sample: int,
-        stop_sample: int,
-        total_samples: int,
-        n_channels: int,
-        device: torch.device) -> torch.Tensor:
-
-    start = start_sample / total_samples
-    end = stop_sample / total_samples
-    n_samples = stop_sample - start_sample
-
-
-    t = torch.linspace(start, end, n_samples, device=device)[None, :]
-
-    return time_vector(t, total_samples, n_channels, device)
-
+# def pos_encoding(
+#         start_sample: int,
+#         stop_sample: int,
+#         total_samples: int,
+#         n_channels: int,
+#         device: torch.device) -> torch.Tensor:
+#
+#     start = start_sample / total_samples
+#     end = stop_sample / total_samples
+#     n_samples = stop_sample - start_sample
+#
+#
+#     t = torch.linspace(start, end, n_samples, device=device)[None, :]
+#
+#     return time_vector(t, total_samples, n_channels, device)
 
 
 def transform(x: torch.Tensor) -> torch.Tensor:
@@ -296,30 +295,28 @@ class EventGenerator(nn.Module):
 
 def schedule_events(
         events: torch.Tensor,
-        times: torch.Tensor,
-        pos_encodings: torch.Tensor,
-        temperature: float) -> Tuple[torch.Tensor, torch.Tensor]:
+        times: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     batch, n_events, n_samples = events.shape
     n_events, pos_encoding_dim = times.shape
-    _, n_frames, pos_encoding_dim = pos_encodings.shape
+    # _, n_frames, pos_encoding_dim = pos_encodings.shape
 
-
-    pos_encodings = pos_encodings.view(pos_encoding_dim, -1)
+    # pos_encodings = pos_encodings.view(pos_encoding_dim, -1)
 
     # times = unit_norm(times, axis=-1)
     # pos_encodings = unit_norm(pos_encodings, axis=0)
 
     # sim = times @ pos_encodings.T
-    s = sim(times, pos_encodings)
+    # s = sim(times, pos_encodings)
     # print('S', s.shape)
-
 
     # sched = F.gumbel_softmax(s, tau=temperature, hard=False, dim=-1)
 
     # if np.random.random() > 0.5:
     # sched = sparse_softmax(s, normalize=True)
     # else:
-    sched = torch.softmax(s, dim=-1)
+    # sched = torch.softmax(s, dim=-1)
+
+    sched = times
 
     mx, indices = torch.max(sched, dim=-1)
     print(sched.shape, indices.max().item(), mx.mean().item())
@@ -338,7 +335,6 @@ class Model(nn.Module):
             samplerate: int,
             event_latent_dim: int,
             window_size: int,
-            pos_encoding_channels: int,
             n_segment_samples: int,
             events_per_second: float):
         super().__init__()
@@ -347,7 +343,6 @@ class Model(nn.Module):
         self.n_frames = n_frames
         self.window_size = window_size
         self.window_params = HalfLappedWindowParams(window_size)
-        self.pos_encoding_channels = pos_encoding_channels
         self.event_latent_dim = event_latent_dim
         self.total_samples = total_samples
         self.samplerate = samplerate
@@ -357,12 +352,14 @@ class Model(nn.Module):
         print('TOTAL EVENTS', self.total_events)
 
         self.events = nn.Parameter(torch.zeros(self.total_events, self.event_latent_dim).uniform_(-1, 1))
-        times = torch.zeros(self.total_events, device=device).uniform_(0, 1)
+        self.times = nn.Parameter(torch.zeros(self.total_events, self.n_frames).uniform_(-1, 1))
 
-        orig_times = time_vector(times, self.total_samples, pos_encoding_channels, device)
+        # times = torch.zeros(self.total_events, device=device).uniform_(0, 1)
+
+        # orig_times = time_vector(times, self.total_samples, pos_encoding_channels, device)
         # orig_times = torch.zeros_like(orig_times).uniform_(-0.01, 0.01)
         # self.register_buffer('orig_times', orig_times)
-        self.times = nn.Parameter(orig_times)
+        # self.times = nn.Parameter(orig_times)
 
         n_event_frames = n_segment_samples // self.window_params.step_size
 
@@ -375,9 +372,14 @@ class Model(nn.Module):
     # def time_change(self):
     #     return torch.abs(self.orig_times - self.times).sum()
 
+    @property
+    def compression_ratio(self):
+        # we only need a single float value, representing event time
+        n_params = (self.total_events * self.event_latent_dim) + self.total_events
+        return n_params / self.total_samples
+
     def forward(
             self,
-            pos_encoding: torch.Tensor,
             start_frame: int,
             end_frame: int,
             temperature: float) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -395,30 +397,35 @@ class Model(nn.Module):
         # print(n_frames, n_samples, start_frame, end_frame, early_frame, start_rel, stop_rel)
 
         # use the linear [0-1] channel to locate events that will affect this interval
-        t = self.times[0, :]
+        # t = self.times[0, :]
 
         # TODO: Temporary ======================================
         # create time vectors for every position in the _entire_ song
-        z = torch.linspace(0, 1, self.n_frames, device=t.device)
-        tv = time_vector(z, self.n_frames, self.pos_encoding_channels, device)
+        # z = torch.linspace(0, 1, self.n_frames, device=t.device)
+        # tv = time_vector(z, self.n_frames, self.pos_encoding_channels, device)
         # print(tv.T.shape, self.times.shape)
         # actual = tv.T @ self.times
-        actual = sim(tv.T, self.times.T)
+        # actual = sim(tv.T, self.times.T)
         # print('ACTUAL', actual.shape)
-        oh = sparse_softmax(actual, dim=0, normalize=True)
-        indices = torch.argmax(actual, dim=0) / self.n_frames
-        t = indices
-
+        # oh = sparse_softmax(actual, dim=0, normalize=True)
+        # indices = torch.argmax(actual, dim=0) / self.n_frames
+        # t = indices
 
         # In theory, if instead of using the first dimension, I compare
         # to _every_ frame to find relevant items, the experiment should
         # work, if my theory is correct.
         # TODO: Temporary ======================================
 
+        t = sparse_softmax(self.times, dim=-1, normalize=True)
+        oh = t
+        t = torch.argmax(t, dim=-1) / self.n_frames
+
         mask = (t > start_rel) & (t < stop_rel)
 
+        # print(self.n_frames, t.shape, mask.shape)
+
         events = self.events[mask]
-        times = self.times.T[mask]
+        times = self.times[mask]
 
         if events.shape[0] == 0:
             raise ValueError('no events')
@@ -430,7 +437,7 @@ class Model(nn.Module):
         samples = samples.view(1, -1, n_samples)
         samples = ensure_last_axis_length(samples, desired_size=n_samples * 2)
 
-        scheduled, mx = schedule_events(samples, times, pos_encoding, temperature=temperature)
+        scheduled, mx = schedule_events(samples, times[:, early_frame: end_frame])
 
         # print(scheduled.shape)
         return scheduled[:, :, n_samples:], mx, oh
@@ -449,7 +456,6 @@ def dataset(
         n_segment_samples: int = 2 ** 15,
         window_size: int = 1024,
         n_pos_encoding_channels: int = 64) -> Generator[DatasetBatch, None, None]:
-
     samples = get_samples(path, 22050)
     n_samples = len(samples)
 
@@ -465,7 +471,7 @@ def dataset(
 
         # we'll return positions that are twice as long as the segment, beginning one full segment
         # earlier than the samples
-        pos = torch.zeros(1, n_pos_encoding_channels, n_segment_frames * 2, device=device)
+        # pos = torch.zeros(1, n_pos_encoding_channels, n_segment_frames * 2, device=device)
 
         start_index = np.random.randint(n_frames - (n_segment_frames - 1))
         end_index = start_index + n_segment_frames
@@ -473,9 +479,9 @@ def dataset(
 
         chunk = torch.from_numpy(samples[start_index * step_size:end_index * step_size]).to(device)
         batch[:, 0, :] = chunk
-        pos[:, :, :] = pos_encoding(early_index, end_index, n_frames, n_pos_encoding_channels, device)
+        # pos[:, :, :] = pos_encoding(early_index, end_index, n_frames, n_pos_encoding_channels, device)
 
-        yield pos, batch, n_samples, start_index, end_index, n_frames
+        yield batch, n_samples, start_index, end_index, n_frames
 
 
 def to_numpy(x: torch.Tensor):
@@ -516,34 +522,30 @@ def train(
         window_size=window_size,
         n_pos_encoding_channels=n_pos_encoding_channels)
 
-    _, _, total_samples, _, _, _ = next(iterator)
+    _, total_samples, _, _, _ = next(iterator)
 
     model = Model(
         total_samples=total_samples,
         n_frames=total_samples // (window_size // 2),
         samplerate=22050,
-        event_latent_dim=32,
-        events_per_second=32,
+        event_latent_dim=64,
+        events_per_second=16,
         window_size=window_size,
-        pos_encoding_channels=n_pos_encoding_channels,
         n_segment_samples=n_segment_samples
     ).to(device)
 
     optim = Adam(model.parameters(), lr=1e-3)
 
-    model_params = count_parameters(model)
-
     tmp_schedule = torch.linspace(1, 1e-4, 10000)
 
     for i, pair in enumerate(iterator):
 
-        pos, samples, total_samples, start_frame, end_frame, n_frames = pair
+        samples, total_samples, start_frame, end_frame, n_frames = pair
 
         events(max_norm(model.events.data))
 
         # log original audio
         orig_audio(max_norm(samples))
-
 
         optim.zero_grad()
         try:
@@ -552,13 +554,12 @@ def train(
             tmp = 1e-4
 
         try:
-            recon, mx, positions = model.forward(pos, start_frame, end_frame, temperature=tmp)
+            recon, mx, positions = model.forward(start_frame, end_frame, temperature=tmp)
         except ValueError as e:
             print(e)
             continue
 
         encoding(positions)
-
 
         recon_summed = torch.sum(recon, dim=1, keepdim=True)
 
@@ -567,14 +568,14 @@ def train(
 
         # print(mx)
         # confidence_loss = torch.abs(0.99 - mx).sum() * 100
-        # l = iterative_loss(samples, recon, transform, ratio_loss=False, sort_channels=True) + confidence_loss
+        l = iterative_loss(samples, recon, transform, ratio_loss=False, sort_channels=True)  # + confidence_loss
 
         # print(recon_summed.shape)
-        l = loss(recon_summed, samples) #+ confidence_loss
+        # l = loss(recon_summed, samples) #+ confidence_loss
         l.backward()
         optim.step()
         print(i, l.item(),
-              f'N Frames: {n_frames}, Compression Ratio: {(model_params / total_samples):.2f}')
+              f'N Frames: {n_frames}, Compression Ratio: {(model.compression_ratio):.2f}')
 
 
 if __name__ == '__main__':
@@ -586,5 +587,4 @@ if __name__ == '__main__':
         args.path,
         torch.device('cuda'),
         n_segment_samples=2 ** 16,
-        window_size=1024,
-        n_pos_encoding_channels=4096)
+        window_size=1024)
