@@ -158,17 +158,14 @@ class OverfitHierarchicalEvents(nn.Module):
             events: torch.Tensor,
             times: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         for i in range(self.event_levels - 1):
-            # scale = 1 / (i + 1)
             scale = 1
 
-            # TODO: consider bringing back scaling as we approach the leaves of the tree
             events = \
                 events.view(1, -1, 1, self.context_dim) \
                 + (self.hierarchical_event_vectors[str(i)].view(1, 1, 2, self.context_dim) * scale)
             events = events.view(1, -1, self.context_dim)
 
-            # TODO: Consider masking lower bits as we approach the leaves of the tree, so that
-            # new levels can only _refine_, and not completely move entire branches
+            # grow the number of encoded times by repeating the previous "level" and adding the next
             batch, n_events, n_bits, _ = times.shape
             times = times.view(batch, n_events, 1, n_bits, 2).repeat(1, 1, 2, 1, 1).view(batch, n_events * 2, n_bits, 2)
             times = times + (self.hierarchical_time_vectors[str(i)] * scale)

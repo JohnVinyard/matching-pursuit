@@ -1,9 +1,9 @@
-from typing import Tuple, Callable, Any
+from typing import Tuple, Callable, Any, Union
 
 import numpy as np
 import torch
 
-from conjure import serve_conjure, SupportedContentType, NumpyDeserializer, NumpySerializer
+from conjure import serve_conjure, SupportedContentType, NumpyDeserializer, NumpySerializer, Logger, MetaData
 from torch import nn
 from torch.optim import Adam
 
@@ -15,6 +15,8 @@ from modules.infoloss import CorrelationLoss
 from modules.transfer import freq_domain_transfer_function_to_resonance, fft_convolve
 from modules.upsample import upsample_with_holes, ensure_last_axis_length
 from util import device, encode_audio, make_initializer
+from base64 import b64encode
+from sklearn.decomposition import SparsePCA
 
 MaterializeResonances = Callable[..., torch.Tensor]
 
@@ -89,10 +91,9 @@ def execute_layer(
         deformations: torch.Tensor,
         gains: torch.Tensor,
         window_size: int) -> Tuple[torch.Tensor, torch.Tensor]:
-    # n_resonances, n_coeffs, expressivity = amp.shape
     batch, n_events, control_plane_dim, frames = control_signal.shape
     batch, n_events, expressivity, def_frames = deformations.shape
-    cpd, nr = routing.shape
+    # cpd, nr = routing.shape
 
     # TODO: control signal sparsity enforced here?
 
@@ -117,7 +118,9 @@ def execute_layer(
 
     # convolve with noise impulse
     routed = upsample_with_holes(routed, n_samples)
-    impulse = torch.hamming_window(128, device=routed.device)
+
+    # TODO: Try this with a gamma distribution, or a learnable distribution
+    impulse = torch.hamming_window(128, device=routed.device) ** 4
     impulse = impulse * torch.zeros_like(impulse).uniform_(-1, 1)
     impulse = ensure_last_axis_length(impulse, n_samples)
     impulse = impulse.view(1, 1, 1, 1, n_samples)
@@ -220,7 +223,7 @@ class MultibandFFTResonanceBlock(nn.Module):
 
             mag = self.resonances['decay'][:, :self.n_coeffs, :]
             phase = self.resonances['phase'][:, self.n_coeffs:self.n_coeffs * 2, :]
-            start = self.resonances['amp'][:, self.n_coeffs*2:self.n_coeffs*3, :]
+            start = self.resonances['amp'][:, self.n_coeffs * 2:self.n_coeffs * 3, :]
             phase_dither = self.resonances['phase_dither'][:, -self.n_coeffs:, :]
 
             mag = mag.permute(0, 2, 1)
@@ -317,7 +320,6 @@ class DampedHarmonicOscillatorBlock(nn.Module):
         time = torch.linspace(0, 1, self.n_samples, device=device) \
             .view(1, 1, 1, self.n_samples)
 
-
         x = damped_harmonic_oscillator(
             time=time,
             mass=torch.sigmoid(self.mass[..., None]),
@@ -347,7 +349,6 @@ class LatentResonanceBlock(nn.Module):
             n_resonances: int,
             expressivity: int,
             latent_dim: int):
-
         super().__init__()
         self.n_samples = n_samples
         self.n_resonances = n_resonances
@@ -356,7 +357,6 @@ class LatentResonanceBlock(nn.Module):
 
         n_coeffs = n_samples // 2 + 1
         total_coeffs = n_coeffs * 2
-
 
         self.mapping = HyperNetworkLayer(latent_dim, latent_dim, latent_dim, total_coeffs, bias=False)
         self.layer_latents = nn.Parameter(
@@ -371,6 +371,7 @@ class LatentResonanceBlock(nn.Module):
         mapped = torch.view_as_complex(mapped)
         res = torch.fft.irfft(mapped)
         return res.view(1, 1, self.n_resonances, self.expressivity, self.n_samples)
+
 
 class FFTResonanceBlock(nn.Module):
     def __init__(
@@ -509,6 +510,15 @@ class ResonanceLayer(nn.Module):
 
         self.gains = nn.Parameter(torch.zeros((n_resonances, 1)).uniform_(0.01, 1.1))
 
+    def get_materialized_resonance(self):
+        return self.resonance.forward()
+
+    def get_gains(self):
+        return self.gains
+
+    def get_router(self):
+        return self.router
+
     def forward(
             self,
             control_signal: torch.Tensor,
@@ -555,6 +565,18 @@ class ResonanceStack(nn.Module):
             expressivity,
             base_resonance
         ) for _ in range(n_layers)])
+
+    def get_materialized_resonance(self, layer: int) -> torch.Tensor:
+        layer = self.layers[layer]
+        return layer.get_materialized_resonance()
+
+    def get_gains(self, layer: int) -> torch.Tensor:
+        layer = self.layers[layer]
+        return layer.get_gains()
+
+    def get_router(self, layer: int) -> torch.Tensor:
+        layer = self.layers[layer]
+        return layer.get_router()
 
     def forward(self, control_signal: torch.Tensor, deformations: torch.Tensor) -> torch.Tensor:
         batch_size, n_events, cpd, frames = control_signal.shape
@@ -616,6 +638,28 @@ class OverfitResonanceStack(nn.Module):
 
         self.apply(init_weights)
 
+    def _get_mapping(self, n_components: int) -> np.ndarray:
+        cs = self.control_signal.data.cpu().numpy() \
+            .reshape(self.control_plane_dim, self.n_frames).T
+        pca = SparsePCA(n_components=n_components)
+        pca.fit(cs)
+        # this will be of shape (n_components, control_plane_dim)
+        return pca.components_
+
+    def get_hand_tracking_mapping(self) -> np.ndarray:
+        mapping = self._get_mapping(n_components=21 * 3)
+        print('PCA Weight Shape', mapping.shape)
+        return mapping
+
+    def get_materialized_resonance(self, layer: int) -> torch.Tensor:
+        return self.network.get_materialized_resonance(layer)
+
+    def get_gains(self, layer: int) -> torch.Tensor:
+        return self.network.get_gains(layer)
+
+    def get_router(self, layer: int) -> torch.Tensor:
+        return self.network.get_router(layer)
+
     def _process_control_plane(
             self,
             cp: torch.Tensor,
@@ -660,6 +704,39 @@ class OverfitResonanceStack(nn.Module):
         return (self.deformations.numel() + count_parameters(self.network) + 256) / n_samples
 
 
+def encode_array(arr: Union[np.ndarray, torch.Tensor], serializer: NumpySerializer) -> str:
+    if isinstance(arr, torch.Tensor):
+        arr = arr.data.cpu().numpy()
+
+    return b64encode(serializer.to_bytes(arr)).decode()
+
+
+def generate_param_dict(key: str, logger: Logger, model: OverfitResonanceStack) -> [dict, MetaData]:
+    serializer = NumpySerializer()
+
+    hand = model.get_hand_tracking_mapping()
+    assert hand.shape == (21 * 3, model.control_plane_dim)
+
+    router = model.get_router(0)
+    assert router.shape == (model.control_plane_dim, model.n_resonances)
+
+    gains = model.get_gains(0).view(-1)
+    assert gains.shape == (model.n_resonances,)
+
+    resonances = model.get_materialized_resonance(0).reshape(-1, model.n_samples)
+    assert resonances.shape == (model.n_resonances * model.expressivity, model.n_samples)
+
+    params = dict(
+        gains=encode_array(gains, serializer),
+        router=encode_array(router, serializer),
+        resonances=encode_array(resonances, serializer),
+        hand=encode_array(hand, serializer),
+    )
+    _, meta = logger.log_json(key, params)
+    print('WEIGHTS URI', meta.public_uri.geturl())
+    return params, meta
+
+
 def l0_norm(x: torch.Tensor):
     mask = (x > 0).float()
     forward = mask
@@ -669,7 +746,7 @@ def l0_norm(x: torch.Tensor):
 
 
 def overfit_model():
-    n_samples = 2 ** 16
+    n_samples = 2 ** 17
     resonance_window_size = 2048
     step_size = 1024
     n_frames = n_samples // step_size
@@ -693,6 +770,9 @@ def overfit_model():
     ).to(device)
     optimizer = Adam(model.parameters(), lr=1e-3)
     collection = conjure.LmdbCollection(path='resonancemodel')
+
+    remote_collection = conjure.S3Collection('resonancemodel', is_public=True, cors_enabled=True)
+    remote_logger = conjure.Logger(remote_collection)
 
     t, r, rand = conjure.loggers(
         ['target', 'recon', 'random'],
@@ -726,10 +806,10 @@ def overfit_model():
             r(max_norm(recon))
             c(model.control_signal[0, 0])
 
-            x = flattened_multiband_spectrogram(target, {'s': (64, 16)})
-            y = flattened_multiband_spectrogram(recon, {'s': (64, 16)})
-            # x = stft(target, 2048, 256, pad=True)
-            # y = stft(recon, 2048, 256, pad=True)
+            # x = flattened_multiband_spectrogram(target, {'s': (64, 16)})
+            # y = flattened_multiband_spectrogram(recon, {'s': (64, 16)})
+            x = stft(target, 2048, 256, pad=True)
+            y = stft(recon, 2048, 256, pad=True)
             loss = torch.abs(x - y).sum()
 
             # loss = loss_model.multiband_noise_loss(target, recon, 64, 16)
@@ -742,6 +822,11 @@ def overfit_model():
                 rand(max_norm(model.random(use_learned_deformations=True)))
 
             iteration += 1
+
+            if iteration > 0 and iteration % 1000 == 0:
+                print('Serializing')
+                generate_param_dict('resonancemodelparams', remote_logger, model)
+                input('Continue?')
 
     train()
 

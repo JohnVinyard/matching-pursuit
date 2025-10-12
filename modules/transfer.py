@@ -229,6 +229,7 @@ def freq_domain_transfer_function_to_resonance(
     # convert from polar coordinates
     spec = spec * torch.exp(1j * phase)
 
+    # TODO:  Why overlap-add here?  Should the group delay be adjusted?
     windowed = torch.fft.irfft(spec, dim=-1).view(-1, 1, n_frames, window_size)
     audio = overlap_add(windowed, apply_window=False)[..., :total_samples]
     audio = audio.view(-1, 1, total_samples)

@@ -319,7 +319,7 @@ class SpikingModel(nn.Module):
         y = back + (fwd - back).detach()
 
 
-        # print(f'Channel {audio.shape[-1]} with sparsity {(fwd.sum() / fwd.numel())} and {fwd.sum()} non-zero elements')
+        print(f'Channel {audio.shape[-1]} with sparsity {(fwd.sum() / fwd.numel())} and {fwd.sum()} non-zero elements')
 
         # TODO: Figure out mask here
 
@@ -345,7 +345,11 @@ class SpikingModel(nn.Module):
 
 
 class HyperDimensionalLoss(nn.Module):
-    def __init__(self, window_size: int = 2048, step_size: int = 256, hdim: int = 16384):
+    def __init__(
+            self,
+            window_size: int = 2048,
+            step_size: int = 256,
+            hdim: int = 16384):
         super().__init__()
         self.window_size = window_size
         self.n_coeffs = self.window_size // 2 + 1
