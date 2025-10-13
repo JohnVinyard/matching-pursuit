@@ -176,7 +176,9 @@ def freq_domain_transfer_function_to_resonance(
         start_phase: Union[None, torch.Tensor] = None,
         start_mags: Union[None, torch.Tensor] = None,
         log_space_scan: bool = True,
-        phase_dither: torch.Tensor = None) -> torch.Tensor:
+        phase_dither: torch.Tensor = None,
+        apply_window: bool = False,
+        overrlap_add: bool = True) -> torch.Tensor:
     step_size = window_size // 2
     total_samples = step_size * n_frames
 
@@ -216,7 +218,7 @@ def freq_domain_transfer_function_to_resonance(
     phase[:, :, :, :] = gd
 
     if phase_dither is not None:
-        print(phase_dither.shape, phase.shape, group_delay.shape)
+        # print(phase_dither.shape, phase.shape, group_delay.shape)
         # TODO: Experimental
         phase = phase + (torch.zeros_like(phase).uniform_(-1, 1) * group_delay[None, None, None, :] * phase_dither[:, None, :, :])
 
@@ -231,7 +233,13 @@ def freq_domain_transfer_function_to_resonance(
 
     # TODO:  Why overlap-add here?  Should the group delay be adjusted?
     windowed = torch.fft.irfft(spec, dim=-1).view(-1, 1, n_frames, window_size)
-    audio = overlap_add(windowed, apply_window=False)[..., :total_samples]
+    b = windowed.shape[0]
+
+    if overrlap_add:
+        audio = overlap_add(windowed, apply_window=apply_window)[..., :total_samples]
+    else:
+        audio = windowed.view(b, 1, -1)[..., :total_samples]
+
     audio = audio.view(-1, 1, total_samples)
     audio = max_norm(audio)
     return audio

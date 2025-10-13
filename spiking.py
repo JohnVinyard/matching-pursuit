@@ -370,11 +370,21 @@ class HyperDimensionalLoss(nn.Module):
         x = x.view(batch_size, -1, self.n_coeffs).permute(0, 2, 1)
         x = self.proj.T @ x
         x = torch.tanh(x)
+
+        items = []
+
+        for i in range(x.shape[-1]):
+            item = x[:, :, i: i + 1]
+            torch.roll(item, shifts=i, dims=1)
+            items.append(item)
+            # x[:, :, i: i + 1] = item
+
+        x = torch.cat(items, dim=-1)
         x = torch.sum(x, dim=-1)
 
-        back = x
-        fwd = torch.sign(x)
-        x = back + (fwd - back).detach()
+        # back = x
+        # fwd = torch.sign(x)
+        # x = back + (fwd - back).detach()
         return x
 
 
@@ -545,7 +555,7 @@ def overfit_model():
 
     # loss_model = AutocorrelationLoss(n_channels=64, filter_size=64).to(device)
 
-    # loss_model = HyperDimensionalLoss().to(device)
+    loss_model = HyperDimensionalLoss().to(device)
 
     overfit_model = OverfitRawAudio(target.shape, std=0.01, normalize=True).to(device)
     optim = Adam(overfit_model.parameters(), lr=1e-3)
@@ -575,8 +585,8 @@ def overfit_model():
 
         # ae.forward(target)
 
-        # loss = loss_model.compute_loss(target, recon)
-        loss = loss_model.compute_multiband_loss(target, recon)
+        loss = loss_model.compute_loss(target, recon)
+        # loss = loss_model.compute_multiband_loss(target, recon)
 
         # loss = torch.abs(target_features - recon_features).sum()
         loss.backward()
