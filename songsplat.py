@@ -101,10 +101,25 @@ def binary_positions_to_scalar(pos: torch.Tensor, total_samples: int) -> torch.T
     return x / total_samples
 
 
-def calculate_pos_encoding_size(n_samples: int) -> int:
+def binary_positions_to_bits(pos: torch.Tensor) -> torch.Tensor:
+    _, n_elements, _ = pos.shape
+    basis = torch.zeros(2, device=pos.device)
+    basis[1] = 1
+    x = sparse_softmax(pos, dim=-1, normalize=True)
+    x = x @ basis
+    return x
+
+
+def calculate_pos_encoding_size(n_samples: int) -> Tuple[int, int]:
     l = np.log2(n_samples)
     l = np.ceil(l)
-    return l
+    return 2 ** int(l), l
+
+
+def calculate_power_of_two_number_of_events(suggested_event_count: int) -> int:
+    l = np.log2(suggested_event_count)
+    l = np.ceil(l)
+    return 2 ** int(l)
 
 
 class HierarchicalTimeEncoding(nn.Module):
@@ -127,8 +142,16 @@ class HierarchicalTimeEncoding(nn.Module):
             {str(i): torch.zeros(1, (2 ** (i + 2)), self.n_bits, 2).uniform_(-rng, rng) for i in
              range(event_levels - 1)})
 
-        for k, v in self.hierarchical_time_vectors.items():
-            print(k, v.shape)
+        # for k, v in self.hierarchical_time_vectors.items():
+        #     print(k, v.shape)
+
+    def get_range(self, start: float, end: float) -> Tuple[torch.Tensor, torch.Tensor]:
+        pos = self.materialize()
+        t = binary_positions_to_scalar(pos, self.n_samples)
+
+        mask = (t > start) & (t < end)
+
+        return pos[mask], mask
 
     def get_scalar_positions(self) -> torch.Tensor:
         pos = self.materialize()
@@ -139,7 +162,6 @@ class HierarchicalTimeEncoding(nn.Module):
         times = self.base_times.clone()
 
         for i in range(self.event_levels - 1):
-
             # grow the number of encoded times by repeating the previous "level" and adding the next
             batch, n_events, n_bits, _ = times.shape
 
@@ -149,13 +171,18 @@ class HierarchicalTimeEncoding(nn.Module):
                 .view(batch, n_events * 2, n_bits, 2)
             next_level = self.hierarchical_time_vectors[str(i)]
 
-
             times = times + next_level
         return times
 
     def forward(self, events: torch.Tensor):
         full_times = self.materialize()
         times = hierarchical_dirac(full_times, soft=False)
+        scheduled = fft_convolve(times, events)
+        return scheduled
+
+    def schedule_events(self, events: torch.Tensor, times: torch.Tensor) -> torch.Tensor:
+        times = hierarchical_dirac(times, soft=False)
+        print(times.shape, events.shape)
         scheduled = fft_convolve(times, events)
         return scheduled
 
@@ -179,11 +206,11 @@ def loss(recon: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     return l
 
 
-def grow_positions(base_time_vector: torch.Tensor, amendments: Dict[int, torch.Tensor]) -> torch.Tensor:
-    '''
-    level 1 - (n_events, log2, 2)
-    '''
-    n_events, levels, _ = base_time_vector.shape
+# def grow_positions(base_time_vector: torch.Tensor, amendments: Dict[int, torch.Tensor]) -> torch.Tensor:
+#     '''
+#     level 1 - (n_events, log2, 2)
+#     '''
+#     n_events, levels, _ = base_time_vector.shape
 
 
 class SimpleLookup(nn.Module):
@@ -414,11 +441,17 @@ class Model(nn.Module):
         self.samplerate = samplerate
         self.total_seconds = total_samples / samplerate
         self.events_per_second = events_per_second
-        self.total_events = int(self.total_seconds * self.events_per_second)
+
+        suggested = int(self.total_seconds * self.events_per_second)
+        self.total_events = calculate_power_of_two_number_of_events(suggested)
+        # self.total_events = int(self.total_seconds * self.events_per_second)
         print('TOTAL EVENTS', self.total_events)
 
         self.events = nn.Parameter(torch.zeros(self.total_events, self.event_latent_dim).uniform_(-0.01, 0.01))
-        self.times = nn.Parameter(torch.zeros(self.total_events, self.n_frames).uniform_(-0.01, 0.01))
+
+        self.times = HierarchicalTimeEncoding(self.total_events, self.total_samples)
+
+        # self.times = nn.Parameter(torch.zeros(self.total_events, self.n_frames).uniform_(-0.01, 0.01))
 
         # times = torch.zeros(self.total_events, device=device).uniform_(0, 1)
 
@@ -449,7 +482,7 @@ class Model(nn.Module):
     def forward(
             self,
             start_frame: int,
-            end_frame: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            end_frame: int) -> Tuple[torch.Tensor, torch.Tensor]:
 
         n_frames = end_frame - start_frame
         n_samples = self.window_params.total_samples(n_frames)
@@ -462,16 +495,21 @@ class Model(nn.Module):
             raise ValueError('skipping too-early segment')
 
         # OPERATION: range query
-        t = sparse_softmax(self.times, dim=-1, normalize=True)
-        oh = t
-        t = torch.argmax(t, dim=-1) / self.n_frames
+        # t = sparse_softmax(self.times, dim=-1, normalize=True)
+        # oh = t
+        # t = torch.argmax(t, dim=-1) / self.n_frames
+        #
+        # mask = (t > start_rel) & (t < stop_rel)
+        #
+        # # print(self.n_frames, t.shape, mask.shape)
+        #
+        # events = self.events[mask]
+        # times = self.times[mask]
 
-        mask = (t > start_rel) & (t < stop_rel)
+        times, mask = self.times.get_range(start_rel, stop_rel)
+        events = self.events[mask.view(-1)]
 
-        # print(self.n_frames, t.shape, mask.shape)
-
-        events = self.events[mask]
-        times = self.times[mask]
+        bits = binary_positions_to_bits(times)
 
         if events.shape[0] == 0:
             raise ValueError('no events')
@@ -483,17 +521,33 @@ class Model(nn.Module):
         samples = samples.view(1, -1, n_samples)
         samples = ensure_last_axis_length(samples, desired_size=n_samples * 2)
 
+        total_bits = int(np.log2(self.total_samples))
+        segment_bits = int(np.log2(self.n_segment_samples * 2))
+        diff = total_bits - segment_bits
+        # print(total_bits, segment_bits, diff)
+
         # OPERATION: offset/shift/translate
-        scheduled, mx = schedule_events(samples, times[:, early_frame: end_frame])
+        # scheduled, mx = schedule_events(samples, times[:, early_frame: end_frame])
+
+        # print(bits[:, -diff:])
+
+        scheduled = self.times.schedule_events(samples, times[:, :-diff, :])
 
         # print(scheduled.shape)
-        return scheduled[:, :, n_samples:], mx, oh
+        return scheduled[:, :, n_samples:], bits
 
 
 @numpy_conjure(collection)
 def get_samples(path: str, samplerate: int) -> np.ndarray:
     samples, sr = librosa.load(path, sr=samplerate, mono=True)
-    return samples
+    # print(samples.length)
+    n_samples, pow = calculate_pos_encoding_size(len(samples))
+    padded = np.concatenate([samples, np.zeros(n_samples - len(samples))])
+    return padded
+    # samples = np.pad(
+    #     samples,
+    #     pad_width=[(0, n_samples - len(samples))])
+    # return ensure_last_axis_length(samples, desired_size=n_samples)
 
 
 def dataset(
@@ -544,8 +598,8 @@ def train(
         encode_audio,
         collection)
 
-    events, = loggers(
-        ['events'],
+    events, bits = loggers(
+        ['events', 'bits'],
         SupportedContentType.Spectrogram.value,
         to_numpy,
         collection,
@@ -556,6 +610,7 @@ def train(
         orig_audio,
         recon_audio,
         events,
+        bits
     ], port=9999, n_workers=1)
 
     iterator = dataset(
@@ -573,14 +628,14 @@ def train(
         n_frames=total_samples // (window_size // 2),
         samplerate=22050,
         event_latent_dim=32,
-        events_per_second=8,
+        events_per_second=4,
         window_size=window_size,
         n_segment_samples=n_segment_samples
     ).to(device)
 
     optim = Adam(model.parameters(), lr=1e-3)
 
-    tmp_schedule = torch.linspace(1, 1e-4, 10000)
+    # tmp_schedule = torch.linspace(1, 1e-4, 10000)
 
     for i, pair in enumerate(iterator):
 
@@ -594,11 +649,12 @@ def train(
         optim.zero_grad()
 
         try:
-            recon, mx, positions = model.forward(start_frame, end_frame)
+            recon, bt = model.forward(start_frame, end_frame)
         except ValueError as e:
             print(e)
             continue
 
+        bits(bt)
         # encoding(positions)
 
         recon_summed = torch.sum(recon, dim=1, keepdim=True)
