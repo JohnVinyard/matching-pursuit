@@ -25,7 +25,6 @@ DatasetBatch = Tuple[torch.Tensor, int, int, int, int]
 init = make_initializer(0.05)
 
 
-
 def schedule_events(
         events: torch.Tensor,
         times: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -93,7 +92,7 @@ def count_parameters(model):
 # TODO: move this near hierarchical_dirac
 def binary_positions_to_scalar(pos: torch.Tensor, total_samples: int) -> torch.Tensor:
     _, _, n_elements, _ = pos.shape
-    pow = 2 ** np.linspace(0, n_elements - 1, n_elements)
+    pow = 2 ** torch.linspace(0, n_elements - 1, n_elements, device=pos.device)
     basis = torch.zeros(2, device=pos.device)
     basis[1] = 1
     x = sparse_softmax(pos, dim=-1, normalize=True)
@@ -102,16 +101,18 @@ def binary_positions_to_scalar(pos: torch.Tensor, total_samples: int) -> torch.T
     return x / total_samples
 
 
-def calculate_pos_encoding_size(n_samples:int) -> int:
+def calculate_pos_encoding_size(n_samples: int) -> int:
     l = np.log2(n_samples)
     l = np.ceil(l)
     return l
+
 
 class HierarchicalTimeEncoding(nn.Module):
     def __init__(self, n_events: int, n_samples: int):
         super().__init__()
         self.n_events = n_events
         self.n_samples = n_samples
+
         event_levels = int(np.log2(n_events))
         total_levels = int(np.log2(n_samples))
 
@@ -126,26 +127,31 @@ class HierarchicalTimeEncoding(nn.Module):
             {str(i): torch.zeros(1, (2 ** (i + 2)), self.n_bits, 2).uniform_(-rng, rng) for i in
              range(event_levels - 1)})
 
+        for k, v in self.hierarchical_time_vectors.items():
+            print(k, v.shape)
+
+    def get_scalar_positions(self) -> torch.Tensor:
+        pos = self.materialize()
+        scalars = binary_positions_to_scalar(pos, self.n_samples)
+        return scalars
 
     def materialize(self):
-        for i in range(self.event_levels - 1):
-            scale = 1
+        times = self.base_times.clone()
 
-            # events = \
-            #     events.view(1, -1, 1, self.context_dim) \
-            #     + (self.hierarchical_event_vectors[str(i)].view(1, 1, 2, self.context_dim) * scale)
-            # events = events.view(1, -1, self.context_dim)
+        for i in range(self.event_levels - 1):
 
             # grow the number of encoded times by repeating the previous "level" and adding the next
-            batch, n_events, n_bits, _ = self.base_times.shape
+            batch, n_events, n_bits, _ = times.shape
 
-            times = self.base_timees\
-                .view(batch, n_events, 1, n_bits, 2)\
-                .repeat(1, 1, 2, 1, 1)\
+            times = times \
+                .view(batch, n_events, 1, n_bits, 2) \
+                .repeat(1, 1, 2, 1, 1) \
                 .view(batch, n_events * 2, n_bits, 2)
+            next_level = self.hierarchical_time_vectors[str(i)]
 
-            times = times + (self.hierarchical_time_vectors[str(i)] * scale)
-            return times
+
+            times = times + next_level
+        return times
 
     def forward(self, events: torch.Tensor):
         full_times = self.materialize()
@@ -173,14 +179,12 @@ def loss(recon: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     return l
 
 
-
-
-
 def grow_positions(base_time_vector: torch.Tensor, amendments: Dict[int, torch.Tensor]) -> torch.Tensor:
     '''
     level 1 - (n_events, log2, 2)
     '''
     n_events, levels, _ = base_time_vector.shape
+
 
 class SimpleLookup(nn.Module):
     def __init__(
@@ -257,14 +261,12 @@ class EventGenerator(nn.Module):
             latent_dim: int,
             n_frames: int,
             window_size: int):
-
         super().__init__()
         self.latent_dim = latent_dim
         self.n_frames = n_frames
         self.window_size = window_size
         self.window = HalfLappedWindowParams(window_size)
         self.n_samples = self.window.total_samples(n_frames)
-
 
         expressivity = 2
         n_coeffs = self.window.n_coeffs
@@ -300,7 +302,6 @@ class EventGenerator(nn.Module):
 
     def forward(self, events: torch.Tensor) -> torch.Tensor:
         batch, n_events, dim = events.shape
-
 
         dither = self.to_dither(events).view(batch, n_events * self.expressivity, self.n_coeffs)
         decay = self.to_coeffs(events).view(batch, n_events * self.expressivity, self.n_coeffs)
@@ -416,7 +417,6 @@ class Model(nn.Module):
         self.total_events = int(self.total_seconds * self.events_per_second)
         print('TOTAL EVENTS', self.total_events)
 
-
         self.events = nn.Parameter(torch.zeros(self.total_events, self.event_latent_dim).uniform_(-0.01, 0.01))
         self.times = nn.Parameter(torch.zeros(self.total_events, self.n_frames).uniform_(-0.01, 0.01))
 
@@ -460,7 +460,6 @@ class Model(nn.Module):
 
         if start_rel < 0:
             raise ValueError('skipping too-early segment')
-
 
         # OPERATION: range query
         t = sparse_softmax(self.times, dim=-1, normalize=True)
@@ -594,7 +593,6 @@ def train(
 
         optim.zero_grad()
 
-
         try:
             recon, mx, positions = model.forward(start_frame, end_frame)
         except ValueError as e:
@@ -631,8 +629,7 @@ if __name__ == '__main__':
         n_segment_samples=2 ** 16,
         window_size=1024)
 
-
-    # n_samples = 2 ** 19
-    # pos = torch.zeros(3, 12, 19, 2).uniform_(-1, 1)
-    # scalar = binary_positions_to_scalar(pos, n_samples)
-    # print(scalar.view(-1))
+    # model = HierarchicalTimeEncoding(n_events=128, n_samples=2 ** 16)
+    # x = model.materialize()
+    # print(x.shape)
+    # print(model.get_scalar_positions())
