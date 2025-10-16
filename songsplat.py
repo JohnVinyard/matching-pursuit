@@ -13,7 +13,7 @@ from modules import stft, max_norm, sparse_softmax, interpolate_last_axis, flatt
     iterative_loss, LinearOutputStack
 from modules.atoms import unit_norm
 from modules.infoloss import CorrelationLoss
-from modules.transfer import fft_convolve, freq_domain_transfer_function_to_resonance
+from modules.transfer import fft_convolve, freq_domain_transfer_function_to_resonance, hierarchical_dirac
 from modules.upsample import upsample_with_holes, ensure_last_axis_length
 from spiking import SpikingModel
 from util import encode_audio, make_initializer, device
@@ -90,6 +90,68 @@ def count_parameters(model):
 #
 #         return times, mask, oh
 
+# TODO: move this near hierarchical_dirac
+def binary_positions_to_scalar(pos: torch.Tensor, total_samples: int) -> torch.Tensor:
+    _, _, n_elements, _ = pos.shape
+    pow = 2 ** np.linspace(0, n_elements - 1, n_elements)
+    basis = torch.zeros(2, device=pos.device)
+    basis[1] = 1
+    x = sparse_softmax(pos, dim=-1, normalize=True)
+    x = x @ basis
+    x = x @ pow
+    return x / total_samples
+
+
+def calculate_pos_encoding_size(n_samples:int) -> int:
+    l = np.log2(n_samples)
+    l = np.ceil(l)
+    return l
+
+class HierarchicalTimeEncoding(nn.Module):
+    def __init__(self, n_events: int, n_samples: int):
+        super().__init__()
+        self.n_events = n_events
+        self.n_samples = n_samples
+        event_levels = int(np.log2(n_events))
+        total_levels = int(np.log2(n_samples))
+
+        self.event_levels = event_levels
+        self.n_bits = total_levels
+
+        rng = 0.1
+
+        self.base_times = nn.Parameter(
+            torch.zeros(1, 2, total_levels, 2).uniform_(-rng, rng))
+        self.hierarchical_time_vectors = nn.ParameterDict(
+            {str(i): torch.zeros(1, (2 ** (i + 2)), self.n_bits, 2).uniform_(-rng, rng) for i in
+             range(event_levels - 1)})
+
+
+    def materialize(self):
+        for i in range(self.event_levels - 1):
+            scale = 1
+
+            # events = \
+            #     events.view(1, -1, 1, self.context_dim) \
+            #     + (self.hierarchical_event_vectors[str(i)].view(1, 1, 2, self.context_dim) * scale)
+            # events = events.view(1, -1, self.context_dim)
+
+            # grow the number of encoded times by repeating the previous "level" and adding the next
+            batch, n_events, n_bits, _ = self.base_times.shape
+
+            times = self.base_timees\
+                .view(batch, n_events, 1, n_bits, 2)\
+                .repeat(1, 1, 2, 1, 1)\
+                .view(batch, n_events * 2, n_bits, 2)
+
+            times = times + (self.hierarchical_time_vectors[str(i)] * scale)
+            return times
+
+    def forward(self, events: torch.Tensor):
+        full_times = self.materialize()
+        times = hierarchical_dirac(full_times, soft=False)
+        scheduled = fft_convolve(times, events)
+        return scheduled
 
 
 def decaying_noise(n_items: int, n_samples: int, low_exp: int, high_exp: int, device: torch.device):
@@ -111,22 +173,7 @@ def loss(recon: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     return l
 
 
-# TODO: move this near hierarchical_dirac
-def binary_positions_to_scalar(pos: torch.Tensor, total_samples: int) -> torch.Tensor:
-    _, _, n_elements, _ = pos.shape
-    pow = 2 ** np.linspace(0, n_elements - 1, n_elements)
-    basis = torch.zeros(2, device=pos.device)
-    basis[1] = 1
-    x = sparse_softmax(pos, dim=-1, normalize=True)
-    x = x @ basis
-    x = x @ pow
-    return x / total_samples
 
-
-def calculate_pos_encoding_size(n_samples:int) -> int:
-    l = np.log2(n_samples)
-    l = np.ceil(l)
-    return l
 
 
 def grow_positions(base_time_vector: torch.Tensor, amendments: Dict[int, torch.Tensor]) -> torch.Tensor:

@@ -167,6 +167,7 @@ class OverfitHierarchicalEvents(nn.Module):
 
             # grow the number of encoded times by repeating the previous "level" and adding the next
             batch, n_events, n_bits, _ = times.shape
+
             times = times.view(batch, n_events, 1, n_bits, 2).repeat(1, 1, 2, 1, 1).view(batch, n_events * 2, n_bits, 2)
             times = times + (self.hierarchical_time_vectors[str(i)] * scale)
 

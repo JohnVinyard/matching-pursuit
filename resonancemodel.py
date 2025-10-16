@@ -83,6 +83,12 @@ plt.show()
 
 '''
 
+def decaying_noise(n_items: int, n_samples: int, low_exp: int, high_exp: int, device: torch.device):
+    t = torch.linspace(1, 0, n_samples, device=device)
+    pos = torch.zeros(n_items, device=device).uniform_(low_exp, high_exp)
+    noise = torch.zeros(n_items, n_samples, device=device).uniform_(-1, 1)
+    return (t[None, :] ** pos[:, None]) * noise
+
 
 def materialize_non_windowed_fft_resonance(n_samples: int, amplitudes: torch.Tensor, damping: torch.Tensor):
     phi = np.pi / 4
@@ -104,7 +110,6 @@ class SampleLookupBlock(nn.Module):
             initial: Union[torch.Tensor, None] = None,
             randomize_phases: bool = False,
             windowed: bool = False):
-
         super().__init__()
 
         self.n_samples = n_samples
@@ -180,6 +185,7 @@ class SampleLookup(Lookup):
 
 def execute_layer(
         control_signal: torch.Tensor,
+        attack_envelopes: torch.Tensor,
         routing: torch.Tensor,
         # materialize_resonances: MaterializeResonances,
         res: torch.Tensor,
@@ -215,10 +221,13 @@ def execute_layer(
     routed = upsample_with_holes(routed, n_samples)
 
     # TODO: Try this with a gamma distribution, or a learnable distribution
-    impulse = torch.hamming_window(128, device=routed.device)
+    # impulse = torch.hamming_window(128, device=routed.device)
+    impulse = interpolate_last_axis(attack_envelopes ** 2, desired_size=window_size)
     impulse = impulse * torch.zeros_like(impulse).uniform_(-1, 1)
     impulse = ensure_last_axis_length(impulse, n_samples)
-    impulse = impulse.view(1, 1, 1, 1, n_samples)
+
+    # print(impulse.shape, routed.shape)
+    impulse = impulse.view(1, 1, control_plane_dim, 1, n_samples)
     routed = fft_convolve(impulse, routed)
 
     # interpolate and multiply with noise
@@ -582,9 +591,10 @@ class ResonanceLayer(nn.Module):
 
         resonance_coeffs = resonance_window_size // 2 + 1
 
+        self.attack_envelopes = nn.Parameter(decaying_noise(self.control_plane_dim, 128, 4, 20, device=device))
+
         self.router = nn.Parameter(
             torch.zeros((self.control_plane_dim, self.n_resonances)).uniform_(-1, 1))
-
 
         # self.resonance = SampleLookupBlock(
         #     n_resonances * expressivity, n_samples, 64, randomize_phases=True, windowed=True)
@@ -632,6 +642,9 @@ class ResonanceLayer(nn.Module):
     def get_router(self):
         return self.router
 
+    def get_attack_envelopes(self):
+        return self.attack_envelopes
+
     def forward(
             self,
             control_signal: torch.Tensor,
@@ -640,6 +653,7 @@ class ResonanceLayer(nn.Module):
         # print(res.shape)
         output, fwd = execute_layer(
             control_signal,
+            self.attack_envelopes,
             self.router,
             res,
             deformations,
@@ -690,6 +704,10 @@ class ResonanceStack(nn.Module):
     def get_router(self, layer: int) -> torch.Tensor:
         layer = self.layers[layer]
         return layer.get_router()
+
+    def get_attack_envelopes(self, layer: int) -> torch.Tensor:
+        layer = self.layers[layer]
+        return layer.get_attack_envelopes()
 
     def forward(self, control_signal: torch.Tensor, deformations: torch.Tensor) -> torch.Tensor:
         batch_size, n_events, cpd, frames = control_signal.shape
@@ -776,6 +794,9 @@ class OverfitResonanceStack(nn.Module):
 
     def get_router(self, layer: int) -> torch.Tensor:
         return self.network.get_router(layer)
+
+    def get_attack_envelopes(self, layer: int) -> torch.Tensor:
+        return self.network.get_attack_envelopes(layer) ** 2
 
     def _process_control_plane(
             self,
@@ -901,15 +922,16 @@ def overfit_model():
     def to_numpy(x: torch.Tensor) -> np.ndarray:
         return x.data.cpu().numpy()
 
-    c, deformations, routing = conjure.loggers(
-        ['control', 'deformations', 'routing'],
+    c, deformations, routing, attack = conjure.loggers(
+        ['control', 'deformations', 'routing', 'attack'],
         SupportedContentType.Spectrogram.value,
         to_numpy,
         collection,
         serializer=NumpySerializer(),
         deserializer=NumpyDeserializer())
 
-    serve_conjure([t, r, c, rand, res, deformations, routing], port=9999, n_workers=1)
+    serve_conjure(
+        [t, r, c, rand, res, deformations, routing, attack], port=9999, n_workers=1)
 
     t(max_norm(target))
 
@@ -938,6 +960,7 @@ def overfit_model():
 
             deformations(model.flattened_deformations)
             routing(torch.abs(model.get_router(0)))
+            attack(model.get_attack_envelopes(0))
 
             with torch.no_grad():
                 rand(max_norm(model.random(use_learned_deformations=False)))
