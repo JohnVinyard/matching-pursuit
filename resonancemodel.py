@@ -11,12 +11,13 @@ import conjure
 from data import get_one_audio_segment
 from modules import max_norm, interpolate_last_axis, sparsify, unit_norm, flattened_multiband_spectrogram, \
     fft_frequency_recompose, stft, HyperNetworkLayer
+from modules.eventgenerators.overfitresonance import Lookup, flatten_envelope
 from modules.infoloss import CorrelationLoss
 from modules.transfer import freq_domain_transfer_function_to_resonance, fft_convolve
 from modules.upsample import upsample_with_holes, ensure_last_axis_length
 from util import device, encode_audio, make_initializer
 from base64 import b64encode
-from sklearn.decomposition import SparsePCA
+from sklearn.decomposition import DictionaryLearning
 
 MaterializeResonances = Callable[..., torch.Tensor]
 
@@ -83,6 +84,100 @@ plt.show()
 '''
 
 
+def materialize_non_windowed_fft_resonance(n_samples: int, amplitudes: torch.Tensor, damping: torch.Tensor):
+    phi = np.pi / 4
+    X_omega_pos = (amplitudes / 2) * np.exp(1j * phi) / (damping + 1j)
+    X_omega_neg = (amplitudes / 2) * np.exp(-1j * phi) / (damping + 1j)
+    X_omega = X_omega_pos + X_omega_neg
+
+    # 4. Take the inverse FFT to get the time domain signal
+    x_t = np.fft.ifft(X_omega)
+    return x_t
+
+
+class SampleLookupBlock(nn.Module):
+    def __init__(
+            self,
+            n_items: int,
+            n_samples: int,
+            flatten_kernel_size: Union[int, None] = None,
+            initial: Union[torch.Tensor, None] = None,
+            randomize_phases: bool = False,
+            windowed: bool = False):
+
+        super().__init__()
+
+        self.n_samples = n_samples
+        self.decays = nn.Parameter(torch.zeros(n_items).uniform_(0, 1))
+        self.latent = nn.Parameter(torch.zeros(n_items, n_items).uniform_(-0.01, 0.01))
+        self.network = SampleLookup(n_items, n_samples, None, initial, randomize_phases, windowed)
+
+    def forward(self):
+        t = torch.linspace(1, 0, self.n_samples, device=self.decays.device)[None, :]
+
+        exps = 4 + (torch.sigmoid(self.decays) * 90)[:, None]
+        decays = t ** exps
+
+        x = self.network(self.latent) * decays
+        return x.view(1, 1, -1, 2, self.n_samples)
+
+
+class SampleLookup(Lookup):
+
+    def __init__(
+            self,
+            n_items: int,
+            n_samples: int,
+            flatten_kernel_size: Union[int, None] = None,
+            initial: Union[torch.Tensor, None] = None,
+            randomize_phases: bool = True,
+            windowed: bool = False):
+
+        # if initial is not None:
+        #     initializer = lambda x: initial
+        # else:
+        #     initializer = None
+
+        def sample_lookup_init(x: torch.Tensor) -> torch.Tensor:
+            return torch.zeros_like(x).uniform_(-0.01, 0.01)
+
+        super().__init__(n_items, n_samples, initialize=sample_lookup_init, selection_type='identity')
+        self.randomize_phases = randomize_phases
+        self.flatten_kernel_size = flatten_kernel_size
+        self.windowed = windowed
+
+    def preprocess_items(self, items: torch.Tensor) -> torch.Tensor:
+        """Ensure that we have audio-rate samples at a relatively uniform
+        amplitude throughout
+        """
+        if self.flatten_kernel_size:
+            x = flatten_envelope(
+                items,
+                kernel_size=self.flatten_kernel_size,
+                step_size=self.flatten_kernel_size // 2)
+        else:
+            x = items
+
+        if self.randomize_phases:
+            spec = torch.fft.rfft(x, dim=-1)
+            # randomize phases
+            mags = torch.abs(spec)
+            phases = torch.angle(spec)
+            phases = torch.zeros_like(phases).uniform_(-np.pi, np.pi)
+            # imag = torch.cumsum(phases, dim=1)
+            imag = phases
+            # imag = (imag + np.pi) % (2 * np.pi) - np.pi
+            spec = mags * torch.exp(1j * imag)
+            x = torch.fft.irfft(spec, dim=-1)
+
+        if self.windowed:
+            x = x * torch.hamming_window(x.shape[-1], device=x.device)
+
+        # TODO: Unit norm
+        x = unit_norm(x)
+        return x
+
+
 def execute_layer(
         control_signal: torch.Tensor,
         routing: torch.Tensor,
@@ -146,8 +241,8 @@ def execute_layer(
     x = d * conv
     x = torch.sum(x, dim=-2)
 
-    # summed = torch.tanh(x * torch.abs(gains.view(1, 1, n_resonances, 1)))
-    summed = x
+    summed = torch.tanh(x * torch.abs(gains.view(1, 1, n_resonances, 1)))
+    # summed = x
 
     summed = torch.sum(summed, dim=-2, keepdim=True)
 
@@ -236,7 +331,7 @@ class MultibandFFTResonanceBlock(nn.Module):
 
             band = freq_domain_transfer_function_to_resonance(
                 window_size=self.window_size,
-                coeffs=self.base_resonance + ((torch.sigmoid(mag) * self.resonance_span) * 0.9999),
+                coeffs=self.base_resonance + ((torch.clamp(mag, 0, 1) * self.resonance_span) * 0.9999),
                 n_frames=self.frames_per_band[i],
                 apply_decay=True,
                 start_phase=torch.tanh(phase) * np.pi,
@@ -271,7 +366,15 @@ def damped_harmonic_oscillator(
     # initial_velocity = initial_velocity.view(n_osc, 1)
 
     x = (damping / (2 * mass))
-    omega = torch.sqrt(tension - (x ** 2))
+    if torch.isnan(x).sum() > 0:
+        print('x first appearance of NaN')
+
+    # print(tension, x ** 2, tension - (x ** 2))
+
+    omega = torch.sqrt(torch.clamp(tension - (x ** 2), 1e-12, np.inf))
+    if torch.isnan(omega).sum() > 0:
+        print('omega first appearance of NaN')
+
     # phi = torch.arctan((initial_velocity + (x * initial_displacement) / (initial_displacement * omega)))
     phi = torch.atan2(
         (initial_velocity + (x * initial_displacement)),
@@ -318,14 +421,14 @@ class DampedHarmonicOscillatorBlock(nn.Module):
                 .uniform_(-1, 1))
 
     def _materialize_resonances(self, device: torch.device):
-        time = torch.linspace(0, 1, self.n_samples, device=device) \
+        time = torch.linspace(0, 10, self.n_samples, device=device) \
             .view(1, 1, 1, self.n_samples)
 
         x = damped_harmonic_oscillator(
             time=time,
             mass=torch.sigmoid(self.mass[..., None]),
             # mass=0.2,
-            damping=torch.sigmoid(self.damping[..., None]) * 10,
+            damping=torch.sigmoid(self.damping[..., None]) * 20,
             tension=10 ** self.tension[..., None],
             initial_displacement=self.initial_displacement[..., None],
             initial_velocity=0
@@ -437,9 +540,11 @@ class FFTResonanceBlock(nn.Module):
             n_resonance_frames,
             apply_decay=True,
             start_phase=torch.tanh(phase) * np.pi,
+            # start_phase=phase,
             start_mags=amp ** 2,
             phase_dither=torch.tanh(phase_dither).reshape(-1, 1, self.n_coeffs),
-            log_space_scan=True,
+            # phase_dither=phase_dither.reshape(-1, 1, self.n_coeffs),
+            log_space_scan=False,
             apply_window=False,
             overrlap_add=True)
 
@@ -480,23 +585,27 @@ class ResonanceLayer(nn.Module):
         self.router = nn.Parameter(
             torch.zeros((self.control_plane_dim, self.n_resonances)).uniform_(-1, 1))
 
-        # self.resonance = DampedHarmonicOscillatorBlock(
-        #     n_samples, 64, n_resonances, expressivity
-        # )
+
+        # self.resonance = SampleLookupBlock(
+        #     n_resonances * expressivity, n_samples, 64, randomize_phases=True, windowed=True)
+
+        self.resonance = DampedHarmonicOscillatorBlock(
+            n_samples, 64, n_resonances, expressivity
+        )
 
         # self.resonance = LatentResonanceBlock(
         #     n_samples, n_resonances, expressivity, latent_dim=16)
 
-        self.resonance = FFTResonanceBlock(
-            n_samples, resonance_window_size, n_resonances, expressivity, base_resonance)
+        # self.resonance = FFTResonanceBlock(
+        #     n_samples, resonance_window_size, n_resonances, expressivity, base_resonance)
 
         # self.resonance = MultibandFFTResonanceBlock(
         #     n_resonances,
         #     n_samples,
         #     expressivity,
-        #     smallest_band_size=2048,
+        #     smallest_band_size=16384,
         #     base_resonance=0.01,
-        #     window_size=256)
+        #     window_size=512)
 
         # def init_resonance() -> torch.Tensor:
         #     # base resonance
@@ -570,7 +679,6 @@ class ResonanceStack(nn.Module):
             base_resonance
         ) for _ in range(n_layers)])
 
-
     def get_materialized_resonance(self, layer: int) -> torch.Tensor:
         layer = self.layers[layer]
         return layer.get_materialized_resonance()
@@ -643,7 +751,6 @@ class OverfitResonanceStack(nn.Module):
 
         self.apply(init_weights)
 
-
     @property
     def flattened_deformations(self):
         return self.deformations.view(self.expressivity, self.n_frames)
@@ -651,7 +758,7 @@ class OverfitResonanceStack(nn.Module):
     def _get_mapping(self, n_components: int) -> np.ndarray:
         cs = self.control_signal.data.cpu().numpy() \
             .reshape(self.control_plane_dim, self.n_frames).T
-        pca = SparsePCA(n_components=n_components)
+        pca = DictionaryLearning(n_components=n_components)
         pca.fit(cs)
         # this will be of shape (n_components, control_plane_dim)
         return pca.components_
@@ -686,6 +793,7 @@ class OverfitResonanceStack(nn.Module):
         return cp
 
     def random(self, use_learned_deformations: bool = False):
+        # print(self.control_plane.min().item(), self.control_plane.max().item())
         rcp = torch \
             .zeros_like(self.control_plane) \
             .uniform_(
@@ -724,8 +832,8 @@ def encode_array(arr: Union[np.ndarray, torch.Tensor], serializer: NumpySerializ
 def generate_param_dict(key: str, logger: Logger, model: OverfitResonanceStack) -> [dict, MetaData]:
     serializer = NumpySerializer()
 
-    hand = model.get_hand_tracking_mapping()
-    assert hand.shape == (21 * 3, model.control_plane_dim)
+    hand = model.get_hand_tracking_mapping().T
+    assert hand.shape == (model.control_plane_dim, 21 * 3)
 
     router = model.get_router(0)
     assert router.shape == (model.control_plane_dim, model.n_resonances)

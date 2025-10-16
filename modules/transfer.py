@@ -231,6 +231,9 @@ def freq_domain_transfer_function_to_resonance(
     # convert from polar coordinates
     spec = spec * torch.exp(1j * phase)
 
+    # TODO: Experimental
+    # spec = spec * torch.hamming_window(spec.shape[-1], device=spec.device)
+
     # TODO:  Why overlap-add here?  Should the group delay be adjusted?
     windowed = torch.fft.irfft(spec, dim=-1).view(-1, 1, n_frames, window_size)
     b = windowed.shape[0]
