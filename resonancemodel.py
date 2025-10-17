@@ -183,6 +183,11 @@ class SampleLookup(Lookup):
         return x
 
 
+def materialize_attack_envelopes(low_res: torch.Tensor, window_size: int) -> torch.Tensor:
+    impulse = interpolate_last_axis(low_res ** 2, desired_size=window_size)
+    impulse = impulse * torch.zeros_like(impulse).uniform_(-1, 1)
+    return impulse
+
 def execute_layer(
         control_signal: torch.Tensor,
         attack_envelopes: torch.Tensor,
@@ -222,8 +227,11 @@ def execute_layer(
 
     # TODO: Try this with a gamma distribution, or a learnable distribution
     # impulse = torch.hamming_window(128, device=routed.device)
-    impulse = interpolate_last_axis(attack_envelopes ** 2, desired_size=window_size)
-    impulse = impulse * torch.zeros_like(impulse).uniform_(-1, 1)
+
+    # impulse = interpolate_last_axis(attack_envelopes ** 2, desired_size=window_size)
+    # impulse = impulse * torch.zeros_like(impulse).uniform_(-1, 1)
+
+    impulse = materialize_attack_envelopes(attack_envelopes, window_size)
     impulse = ensure_last_axis_length(impulse, n_samples)
 
     # print(impulse.shape, routed.shape)
@@ -633,6 +641,10 @@ class ResonanceLayer(nn.Module):
 
         self.gains = nn.Parameter(torch.zeros((n_resonances, 1)).uniform_(0.01, 1.1))
 
+
+    def get_attack_envelopes(self):
+        return materialize_attack_envelopes(self.attack_envelopes, self.resonance_window_size)
+
     def get_materialized_resonance(self):
         return self.resonance.forward()
 
@@ -641,9 +653,6 @@ class ResonanceLayer(nn.Module):
 
     def get_router(self):
         return self.router
-
-    def get_attack_envelopes(self):
-        return self.attack_envelopes
 
     def forward(
             self,
@@ -658,7 +667,7 @@ class ResonanceLayer(nn.Module):
             res,
             deformations,
             self.gains,
-            self.n_samples,
+            self.resonance_window_size,
         )
         return output, fwd
 
@@ -865,11 +874,14 @@ def generate_param_dict(key: str, logger: Logger, model: OverfitResonanceStack) 
     resonances = model.get_materialized_resonance(0).reshape(-1, model.n_samples)
     assert resonances.shape == (model.n_resonances * model.expressivity, model.n_samples)
 
+    attacks = model.get_attack_envelopes(0)
+
     params = dict(
         gains=encode_array(gains, serializer),
         router=encode_array(router, serializer),
         resonances=encode_array(resonances, serializer),
         hand=encode_array(hand, serializer),
+        attacks=encode_array(attacks, serializer),
     )
     _, meta = logger.log_json(key, params)
     print('WEIGHTS URI', meta.public_uri.geturl())
@@ -969,7 +981,7 @@ def overfit_model():
 
             iteration += 1
 
-            if iteration > 0 and iteration % 10000 == 0:
+            if iteration > 0 and iteration % 5000 == 0:
                 print('Serializing')
                 generate_param_dict('resonancemodelparams', remote_logger, model)
                 input('Continue?')

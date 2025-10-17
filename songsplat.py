@@ -25,14 +25,16 @@ DatasetBatch = Tuple[torch.Tensor, int, int, int, int]
 init = make_initializer(0.05)
 
 
-def schedule_events(
-        events: torch.Tensor,
-        times: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    batch, n_events, n_samples = events.shape
-    mx, indices = torch.max(times, dim=-1)
-    sched = upsample_with_holes(times, desired_size=n_samples)
-    scheduled = fft_convolve(events, sched)
-    return scheduled, mx
+# def schedule_events(
+#         events: torch.Tensor,
+#         times: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+#
+#     batch, n_events, n_samples = events.shape
+#     mx, indices = torch.max(times, dim=-1)
+#
+#     sched = upsample_with_holes(times, desired_size=n_samples)
+#     scheduled = fft_convolve(events, sched)
+#     return scheduled, mx
 
 
 # TODO: try this with scalar FFT-based scheduling
@@ -92,7 +94,7 @@ def count_parameters(model):
 # TODO: move this near hierarchical_dirac
 def binary_positions_to_scalar(pos: torch.Tensor, total_samples: int) -> torch.Tensor:
     _, _, n_elements, _ = pos.shape
-    pow = 2 ** torch.linspace(0, n_elements - 1, n_elements, device=pos.device)
+    pow = 2 ** np.linspace(0, n_elements - 1, n_elements)
     basis = torch.zeros(2, device=pos.device)
     basis[1] = 1
     x = sparse_softmax(pos, dim=-1, normalize=True)
@@ -112,7 +114,6 @@ class HierarchicalTimeEncoding(nn.Module):
         super().__init__()
         self.n_events = n_events
         self.n_samples = n_samples
-
         event_levels = int(np.log2(n_events))
         total_levels = int(np.log2(n_samples))
 
@@ -127,31 +128,25 @@ class HierarchicalTimeEncoding(nn.Module):
             {str(i): torch.zeros(1, (2 ** (i + 2)), self.n_bits, 2).uniform_(-rng, rng) for i in
              range(event_levels - 1)})
 
-        for k, v in self.hierarchical_time_vectors.items():
-            print(k, v.shape)
-
-    def get_scalar_positions(self) -> torch.Tensor:
-        pos = self.materialize()
-        scalars = binary_positions_to_scalar(pos, self.n_samples)
-        return scalars
-
     def materialize(self):
-        times = self.base_times.clone()
-
         for i in range(self.event_levels - 1):
+            scale = 1
+
+            # events = \
+            #     events.view(1, -1, 1, self.context_dim) \
+            #     + (self.hierarchical_event_vectors[str(i)].view(1, 1, 2, self.context_dim) * scale)
+            # events = events.view(1, -1, self.context_dim)
 
             # grow the number of encoded times by repeating the previous "level" and adding the next
-            batch, n_events, n_bits, _ = times.shape
+            batch, n_events, n_bits, _ = self.base_times.shape
 
-            times = times \
+            times = self.base_timees \
                 .view(batch, n_events, 1, n_bits, 2) \
                 .repeat(1, 1, 2, 1, 1) \
                 .view(batch, n_events * 2, n_bits, 2)
-            next_level = self.hierarchical_time_vectors[str(i)]
 
-
-            times = times + next_level
-        return times
+            times = times + (self.hierarchical_time_vectors[str(i)] * scale)
+            return times
 
     def forward(self, events: torch.Tensor):
         full_times = self.materialize()
@@ -199,15 +194,15 @@ class SimpleLookup(nn.Module):
         self.n_samples = n_samples
         self.expressivity = expressivity
 
-        self.from_latent = LinearOutputStack(
-            channels=128,
-            layers=2,
-            in_channels=latent,
-            out_channels=n_items * expressivity,
-            norm=lambda channels: nn.LayerNorm([channels, ])
-        )
+        # self.from_latent = LinearOutputStack(
+        #     channels=128,
+        #     layers=2,
+        #     in_channels=latent,
+        #     out_channels=n_items * expressivity,
+        #     norm=lambda channels: nn.LayerNorm([channels, ])
+        # )
 
-        # self.from_latent = nn.Linear(latent, n_items * expressivity)
+        self.from_latent = nn.Linear(latent, n_items * expressivity)
         self.items = nn.Parameter(torch.zeros(n_items, n_samples).uniform_(-0.02, 0.02))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -279,8 +274,8 @@ class EventGenerator(nn.Module):
 
         n_envelopes = 64
         n_dither = 64
-        n_resonances = 1024
-        n_amps = 1024
+        n_resonances = 256
+        n_amps = 256
         n_phase = 8
         n_deformations = 32
 
@@ -314,11 +309,11 @@ class EventGenerator(nn.Module):
             n_frames=self.n_frames,
             apply_decay=True,
             start_phase=torch.tanh(phase) * np.pi,
-            start_mags=torch.sigmoid(amps),
+            start_mags=amps ** 2,
             log_space_scan=True,
             phase_dither=torch.tanh(dither.view(-1, 1, self.n_coeffs))
         )
-        resonances = unit_norm(resonances)
+        # resonances = unit_norm(resonances)
 
         resonances = resonances.view(batch, n_events, self.expressivity, self.n_samples)
 
@@ -446,11 +441,28 @@ class Model(nn.Module):
             + self.total_events + count_parameters(self.generator)
         return n_params / self.total_samples
 
+    def generate_random(self, n_events):
+        events = torch.zeros(n_events, self.event_latent_dim, device=device) \
+            .normal_(self.events.mean().item(), self.events.std().item())
+
+        samples = self.generator.forward(events[None, ...])
+
+        # print('EVENTS', events.shape, times.shape, samples.shape)
+
+        samples = samples.view(1, -1, self.n_segment_samples)
+        samples = ensure_last_axis_length(samples, desired_size=self.n_segment_samples * 2)
+
+        times = torch.zeros(n_events, (self.n_segment_samples * 2) // self.window_size, device=device).uniform_(-1, 1)
+        times = sparse_softmax(times, dim=-1, normalize=True)
+
+        scheduled, _ = schedule_events(samples, times)
+        scheduled = scheduled[:, :, :self.n_segment_samples]
+        return scheduled
+
     def forward(
             self,
             start_frame: int,
             end_frame: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-
         n_frames = end_frame - start_frame
         n_samples = self.window_params.total_samples(n_frames)
         early_frame = start_frame - n_frames
@@ -538,8 +550,9 @@ def train(
         device: torch.device,
         n_segment_samples: int = 2 ** 15,
         window_size: int = 1024):
-    recon_audio, orig_audio = loggers(
-        ['recon', 'orig'],
+
+    recon_audio, orig_audio, rnd = loggers(
+        ['recon', 'orig', 'rnd'],
         'audio/wav',
         encode_audio,
         collection)
@@ -556,6 +569,7 @@ def train(
         orig_audio,
         recon_audio,
         events,
+        rnd
     ], port=9999, n_workers=1)
 
     iterator = dataset(
@@ -566,21 +580,21 @@ def train(
 
     _, total_samples, _, _, _ = next(iterator)
 
-    pos_encoding_size = calculate_pos_encoding_size(total_samples)
+    # pos_encoding_size = calculate_pos_encoding_size(total_samples)
 
     model = Model(
         total_samples=total_samples,
         n_frames=total_samples // (window_size // 2),
         samplerate=22050,
         event_latent_dim=32,
-        events_per_second=8,
+        events_per_second=16,
         window_size=window_size,
         n_segment_samples=n_segment_samples
     ).to(device)
 
     optim = Adam(model.parameters(), lr=1e-3)
 
-    tmp_schedule = torch.linspace(1, 1e-4, 10000)
+    # tmp_schedule = torch.linspace(1, 1e-4, 10000)
 
     for i, pair in enumerate(iterator):
 
@@ -608,14 +622,20 @@ def train(
 
         # print(mx)
         # confidence_loss = torch.abs(0.99 - mx).sum() * 100
-        l = iterative_loss(samples, recon, transform, ratio_loss=False, sort_channels=True)  # + confidence_loss
+        # l = iterative_loss(samples, recon, transform, ratio_loss=False, sort_channels=True)  # + confidence_loss
 
         # print(recon_summed.shape)
-        # l = loss(recon_summed, samples) #+ confidence_loss
+        l = loss(recon_summed, samples) #+ confidence_loss
         l.backward()
         optim.step()
         print(i, l.item(),
               f'N Frames: {n_frames}, Compression Ratio: {(model.compression_ratio):.2f}')
+
+        with torch.no_grad():
+            r = model.generate_random(n_events=6)
+            r = torch.sum(r, dim=1, keepdim=True)
+            r = max_norm(r)
+            rnd(r)
 
 
 if __name__ == '__main__':
@@ -627,9 +647,9 @@ if __name__ == '__main__':
         args.path,
         torch.device('cuda'),
         n_segment_samples=2 ** 16,
-        window_size=1024)
+        window_size=2048)
 
-    # model = HierarchicalTimeEncoding(n_events=128, n_samples=2 ** 16)
-    # x = model.materialize()
-    # print(x.shape)
-    # print(model.get_scalar_positions())
+    # n_samples = 2 ** 19
+    # pos = torch.zeros(3, 12, 19, 2).uniform_(-1, 1)
+    # scalar = binary_positions_to_scalar(pos, n_samples)
+    # print(scalar.view(-1))
