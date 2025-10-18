@@ -83,6 +83,7 @@ plt.show()
 
 '''
 
+
 def decaying_noise(n_items: int, n_samples: int, low_exp: int, high_exp: int, device: torch.device):
     t = torch.linspace(1, 0, n_samples, device=device)
     pos = torch.zeros(n_items, device=device).uniform_(low_exp, high_exp)
@@ -188,9 +189,11 @@ def materialize_attack_envelopes(low_res: torch.Tensor, window_size: int) -> tor
     impulse = impulse * torch.zeros_like(impulse).uniform_(-1, 1)
     return impulse
 
+
 def execute_layer(
         control_signal: torch.Tensor,
         attack_envelopes: torch.Tensor,
+        mix: torch.Tensor,
         routing: torch.Tensor,
         # materialize_resonances: MaterializeResonances,
         res: torch.Tensor,
@@ -257,6 +260,18 @@ def execute_layer(
 
     x = d * conv
     x = torch.sum(x, dim=-2)
+
+    # print('BEFORE', x.shape)
+
+    mixes = mix.view(1, 1, n_resonances, 1, 1, 2)
+    mixes = torch.softmax(mixes, dim=-1)
+    stacked = torch.stack([routed, x.reshape(*routed.shape)], dim=-1)
+    x = mixes * stacked
+    x = torch.sum(x, dim=-1)
+
+    x = x.view(1, 1, n_resonances, -1)
+    # print('AFTER', x.shape)
+
 
     summed = torch.tanh(x * torch.abs(gains.view(1, 1, n_resonances, 1)))
     # summed = x
@@ -611,6 +626,8 @@ class ResonanceLayer(nn.Module):
             n_samples, 64, n_resonances, expressivity
         )
 
+        self.mix = nn.Parameter(torch.zeros(self.n_resonances, 2).uniform_(-1, 1))
+
         # self.resonance = LatentResonanceBlock(
         #     n_samples, n_resonances, expressivity, latent_dim=16)
 
@@ -641,7 +658,6 @@ class ResonanceLayer(nn.Module):
 
         self.gains = nn.Parameter(torch.zeros((n_resonances, 1)).uniform_(0.01, 1.1))
 
-
     def get_attack_envelopes(self):
         return materialize_attack_envelopes(self.attack_envelopes, self.resonance_window_size)
 
@@ -663,6 +679,7 @@ class ResonanceLayer(nn.Module):
         output, fwd = execute_layer(
             control_signal,
             self.attack_envelopes,
+            self.mix,
             self.router,
             res,
             deformations,
@@ -904,8 +921,8 @@ def overfit_model():
 
     # KLUDGE: control_plane_dim and n_resonances
     # must have the same value
-    control_plane_dim = 16
-    n_resonances = 16
+    control_plane_dim = 4
+    n_resonances = 4
     expressivity = 2
 
     target = get_one_audio_segment(n_samples)
@@ -981,7 +998,7 @@ def overfit_model():
 
             iteration += 1
 
-            if iteration > 0 and iteration % 5000 == 0:
+            if iteration > 0 and iteration % 10000 == 0:
                 print('Serializing')
                 generate_param_dict('resonancemodelparams', remote_logger, model)
                 input('Continue?')
