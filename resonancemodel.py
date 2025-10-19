@@ -83,11 +83,23 @@ plt.show()
 
 '''
 
-def decaying_noise(n_items: int, n_samples: int, low_exp: int, high_exp: int, device: torch.device):
+
+def decaying_noise(
+        n_items: int,
+        n_samples: int,
+        low_exp: int,
+        high_exp: int,
+        device: torch.device,
+        include_noise: bool = True):
+    
     t = torch.linspace(1, 0, n_samples, device=device)
     pos = torch.zeros(n_items, device=device).uniform_(low_exp, high_exp)
-    noise = torch.zeros(n_items, n_samples, device=device).uniform_(-1, 1)
-    return (t[None, :] ** pos[:, None]) * noise
+
+    if include_noise:
+        noise = torch.zeros(n_items, n_samples, device=device).uniform_(-1, 1)
+        return (t[None, :] ** pos[:, None]) * noise
+    else:
+        return (t[None, :] ** pos[:, None])
 
 
 def materialize_non_windowed_fft_resonance(n_samples: int, amplitudes: torch.Tensor, damping: torch.Tensor):
@@ -183,14 +195,26 @@ class SampleLookup(Lookup):
         return x
 
 
-def materialize_attack_envelopes(low_res: torch.Tensor, window_size: int) -> torch.Tensor:
-    impulse = interpolate_last_axis(low_res ** 2, desired_size=window_size)
+def materialize_attack_envelopes(
+        low_res: torch.Tensor,
+        window_size: int,
+        is_fft: bool = False) -> torch.Tensor:
+    print('ATTACK', low_res.shape)
+
+    if is_fft:
+        low_res = torch.view_as_complex(low_res)
+        low_res = torch.fft.irfft(low_res)
+
+    impulse = interpolate_last_axis(low_res, desired_size=window_size) ** 2
+
     impulse = impulse * torch.zeros_like(impulse).uniform_(-1, 1)
     return impulse
+
 
 def execute_layer(
         control_signal: torch.Tensor,
         attack_envelopes: torch.Tensor,
+        mix: torch.Tensor,
         routing: torch.Tensor,
         # materialize_resonances: MaterializeResonances,
         res: torch.Tensor,
@@ -257,6 +281,17 @@ def execute_layer(
 
     x = d * conv
     x = torch.sum(x, dim=-2)
+
+    # print('BEFORE', x.shape)
+
+    mixes = mix.view(1, 1, n_resonances, 1, 1, 2)
+    mixes = torch.softmax(mixes, dim=-1)
+    stacked = torch.stack([routed, x.reshape(*routed.shape)], dim=-1)
+    x = mixes * stacked
+    x = torch.sum(x, dim=-1)
+
+    x = x.view(1, 1, n_resonances, -1)
+    # print('AFTER', x.shape)
 
     summed = torch.tanh(x * torch.abs(gains.view(1, 1, n_resonances, 1)))
     # summed = x
@@ -599,7 +634,10 @@ class ResonanceLayer(nn.Module):
 
         resonance_coeffs = resonance_window_size // 2 + 1
 
-        self.attack_envelopes = nn.Parameter(decaying_noise(self.control_plane_dim, 128, 4, 20, device=device))
+        self.attack_envelopes = nn.Parameter(
+            # decaying_noise(self.control_plane_dim, 256, 4, 20, device=device, include_noise=False)
+            torch.zeros(self.control_plane_dim, 256).uniform_(-1, 1)
+        )
 
         self.router = nn.Parameter(
             torch.zeros((self.control_plane_dim, self.n_resonances)).uniform_(-1, 1))
@@ -610,6 +648,8 @@ class ResonanceLayer(nn.Module):
         self.resonance = DampedHarmonicOscillatorBlock(
             n_samples, 64, n_resonances, expressivity
         )
+
+        self.mix = nn.Parameter(torch.zeros(self.n_resonances, 2).uniform_(-1, 1))
 
         # self.resonance = LatentResonanceBlock(
         #     n_samples, n_resonances, expressivity, latent_dim=16)
@@ -641,7 +681,6 @@ class ResonanceLayer(nn.Module):
 
         self.gains = nn.Parameter(torch.zeros((n_resonances, 1)).uniform_(0.01, 1.1))
 
-
     def get_attack_envelopes(self):
         return materialize_attack_envelopes(self.attack_envelopes, self.resonance_window_size)
 
@@ -663,6 +702,7 @@ class ResonanceLayer(nn.Module):
         output, fwd = execute_layer(
             control_signal,
             self.attack_envelopes,
+            self.mix,
             self.router,
             res,
             deformations,
@@ -972,7 +1012,7 @@ def overfit_model():
 
             deformations(model.flattened_deformations)
             routing(torch.abs(model.get_router(0)))
-            attack(model.get_attack_envelopes(0))
+            attack(max_norm(model.get_attack_envelopes(0)))
 
             with torch.no_grad():
                 rand(max_norm(model.random(use_learned_deformations=False)))
@@ -981,7 +1021,7 @@ def overfit_model():
 
             iteration += 1
 
-            if iteration > 0 and iteration % 5000 == 0:
+            if iteration > 0 and iteration % 10000 == 0:
                 print('Serializing')
                 generate_param_dict('resonancemodelparams', remote_logger, model)
                 input('Continue?')
