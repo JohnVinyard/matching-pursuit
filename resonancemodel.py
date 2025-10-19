@@ -199,7 +199,6 @@ def materialize_attack_envelopes(
         low_res: torch.Tensor,
         window_size: int,
         is_fft: bool = False) -> torch.Tensor:
-    print('ATTACK', low_res.shape)
 
     if is_fft:
         low_res = torch.view_as_complex(low_res)
@@ -409,32 +408,22 @@ def damped_harmonic_oscillator(
         initial_displacement: torch.Tensor,
         initial_velocity: float,
 ) -> torch.Tensor:
-    n_samples = time.shape[-1]
-
-    # mass = mass.view(n_osc, 1)
-    # damping = damping.view(n_osc, 1)
-    # tension = tension.view(n_osc, 1)
-    # initial_displacement = initial_displacement.view(n_osc, 1)
-    # initial_velocity = initial_velocity.view(n_osc, 1)
 
     x = (damping / (2 * mass))
     if torch.isnan(x).sum() > 0:
         print('x first appearance of NaN')
 
-    # print(tension, x ** 2, tension - (x ** 2))
 
     omega = torch.sqrt(torch.clamp(tension - (x ** 2), 1e-12, np.inf))
     if torch.isnan(omega).sum() > 0:
         print('omega first appearance of NaN')
 
-    # phi = torch.arctan((initial_velocity + (x * initial_displacement) / (initial_displacement * omega)))
     phi = torch.atan2(
         (initial_velocity + (x * initial_displacement)),
         (initial_displacement * omega)
     )
     a = initial_displacement / torch.cos(phi)
 
-    # print(a.shape, x.shape, time.shape, omega.shape, phi.shape)
     z = a * torch.exp(-x * time) * torch.cos(omega * time - phi)
     return z
 

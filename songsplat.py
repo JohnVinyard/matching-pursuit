@@ -13,7 +13,8 @@ from modules import stft, max_norm, sparse_softmax, interpolate_last_axis, flatt
     iterative_loss, LinearOutputStack
 from modules.atoms import unit_norm
 from modules.infoloss import CorrelationLoss
-from modules.transfer import fft_convolve, freq_domain_transfer_function_to_resonance, hierarchical_dirac
+from modules.transfer import fft_convolve, freq_domain_transfer_function_to_resonance, hierarchical_dirac, \
+    damped_harmonic_oscillator
 from modules.upsample import upsample_with_holes, ensure_last_axis_length
 from spiking import SpikingModel
 from util import encode_audio, make_initializer, device
@@ -248,6 +249,63 @@ class HalfLappedWindowParams:
         gd = torch.cumsum(gd, dim=1)
         return gd
 
+class DampedHarmonicOscillatorBlock(nn.Module):
+    def __init__(
+            self,
+            n_samples: int,
+            n_oscillators: int,
+            n_resonances: int,
+            expressivity: int):
+        super().__init__()
+        self.n_samples = n_samples
+        self.n_oscillators = n_oscillators
+        self.n_resonances = n_resonances
+        self.expressivity = expressivity
+
+        self.mass = nn.Parameter(
+            torch.zeros(n_oscillators, n_resonances, expressivity) \
+                .uniform_(-2, 2))
+
+        self.damping = nn.Parameter(
+            torch.zeros(n_oscillators, n_resonances, expressivity) \
+                .uniform_(0.5, 1.5))
+
+        self.tension = nn.Parameter(
+            torch.zeros(n_oscillators, n_resonances, expressivity) \
+                .uniform_(4, 9))
+
+        self.initial_displacement = nn.Parameter(
+            torch.zeros(n_oscillators, n_resonances, expressivity) \
+                .uniform_(-1, 2))
+
+        self.amplitudes = nn.Parameter(
+            torch.zeros(n_oscillators, n_resonances, expressivity, 1) \
+                .uniform_(-1, 1))
+
+    def _materialize_resonances(self, device: torch.device):
+        time = torch.linspace(0, 10, self.n_samples, device=device) \
+            .view(1, 1, 1, self.n_samples)
+
+        x = damped_harmonic_oscillator(
+            time=time,
+            mass=torch.sigmoid(self.mass[..., None]),
+            damping=torch.sigmoid(self.damping[..., None]) * 20,
+            tension=10 ** self.tension[..., None],
+            initial_displacement=self.initial_displacement[..., None],
+            initial_velocity=0
+        )
+
+        x = x.view(self.n_oscillators, self.n_resonances, self.expressivity, self.n_samples)
+        x = x * self.amplitudes ** 2
+        x = torch.sum(x, dim=0)
+
+        ramp = torch.ones(self.n_samples, device=device)
+        ramp[:10] = torch.linspace(0, 1, 10, device=device)
+        return x.view(1, 1, self.n_resonances, self.expressivity, self.n_samples) * ramp[None, None, None, None, :]
+
+    def forward(self) -> torch.Tensor:
+        return self._materialize_resonances(self.damping.device)
+
 
 class EventGenerator(nn.Module):
 
@@ -274,19 +332,30 @@ class EventGenerator(nn.Module):
 
         n_envelopes = 64
         n_dither = 64
-        n_resonances = 256
+        n_resonances = 32
         n_amps = 256
         n_phase = 8
         n_deformations = 32
 
+        self.n_resonances = n_resonances
+
+        self.resonances = DampedHarmonicOscillatorBlock(
+            n_samples=self.n_samples,
+            n_oscillators=64,
+            n_resonances=n_resonances,
+            expressivity=1)
+
+        self.to_resonance = nn.Linear(latent_dim, n_resonances * self.expressivity)
+
         # note: the noise envelope is 4x the frame rate, as it is upsampled
         # to 1/4 the overall number of frames
         self.to_noise = SimpleLookup(latent_dim, n_envelopes, n_frames, 1)
-        self.to_dither = SimpleLookup(latent_dim, n_dither, n_coeffs, expressivity)
-        self.to_coeffs = SimpleLookup(latent_dim, n_resonances, n_coeffs, expressivity)
-        self.to_phase = SimpleLookup(latent_dim, n_phase, n_coeffs, expressivity)
+
+        # self.to_dither = SimpleLookup(latent_dim, n_dither, n_coeffs, expressivity)
+        # self.to_coeffs = SimpleLookup(latent_dim, n_resonances, n_coeffs, expressivity)
+        # self.to_phase = SimpleLookup(latent_dim, n_phase, n_coeffs, expressivity)
         self.to_deformation = SimpleLookup(latent_dim, n_deformations, n_frames, expressivity)
-        self.to_amps = SimpleLookup(latent_dim, n_amps, n_coeffs, expressivity)
+        # self.to_amps = SimpleLookup(latent_dim, n_amps, n_coeffs, expressivity)
 
         self.to_mix = nn.Linear(latent_dim, 2)
         self.to_loudness = nn.Linear(latent_dim, 1)
@@ -298,21 +367,31 @@ class EventGenerator(nn.Module):
     def forward(self, events: torch.Tensor) -> torch.Tensor:
         batch, n_events, dim = events.shape
 
-        dither = self.to_dither(events).view(batch, n_events * self.expressivity, self.n_coeffs)
-        decay = self.to_coeffs(events).view(batch, n_events * self.expressivity, self.n_coeffs)
-        amps = self.to_amps(events).view(batch, n_events * self.expressivity, self.n_coeffs)
-        phase = self.to_phase(events).view(batch, n_events * self.expressivity, self.n_coeffs)
+        # materialize resonances into sample space (n_resonances, n_samples)
 
-        resonances = freq_domain_transfer_function_to_resonance(
-            window_size=self.window_size,
-            coeffs=self.base_resonance + (torch.sigmoid(decay) * self.resonance_span),
-            n_frames=self.n_frames,
-            apply_decay=True,
-            start_phase=torch.tanh(phase) * np.pi,
-            start_mags=amps ** 2,
-            log_space_scan=True,
-            phase_dither=torch.tanh(dither.view(-1, 1, self.n_coeffs))
-        )
+        resonances = self.resonances.forward().view(self.n_resonances, -1)
+        x = self.to_resonance(events).view(batch, n_events * self.expressivity, self.latent_dim)
+        resonances = x @ resonances
+
+
+
+        # dither = self.to_dither(events).view(batch, n_events * self.expressivity, self.n_coeffs)
+        # decay = self.to_coeffs(events).view(batch, n_events * self.expressivity, self.n_coeffs)
+        # amps = self.to_amps(events).view(batch, n_events * self.expressivity, self.n_coeffs)
+        # phase = self.to_phase(events).view(batch, n_events * self.expressivity, self.n_coeffs)
+        #
+        # resonances = freq_domain_transfer_function_to_resonance(
+        #     window_size=self.window_size,
+        #     coeffs=self.base_resonance + (torch.sigmoid(decay) * self.resonance_span),
+        #     n_frames=self.n_frames,
+        #     apply_decay=True,
+        #     start_phase=torch.tanh(phase) * np.pi,
+        #     start_mags=amps ** 2,
+        #     log_space_scan=True,
+        #     phase_dither=torch.tanh(dither.view(-1, 1, self.n_coeffs))
+        # )
+        # print('RESONANCES', resonances.shape)
+        # raise Exception('Blah')
         # resonances = unit_norm(resonances)
 
         resonances = resonances.view(batch, n_events, self.expressivity, self.n_samples)
@@ -357,24 +436,6 @@ def schedule_events(
         events: torch.Tensor,
         times: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     batch, n_events, n_samples = events.shape
-    n_events, pos_encoding_dim = times.shape
-    # _, n_frames, pos_encoding_dim = pos_encodings.shape
-
-    # pos_encodings = pos_encodings.view(pos_encoding_dim, -1)
-
-    # times = unit_norm(times, axis=-1)
-    # pos_encodings = unit_norm(pos_encodings, axis=0)
-
-    # sim = times @ pos_encodings.T
-    # s = sim(times, pos_encodings)
-    # print('S', s.shape)
-
-    # sched = F.gumbel_softmax(s, tau=temperature, hard=False, dim=-1)
-
-    # if np.random.random() > 0.5:
-    # sched = sparse_softmax(s, normalize=True)
-    # else:
-    # sched = torch.softmax(s, dim=-1)
 
     sched = times
 
@@ -413,6 +474,9 @@ class Model(nn.Module):
         print('TOTAL EVENTS', self.total_events)
 
         self.events = nn.Parameter(torch.zeros(self.total_events, self.event_latent_dim).uniform_(-0.01, 0.01))
+
+        # self.base_times = nn.Parameter(torch.zeros(1, self.n_frames).uniform_(-0.01, 0.01))
+
         self.times = nn.Parameter(torch.zeros(self.total_events, self.n_frames).uniform_(-0.01, 0.01))
 
         # times = torch.zeros(self.total_events, device=device).uniform_(0, 1)
@@ -428,6 +492,10 @@ class Model(nn.Module):
             event_latent_dim, n_event_frames, window_size)
 
         self.apply(init)
+
+    def materialize_times(self):
+        # return self.base_times + self.times
+        return self.times
 
     # @property
     # def time_change(self):
@@ -474,7 +542,9 @@ class Model(nn.Module):
             raise ValueError('skipping too-early segment')
 
         # OPERATION: range query
-        t = sparse_softmax(self.times, dim=-1, normalize=True)
+        times = self.materialize_times()
+        t = sparse_softmax(times, dim=-1, normalize=True)
+
         oh = t
         t = torch.argmax(t, dim=-1) / self.n_frames
 
@@ -483,7 +553,7 @@ class Model(nn.Module):
         # print(self.n_frames, t.shape, mask.shape)
 
         events = self.events[mask]
-        times = self.times[mask]
+        times = times[mask]
 
         if events.shape[0] == 0:
             raise ValueError('no events')
@@ -526,17 +596,12 @@ def dataset(
     while True:
         batch = torch.zeros(1, 1, n_segment_samples, device=device)
 
-        # we'll return positions that are twice as long as the segment, beginning one full segment
-        # earlier than the samples
-        # pos = torch.zeros(1, n_pos_encoding_channels, n_segment_frames * 2, device=device)
 
         start_index = np.random.randint(n_frames - (n_segment_frames - 1))
         end_index = start_index + n_segment_frames
-        early_index = start_index - n_segment_frames
 
         chunk = torch.from_numpy(samples[start_index * step_size:end_index * step_size]).to(device)
         batch[:, 0, :] = chunk
-        # pos[:, :, :] = pos_encoding(early_index, end_index, n_frames, n_pos_encoding_channels, device)
 
         yield batch, n_samples, start_index, end_index, n_frames
 

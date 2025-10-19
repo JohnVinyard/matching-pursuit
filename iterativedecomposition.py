@@ -13,13 +13,9 @@ from modules import stft, sparsify, sparsify_vectors, iterative_loss, max_norm, 
     sparse_softmax, positional_encoding, UNet, flattened_multiband_spectrogram
 from modules.anticausal import AntiCausalAnalysis
 from modules.eventgenerators.generator import EventGenerator
-from modules.eventgenerators.overfitresonance import OverfitResonanceModel, SimpleEventGenerator, WavetableModel, \
-    AudioModelEventGenerator
-from modules.infoloss import CorrelationLoss
-from modules.iterative import sort_channels_descending_norm
+from modules.eventgenerators.overfitresonance import OverfitResonanceModel
 from modules.mixer import MixerStack
 from modules.multiheadtransform import MultiHeadTransform
-from spiking import SpikingModel, AutocorrelationLoss
 from util import device, encode_audio, make_initializer
 
 matplotlib.use('Qt5Agg')
@@ -438,52 +434,29 @@ def train_and_monitor(
 
         scaler = torch.cuda.amp.GradScaler()
 
-        hidden_channels = 512
+        hidden_channels = 128
 
         resonance_model = OverfitResonanceModel(
-            n_noise_filters=64,
+            n_noise_filters=32,
             noise_expressivity=2,
             noise_filter_samples=128,
-            noise_deformations=32,
-            instr_expressivity=4,
+            noise_deformations=16,
+            instr_expressivity=2,
             n_events=1,
-            n_resonances=4096,
-            n_envelopes=256,
-            n_decays=64,
-            n_deformations=256,
+            n_resonances=16,
+            n_envelopes=64,
+            # n_decays=64,
+            n_deformations=64,
             n_samples=n_samples,
             n_frames=n_frames,
             samplerate=samplerate,
             hidden_channels=hidden_channels,
             wavetable_device=device,
             fine_positioning=fine_positioning,
-            fft_resonance=True,
+            fft_resonance=False,
             context_dim=context_dim
         )
 
-        # resonance_model = WavetableModel(
-        #     n_items=512,
-        #     expressivity=4,
-        #     n_samples=n_samples,
-        #     n_frames=n_frames,
-        #     n_events=1)
-
-        # resonance_model = AudioModelEventGenerator(
-        #     n_items=1024,
-        #     n_samples=n_samples,
-        #     n_frames=n_frames,
-        #     n_events=1,
-        #     samplerate=samplerate,
-        #     context_dim=context_dim
-        # )
-
-        # resonance_model = SimpleEventGenerator(
-        #     context_dim=context_dim,
-        #     n_frames=n_frames,
-        #     n_samples=n_samples,
-        #     n_events=1,
-        #     channels=256
-        # )
 
         model = Model(
             resonance_model=resonance_model,
@@ -543,7 +516,6 @@ def train_and_monitor(
                 recon_summed = recon_summed * weighting
 
 
-
                 # loss from iterative_loss will be negative since we're maximizing
                 # the amount of energy removed
                 loss = iterative_loss(
@@ -552,13 +524,9 @@ def train_and_monitor(
                     loss_transform,
                     ratio_loss=False,
                     sort_channels=True)
+                # loss = reconstruction_loss(recon_summed, target)
 
-                # loss = loss_model.multiband_noise_loss(target, recon_summed, 64, 16)
 
-
-                # disc_j = disc.forward(recon_summed)
-                # disc_loss = torch.abs(1 - disc_j).sum()
-                # loss = loss #+ (disc_loss * disc_loss_factor)
 
             scaler.scale(loss).backward()
             scaler.step(optim)
@@ -566,14 +534,6 @@ def train_and_monitor(
             print(i, loss.item())
             optim.zero_grad()
 
-            # train discriminator
-            # disc_optim.zero_grad()
-            # rj = disc.forward(target)
-            # fj = disc.forward(recon_summed.clone().detach())
-            # disc_loss = torch.abs(1 - rj).sum() + torch.abs(0 - fj).sum()
-            # disc_loss.backward()
-            # disc_optim.step()
-            # print('D', disc_loss.item())
 
 
             # TODO: sample scale/amplitude of one-hot time vectors

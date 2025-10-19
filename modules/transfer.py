@@ -14,6 +14,33 @@ import numpy as np
 from torch.nn import functional as F
 from scipy.signal import square, sawtooth
 
+def damped_harmonic_oscillator(
+        time: torch.Tensor,
+        mass: torch.Tensor,
+        damping: torch.Tensor,
+        tension: torch.Tensor,
+        initial_displacement: torch.Tensor,
+        initial_velocity: float,
+) -> torch.Tensor:
+
+    x = (damping / (2 * mass))
+    if torch.isnan(x).sum() > 0:
+        print('x first appearance of NaN')
+
+
+    omega = torch.sqrt(torch.clamp(tension - (x ** 2), 1e-12, np.inf))
+    if torch.isnan(omega).sum() > 0:
+        print('omega first appearance of NaN')
+
+    phi = torch.atan2(
+        (initial_velocity + (x * initial_displacement)),
+        (initial_displacement * omega)
+    )
+    a = initial_displacement / torch.cos(phi)
+
+    z = a * torch.exp(-x * time) * torch.cos(omega * time - phi)
+    return z
+
 
 class ExponentialTransform(nn.Module):
     def __init__(self, window_size: int, step: int, n_exponents: int, n_frames: int, max_exponent: float = 100):

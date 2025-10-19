@@ -6,17 +6,17 @@ from torch import nn
 from torch.nn import functional as F
 
 from config import Config
-from modules import interpolate_last_axis, select_items, NeuralReverb, SSM, sparse_softmax, sparsify, max_norm, \
-    fft_frequency_recompose, unit_norm, LinearOutputStack, gammatone_filter_bank
-from modules.ddsp import AudioModel
+from modules import interpolate_last_axis, select_items, NeuralReverb, SSM, sparse_softmax, sparsify, \
+    fft_frequency_recompose, unit_norm, LinearOutputStack
 from modules.eventgenerators.generator import EventGenerator
 from modules.eventgenerators.schedule import DiracScheduler, HierarchicalDiracModel
 from modules.iterative import TensorTransform
 from modules.multiheadtransform import ShapeSpec
 from modules.overlap_add import overlap_add
 from modules.phase import mag_phase_recomposition
-from modules.transfer import fft_convolve, make_waves_vectorized, freq_domain_transfer_function_to_resonance, fft_shift
-from modules.upsample import ensure_last_axis_length, ConvUpsample
+from modules.transfer import fft_convolve, make_waves_vectorized, freq_domain_transfer_function_to_resonance, fft_shift, \
+    damped_harmonic_oscillator
+from modules.upsample import ensure_last_axis_length
 from util import device
 
 
@@ -31,29 +31,6 @@ def mix(dry: torch.Tensor, wet: torch.Tensor, mix: torch.Tensor) -> torch.Tensor
     return x
 
 
-# def fft_shift(a: torch.Tensor, shift: torch.Tensor) -> torch.Tensor:
-#     # this is here to make the shift value interpretable
-#     shift = (1 - shift)
-#
-#     n_samples = a.shape[-1]
-#
-#     shift_samples = (shift * n_samples * 0.5)
-#
-#     # a = F.pad(a, (0, n_samples * 2))
-#
-#     spec = torch.fft.rfft(a, dim=-1, norm='ortho')
-#
-#     n_coeffs = spec.shape[-1]
-#     shift = (torch.arange(0, n_coeffs, device=a.device) * 2j * np.pi) / n_coeffs
-#
-#     shift = torch.exp(shift * shift_samples)
-#
-#     spec = spec * shift
-#
-#     samples = torch.fft.irfft(spec, dim=-1, norm='ortho')
-#     # samples = samples[..., :n_samples]
-#     # samples = torch.relu(samples)
-#     return samples
 
 
 class Lookup(nn.Module):
@@ -279,6 +256,56 @@ class MultibandResonanceLookup(Lookup):
         full = full.view(batch, n_events, expressivity, -1)
         full = unit_norm(full)
         return full
+
+
+
+
+class DampedHarmonicOscillatorLookup(nn.Module):
+
+    def __init__(self, latent_dim: int, n_samples: int, n_oscillators: int, n_resonances: int):
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.n_samples = n_samples
+        self.n_oscillators = n_oscillators
+        self.n_resonances = n_resonances
+
+        self.to_mass = nn.Linear(latent_dim, n_oscillators)
+        self.to_damping = nn.Linear(latent_dim, n_oscillators)
+        self.to_tension = nn.Linear(latent_dim, n_oscillators)
+        self.to_initial_displacement = nn.Linear(latent_dim, n_oscillators)
+        self.to_amplitudes = nn.Linear(latent_dim, n_oscillators)
+
+        time = torch.linspace(0, 10, self.n_samples, device=device) \
+            .view(1, 1, 1, self.n_samples)
+        self.register_buffer('time', time)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch, n_events, expressivity, latent_dim = x.shape
+
+        mass = self.to_mass(x)
+        damping = self.to_damping(x)
+        tension = self.to_tension(x)
+        initial_displacement = self.to_initial_displacement(x)
+        amplitudes = self.to_amplitudes(x)
+
+        x = damped_harmonic_oscillator(
+            time=self.time,
+            mass=torch.sigmoid(mass[..., None]),
+            damping=torch.sigmoid(damping[..., None]) * 20,
+            tension=10 ** tension[..., None],
+            initial_displacement=initial_displacement[..., None],
+            initial_velocity=0
+        )
+
+        amplitudes = amplitudes.view(batch, n_events, expressivity, self.n_oscillators, 1)
+
+        x = x.view(batch, n_events, expressivity, self.n_oscillators, self.n_samples)
+        x = x * amplitudes ** 2
+        x = torch.sum(x, dim=-2)
+
+        ramp = torch.ones(self.n_samples, device=device)
+        ramp[:10] = torch.linspace(0, 1, 10, device=device)
+        return x.view(batch, n_events, expressivity, self.n_samples) * ramp[None, None, None, :]
 
 
 class FFTResonanceLookup(Lookup):
@@ -886,7 +913,7 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
             n_events: int,
             n_resonances: int,
             n_envelopes: int,
-            n_decays: int,
+            # n_decays: int,
             n_deformations: int,
             n_samples: int,
             n_frames: int,
@@ -922,7 +949,7 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
         self.noise_resonance_shape = (1, n_events, noise_expressivity, n_noise_filters)
 
         self.envelope_shape = (1, n_events, n_envelopes)
-        self.decay_shape = (1, n_events, n_decays)
+        # self.decay_shape = (1, n_events, n_decays)
 
         self.deformation_shape = (1, n_events, n_deformations)
         self.noise_deformation_shape = (1, n_events, noise_deformations)
@@ -939,23 +966,11 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
         self.n_resonances = n_resonances
 
         if fft_resonance:
-            # self.r = MultibandResonanceLookup(
-            #     n_resonances,
-            #     n_samples,
-            #     base_resonance=0.01,
-            #     smallest_band_size=2048)
-
             self.r = FFTResonanceLookup(n_resonances, n_samples, 2048, base_resonance=0.02)
-            # self.r = SampleResonanceLookup(n_resonances, n_samples)
-            # self.r = F0ResonanceLookup(n_resonances, n_samples)
         else:
-            self.r = WavetableLookup(
-                n_resonances,
-                n_samples,
-                n_resonances=n_resonances,
-                samplerate=samplerate,
-                learnable=False,
-                wavetable_device=wavetable_device)
+            self.r = DampedHarmonicOscillatorLookup(
+                latent_dim=context_dim, n_samples=n_samples, n_oscillators=16, n_resonances=n_resonances)
+
 
         # TODO: This is an issue because we have gradients for every sample, even though
         # they are largely redundant (think exponential vs.
@@ -979,7 +994,7 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
         # self.e = ConvEnvelopes(
         #     n_samples=128, full_size=8192, padded_size=self.n_samples, context_dim=self.context_dim, channels=32)
 
-        self.n_decays = n_decays
+        # self.n_decays = n_decays
 
         # deformation_frames = n_samples // 1024
         deformation_frames = n_frames
@@ -1024,7 +1039,7 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
             # resonances=(self.instr_expressivity, self.context_dim),
 
             noise_mixes=(2,),
-            resonances=(self.instr_expressivity, self.n_resonances),
+            resonances=(self.instr_expressivity, self.context_dim),
             res_filter=(self.noise_expressivity, self.n_noise_filters),
             # decays=(self.instr_expressivity, self.n_decays,),
             mixes=(2,),
@@ -1094,6 +1109,8 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
         # choose a number of resonances to be convolved with
         # those impulses
         resonance = self.r.forward(resonances)
+
+
         # res_filters = self.n.forward(res_filter)
 
         # res_filters = torch.cat([
