@@ -443,7 +443,7 @@ def train_and_monitor(
             noise_deformations=16,
             instr_expressivity=2,
             n_events=1,
-            n_resonances=16,
+            n_resonances=128,
             n_envelopes=64,
             # n_decays=64,
             n_deformations=64,

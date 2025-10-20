@@ -291,7 +291,7 @@ class DampedHarmonicOscillatorLookup(nn.Module):
         x = damped_harmonic_oscillator(
             time=self.time,
             mass=torch.sigmoid(mass[..., None]),
-            damping=torch.sigmoid(damping[..., None]) * 20,
+            damping=torch.sigmoid(damping[..., None]) * 10,
             tension=10 ** tension[..., None],
             initial_displacement=initial_displacement[..., None],
             initial_velocity=0
@@ -969,7 +969,7 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
             self.r = FFTResonanceLookup(n_resonances, n_samples, 2048, base_resonance=0.02)
         else:
             self.r = DampedHarmonicOscillatorLookup(
-                latent_dim=context_dim, n_samples=n_samples, n_oscillators=16, n_resonances=n_resonances)
+                latent_dim=self.n_resonances, n_samples=n_samples, n_oscillators=32, n_resonances=n_resonances)
 
 
         # TODO: This is an issue because we have gradients for every sample, even though
@@ -1039,7 +1039,7 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
             # resonances=(self.instr_expressivity, self.context_dim),
 
             noise_mixes=(2,),
-            resonances=(self.instr_expressivity, self.context_dim),
+            resonances=(self.instr_expressivity, self.n_resonances),
             res_filter=(self.noise_expressivity, self.n_noise_filters),
             # decays=(self.instr_expressivity, self.n_decays,),
             mixes=(2,),
@@ -1148,14 +1148,14 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
 
         intermediates['dry'] = final
 
-        # apply reverb
-        verb = self.verb.forward(room_choice)
-        wet = fft_convolve(verb, final.view(*verb.shape))
-        verb_mix = torch.softmax(room_mix, dim=-1)[:, :, None, :]
-        stacked = torch.stack([wet, final.view(*verb.shape)], dim=-1)
-        stacked = stacked * verb_mix
-
-        final = stacked.sum(dim=-1)
+        # apply reverb TODO: Skipping for now
+        # verb = self.verb.forward(room_choice)
+        # wet = fft_convolve(verb, final.view(*verb.shape))
+        # verb_mix = torch.softmax(room_mix, dim=-1)[:, :, None, :]
+        # stacked = torch.stack([wet, final.view(*verb.shape)], dim=-1)
+        # stacked = stacked * verb_mix
+        #
+        # final = stacked.sum(dim=-1)
 
         intermediates['wet'] = final
 
