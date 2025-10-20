@@ -1,24 +1,11 @@
-from typing import Tuple, Callable, Any, Union
-from itertools import count
 import numpy as np
 import torch
-
-from conjure import serve_conjure, SupportedContentType, NumpyDeserializer, NumpySerializer, Logger, MetaData
 from torch import nn
-from torch.optim import Adam
 
-import conjure
-from data import get_one_audio_segment
-from modules import max_norm, interpolate_last_axis, sparsify, unit_norm, flattened_multiband_spectrogram, \
-    fft_frequency_recompose, stft, HyperNetworkLayer
-from modules.eventgenerators.overfitresonance import Lookup, flatten_envelope
-from modules.infoloss import CorrelationLoss
-from modules.transfer import freq_domain_transfer_function_to_resonance, fft_convolve
-from modules.upsample import upsample_with_holes, ensure_last_axis_length
-from util import device, encode_audio, make_initializer
-from base64 import b64encode
-from sklearn.decomposition import DictionaryLearning
-
+from modules import interpolate_last_axis, stft
+from modules.upsample import upsample_with_holes
+from util import make_initializer
+from util.overfit import overfit_model
 
 init_weights = make_initializer(0.02)
 
@@ -59,18 +46,19 @@ class DampedHarmonicOscillatorController(nn.Module):
         self.control_rate = control_rate
         self.n_oscillators = n_oscillators
         self.n_frames = int(n_samples / control_rate)
+        print('FRAMES', self.n_frames)
 
         self.mass = nn.Parameter(torch.zeros(n_oscillators, 1, 1).uniform_(-6, 6))
 
-        self.base_damping = nn.Parameter(torch.zeros(n_oscillators, 1, 1).uniform_(0, 1))
+        self.base_damping = nn.Parameter(torch.zeros(n_oscillators, 1, 1).uniform_(-6, 6))
         self.damping = nn.Parameter(torch.zeros(n_oscillators, 1, self.n_frames).uniform_(-0.01, 0.01))
 
-        self.base_tension = nn.Parameter(torch.zeros(n_oscillators, 1, 1).uniform_(0, 1))
+        self.base_tension = nn.Parameter(torch.zeros(n_oscillators, 1, 1).uniform_(4, 9))
         self.tension = nn.Parameter(torch.zeros(n_oscillators, 1, self.n_frames).uniform_(-0.01, 0.01))
 
-        self.initial_displacement = nn.Parameter(torch.zeros(n_oscillators, 1, 1).uniform_(-1, 1))
+        self.initial_displacement = nn.Parameter(torch.zeros(n_oscillators, 1, 1).uniform_(-0.01, 0.01))
 
-        self.times = nn.Parameter(torch.zeros(n_oscillators, 1, self.n_frames).uniform_(-1, 1))
+        self.times = nn.Parameter(torch.zeros(n_oscillators, 1, self.n_frames).uniform_(-0.0001, 0.0001))
 
         self.max_time = 10
         self.time_step = 10 // n_samples
@@ -98,191 +86,8 @@ class DampedHarmonicOscillatorController(nn.Module):
         )
 
         x = torch.sum(x, dim=0, keepdim=True)
-
-        x = max_norm(x)
         return x
 
-
-# class DampedHarmonicOscillatorBlock(nn.Module):
-#     def __init__(
-#             self,
-#             n_samples: int,
-#             n_oscillators: int,
-#             n_resonances: int,
-#             expressivity: int):
-#         super().__init__()
-#         self.n_samples = n_samples
-#         self.n_oscillators = n_oscillators
-#         self.n_resonances = n_resonances
-#         self.expressivity = expressivity
-#
-#         self.mass = nn.Parameter(
-#             torch.zeros(n_oscillators, n_resonances, expressivity) \
-#                 .uniform_(-2, 2))
-#
-#         self.damping = nn.Parameter(
-#             torch.zeros(n_oscillators, n_resonances, expressivity) \
-#                 .uniform_(0.5, 1.5))
-#
-#         self.tension = nn.Parameter(
-#             torch.zeros(n_oscillators, n_resonances, expressivity) \
-#                 .uniform_(4, 9))
-#
-#         self.initial_displacement = nn.Parameter(
-#             torch.zeros(n_oscillators, n_resonances, expressivity) \
-#                 .uniform_(-1, 2))
-#
-#         self.amplitudes = nn.Parameter(
-#             torch.zeros(n_oscillators, n_resonances, expressivity, 1) \
-#                 .uniform_(-1, 1))
-#
-#     def _materialize_resonances(self, device: torch.device):
-#         time = torch.linspace(0, 10, self.n_samples, device=device) \
-#             .view(1, 1, 1, self.n_samples)
-#
-#         x = damped_harmonic_oscillator(
-#             time=time,
-#             mass=torch.sigmoid(self.mass[..., None]),
-#             # mass=0.2,
-#             damping=torch.sigmoid(self.damping[..., None]) * 20,
-#             tension=10 ** self.tension[..., None],
-#             initial_displacement=self.initial_displacement[..., None],
-#             initial_velocity=0
-#         )
-#
-#         x = x.view(self.n_oscillators, self.n_resonances, self.expressivity, self.n_samples)
-#         x = x * self.amplitudes ** 2
-#         x = torch.sum(x, dim=0)
-#
-#         ramp = torch.ones(self.n_samples, device=device)
-#         ramp[:10] = torch.linspace(0, 1, 10, device=device)
-#         return x.view(1, 1, self.n_resonances, self.expressivity, self.n_samples) * ramp[None, None, None, None, :]
-#
-#     def forward(self) -> torch.Tensor:
-#         return self._materialize_resonances(self.damping.device)
-#
-
-LossFunc = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
-
-def overfit_model(
-        n_samples: int,
-        model: nn.Module,
-        loss_func: LossFunc,
-        collection_name: str):
-
-    target = get_one_audio_segment(n_samples)
-    model = model.to(device)
-    optimizer = Adam(model.parameters(), lr=1e-3)
-    collection = conjure.LmdbCollection(path=collection_name)
-
-    t, r = conjure.loggers(
-        ['target', 'recon',],
-        'audio/wav',
-        encode_audio,
-        collection)
-
-    serve_conjure(
-        [t, r], port=9999, n_workers=1)
-
-    t(max_norm(target))
-
-    for i in count():
-        optimizer.zero_grad()
-        recon = model.forward()
-        r(max_norm(recon))
-        loss = loss_func(recon, target)
-        loss.backward()
-        optimizer.step()
-        print(i, loss.item())
-
-
-
-
-# def overfit_model():
-#     n_samples = 2 ** 17
-#     resonance_window_size = 2048
-#     step_size = 1024
-#     n_frames = n_samples // step_size
-#
-#     # KLUDGE: control_plane_dim and n_resonances
-#     # must have the same value
-#     control_plane_dim = 16
-#     n_resonances = 16
-#     expressivity = 2
-#
-#     target = get_one_audio_segment(n_samples)
-#     model = OverfitResonanceStack(
-#         n_layers=1,
-#         n_samples=n_samples,
-#         resonance_window_size=resonance_window_size,
-#         control_plane_dim=control_plane_dim,
-#         n_resonances=n_resonances,
-#         expressivity=expressivity,
-#         base_resonance=0.01,
-#         n_frames=n_frames
-#     ).to(device)
-#     optimizer = Adam(model.parameters(), lr=1e-3)
-#     collection = conjure.LmdbCollection(path='resonancemodel')
-#
-#
-#     t, r, rand, res = conjure.loggers(
-#         ['target', 'recon', 'random', 'resonance'],
-#         'audio/wav',
-#         encode_audio,
-#         collection)
-#
-#     def to_numpy(x: torch.Tensor) -> np.ndarray:
-#         return x.data.cpu().numpy()
-#
-#     c, deformations, routing, attack = conjure.loggers(
-#         ['control', 'deformations', 'routing', 'attack'],
-#         SupportedContentType.Spectrogram.value,
-#         to_numpy,
-#         collection,
-#         serializer=NumpySerializer(),
-#         deserializer=NumpyDeserializer())
-#
-#     serve_conjure(
-#         [t, r, c, rand, res, deformations, routing, attack], port=9999, n_workers=1)
-#
-#     t(max_norm(target))
-#
-#     # loss_model = CorrelationLoss(n_elements=256).to(device)
-#
-#     def train():
-#         iteration = 0
-#
-#         while True:
-#             optimizer.zero_grad()
-#             recon = model.forward()
-#             r(max_norm(recon))
-#             c(model.control_signal[0, 0])
-#
-#             # x = flattened_multiband_spectrogram(target, {'s': (64, 16)})
-#             # y = flattened_multiband_spectrogram(recon, {'s': (64, 16)})
-#             x = stft(target, 2048, 256, pad=True)
-#             y = stft(recon, 2048, 256, pad=True)
-#             loss = torch.abs(x - y).sum()
-#
-#             # loss = loss_model.multiband_noise_loss(target, recon, 64, 16)
-#
-#             loss.backward()
-#             optimizer.step()
-#             print(iteration, loss.item(), model.compression_ratio(n_samples))
-#
-#             deformations(model.flattened_deformations)
-#             routing(torch.abs(model.get_router(0)))
-#             attack(max_norm(model.get_attack_envelopes(0)))
-#
-#             with torch.no_grad():
-#                 rand(max_norm(model.random(use_learned_deformations=False)))
-#                 rz = model.get_materialized_resonance(0).view(-1, n_samples)
-#                 res(max_norm(rz[np.random.randint(0, n_resonances * expressivity - 1)]))
-#
-#             iteration += 1
-#
-#
-#     train()
 
 
 def compute_loss(target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
@@ -297,8 +102,8 @@ if __name__ == '__main__':
         n_samples=n_samples,
         model=DampedHarmonicOscillatorController(
             n_samples=n_samples,
-            control_rate=512,
-            n_oscillators=64),
+            control_rate=256,
+            n_oscillators=256),
         loss_func=compute_loss,
         collection_name='dho'
     )
