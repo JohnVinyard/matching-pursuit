@@ -305,7 +305,9 @@ class DampedHarmonicOscillatorLookup(nn.Module):
 
         ramp = torch.ones(self.n_samples, device=device)
         ramp[:10] = torch.linspace(0, 1, 10, device=device)
-        return x.view(batch, n_events, expressivity, self.n_samples) * ramp[None, None, None, :]
+        x = x.view(batch, n_events, expressivity, self.n_samples) * ramp[None, None, None, :]
+        x = unit_norm(x, dim=-1)
+        return x
 
 
 class FFTResonanceLookup(Lookup):
@@ -1148,14 +1150,14 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
 
         intermediates['dry'] = final
 
-        # apply reverb TODO: Skipping for now
-        # verb = self.verb.forward(room_choice)
-        # wet = fft_convolve(verb, final.view(*verb.shape))
-        # verb_mix = torch.softmax(room_mix, dim=-1)[:, :, None, :]
-        # stacked = torch.stack([wet, final.view(*verb.shape)], dim=-1)
-        # stacked = stacked * verb_mix
-        #
-        # final = stacked.sum(dim=-1)
+        # apply reverb
+        verb = self.verb.forward(room_choice)
+        wet = fft_convolve(verb, final.view(*verb.shape))
+        verb_mix = torch.softmax(room_mix, dim=-1)[:, :, None, :]
+        stacked = torch.stack([wet, final.view(*verb.shape)], dim=-1)
+        stacked = stacked * verb_mix
+
+        final = stacked.sum(dim=-1)
 
         intermediates['wet'] = final
 

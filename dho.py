@@ -12,7 +12,6 @@ init_weights = make_initializer(0.02)
 
 
 
-
 def damped_harmonic_oscillator(
         time: torch.Tensor,
         mass: torch.Tensor,
@@ -87,7 +86,6 @@ class DampedHarmonicOscillatorController(nn.Module):
 
         x = torch.sum(x, dim=0, keepdim=True)
         return x
-
 
 
 def compute_loss(target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
