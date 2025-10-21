@@ -21,10 +21,12 @@ def overfit_model(
         n_samples: int,
         model: nn.Module,
         loss_func: LossFunc,
-        collection_name: PathLike):
+        collection_name: PathLike,
+        learning_rate: float = 1e-3):
+
     target = get_one_audio_segment(n_samples)
     model = model.to(device)
-    optimizer = Adam(model.parameters(), lr=1e-3)
+    optimizer = Adam(model.parameters(), lr=learning_rate)
     collection = conjure.LmdbCollection(path=collection_name)
 
     t, r = conjure.loggers(

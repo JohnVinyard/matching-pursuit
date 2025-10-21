@@ -1,8 +1,22 @@
+from typing import Tuple
 import torch
 from torch.nn import functional as F
 from torch import nn
-from modules.decompose import fft_resample
 
+from modules import stft, max_norm
+from modules.decompose import fft_resample
+from modules.upsample import upsample_with_holes
+from util.overfit import overfit_model
+
+
+def ensure_symmetric(x: torch.Tensor) -> None:
+    if not torch.all(x == x.T):
+        raise ValueError('tensions must be a symmetric matrix')
+
+def sparse_forces(shape: Tuple, probability: float):
+    sparse = torch.zeros(shape).bernoulli_(p=probability)
+    rand = torch.zeros(shape).uniform_(-0.001, 0.001)
+    return sparse * rand
 
 # @torch.jit.script
 def torch_spring_mesh(
@@ -11,6 +25,7 @@ def torch_spring_mesh(
         tensions: torch.Tensor,
         damping: float,
         n_samples: int,
+        mixer: torch.Tensor,
         constrained_mask: torch.Tensor,
         forces: torch.Tensor,
         interpolate: int = 1
@@ -20,14 +35,10 @@ def torch_spring_mesh(
     node at each timestep
     """
 
-    recording_index = 32
-
     n_masses = masses.shape[0]
 
     if not torch.all(tensions == tensions.T):
         raise ValueError('tensions must be a symmetric matrix')
-
-    # orig_positions = node_positions.clone()
 
     connectivity_mask: torch.Tensor = tensions > 0
 
@@ -39,8 +50,6 @@ def torch_spring_mesh(
 
     # first derivative of node displacement
     velocities = torch.zeros_like(node_positions)
-
-    # accelerations = torch.zeros_like(node_positions)
 
     ones = torch.ones(n_masses, n_masses, 1, device=node_positions.device)
     upper_mask = torch.triu(ones)
@@ -75,26 +84,109 @@ def torch_spring_mesh(
         # update positions for nodes that are not constrained/fixed
         node_positions = node_positions + (velocities * constrained_mask[..., None])
 
-        recording[t] = velocities[recording_index, 0]
+        f = m * accelerations
+
+        mixed = mixer @ f[:, 0]
+
+        # recording[t] = velocities[recording_index, 0]
+        recording[t] = mixed
 
         # clear all the accumulated forces
         velocities = velocities * damping
 
     if interpolate > 1:
-        recording = F.interpolate(recording.view(1, 1, -1), scale_factor=interpolate, mode='linear')
-        # recording = fft_resample(recording, desired_size=n_samples * interpolate, is_lowest_band=True)
+        # recording = F.interpolate(recording.view(1, 1, -1), scale_factor=interpolate, mode='linear')
+        recording = fft_resample(recording.view(1, 1, -1), desired_size=n_samples * interpolate, is_lowest_band=True)
         recording = recording.view(-1)
 
-    return recording
+    return max_norm(recording.view(1, 1, -1))
 
 
 class Model(nn.Module):
 
-    def __init__(self, n_nodes: int, node_dim: int, ):
+    def __init__(
+            self,
+            n_nodes: int,
+            node_dim: int,
+            control_frame_rate: int,
+            n_samples: int):
         super().__init__()
 
+        self.n_nodes = n_nodes
+        self.node_dim = node_dim
+        self.control_frame_rate = control_frame_rate
+        self.n_samples = n_samples
+        self.n_frames = n_samples // control_frame_rate
+
+        self.nodes = nn.Parameter(torch.zeros(n_nodes, node_dim).uniform_(-1, 1))
+        self.masses = nn.Parameter(torch.zeros(n_nodes,).uniform_(18, 20))
+
+        self.tensions = nn.Parameter(torch.zeros(n_nodes, n_nodes).uniform_(10, 11))
+
+        self.damping = 0.99
+
+        self.mixer = nn.Parameter(torch.zeros(n_nodes,).uniform_(-1, 1))
+
+        forces = sparse_forces((self.n_frames // 8, self.n_nodes, self.node_dim), probability=0.1)
+
+        self.forces = nn.Parameter(forces)
+
+        self.constrained_mask = nn.Parameter(torch.zeros(n_nodes,).bernoulli_(0.1))
+
+    @property
+    def constrained(self):
+        fwd = (self.constrained_mask > 0).float()
+        back = self.constrained_mask
+        y = back + (fwd - back).detach()
+
+        print(fwd.sum().item(), fwd.numel())
+        return y
+
+    @property
+    def symmetric_tensions(self) -> torch.Tensor:
+        upper = torch.triu(self.tensions, diagonal=1)
+        symmetric = upper + upper.T
+        return symmetric
+
+    @property
+    def interpolated_forces(self):
+        # permute to (nodes, node_dim, time)
+        x = upsample_with_holes(self.forces.permute(1, 2, 0), self.n_frames)
+        x = x.permute(2, 0, 1)
+        return x
+
     def forward(self) -> torch.Tensor:
-        pass
+        x = torch_spring_mesh(
+            node_positions=torch.clamp(self.nodes, -1, 1),
+            masses=torch.abs(self.masses) * 20 + 1e-8,
+            tensions=torch.abs(self.symmetric_tensions) + 1e-8,
+            damping=self.damping,
+            n_samples=self.n_frames,
+            mixer=self.mixer,
+            constrained_mask=self.constrained,
+            forces=self.interpolated_forces,
+            interpolate=self.control_frame_rate
+        )
+        return x
+
+def compute_loss(target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
+    t = stft(target, 2048, 256, pad=True)
+    r = stft(recon, 2048, 256, pad=True)
+    return torch.abs(t - r).sum()
+
 
 if __name__ == '__main__':
-    pass
+    n_samples = 2**15
+    overfit_model(
+        n_samples=n_samples,
+        model=Model(
+            n_nodes=128,
+            node_dim=2,
+            control_frame_rate=32,
+            n_samples=n_samples
+        ),
+        loss_func=compute_loss,
+        collection_name='simulation',
+        learning_rate=1e-2
+    )
+
