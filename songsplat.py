@@ -9,14 +9,10 @@ from torch.optim import Adam
 
 from conjure import LmdbCollection, numpy_conjure, loggers, serve_conjure, SupportedContentType, NumpySerializer, \
     NumpyDeserializer
-from modules import stft, max_norm, sparse_softmax, interpolate_last_axis, flattened_multiband_spectrogram, \
-    iterative_loss, LinearOutputStack
-from modules.atoms import unit_norm
-from modules.infoloss import CorrelationLoss
-from modules.transfer import fft_convolve, freq_domain_transfer_function_to_resonance, hierarchical_dirac, \
+from modules import max_norm, sparse_softmax, interpolate_last_axis, flattened_multiband_spectrogram
+from modules.transfer import fft_convolve, hierarchical_dirac, \
     damped_harmonic_oscillator
 from modules.upsample import upsample_with_holes, ensure_last_axis_length
-from spiking import SpikingModel
 from util import encode_audio, make_initializer, device
 
 collection = LmdbCollection('songsplat')
@@ -26,134 +22,12 @@ DatasetBatch = Tuple[torch.Tensor, int, int, int, int]
 init = make_initializer(0.05)
 
 
-# def schedule_events(
-#         events: torch.Tensor,
-#         times: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-#
-#     batch, n_events, n_samples = events.shape
-#     mx, indices = torch.max(times, dim=-1)
-#
-#     sched = upsample_with_holes(times, desired_size=n_samples)
-#     scheduled = fft_convolve(events, sched)
-#     return scheduled, mx
-
 
 # TODO: try this with scalar FFT-based scheduling
 
 # thanks to https://discuss.pytorch.org/t/how-do-i-check-the-number-of-parameters-of-a-model/4325/9
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-
-# class OneHotPosEncoding(nn.Module):
-#     def __init__(self, n_events: int, n_frames: int, n_samples):
-#         super().__init__()
-#         self.n_events = n_events
-#         self.n_frames = n_frames
-#         self.n_samples = n_samples
-#
-#         self.times = nn.Parameter(torch.zeros(self.n_events, self.n_frames).uniform_(-1, 1))
-#
-#     def schedule(self, events: torch.Tensor) -> torch.Tensor:
-#         one_hot = sparse_softmax(self.times, dim=-1, normalize=True)
-#         x, _ = schedule_events(events, one_hot)
-#         return x
-#
-#     # TODO: Should this actually be a slice operation with __getitem__() ?
-#     def get_range(
-#             self,
-#             start_frame: int,
-#             end_frame: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-#
-#         """
-#         Return
-#             -a translated segment of times
-#             - a mask for events
-#             - entire one-hot representation
-#         """
-#
-#         n_frames = end_frame - start_frame
-#         early_frame = start_frame - n_frames
-#
-#         start_rel = early_frame / self.n_frames
-#         stop_rel = end_frame / self.n_frames
-#
-#         if start_rel < 0:
-#             raise ValueError('skipping too-early segment')
-#
-#         t = sparse_softmax(self.times, dim=-1, normalize=True)
-#         oh = t
-#         t = torch.argmax(t, dim=-1) / self.n_frames
-#
-#         mask = (t > start_rel) & (t < stop_rel)
-#
-#         times = self.times[mask]
-#         times = times[:, early_frame: end_frame]
-#
-#         return times, mask, oh
-
-# TODO: move this near hierarchical_dirac
-def binary_positions_to_scalar(pos: torch.Tensor, total_samples: int) -> torch.Tensor:
-    _, _, n_elements, _ = pos.shape
-    pow = 2 ** np.linspace(0, n_elements - 1, n_elements)
-    basis = torch.zeros(2, device=pos.device)
-    basis[1] = 1
-    x = sparse_softmax(pos, dim=-1, normalize=True)
-    x = x @ basis
-    x = x @ pow
-    return x / total_samples
-
-
-def calculate_pos_encoding_size(n_samples: int) -> int:
-    l = np.log2(n_samples)
-    l = np.ceil(l)
-    return l
-
-
-class HierarchicalTimeEncoding(nn.Module):
-    def __init__(self, n_events: int, n_samples: int):
-        super().__init__()
-        self.n_events = n_events
-        self.n_samples = n_samples
-        event_levels = int(np.log2(n_events))
-        total_levels = int(np.log2(n_samples))
-
-        self.event_levels = event_levels
-        self.n_bits = total_levels
-
-        rng = 0.1
-
-        self.base_times = nn.Parameter(
-            torch.zeros(1, 2, total_levels, 2).uniform_(-rng, rng))
-        self.hierarchical_time_vectors = nn.ParameterDict(
-            {str(i): torch.zeros(1, (2 ** (i + 2)), self.n_bits, 2).uniform_(-rng, rng) for i in
-             range(event_levels - 1)})
-
-    def materialize(self):
-        for i in range(self.event_levels - 1):
-            scale = 1
-
-            # events = \
-            #     events.view(1, -1, 1, self.context_dim) \
-            #     + (self.hierarchical_event_vectors[str(i)].view(1, 1, 2, self.context_dim) * scale)
-            # events = events.view(1, -1, self.context_dim)
-
-            # grow the number of encoded times by repeating the previous "level" and adding the next
-            batch, n_events, n_bits, _ = self.base_times.shape
-
-            times = self.base_timees \
-                .view(batch, n_events, 1, n_bits, 2) \
-                .repeat(1, 1, 2, 1, 1) \
-                .view(batch, n_events * 2, n_bits, 2)
-
-            times = times + (self.hierarchical_time_vectors[str(i)] * scale)
-            return times
-
-    def forward(self, events: torch.Tensor):
-        full_times = self.materialize()
-        times = hierarchical_dirac(full_times, soft=False)
-        scheduled = fft_convolve(times, events)
-        return scheduled
 
 
 def decaying_noise(n_items: int, n_samples: int, low_exp: int, high_exp: int, device: torch.device):
@@ -165,7 +39,6 @@ def decaying_noise(n_items: int, n_samples: int, low_exp: int, high_exp: int, de
 
 def transform(x: torch.Tensor) -> torch.Tensor:
     return flattened_multiband_spectrogram(x, {'sm': (64, 16)})
-    # return stft(x, 2048, 256, pad=True)
 
 
 def loss(recon: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -173,13 +46,6 @@ def loss(recon: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     t = transform(target)
     l = torch.abs(r - t).sum()
     return l
-
-
-def grow_positions(base_time_vector: torch.Tensor, amendments: Dict[int, torch.Tensor]) -> torch.Tensor:
-    '''
-    level 1 - (n_events, log2, 2)
-    '''
-    n_events, levels, _ = base_time_vector.shape
 
 
 class SimpleLookup(nn.Module):
@@ -194,14 +60,6 @@ class SimpleLookup(nn.Module):
         self.n_items = n_items
         self.n_samples = n_samples
         self.expressivity = expressivity
-
-        # self.from_latent = LinearOutputStack(
-        #     channels=128,
-        #     layers=2,
-        #     in_channels=latent,
-        #     out_channels=n_items * expressivity,
-        #     norm=lambda channels: nn.LayerNorm([channels, ])
-        # )
 
         self.from_latent = nn.Linear(latent, n_items * expressivity)
         self.items = nn.Parameter(torch.zeros(n_items, n_samples).uniform_(-0.02, 0.02))
@@ -248,6 +106,7 @@ class HalfLappedWindowParams:
 
         gd = torch.cumsum(gd, dim=1)
         return gd
+
 
 class DampedHarmonicOscillatorBlock(nn.Module):
     def __init__(
@@ -331,10 +190,7 @@ class EventGenerator(nn.Module):
         self.resonance_span = self.max_resonance - self.base_resonance
 
         n_envelopes = 64
-        n_dither = 64
         n_resonances = 32
-        n_amps = 256
-        n_phase = 8
         n_deformations = 32
 
         self.n_resonances = n_resonances
@@ -351,11 +207,7 @@ class EventGenerator(nn.Module):
         # to 1/4 the overall number of frames
         self.to_noise = SimpleLookup(latent_dim, n_envelopes, n_frames, 1)
 
-        # self.to_dither = SimpleLookup(latent_dim, n_dither, n_coeffs, expressivity)
-        # self.to_coeffs = SimpleLookup(latent_dim, n_resonances, n_coeffs, expressivity)
-        # self.to_phase = SimpleLookup(latent_dim, n_phase, n_coeffs, expressivity)
         self.to_deformation = SimpleLookup(latent_dim, n_deformations, n_frames, expressivity)
-        # self.to_amps = SimpleLookup(latent_dim, n_amps, n_coeffs, expressivity)
 
         self.to_mix = nn.Linear(latent_dim, 2)
         self.to_loudness = nn.Linear(latent_dim, 1)
@@ -373,27 +225,6 @@ class EventGenerator(nn.Module):
         x = self.to_resonance(events).view(batch, n_events * self.expressivity, self.latent_dim)
         resonances = x @ resonances
 
-
-
-        # dither = self.to_dither(events).view(batch, n_events * self.expressivity, self.n_coeffs)
-        # decay = self.to_coeffs(events).view(batch, n_events * self.expressivity, self.n_coeffs)
-        # amps = self.to_amps(events).view(batch, n_events * self.expressivity, self.n_coeffs)
-        # phase = self.to_phase(events).view(batch, n_events * self.expressivity, self.n_coeffs)
-        #
-        # resonances = freq_domain_transfer_function_to_resonance(
-        #     window_size=self.window_size,
-        #     coeffs=self.base_resonance + (torch.sigmoid(decay) * self.resonance_span),
-        #     n_frames=self.n_frames,
-        #     apply_decay=True,
-        #     start_phase=torch.tanh(phase) * np.pi,
-        #     start_mags=amps ** 2,
-        #     log_space_scan=True,
-        #     phase_dither=torch.tanh(dither.view(-1, 1, self.n_coeffs))
-        # )
-        # print('RESONANCES', resonances.shape)
-        # raise Exception('Blah')
-        # resonances = unit_norm(resonances)
-
         resonances = resonances.view(batch, n_events, self.expressivity, self.n_samples)
 
         n = self.to_noise(events).view(batch, n_events, 1, self.n_frames)
@@ -402,10 +233,6 @@ class EventGenerator(nn.Module):
         n = interpolate_last_axis(n, desired_size=self.n_samples // 4)
         n = ensure_last_axis_length(n, desired_size=self.n_samples)
         n = n * torch.zeros_like(n).uniform_(-1, 1)
-
-        # n = self.to_env_choice(events)
-        # n = self.to_envelopes.forward(n)
-        # n = n.view(batch, n_events, 1, self.n_samples)
 
         resonances = fft_convolve(resonances, n)
 
@@ -471,20 +298,10 @@ class Model(nn.Module):
         self.total_seconds = total_samples / samplerate
         self.events_per_second = events_per_second
         self.total_events = int(self.total_seconds * self.events_per_second)
-        print('TOTAL EVENTS', self.total_events)
 
         self.events = nn.Parameter(torch.zeros(self.total_events, self.event_latent_dim).uniform_(-0.01, 0.01))
 
-        # self.base_times = nn.Parameter(torch.zeros(1, self.n_frames).uniform_(-0.01, 0.01))
-
         self.times = nn.Parameter(torch.zeros(self.total_events, self.n_frames).uniform_(-0.01, 0.01))
-
-        # times = torch.zeros(self.total_events, device=device).uniform_(0, 1)
-
-        # orig_times = time_vector(times, self.total_samples, pos_encoding_channels, device)
-        # orig_times = torch.zeros_like(orig_times).uniform_(-0.01, 0.01)
-        # self.register_buffer('orig_times', orig_times)
-        # self.times = nn.Parameter(orig_times)
 
         n_event_frames = n_segment_samples // self.window_params.step_size
 
@@ -494,12 +311,8 @@ class Model(nn.Module):
         self.apply(init)
 
     def materialize_times(self):
-        # return self.base_times + self.times
         return self.times
 
-    # @property
-    # def time_change(self):
-    #     return torch.abs(self.orig_times - self.times).sum()
 
     @property
     def compression_ratio(self):
@@ -514,8 +327,6 @@ class Model(nn.Module):
             .normal_(self.events.mean().item(), self.events.std().item())
 
         samples = self.generator.forward(events[None, ...])
-
-        # print('EVENTS', events.shape, times.shape, samples.shape)
 
         samples = samples.view(1, -1, self.n_segment_samples)
         samples = ensure_last_axis_length(samples, desired_size=self.n_segment_samples * 2)
@@ -550,8 +361,6 @@ class Model(nn.Module):
 
         mask = (t > start_rel) & (t < stop_rel)
 
-        # print(self.n_frames, t.shape, mask.shape)
-
         events = self.events[mask]
         times = times[mask]
 
@@ -560,22 +369,19 @@ class Model(nn.Module):
 
         samples = self.generator.forward(events[None, ...])
 
-        # print('EVENTS', events.shape, times.shape, samples.shape)
-
         samples = samples.view(1, -1, n_samples)
         samples = ensure_last_axis_length(samples, desired_size=n_samples * 2)
 
         # OPERATION: offset/shift/translate
         scheduled, mx = schedule_events(samples, times[:, early_frame: end_frame])
 
-        # print(scheduled.shape)
         return scheduled[:, :, n_samples:], mx, oh
 
 
 @numpy_conjure(collection)
 def get_samples(path: str, samplerate: int) -> np.ndarray:
     samples, sr = librosa.load(path, sr=samplerate, mono=True)
-    return samples
+    return samples[:2**19]
 
 
 def dataset(
@@ -596,7 +402,6 @@ def dataset(
     while True:
         batch = torch.zeros(1, 1, n_segment_samples, device=device)
 
-
         start_index = np.random.randint(n_frames - (n_segment_frames - 1))
         end_index = start_index + n_segment_frames
 
@@ -615,7 +420,6 @@ def train(
         device: torch.device,
         n_segment_samples: int = 2 ** 15,
         window_size: int = 1024):
-
     recon_audio, orig_audio, rnd = loggers(
         ['recon', 'orig', 'rnd'],
         'audio/wav',
@@ -678,8 +482,6 @@ def train(
             print(e)
             continue
 
-        # encoding(positions)
-
         recon_summed = torch.sum(recon, dim=1, keepdim=True)
 
         # log recon audio
@@ -690,7 +492,7 @@ def train(
         # l = iterative_loss(samples, recon, transform, ratio_loss=False, sort_channels=True)  # + confidence_loss
 
         # print(recon_summed.shape)
-        l = loss(recon_summed, samples) #+ confidence_loss
+        l = loss(recon_summed, samples)  # + confidence_loss
         l.backward()
         optim.step()
         print(i, l.item(),
@@ -713,8 +515,3 @@ if __name__ == '__main__':
         torch.device('cuda'),
         n_segment_samples=2 ** 16,
         window_size=2048)
-
-    # n_samples = 2 ** 19
-    # pos = torch.zeros(3, 12, 19, 2).uniform_(-1, 1)
-    # scalar = binary_positions_to_scalar(pos, n_samples)
-    # print(scalar.view(-1))
