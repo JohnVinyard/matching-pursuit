@@ -12,7 +12,6 @@ from data import get_one_audio_segment
 from modules import max_norm, interpolate_last_axis, sparsify, unit_norm, flattened_multiband_spectrogram, \
     fft_frequency_recompose, stft, HyperNetworkLayer
 from modules.eventgenerators.overfitresonance import Lookup, flatten_envelope
-from modules.infoloss import CorrelationLoss
 from modules.transfer import freq_domain_transfer_function_to_resonance, fft_convolve
 from modules.upsample import upsample_with_holes, ensure_last_axis_length
 from util import device, encode_audio, make_initializer
@@ -91,7 +90,6 @@ def decaying_noise(
         high_exp: int,
         device: torch.device,
         include_noise: bool = True):
-    
     t = torch.linspace(1, 0, n_samples, device=device)
     pos = torch.zeros(n_items, device=device).uniform_(low_exp, high_exp)
 
@@ -146,14 +144,8 @@ class SampleLookup(Lookup):
             n_items: int,
             n_samples: int,
             flatten_kernel_size: Union[int, None] = None,
-            initial: Union[torch.Tensor, None] = None,
             randomize_phases: bool = True,
             windowed: bool = False):
-
-        # if initial is not None:
-        #     initializer = lambda x: initial
-        # else:
-        #     initializer = None
 
         def sample_lookup_init(x: torch.Tensor) -> torch.Tensor:
             return torch.zeros_like(x).uniform_(-0.01, 0.01)
@@ -199,7 +191,6 @@ def materialize_attack_envelopes(
         low_res: torch.Tensor,
         window_size: int,
         is_fft: bool = False) -> torch.Tensor:
-
     if is_fft:
         low_res = torch.view_as_complex(low_res)
         low_res = torch.fft.irfft(low_res)
@@ -215,7 +206,6 @@ def execute_layer(
         attack_envelopes: torch.Tensor,
         mix: torch.Tensor,
         routing: torch.Tensor,
-        # materialize_resonances: MaterializeResonances,
         res: torch.Tensor,
         deformations: torch.Tensor,
         gains: torch.Tensor,
@@ -354,7 +344,6 @@ class MultibandFFTResonanceBlock(nn.Module):
         self.params_per_band = params_per_band
         self.n_coeffs = n_coeffs
         self.window_size = window_size
-        # self.padded_samples = n_samples * 2
         self.expressivity = expressivity
 
     def forward(self) -> torch.Tensor:
@@ -408,11 +397,9 @@ def damped_harmonic_oscillator(
         initial_displacement: torch.Tensor,
         initial_velocity: float,
 ) -> torch.Tensor:
-
     x = (damping / (2 * mass))
     if torch.isnan(x).sum() > 0:
         print('x first appearance of NaN')
-
 
     omega = torch.sqrt(torch.clamp(tension - (x ** 2), 1e-12, np.inf))
     if torch.isnan(omega).sum() > 0:
@@ -468,7 +455,6 @@ class DampedHarmonicOscillatorBlock(nn.Module):
         x = damped_harmonic_oscillator(
             time=time,
             mass=torch.sigmoid(self.mass[..., None]),
-            # mass=0.2,
             damping=torch.sigmoid(self.damping[..., None]) * 20,
             tension=10 ** self.tension[..., None],
             initial_displacement=self.initial_displacement[..., None],
@@ -581,10 +567,8 @@ class FFTResonanceBlock(nn.Module):
             n_resonance_frames,
             apply_decay=True,
             start_phase=torch.tanh(phase) * np.pi,
-            # start_phase=phase,
             start_mags=amp ** 2,
             phase_dither=torch.tanh(phase_dither).reshape(-1, 1, self.n_coeffs),
-            # phase_dither=phase_dither.reshape(-1, 1, self.n_coeffs),
             log_space_scan=False,
             apply_window=False,
             overrlap_add=True)
@@ -972,7 +956,10 @@ def overfit_model():
         deserializer=NumpyDeserializer())
 
     serve_conjure(
-        [t, r, c, rand, res, deformations, routing, attack], port=9999, n_workers=1)
+        [t, r, c, rand, res, deformations, routing, attack],
+        port=9999,
+        n_workers=1,
+        web_components_version='0.0.88')
 
     t(max_norm(target))
 
@@ -987,8 +974,6 @@ def overfit_model():
             r(max_norm(recon))
             c(model.control_signal[0, 0])
 
-            # x = flattened_multiband_spectrogram(target, {'s': (64, 16)})
-            # y = flattened_multiband_spectrogram(recon, {'s': (64, 16)})
             x = stft(target, 2048, 256, pad=True)
             y = stft(recon, 2048, 256, pad=True)
             loss = torch.abs(x - y).sum()
