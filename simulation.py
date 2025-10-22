@@ -1,6 +1,5 @@
 from typing import Tuple
 import torch
-from torch.nn import functional as F
 from torch import nn
 
 from modules import stft, max_norm
@@ -15,7 +14,7 @@ def ensure_symmetric(x: torch.Tensor) -> None:
 
 def sparse_forces(shape: Tuple, probability: float):
     sparse = torch.zeros(shape).bernoulli_(p=probability)
-    rand = torch.zeros(shape).uniform_(-0.001, 0.001)
+    rand = torch.zeros(shape).uniform_(-0.01, 0.01)
     return sparse * rand
 
 # @torch.jit.script
@@ -85,10 +84,9 @@ def torch_spring_mesh(
         node_positions = node_positions + (velocities * constrained_mask[..., None])
 
         f = m * accelerations
-
         mixed = mixer @ f[:, 0]
 
-        # recording[t] = velocities[recording_index, 0]
+        # recording[t] = velocities[32, 0]
         recording[t] = mixed
 
         # clear all the accumulated forces
@@ -99,7 +97,7 @@ def torch_spring_mesh(
         recording = fft_resample(recording.view(1, 1, -1), desired_size=n_samples * interpolate, is_lowest_band=True)
         recording = recording.view(-1)
 
-    return max_norm(recording.view(1, 1, -1))
+    return recording.view(1, 1, -1)
 
 
 class Model(nn.Module):
@@ -123,23 +121,25 @@ class Model(nn.Module):
 
         self.tensions = nn.Parameter(torch.zeros(n_nodes, n_nodes).uniform_(10, 11))
 
-        self.damping = 0.99
+        self.damping = 0.9
 
-        self.mixer = nn.Parameter(torch.zeros(n_nodes,).uniform_(-1, 1))
+        self.mixer = nn.Parameter(torch.zeros(n_nodes,).uniform_(-0.1, 0.1))
 
-        forces = sparse_forces((self.n_frames // 8, self.n_nodes, self.node_dim), probability=0.1)
+        forces = sparse_forces((self.n_frames // 16, self.n_nodes, self.node_dim), probability=0.005)
 
         self.forces = nn.Parameter(forces)
 
         self.constrained_mask = nn.Parameter(torch.zeros(n_nodes,).bernoulli_(0.1))
 
     @property
+    def force_norm(self):
+        return torch.norm(self.forces.view(-1, self.node_dim), dim=-1).sum()
+
+    @property
     def constrained(self):
         fwd = (self.constrained_mask > 0).float()
         back = self.constrained_mask
         y = back + (fwd - back).detach()
-
-        print(fwd.sum().item(), fwd.numel())
         return y
 
     @property
@@ -157,12 +157,12 @@ class Model(nn.Module):
 
     def forward(self) -> torch.Tensor:
         x = torch_spring_mesh(
-            node_positions=torch.clamp(self.nodes, -1, 1),
-            masses=torch.abs(self.masses) * 20 + 1e-8,
-            tensions=torch.abs(self.symmetric_tensions) + 1e-8,
+            node_positions=self.nodes,
+            masses=torch.abs(self.masses) * 100 + 1e-8,
+            tensions=torch.abs(self.symmetric_tensions) * 4 + 1e-8,
             damping=self.damping,
             n_samples=self.n_frames,
-            mixer=self.mixer,
+            mixer=torch.softmax(self.mixer, dim=-1),
             constrained_mask=self.constrained,
             forces=self.interpolated_forces,
             interpolate=self.control_frame_rate
@@ -177,16 +177,24 @@ def compute_loss(target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
 
 if __name__ == '__main__':
     n_samples = 2**15
+
+    model = Model(
+        n_nodes=128,
+        node_dim=2,
+        control_frame_rate=32,
+        n_samples=n_samples
+    )
+
+    def full_loss_func(target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
+        recon_loss = compute_loss(target, recon)
+        energy_loss = model.force_norm
+        return recon_loss + (energy_loss * 10)
+
     overfit_model(
         n_samples=n_samples,
-        model=Model(
-            n_nodes=128,
-            node_dim=2,
-            control_frame_rate=32,
-            n_samples=n_samples
-        ),
-        loss_func=compute_loss,
+        model=model,
+        loss_func=full_loss_func,
         collection_name='simulation',
-        learning_rate=1e-2
+        learning_rate=1e-3
     )
 
