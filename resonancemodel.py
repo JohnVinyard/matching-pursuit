@@ -959,7 +959,7 @@ def overfit_model():
         [t, r, c, rand, res, deformations, routing, attack],
         port=9999,
         n_workers=1,
-        web_components_version='0.0.88')
+        web_components_version='0.0.89')
 
     t(max_norm(target))
 

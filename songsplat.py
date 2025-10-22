@@ -21,8 +21,6 @@ DatasetBatch = Tuple[torch.Tensor, int, int, int, int]
 
 init = make_initializer(0.05)
 
-
-
 # TODO: try this with scalar FFT-based scheduling
 
 # thanks to https://discuss.pytorch.org/t/how-do-i-check-the-number-of-parameters-of-a-model/4325/9
@@ -301,6 +299,9 @@ class Model(nn.Module):
 
         self.events = nn.Parameter(torch.zeros(self.total_events, self.event_latent_dim).uniform_(-0.01, 0.01))
 
+        # TODO: Try out with a hierarchical build-up
+        # a hierarchical buildup will require that the number of samples (and by extension, frames)
+        # must be a power of 2
         self.times = nn.Parameter(torch.zeros(self.total_events, self.n_frames).uniform_(-0.01, 0.01))
 
         n_event_frames = n_segment_samples // self.window_params.step_size
@@ -439,7 +440,7 @@ def train(
         recon_audio,
         events,
         rnd
-    ], port=9999, n_workers=1)
+    ], port=9999, n_workers=1, web_components_version='0.0.89')
 
     iterator = dataset(
         path=path,
