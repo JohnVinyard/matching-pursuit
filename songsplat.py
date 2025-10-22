@@ -10,6 +10,7 @@ from torch.optim import Adam
 from conjure import LmdbCollection, numpy_conjure, loggers, serve_conjure, SupportedContentType, NumpySerializer, \
     NumpyDeserializer
 from modules import max_norm, sparse_softmax, interpolate_last_axis, flattened_multiband_spectrogram
+from modules.normal_pdf import pdf2
 from modules.transfer import fft_convolve, hierarchical_dirac, \
     damped_harmonic_oscillator
 from modules.upsample import upsample_with_holes, ensure_last_axis_length
@@ -267,13 +268,33 @@ def schedule_events(
     sched = times
 
     mx, indices = torch.max(sched, dim=-1)
-    print(sched.shape, indices.max().item(), mx.mean().item())
 
     # OPERATION: schedule
     sched = upsample_with_holes(sched, desired_size=n_samples)
     scheduled = fft_convolve(events, sched)
     return scheduled, mx
 
+
+def gaussian_schedule_events(
+        events: torch.Tensor,
+        time_means: torch.Tensor,
+        time_stds: torch.Tensor,
+        segment_size_samples: int,
+        offset: float,
+        scale: float) -> torch.Tensor:
+
+    m = (time_means - offset) * scale
+    print(m.max().item(), m.min().item())
+    time_fwd = pdf2(m, time_stds * scale, segment_size_samples)
+
+
+    values, indices = torch.max(time_fwd, dim=-1, keepdim=True)
+    bwd = torch.zeros_like(time_fwd)
+    bwd = torch.scatter(bwd, dim=-1, index=indices, src=values)
+
+    y = bwd + (time_fwd - bwd).detach()
+    scheduled = fft_convolve(events, y)
+    return scheduled
 
 class Model(nn.Module):
 
@@ -301,7 +322,15 @@ class Model(nn.Module):
 
         self.events = nn.Parameter(torch.zeros(self.total_events, self.event_latent_dim).uniform_(-0.01, 0.01))
 
-        self.times = nn.Parameter(torch.zeros(self.total_events, self.n_frames).uniform_(-0.01, 0.01))
+        self.time_means = nn.Parameter(torch.zeros(self.total_events).uniform_(0, 1))
+        self.time_std = nn.Parameter(torch.zeros(self.total_events).uniform_(1e-12, 1e-8))
+        # TODO: Consider making this learn-able again
+        # self.register_buffer('time_std', torch.zeros(self.total_events).fill_(1e-8))
+
+
+        # self.times = nn.Parameter(torch.zeros(self.total_events, self.n_frames).uniform_(-0.01, 0.01))
+
+        self.scale_amount =  self.total_samples / (self.n_segment_samples * 2)
 
         n_event_frames = n_segment_samples // self.window_params.step_size
 
@@ -310,8 +339,16 @@ class Model(nn.Module):
 
         self.apply(init)
 
-    def materialize_times(self):
-        return self.times
+
+    def materialize_time_means(self):
+        return torch.clamp(self.time_means, 1e-12, 1 - 1e-12)
+
+    def materialize_time_stds(self):
+        return 1e-8 + torch.abs(self.time_std)
+
+
+    # def materialize_times(self):
+    #     return self.times
 
 
     @property
@@ -341,7 +378,8 @@ class Model(nn.Module):
     def forward(
             self,
             start_frame: int,
-            end_frame: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            end_frame: int) -> torch.Tensor:
+
         n_frames = end_frame - start_frame
         n_samples = self.window_params.total_samples(n_frames)
         early_frame = start_frame - n_frames
@@ -353,16 +391,21 @@ class Model(nn.Module):
             raise ValueError('skipping too-early segment')
 
         # OPERATION: range query
-        times = self.materialize_times()
-        t = sparse_softmax(times, dim=-1, normalize=True)
+        t = self.materialize_time_means()
+        # times = self.materialize_times()
+        # t = sparse_softmax(times, dim=-1, normalize=True)
 
-        oh = t
-        t = torch.argmax(t, dim=-1) / self.n_frames
+        # oh = t
+        # t = torch.argmax(t, dim=-1) / self.n_frames
 
         mask = (t > start_rel) & (t < stop_rel)
 
         events = self.events[mask]
-        times = times[mask]
+
+        time_means = self.materialize_time_means()[mask]
+        time_stds = self.materialize_time_stds()[mask]
+
+        # times = times[mask]
 
         if events.shape[0] == 0:
             raise ValueError('no events')
@@ -372,10 +415,19 @@ class Model(nn.Module):
         samples = samples.view(1, -1, n_samples)
         samples = ensure_last_axis_length(samples, desired_size=n_samples * 2)
 
-        # OPERATION: offset/shift/translate
-        scheduled, mx = schedule_events(samples, times[:, early_frame: end_frame])
+        scheduled = gaussian_schedule_events(
+            samples,
+            time_means,
+            time_stds,
+            self.n_segment_samples * 2,
+            offset=start_rel,
+            scale=self.scale_amount)
 
-        return scheduled[:, :, n_samples:], mx, oh
+        return scheduled[:, :, n_samples:]
+        # OPERATION: offset/shift/translate
+        # scheduled, mx = schedule_events(samples, times[:, early_frame: end_frame])
+
+        # return scheduled[:, :, n_samples:], mx, oh
 
 
 @numpy_conjure(collection)
@@ -449,7 +501,6 @@ def train(
 
     _, total_samples, _, _, _ = next(iterator)
 
-    # pos_encoding_size = calculate_pos_encoding_size(total_samples)
 
     model = Model(
         total_samples=total_samples,
@@ -477,7 +528,7 @@ def train(
         optim.zero_grad()
 
         try:
-            recon, mx, positions = model.forward(start_frame, end_frame)
+            recon = model.forward(start_frame, end_frame)
         except ValueError as e:
             print(e)
             continue
