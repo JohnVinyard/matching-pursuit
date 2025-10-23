@@ -11,7 +11,6 @@ init_weights = make_initializer(0.02)
 
 
 
-
 def damped_harmonic_oscillator(
         time: torch.Tensor,
         mass: torch.Tensor,
@@ -103,5 +102,6 @@ if __name__ == '__main__':
             control_rate=256,
             n_oscillators=256),
         loss_func=compute_loss,
-        collection_name='dho'
+        collection_name='dho',
+        learning_rate=1e-3
     )

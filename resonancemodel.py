@@ -12,8 +12,11 @@ from data import get_one_audio_segment
 from modules import max_norm, interpolate_last_axis, sparsify, unit_norm, flattened_multiband_spectrogram, \
     fft_frequency_recompose, stft, HyperNetworkLayer
 from modules.eventgenerators.overfitresonance import Lookup, flatten_envelope
+from modules.infoloss import CorrelationLoss
+from modules.phase import mag_phase_decomposition
 from modules.transfer import freq_domain_transfer_function_to_resonance, fft_convolve
 from modules.upsample import upsample_with_holes, ensure_last_axis_length
+from spiking import SpikingModel
 from util import device, encode_audio, make_initializer
 from base64 import b64encode
 from sklearn.decomposition import DictionaryLearning
@@ -455,7 +458,7 @@ class DampedHarmonicOscillatorBlock(nn.Module):
         x = damped_harmonic_oscillator(
             time=time,
             mass=torch.sigmoid(self.mass[..., None]),
-            damping=torch.sigmoid(self.damping[..., None]) * 20,
+            damping=torch.sigmoid(self.damping[..., None]) * 30,
             tension=10 ** self.tension[..., None],
             initial_displacement=self.initial_displacement[..., None],
             initial_velocity=0
@@ -619,7 +622,7 @@ class ResonanceLayer(nn.Module):
         #     n_resonances * expressivity, n_samples, 64, randomize_phases=True, windowed=True)
 
         self.resonance = DampedHarmonicOscillatorBlock(
-            n_samples, 64, n_resonances, expressivity
+            n_samples, 16, n_resonances, expressivity
         )
 
         self.mix = nn.Parameter(torch.zeros(self.n_resonances, 2).uniform_(-1, 1))
@@ -823,7 +826,7 @@ class OverfitResonanceStack(nn.Module):
     def _process_control_plane(
             self,
             cp: torch.Tensor,
-            n_to_keep: int = 64) -> torch.Tensor:
+            n_to_keep: int = 256) -> torch.Tensor:
         cp = cp.view(1, self.control_plane_dim, self.n_frames)
         cp = sparsify(cp, n_to_keep=n_to_keep)
         cp = cp.view(1, 1, self.control_plane_dim, self.n_frames)
@@ -963,8 +966,6 @@ def overfit_model():
 
     t(max_norm(target))
 
-    # loss_model = CorrelationLoss(n_elements=256).to(device)
-
     def train():
         iteration = 0
 
@@ -974,11 +975,13 @@ def overfit_model():
             r(max_norm(recon))
             c(model.control_signal[0, 0])
 
-            x = stft(target, 2048, 256, pad=True)
-            y = stft(recon, 2048, 256, pad=True)
-            loss = torch.abs(x - y).sum()
 
-            # loss = loss_model.multiband_noise_loss(target, recon, 64, 16)
+            # x = stft(target, 2048, 256, pad=True)
+            # y = stft(recon, 2048, 256, pad=True)
+
+            x = flattened_multiband_spectrogram(target, {'xs': (64, 16)})
+            y = flattened_multiband_spectrogram(recon, {'xs': (64, 16)})
+            loss = torch.abs(x - y).sum()
 
             loss.backward()
             optimizer.step()
@@ -989,7 +992,7 @@ def overfit_model():
             attack(max_norm(model.get_attack_envelopes(0)))
 
             with torch.no_grad():
-                rand(max_norm(model.random(use_learned_deformations=False)))
+                rand(max_norm(model.random(use_learned_deformations=True)))
                 rz = model.get_materialized_resonance(0).view(-1, n_samples)
                 res(max_norm(rz[np.random.randint(0, n_resonances * expressivity - 1)]))
 

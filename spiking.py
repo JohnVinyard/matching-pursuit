@@ -253,24 +253,25 @@ class SpikingModel(nn.Module):
 
         self.register_buffer('periodicity_memory', periodicity_memory, persistent=False)
 
-    def multiband(self, audio: torch.Tensor) -> Dict[int, torch.Tensor]:
+    def multiband(self, audio: torch.Tensor, hard: bool = False) -> Dict[int, torch.Tensor]:
 
         # audio = torch.cat([torch.zeros_like(audio).uniform_(-1, 1), audio], dim=-1)
         bands = fft_frequency_decompose(audio, 512)
-        bands = {size: self.forward(band) for size, band in bands.items()}
+        bands = {size: self.forward(band, hard=hard) for size, band in bands.items()}
         return bands
 
-    def compute_multiband_loss(self, target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
+    def compute_multiband_loss(self, target: torch.Tensor, recon: torch.Tensor, hard: bool = False) -> torch.Tensor:
         loss = 0
-        target_bands = self.multiband(target)
-        recon_bands = self.multiband(recon)
+        target_bands = self.multiband(target, hard=hard)
+        recon_bands = self.multiband(recon, hard=hard)
+
         for size, band in target_bands.items():
             loss = loss + torch.abs(band - recon_bands[size]).sum()
         return loss
 
-    def compute_loss(self, target: torch.Tensor, recon: torch.Tensor):
-        t = self.forward(target)
-        r = self.forward(recon)
+    def compute_loss(self, target: torch.Tensor, recon: torch.Tensor, hard: bool = True):
+        t = self.forward(target, hard=hard)
+        r = self.forward(recon, hard=hard)
         loss = torch.abs(t - r).sum()
         return loss
 
@@ -284,7 +285,7 @@ class SpikingModel(nn.Module):
         return loss
 
 
-    def forward(self, audio: torch.Tensor):
+    def forward(self, audio: torch.Tensor, hard: bool = True):
         batch = audio.shape[-1]
 
         n_samples = audio.shape[-1]
@@ -306,27 +307,26 @@ class SpikingModel(nn.Module):
         normalized = channels - pooled
         normalized = torch.relu(normalized)
 
-        # y = normalized
+        if not hard:
+            y = normalized
+        else:
+            fwd = (normalized > 0).float()
+            back = normalized
+            # layer one of spiking response.  Unit responses propagate forward,
+            # initial real-values propagate backward
+            y = back + (fwd - back).detach()
 
 
-        fwd = (normalized > 0).float()
 
-        back = normalized
-
-        # layer one of spiking response.  Unit responses propagate forward,
-        # initial real-values propagate backward
-
-        y = back + (fwd - back).detach()
-
-
-        print(f'Channel {audio.shape[-1]} with sparsity {(fwd.sum() / fwd.numel())} and {fwd.sum()} non-zero elements')
+        # print(f'Channel {audio.shape[-1]} with sparsity {(fwd.sum() / fwd.numel())} and {fwd.sum()} non-zero elements')
 
         # TODO: Figure out mask here
 
         # compute periodicity
-        # y = F.pad(y, (0, self.periodicity_size // 4))
-        # y = y.unfold(-1, self.periodicity_size, self.periodicity_size // 4)
-        # y = torch.abs(torch.fft.rfft(y, dim=-1))
+        y = F.pad(y, (0, self.periodicity_size // 4))
+        y = y.unfold(-1, self.periodicity_size, self.periodicity_size // 4)
+        y = torch.abs(torch.fft.rfft(y, dim=-1))
+
         #
         # y = y - torch.mean(y, dim=-1, keepdim=True)
         # y = y[:, :, 1:, :] - y[:, :, :-1, :]

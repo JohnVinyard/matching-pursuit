@@ -8,6 +8,7 @@ from modules.upsample import upsample_with_holes
 from util.overfit import overfit_model
 from torch.nn import functional as F
 
+
 def ensure_symmetric(x: torch.Tensor) -> None:
     if not torch.all(x == x.T):
         raise ValueError('tensions must be a symmetric matrix')
@@ -93,6 +94,7 @@ def _torch_spring_mesh(
         # clear all the accumulated forces
         velocities = velocities * damping
 
+
     return recording
 
 
@@ -106,7 +108,6 @@ def torch_spring_mesh(
         constrained_mask: torch.Tensor,
         forces: torch.Tensor,
         interpolate: int = 1):
-
     recording = _torch_spring_mesh(
         node_positions, masses, tensions, damping, n_samples, mixer, constrained_mask, forces)
 
@@ -114,7 +115,6 @@ def torch_spring_mesh(
         # recording = F.interpolate(recording.view(1, 1, -1), scale_factor=interpolate, mode='linear')
         recording = fft_resample(recording.view(1, 1, -1), desired_size=n_samples * interpolate, is_lowest_band=True)
         recording = recording.view(-1)
-
 
     return recording.view(1, 1, -1)
 
@@ -138,6 +138,8 @@ class Model(nn.Module):
         self.nodes = nn.Parameter(torch.zeros(n_nodes, node_dim).uniform_(-1, 1))
         self.masses = nn.Parameter(torch.zeros(n_nodes, ).uniform_(15, 18))
 
+        # TODO: There should be time-varying deformations applied to the tension
+
         self.tensions = nn.Parameter(torch.zeros(n_nodes, n_nodes).uniform_(10, 11))
 
         self.damping = 0.95
@@ -152,7 +154,7 @@ class Model(nn.Module):
 
     @property
     def force_norm(self):
-        return torch.norm(self.forces.view(-1, self.node_dim), dim=-1).sum()
+        return torch.norm(self.forces.view(-1, self.node_dim), dim=-1, p=1).sum()
 
     @property
     def constrained(self):
@@ -209,6 +211,7 @@ if __name__ == '__main__':
     def full_loss_func(target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
         recon_loss = compute_loss(target, recon)
         energy_loss = model.force_norm
+        # encourage sparse energy
         return recon_loss + (energy_loss * 10)
 
 
