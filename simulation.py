@@ -69,11 +69,11 @@ def _torch_spring_mesh(
         current = node_positions[None, :] - node_positions[:, None]
 
         # update m1
-        x = ((-resting + current) * upper_tensions).sum(dim=0)
+        x = torch.einsum('ikj,ikj->kj', -resting + current, upper_tensions)
         a = x / m
 
         # update m2
-        x = ((resting - current) * lower_tensions).sum(dim=0)
+        x = torch.einsum('ikj,ikj->kj', resting - current, lower_tensions)
         b = x / m
 
         accelerations = accelerations + a + b
