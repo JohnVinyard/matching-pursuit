@@ -25,6 +25,7 @@ def overfit_model(
         learning_rate: float = 1e-3):
 
     target = get_one_audio_segment(n_samples)
+
     model = model.to(device)
     optimizer = Adam(model.parameters(), lr=learning_rate)
     collection = conjure.LmdbCollection(path=collection_name)
@@ -36,7 +37,10 @@ def overfit_model(
         collection)
 
     serve_conjure(
-        [t, r], port=9999, n_workers=1)
+        [t, r],
+        port=9999,
+        n_workers=1,
+        web_components_version='0.0.89')
 
     t(max_norm(target))
 

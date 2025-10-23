@@ -6,19 +6,21 @@ from modules import stft, max_norm
 from modules.decompose import fft_resample
 from modules.upsample import upsample_with_holes
 from util.overfit import overfit_model
-
+from torch.nn import functional as F
 
 def ensure_symmetric(x: torch.Tensor) -> None:
     if not torch.all(x == x.T):
         raise ValueError('tensions must be a symmetric matrix')
 
+
 def sparse_forces(shape: Tuple, probability: float):
     sparse = torch.zeros(shape).bernoulli_(p=probability)
-    rand = torch.zeros(shape).uniform_(-0.01, 0.01)
+    rand = torch.zeros(shape).uniform_(-0.001, 0.001)
     return sparse * rand
 
-# @torch.jit.script
-def torch_spring_mesh(
+
+@torch.jit.script
+def _torch_spring_mesh(
         node_positions: torch.Tensor,
         masses: torch.Tensor,
         tensions: torch.Tensor,
@@ -26,8 +28,7 @@ def torch_spring_mesh(
         n_samples: int,
         mixer: torch.Tensor,
         constrained_mask: torch.Tensor,
-        forces: torch.Tensor,
-        interpolate: int = 1
+        forces: torch.Tensor
 ) -> torch.Tensor:
     """
     forces is (n_samples, n_nodes, dim) representing any outside forces applied to each
@@ -92,10 +93,28 @@ def torch_spring_mesh(
         # clear all the accumulated forces
         velocities = velocities * damping
 
+    return recording
+
+
+def torch_spring_mesh(
+        node_positions: torch.Tensor,
+        masses: torch.Tensor,
+        tensions: torch.Tensor,
+        damping: float,
+        n_samples: int,
+        mixer: torch.Tensor,
+        constrained_mask: torch.Tensor,
+        forces: torch.Tensor,
+        interpolate: int = 1):
+
+    recording = _torch_spring_mesh(
+        node_positions, masses, tensions, damping, n_samples, mixer, constrained_mask, forces)
+
     if interpolate > 1:
         # recording = F.interpolate(recording.view(1, 1, -1), scale_factor=interpolate, mode='linear')
         recording = fft_resample(recording.view(1, 1, -1), desired_size=n_samples * interpolate, is_lowest_band=True)
         recording = recording.view(-1)
+
 
     return recording.view(1, 1, -1)
 
@@ -117,19 +136,19 @@ class Model(nn.Module):
         self.n_frames = n_samples // control_frame_rate
 
         self.nodes = nn.Parameter(torch.zeros(n_nodes, node_dim).uniform_(-1, 1))
-        self.masses = nn.Parameter(torch.zeros(n_nodes,).uniform_(18, 20))
+        self.masses = nn.Parameter(torch.zeros(n_nodes, ).uniform_(15, 18))
 
         self.tensions = nn.Parameter(torch.zeros(n_nodes, n_nodes).uniform_(10, 11))
 
-        self.damping = 0.9
+        self.damping = 0.95
 
-        self.mixer = nn.Parameter(torch.zeros(n_nodes,).uniform_(-0.1, 0.1))
+        self.mixer = nn.Parameter(torch.zeros(n_nodes, ).uniform_(-0.1, 0.1))
 
-        forces = sparse_forces((self.n_frames // 16, self.n_nodes, self.node_dim), probability=0.005)
+        forces = sparse_forces((self.n_frames // 16, self.n_nodes, self.node_dim), probability=0.001)
 
         self.forces = nn.Parameter(forces)
 
-        self.constrained_mask = nn.Parameter(torch.zeros(n_nodes,).bernoulli_(0.1))
+        self.constrained_mask = nn.Parameter(torch.zeros(n_nodes, ).bernoulli_(0.1))
 
     @property
     def force_norm(self):
@@ -169,6 +188,7 @@ class Model(nn.Module):
         )
         return x
 
+
 def compute_loss(target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
     t = stft(target, 2048, 256, pad=True)
     r = stft(recon, 2048, 256, pad=True)
@@ -176,25 +196,26 @@ def compute_loss(target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
 
 
 if __name__ == '__main__':
-    n_samples = 2**15
+    n_samples = 2 ** 15
 
     model = Model(
         n_nodes=128,
         node_dim=2,
-        control_frame_rate=32,
+        control_frame_rate=16,
         n_samples=n_samples
     )
+
 
     def full_loss_func(target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
         recon_loss = compute_loss(target, recon)
         energy_loss = model.force_norm
         return recon_loss + (energy_loss * 10)
 
+
     overfit_model(
         n_samples=n_samples,
         model=model,
         loss_func=full_loss_func,
         collection_name='simulation',
-        learning_rate=1e-3
+        learning_rate=1e-2
     )
-
