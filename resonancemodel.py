@@ -11,6 +11,7 @@ import conjure
 from data import get_one_audio_segment
 from modules import max_norm, interpolate_last_axis, sparsify, unit_norm, flattened_multiband_spectrogram, \
     fft_frequency_recompose, stft, HyperNetworkLayer
+from modules.decompose import fft_resample
 from modules.eventgenerators.overfitresonance import Lookup, flatten_envelope
 from modules.infoloss import CorrelationLoss
 from modules.phase import mag_phase_decomposition
@@ -198,7 +199,10 @@ def materialize_attack_envelopes(
         low_res = torch.view_as_complex(low_res)
         low_res = torch.fft.irfft(low_res)
 
-    impulse = interpolate_last_axis(low_res, desired_size=window_size) ** 2
+    print(low_res.shape)
+
+    impulse = fft_resample(low_res[None, ...], desired_size=window_size, is_lowest_band=True)[0]
+    # impulse = interpolate_last_axis(low_res, desired_size=window_size) #** 2
 
     impulse = impulse * torch.zeros_like(impulse).uniform_(-1, 1)
     return impulse
@@ -401,10 +405,12 @@ def damped_harmonic_oscillator(
         initial_velocity: float,
 ) -> torch.Tensor:
     x = (damping / (2 * mass))
+
     if torch.isnan(x).sum() > 0:
         print('x first appearance of NaN')
 
     omega = torch.sqrt(torch.clamp(tension - (x ** 2), 1e-12, np.inf))
+
     if torch.isnan(omega).sum() > 0:
         print('omega first appearance of NaN')
 
@@ -920,9 +926,9 @@ def overfit_model():
 
     # KLUDGE: control_plane_dim and n_resonances
     # must have the same value
-    control_plane_dim = 16
-    n_resonances = 16
-    expressivity = 2
+    control_plane_dim = 32
+    n_resonances = 32
+    expressivity = 4
 
     target = get_one_audio_segment(n_samples)
     model = OverfitResonanceStack(
@@ -976,11 +982,13 @@ def overfit_model():
             c(model.control_signal[0, 0])
 
 
-            # x = stft(target, 2048, 256, pad=True)
-            # y = stft(recon, 2048, 256, pad=True)
+            x = stft(target, 2048, 256, pad=True)
+            # x = mag_phase_decomposition(x.view(1, -1, 1025), torch.linspace(0, 1, 1025, device=device))
+            y = stft(recon, 2048, 256, pad=True)
+            # y = mag_phase_decomposition(y.view(1, -1, 1025), torch.linspace(0, 1, 1025, device=device))
 
-            x = flattened_multiband_spectrogram(target, {'xs': (64, 16)})
-            y = flattened_multiband_spectrogram(recon, {'xs': (64, 16)})
+            # x = flattened_multiband_spectrogram(target, {'xs': (64, 16)})
+            # y = flattened_multiband_spectrogram(recon, {'xs': (64, 16)})
             loss = torch.abs(x - y).sum()
 
             loss.backward()
