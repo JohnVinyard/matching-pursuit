@@ -253,25 +253,25 @@ class SpikingModel(nn.Module):
 
         self.register_buffer('periodicity_memory', periodicity_memory, persistent=False)
 
-    def multiband(self, audio: torch.Tensor, hard: bool = False) -> Dict[int, torch.Tensor]:
+    def multiband(self, audio: torch.Tensor, hard: bool = False, normalize: bool = True) -> Dict[int, torch.Tensor]:
 
         # audio = torch.cat([torch.zeros_like(audio).uniform_(-1, 1), audio], dim=-1)
         bands = fft_frequency_decompose(audio, 512)
-        bands = {size: self.forward(band, hard=hard) for size, band in bands.items()}
+        bands = {size: self.forward(band, hard=hard, normalize=normalize) for size, band in bands.items()}
         return bands
 
-    def compute_multiband_loss(self, target: torch.Tensor, recon: torch.Tensor, hard: bool = False) -> torch.Tensor:
+    def compute_multiband_loss(self, target: torch.Tensor, recon: torch.Tensor, hard: bool = False, normalize=True) -> torch.Tensor:
         loss = 0
-        target_bands = self.multiband(target, hard=hard)
-        recon_bands = self.multiband(recon, hard=hard)
+        target_bands = self.multiband(target, hard=hard, normalize=normalize)
+        recon_bands = self.multiband(recon, hard=hard, normalize=normalize)
 
         for size, band in target_bands.items():
             loss = loss + torch.abs(band - recon_bands[size]).sum()
         return loss
 
-    def compute_loss(self, target: torch.Tensor, recon: torch.Tensor, hard: bool = True):
-        t = self.forward(target, hard=hard)
-        r = self.forward(recon, hard=hard)
+    def compute_loss(self, target: torch.Tensor, recon: torch.Tensor, hard: bool = True, normalize: bool = True):
+        t = self.forward(target, hard=hard, normalize=normalize)
+        r = self.forward(recon, hard=hard, normalize=normalize)
         loss = torch.abs(t - r).sum()
         return loss
 
@@ -285,7 +285,7 @@ class SpikingModel(nn.Module):
         return loss
 
 
-    def forward(self, audio: torch.Tensor, hard: bool = True):
+    def forward(self, audio: torch.Tensor, hard: bool = True, normalize: bool = True):
         batch = audio.shape[-1]
 
         n_samples = audio.shape[-1]
@@ -302,10 +302,14 @@ class SpikingModel(nn.Module):
         # channels = torch.log(channels + 1e-8)
         # channels = channels ** 2
 
-        m = F.pad(self.memory, (0, n_samples - self.memory_size))
-        pooled = fft_convolve(m, channels)
-        normalized = channels - pooled
-        normalized = torch.relu(normalized)
+        if normalize:
+            m = F.pad(self.memory, (0, n_samples - self.memory_size))
+            pooled = fft_convolve(m, channels)
+            normalized = channels - pooled
+            normalized = torch.relu(normalized)
+        else:
+            normalized = channels
+
 
         if not hard:
             y = normalized

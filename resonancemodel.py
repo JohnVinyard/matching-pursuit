@@ -432,8 +432,11 @@ class DampedHarmonicOscillatorBlock(nn.Module):
             n_samples: int,
             n_oscillators: int,
             n_resonances: int,
-            expressivity: int):
+            expressivity: int,
+            locked_initial_displacement: bool = False):
+
         super().__init__()
+        self.locked_initial_displacement = locked_initial_displacement
         self.n_samples = n_samples
         self.n_oscillators = n_oscillators
         self.n_resonances = n_resonances
@@ -463,12 +466,18 @@ class DampedHarmonicOscillatorBlock(nn.Module):
         time = torch.linspace(0, 10, self.n_samples, device=device) \
             .view(1, 1, 1, self.n_samples)
 
+        if self.locked_initial_displacement:
+            # all oscillators begin with the same initial displacement
+            initial = self.initial_displacement[..., None][:1, ...]
+        else:
+            initial = self.initial_displacement[..., None]
+
         x = damped_harmonic_oscillator(
             time=time,
             mass=torch.sigmoid(self.mass[..., None]),
             damping=torch.sigmoid(self.damping[..., None]) * 30,
             tension=10 ** self.tension[..., None],
-            initial_displacement=self.initial_displacement[..., None],
+            initial_displacement=initial,
             initial_velocity=0
         )
 
@@ -630,7 +639,7 @@ class ResonanceLayer(nn.Module):
         #     n_resonances * expressivity, n_samples, 64, randomize_phases=True, windowed=True)
 
         self.resonance = DampedHarmonicOscillatorBlock(
-            n_samples, 16, n_resonances, expressivity
+            n_samples, 16, n_resonances, expressivity, locked_initial_displacement=True
         )
 
         self.mix = nn.Parameter(torch.zeros(self.n_resonances, 2).uniform_(-1, 1))
@@ -974,6 +983,9 @@ def overfit_model():
 
     t(max_norm(target))
 
+
+    # loss_model = SpikingModel(64, 64, 64, 64, 64).to(device)
+
     def train():
         iteration = 0
 
@@ -983,6 +995,8 @@ def overfit_model():
             r(max_norm(recon))
             c(model.control_signal[0, 0])
 
+
+            # loss = loss_model.compute_multiband_loss(target, recon, hard=False, normalize=False)
 
             x = stft(target, 2048, 256, pad=True)
             # x = mag_phase_decomposition(x.view(1, -1, 1025), torch.linspace(0, 1, 1025, device=device))
