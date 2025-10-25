@@ -269,9 +269,11 @@ def execute_layer(
     base_deformation = torch.zeros_like(deformations)
     base_deformation[:, :, 0:1, :] = 1
     d = base_deformation + deformations
+
     # d = deformations
-    d = torch.softmax(d, dim=-2)
-    # d = torch.relu(d)
+    # d = torch.softmax(d, dim=-2)
+    d = torch.relu(d)
+
     d = d.view(batch, n_events, 1, expressivity, def_frames)
     d = interpolate_last_axis(d, n_samples)
 
