@@ -14,6 +14,7 @@ from modules import max_norm, interpolate_last_axis, sparsify, unit_norm, flatte
 from modules.decompose import fft_resample
 from modules.eventgenerators.overfitresonance import Lookup, flatten_envelope
 from modules.infoloss import CorrelationLoss
+from modules.overfitraw import OverfitRawAudio
 from modules.phase import mag_phase_decomposition
 from modules.transfer import freq_domain_transfer_function_to_resonance, fft_convolve
 from modules.upsample import upsample_with_holes, ensure_last_axis_length
@@ -94,6 +95,7 @@ def decaying_noise(
         high_exp: int,
         device: torch.device,
         include_noise: bool = True):
+
     t = torch.linspace(1, 0, n_samples, device=device)
     pos = torch.zeros(n_items, device=device).uniform_(low_exp, high_exp)
 
@@ -104,107 +106,36 @@ def decaying_noise(
         return (t[None, :] ** pos[:, None])
 
 
-def materialize_non_windowed_fft_resonance(n_samples: int, amplitudes: torch.Tensor, damping: torch.Tensor):
-    phi = np.pi / 4
-    X_omega_pos = (amplitudes / 2) * np.exp(1j * phi) / (damping + 1j)
-    X_omega_neg = (amplitudes / 2) * np.exp(-1j * phi) / (damping + 1j)
-    X_omega = X_omega_pos + X_omega_neg
-
-    # 4. Take the inverse FFT to get the time domain signal
-    x_t = np.fft.ifft(X_omega)
-    return x_t
 
 
-class SampleLookupBlock(nn.Module):
-    def __init__(
-            self,
-            n_items: int,
-            n_samples: int,
-            flatten_kernel_size: Union[int, None] = None,
-            initial: Union[torch.Tensor, None] = None,
-            randomize_phases: bool = False,
-            windowed: bool = False):
-        super().__init__()
-
-        self.n_samples = n_samples
-        self.decays = nn.Parameter(torch.zeros(n_items).uniform_(0, 1))
-        self.latent = nn.Parameter(torch.zeros(n_items, n_items).uniform_(-0.01, 0.01))
-        self.network = SampleLookup(n_items, n_samples, None, initial, randomize_phases, windowed)
-
-    def forward(self):
-        t = torch.linspace(1, 0, self.n_samples, device=self.decays.device)[None, :]
-
-        exps = 4 + (torch.sigmoid(self.decays) * 90)[:, None]
-        decays = t ** exps
-
-        x = self.network(self.latent) * decays
-        return x.view(1, 1, -1, 2, self.n_samples)
 
 
-class SampleLookup(Lookup):
-
-    def __init__(
-            self,
-            n_items: int,
-            n_samples: int,
-            flatten_kernel_size: Union[int, None] = None,
-            randomize_phases: bool = True,
-            windowed: bool = False):
-
-        def sample_lookup_init(x: torch.Tensor) -> torch.Tensor:
-            return torch.zeros_like(x).uniform_(-0.01, 0.01)
-
-        super().__init__(n_items, n_samples, initialize=sample_lookup_init, selection_type='identity')
-        self.randomize_phases = randomize_phases
-        self.flatten_kernel_size = flatten_kernel_size
-        self.windowed = windowed
-
-    def preprocess_items(self, items: torch.Tensor) -> torch.Tensor:
-        """Ensure that we have audio-rate samples at a relatively uniform
-        amplitude throughout
-        """
-        if self.flatten_kernel_size:
-            x = flatten_envelope(
-                items,
-                kernel_size=self.flatten_kernel_size,
-                step_size=self.flatten_kernel_size // 2)
-        else:
-            x = items
-
-        if self.randomize_phases:
-            spec = torch.fft.rfft(x, dim=-1)
-            # randomize phases
-            mags = torch.abs(spec)
-            phases = torch.angle(spec)
-            phases = torch.zeros_like(phases).uniform_(-np.pi, np.pi)
-            # imag = torch.cumsum(phases, dim=1)
-            imag = phases
-            # imag = (imag + np.pi) % (2 * np.pi) - np.pi
-            spec = mags * torch.exp(1j * imag)
-            x = torch.fft.irfft(spec, dim=-1)
-
-        if self.windowed:
-            x = x * torch.hamming_window(x.shape[-1], device=x.device)
-
-        # TODO: Unit norm
-        x = unit_norm(x)
-        return x
-
+def make_ramp(n_samples: int, ramp_length: int, device: torch.device) -> torch.Tensor:
+    ramp = torch.ones(n_samples, device=device)
+    ramp[:ramp_length] = torch.linspace(0, 1, ramp_length, device=device)
+    return ramp
 
 def materialize_attack_envelopes(
         low_res: torch.Tensor,
         window_size: int,
         is_fft: bool = False) -> torch.Tensor:
+
+    if low_res.shape[-1] == window_size:
+        return low_res * torch.zeros_like(low_res).uniform_(-1, 1)
+
     if is_fft:
         low_res = torch.view_as_complex(low_res)
         low_res = torch.fft.irfft(low_res)
 
-    print(low_res.shape)
+    # impulse = fft_resample(low_res[None, ...], desired_size=window_size, is_lowest_band=True)[0]
 
-    impulse = fft_resample(low_res[None, ...], desired_size=window_size, is_lowest_band=True)[0]
-    # impulse = interpolate_last_axis(low_res, desired_size=window_size) #** 2
+    impulse = interpolate_last_axis(low_res ** 2, desired_size=window_size)
+    # impulse = upsample_with_holes(low_res, window_size)
 
     impulse = impulse * torch.zeros_like(impulse).uniform_(-1, 1)
+
+    ramp = make_ramp(impulse.shape[-1], ramp_length=10, device=impulse.device)
+    impulse = impulse * ramp
     return impulse
 
 
@@ -271,8 +202,8 @@ def execute_layer(
     d = base_deformation + deformations
 
     # d = deformations
-    # d = torch.softmax(d, dim=-2)
-    d = torch.relu(d)
+    d = torch.softmax(d, dim=-2)
+    # d = torch.relu(d)
 
     d = d.view(batch, n_events, 1, expressivity, def_frames)
     d = interpolate_last_axis(d, n_samples)
@@ -442,13 +373,13 @@ class DampedHarmonicOscillatorBlock(nn.Module):
         self.n_resonances = n_resonances
         self.expressivity = expressivity
 
-        self.mass = nn.Parameter(
-            torch.zeros(n_oscillators, n_resonances, expressivity) \
-                .uniform_(-2, 2))
-
         self.damping = nn.Parameter(
             torch.zeros(n_oscillators, n_resonances, expressivity) \
                 .uniform_(0.5, 1.5))
+
+        self.mass = nn.Parameter(
+            torch.zeros(n_oscillators, n_resonances, expressivity) \
+                .uniform_(-2, 2))
 
         self.tension = nn.Parameter(
             torch.zeros(n_oscillators, n_resonances, expressivity) \
@@ -485,8 +416,9 @@ class DampedHarmonicOscillatorBlock(nn.Module):
         x = x * self.amplitudes ** 2
         x = torch.sum(x, dim=0)
 
-        ramp = torch.ones(self.n_samples, device=device)
-        ramp[:10] = torch.linspace(0, 1, 10, device=device)
+        # ramp = torch.ones(self.n_samples, device=device)
+        # ramp[:10] = torch.linspace(0, 1, 10, device=device)
+        ramp = make_ramp(self.n_samples, ramp_length=10, device=x.device)
         return x.view(1, 1, self.n_resonances, self.expressivity, self.n_samples) * ramp[None, None, None, None, :]
 
     def forward(self) -> torch.Tensor:
@@ -639,7 +571,7 @@ class ResonanceLayer(nn.Module):
         #     n_resonances * expressivity, n_samples, 64, randomize_phases=True, windowed=True)
 
         self.resonance = DampedHarmonicOscillatorBlock(
-            n_samples, 16, n_resonances, expressivity, locked_initial_displacement=True
+            n_samples, 16, n_resonances, expressivity, locked_initial_displacement=False
         )
 
         self.mix = nn.Parameter(torch.zeros(self.n_resonances, 2).uniform_(-1, 1))
@@ -937,9 +869,9 @@ def overfit_model():
 
     # KLUDGE: control_plane_dim and n_resonances
     # must have the same value
-    control_plane_dim = 32
-    n_resonances = 32
-    expressivity = 4
+    control_plane_dim = 16
+    n_resonances = 16
+    expressivity = 2
 
     target = get_one_audio_segment(n_samples)
     model = OverfitResonanceStack(
@@ -952,6 +884,7 @@ def overfit_model():
         base_resonance=0.01,
         n_frames=n_frames
     ).to(device)
+
     optimizer = Adam(model.parameters(), lr=1e-3)
     collection = conjure.LmdbCollection(path='resonancemodel')
 
@@ -984,19 +917,16 @@ def overfit_model():
     t(max_norm(target))
 
 
-    # loss_model = SpikingModel(64, 64, 64, 64, 64).to(device)
-
     def train():
         iteration = 0
 
         while True:
             optimizer.zero_grad()
             recon = model.forward()
+
             r(max_norm(recon))
             c(model.control_signal[0, 0])
 
-
-            # loss = loss_model.compute_multiband_loss(target, recon, hard=False, normalize=False)
 
             x = stft(target, 2048, 256, pad=True)
             # x = mag_phase_decomposition(x.view(1, -1, 1025), torch.linspace(0, 1, 1025, device=device))
@@ -1005,10 +935,13 @@ def overfit_model():
 
             # x = flattened_multiband_spectrogram(target, {'xs': (64, 16)})
             # y = flattened_multiband_spectrogram(recon, {'xs': (64, 16)})
+
             loss = torch.abs(x - y).sum()
 
             loss.backward()
             optimizer.step()
+
+
             print(iteration, loss.item(), model.compression_ratio(n_samples))
 
             deformations(model.flattened_deformations)
@@ -1022,10 +955,10 @@ def overfit_model():
 
             iteration += 1
 
-            if iteration > 0 and iteration % 10000 == 0:
-                print('Serializing')
-                generate_param_dict('resonancemodelparams', remote_logger, model)
-                input('Continue?')
+            # if iteration > 0 and iteration % 10000 == 0:
+            #     print('Serializing')
+            #     generate_param_dict('resonancemodelparams', remote_logger, model)
+            #     input('Continue?')
 
     train()
 
