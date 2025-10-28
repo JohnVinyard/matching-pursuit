@@ -719,7 +719,9 @@ class OverfitResonanceStack(nn.Module):
             n_resonances: int,
             expressivity: int,
             n_frames: int,
-            base_resonance: float = 0.5):
+            base_resonance: float = 0.5,
+            n_to_keep: int = 1024):
+
         super().__init__()
         self.expressivity = expressivity
         self.n_resonances = n_resonances
@@ -728,6 +730,7 @@ class OverfitResonanceStack(nn.Module):
         self.n_samples = n_samples
         self.base_resonance = base_resonance
         self.n_frames = n_frames
+        self.n_to_keep = n_to_keep
 
         control_plane = torch.zeros(
             (1, 1, control_plane_dim, n_frames)) \
@@ -786,9 +789,10 @@ class OverfitResonanceStack(nn.Module):
     def _process_control_plane(
             self,
             cp: torch.Tensor,
-            n_to_keep: int = 1024) -> torch.Tensor:
+            n_to_keep: int = None) -> torch.Tensor:
+
         cp = cp.view(1, self.control_plane_dim, self.n_frames)
-        cp = sparsify(cp, n_to_keep=n_to_keep)
+        cp = sparsify(cp, n_to_keep=n_to_keep or self.n_to_keep)
         cp = cp.view(1, 1, self.control_plane_dim, self.n_frames)
         return cp
 
@@ -826,7 +830,7 @@ class OverfitResonanceStack(nn.Module):
         def count_parameters(model):
             return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-        return (self.deformations.numel() + count_parameters(self.network) + 256) / n_samples
+        return (self.deformations.numel() + count_parameters(self.network) + (self.n_to_keep * 3)) / n_samples
 
 
 def encode_array(arr: Union[np.ndarray, torch.Tensor], serializer: NumpySerializer) -> str:
@@ -878,7 +882,7 @@ def l0_norm(x: torch.Tensor):
 
 def overfit_model():
     n_samples = 2 ** 17
-    resonance_window_size = 2048
+    resonance_window_size = 1024
     step_size = resonance_window_size // 2
     n_frames = n_samples // step_size
 
@@ -887,6 +891,7 @@ def overfit_model():
     control_plane_dim = 16
     n_resonances = 16
     expressivity = 2
+    n_to_keep = 512
 
     target = get_one_audio_segment(n_samples)
     model = OverfitResonanceStack(
@@ -897,7 +902,8 @@ def overfit_model():
         n_resonances=n_resonances,
         expressivity=expressivity,
         base_resonance=0.01,
-        n_frames=n_frames
+        n_frames=n_frames,
+        n_to_keep=n_to_keep
     ).to(device)
 
     optimizer = Adam(model.parameters(), lr=1e-3)
