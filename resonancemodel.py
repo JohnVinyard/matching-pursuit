@@ -131,7 +131,6 @@ def materialize_attack_envelopes(
 
     # impulse = interpolate_last_axis(low_res, desired_size=window_size)
 
-    # impulse = upsample_with_holes(low_res ** 2, window_size)
 
     impulse = impulse * torch.zeros_like(impulse).uniform_(-1, 1)
 
@@ -148,7 +147,8 @@ def execute_layer(
         res: torch.Tensor,
         deformations: torch.Tensor,
         gains: torch.Tensor,
-        window_size: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        window_size: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+
     batch, n_events, control_plane_dim, frames = control_signal.shape
     batch, n_events, expressivity, def_frames = deformations.shape
     # cpd, nr = routing.shape
@@ -190,6 +190,8 @@ def execute_layer(
     impulse = impulse.view(1, 1, control_plane_dim, 1, n_samples)
     routed = fft_convolve(impulse, routed)
 
+    cs = routed.view(1, control_plane_dim, n_samples).sum(dim=1, keepdim=True)
+
     # interpolate and multiply with noise
     # routed = interpolate_last_axis(routed, n_samples)
     # routed = routed * torch.zeros_like(routed).uniform_(-1, 1)
@@ -228,7 +230,7 @@ def execute_layer(
 
     summed = torch.sum(summed, dim=-2, keepdim=True)
 
-    return summed, before_upsample
+    return summed, before_upsample, cs
 
 
 class MultibandFFTResonanceBlock(nn.Module):
@@ -557,7 +559,7 @@ class ResonanceLayer(nn.Module):
 
         self.attack_envelopes = nn.Parameter(
             # decaying_noise(self.control_plane_dim, 256, 4, 20, device=device, include_noise=False)
-            torch.zeros(self.control_plane_dim, 256).uniform_(-1, 1)
+            torch.zeros(self.control_plane_dim, self.attack_full_size).uniform_(-1, 1)
         )
 
         self.router = nn.Parameter(
@@ -567,7 +569,7 @@ class ResonanceLayer(nn.Module):
         #     n_resonances * expressivity, n_samples, 64, randomize_phases=True, windowed=True)
 
         self.resonance = DampedHarmonicOscillatorBlock(
-            n_samples, 16, n_resonances, expressivity
+            n_samples, 64, n_resonances, expressivity
         )
 
         self.mix = nn.Parameter(torch.zeros(self.n_resonances, 2).uniform_(-1, 1))
@@ -620,10 +622,11 @@ class ResonanceLayer(nn.Module):
     def forward(
             self,
             control_signal: torch.Tensor,
-            deformations: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+            deformations: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+
         res = self.resonance.forward()
         # print(res.shape)
-        output, fwd = execute_layer(
+        output, fwd, cs = execute_layer(
             control_signal,
             self.attack_envelopes,
             self.mix,
@@ -633,7 +636,7 @@ class ResonanceLayer(nn.Module):
             self.gains,
             self.resonance_window_size,
         )
-        return output, fwd
+        return output, fwd, cs
 
 
 class ResonanceStack(nn.Module):
@@ -686,21 +689,22 @@ class ResonanceStack(nn.Module):
         layer = self.layers[layer]
         return layer.get_attack_envelopes()
 
-    def forward(self, control_signal: torch.Tensor, deformations: torch.Tensor) -> torch.Tensor:
+    def forward(self, control_signal: torch.Tensor, deformations: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         batch_size, n_events, cpd, frames = control_signal.shape
 
         outputs = []
         cs = control_signal
+        fcs = None
 
         for layer in self.layers:
-            output, cs = layer(cs, deformations)
+            output, cs, fcs = layer(cs, deformations)
             outputs.append(output)
 
         final = torch.stack(outputs, dim=-1)
         mx = torch.softmax(self.mix, dim=-1)
 
         final = final @ mx[:, None]
-        return final.view(batch_size, n_events, self.n_samples)
+        return final.view(batch_size, n_events, self.n_samples), fcs
 
 
 class OverfitResonanceStack(nn.Module):
@@ -776,7 +780,7 @@ class OverfitResonanceStack(nn.Module):
         return self.network.get_router(layer)
 
     def get_attack_envelopes(self, layer: int) -> torch.Tensor:
-        return self.network.get_attack_envelopes(layer) ** 2
+        return self.network.get_attack_envelopes(layer)
 
     def _process_control_plane(
             self,
@@ -809,11 +813,12 @@ class OverfitResonanceStack(nn.Module):
     def forward(
             self,
             cp: torch.Tensor = None,
-            deformations: torch.Tensor = None):
+            deformations: torch.Tensor = None) -> Tuple[torch.Tensor, torch.Tensor]:
+
         cp = cp if cp is not None else self.control_signal  # / self.control_plane.sum()
         deformations = deformations if deformations is not None else self.deformations
-        x = self.network.forward(cp, deformations)
-        return x
+        x, cs = self.network.forward(cp, deformations)
+        return x, cs
 
     def compression_ratio(self, n_samples: int):
         # thanks to https://discuss.pytorch.org/t/how-do-i-check-the-number-of-parameters-of-a-model/4325/9
@@ -900,8 +905,8 @@ def overfit_model():
     remote_collection = conjure.S3Collection('resonancemodel', is_public=True, cors_enabled=True)
     remote_logger = conjure.Logger(remote_collection)
 
-    t, r, rand, res = conjure.loggers(
-        ['target', 'recon', 'random', 'resonance'],
+    t, r, rand, res, att = conjure.loggers(
+        ['target', 'recon', 'random', 'resonance', 'att'],
         'audio/wav',
         encode_audio,
         collection)
@@ -909,8 +914,8 @@ def overfit_model():
     def to_numpy(x: torch.Tensor) -> np.ndarray:
         return x.data.cpu().numpy()
 
-    c, deformations, routing, attack = conjure.loggers(
-        ['control', 'deformations', 'routing', 'attack'],
+    c, deformations, routing = conjure.loggers(
+        ['control', 'deformations', 'routing'],
         SupportedContentType.Spectrogram.value,
         to_numpy,
         collection,
@@ -918,7 +923,7 @@ def overfit_model():
         deserializer=NumpyDeserializer())
 
     serve_conjure(
-        [t, r, c, rand, res, deformations, routing, attack],
+        [t, r, c, rand, res, deformations, routing, att],
         port=9999,
         n_workers=1,
         web_components_version='0.0.89')
@@ -931,7 +936,7 @@ def overfit_model():
 
         while True:
             optimizer.zero_grad()
-            recon = model.forward()
+            recon, fcs = model.forward()
 
             r(max_norm(recon))
             c(model.control_signal[0, 0])
@@ -951,19 +956,22 @@ def overfit_model():
 
             deformations(model.flattened_deformations)
             routing(torch.abs(model.get_router(0)))
-            attack(max_norm(model.get_attack_envelopes(0)))
+
+
+            fcs = max_norm(fcs)
+            att(fcs)
 
             with torch.no_grad():
-                rand(max_norm(model.random(use_learned_deformations=True)))
+                rand(max_norm(model.random(use_learned_deformations=True)[0]))
                 rz = model.get_materialized_resonance(0).view(-1, n_samples)
                 res(max_norm(rz[np.random.randint(0, n_resonances * expressivity - 1)]))
 
             iteration += 1
 
-            # if iteration > 0 and iteration % 10000 == 0:
-            #     print('Serializing')
-            #     generate_param_dict('resonancemodelparams', remote_logger, model)
-            #     input('Continue?')
+            if iteration > 0 and iteration % 10000 == 0:
+                # print('Serializing')
+                # generate_param_dict('resonancemodelparams', remote_logger, model)
+                input('Continue?')
 
     train()
 
