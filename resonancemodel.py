@@ -127,10 +127,11 @@ def materialize_attack_envelopes(
         low_res = torch.view_as_complex(low_res)
         low_res = torch.fft.irfft(low_res)
 
-    # impulse = fft_resample(low_res[None, ...], desired_size=window_size, is_lowest_band=True)[0]
+    impulse = fft_resample(low_res[None, ...], desired_size=window_size, is_lowest_band=True)[0]
 
-    impulse = interpolate_last_axis(low_res ** 2, desired_size=window_size)
-    # impulse = upsample_with_holes(low_res, window_size)
+    # impulse = interpolate_last_axis(low_res, desired_size=window_size)
+
+    # impulse = upsample_with_holes(low_res ** 2, window_size)
 
     impulse = impulse * torch.zeros_like(impulse).uniform_(-1, 1)
 
@@ -202,8 +203,8 @@ def execute_layer(
     d = base_deformation + deformations
 
     # d = deformations
-    d = torch.softmax(d, dim=-2)
-    # d = torch.relu(d)
+    # d = torch.softmax(d, dim=-2)
+    d = torch.relu(d)
 
     d = d.view(batch, n_events, 1, expressivity, def_frames)
     d = interpolate_last_axis(d, n_samples)
@@ -328,7 +329,7 @@ class MultibandFFTResonanceBlock(nn.Module):
         # full = unit_norm(full)
         return full
 
-
+@torch.jit.script
 def damped_harmonic_oscillator(
         time: torch.Tensor,
         mass: torch.Tensor,
@@ -339,13 +340,13 @@ def damped_harmonic_oscillator(
 ) -> torch.Tensor:
     x = (damping / (2 * mass))
 
-    if torch.isnan(x).sum() > 0:
-        print('x first appearance of NaN')
+    # if torch.isnan(x).sum() > 0:
+    #     print('x first appearance of NaN')
 
     omega = torch.sqrt(torch.clamp(tension - (x ** 2), 1e-12, np.inf))
 
-    if torch.isnan(omega).sum() > 0:
-        print('omega first appearance of NaN')
+    # if torch.isnan(omega).sum() > 0:
+    #     print('omega first appearance of NaN')
 
     phi = torch.atan2(
         (initial_velocity + (x * initial_displacement)),
@@ -557,6 +558,8 @@ class ResonanceLayer(nn.Module):
         self.n_samples = n_samples
         self.base_resonance = base_resonance
 
+        self.attack_full_size = 2048
+
         resonance_coeffs = resonance_window_size // 2 + 1
 
         self.attack_envelopes = nn.Parameter(
@@ -571,7 +574,7 @@ class ResonanceLayer(nn.Module):
         #     n_resonances * expressivity, n_samples, 64, randomize_phases=True, windowed=True)
 
         self.resonance = DampedHarmonicOscillatorBlock(
-            n_samples, 16, n_resonances, expressivity, locked_initial_displacement=False
+            n_samples, 16, n_resonances, expressivity, locked_initial_displacement=True
         )
 
         self.mix = nn.Parameter(torch.zeros(self.n_resonances, 2).uniform_(-1, 1))
@@ -606,8 +609,11 @@ class ResonanceLayer(nn.Module):
 
         self.gains = nn.Parameter(torch.zeros((n_resonances, 1)).uniform_(0.01, 1.1))
 
+    def get_mixes(self):
+        return self.mix
+
     def get_attack_envelopes(self):
-        return materialize_attack_envelopes(self.attack_envelopes, self.resonance_window_size)
+        return materialize_attack_envelopes(self.attack_envelopes, self.attack_full_size)
 
     def get_materialized_resonance(self):
         return self.resonance.forward()
@@ -666,6 +672,10 @@ class ResonanceStack(nn.Module):
             expressivity,
             base_resonance
         ) for _ in range(n_layers)])
+
+    def get_mix(self, layer: int):
+        layer = self.layers[layer]
+        return layer.get_mixes()
 
     def get_materialized_resonance(self, layer: int) -> torch.Tensor:
         layer = self.layers[layer]
@@ -760,6 +770,9 @@ class OverfitResonanceStack(nn.Module):
         print('PCA Weight Shape', mapping.shape)
         return mapping
 
+    def get_mixes(self, layer: int) -> torch.Tensor:
+        return self.network.get_mix(layer)
+
     def get_materialized_resonance(self, layer: int) -> torch.Tensor:
         return self.network.get_materialized_resonance(layer)
 
@@ -841,12 +854,15 @@ def generate_param_dict(key: str, logger: Logger, model: OverfitResonanceStack) 
 
     attacks = model.get_attack_envelopes(0)
 
+    mixes = model.get_mixes(0)
+
     params = dict(
         gains=encode_array(gains, serializer),
         router=encode_array(router, serializer),
         resonances=encode_array(resonances, serializer),
         hand=encode_array(hand, serializer),
         attacks=encode_array(attacks, serializer),
+        mixes=encode_array(mixes, serializer)
     )
     _, meta = logger.log_json(key, params)
     print('WEIGHTS URI', meta.public_uri.geturl())
@@ -864,7 +880,7 @@ def l0_norm(x: torch.Tensor):
 def overfit_model():
     n_samples = 2 ** 17
     resonance_window_size = 2048
-    step_size = 1024
+    step_size = resonance_window_size // 2
     n_frames = n_samples // step_size
 
     # KLUDGE: control_plane_dim and n_resonances
@@ -929,12 +945,8 @@ def overfit_model():
 
 
             x = stft(target, 2048, 256, pad=True)
-            # x = mag_phase_decomposition(x.view(1, -1, 1025), torch.linspace(0, 1, 1025, device=device))
             y = stft(recon, 2048, 256, pad=True)
-            # y = mag_phase_decomposition(y.view(1, -1, 1025), torch.linspace(0, 1, 1025, device=device))
 
-            # x = flattened_multiband_spectrogram(target, {'xs': (64, 16)})
-            # y = flattened_multiband_spectrogram(recon, {'xs': (64, 16)})
 
             loss = torch.abs(x - y).sum()
 
