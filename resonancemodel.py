@@ -123,13 +123,14 @@ def materialize_attack_envelopes(
     if low_res.shape[-1] == window_size:
         return low_res * torch.zeros_like(low_res).uniform_(-1, 1)
 
+
     if is_fft:
         low_res = torch.view_as_complex(low_res)
         low_res = torch.fft.irfft(low_res)
 
-    impulse = fft_resample(low_res[None, ...], desired_size=window_size, is_lowest_band=True)[0]
+    # impulse = fft_resample(low_res[None, ...], desired_size=window_size, is_lowest_band=True)[0]
 
-    # impulse = interpolate_last_axis(low_res, desired_size=window_size)
+    impulse = interpolate_last_axis(low_res, desired_size=window_size)
 
 
     impulse = impulse * torch.zeros_like(impulse).uniform_(-1, 1)
@@ -559,7 +560,7 @@ class ResonanceLayer(nn.Module):
 
         self.attack_envelopes = nn.Parameter(
             # decaying_noise(self.control_plane_dim, 256, 4, 20, device=device, include_noise=False)
-            torch.zeros(self.control_plane_dim, self.attack_full_size).uniform_(-1, 1)
+            torch.zeros(self.control_plane_dim, 128).uniform_(-1, 1)
         )
 
         self.router = nn.Parameter(
@@ -785,7 +786,7 @@ class OverfitResonanceStack(nn.Module):
     def _process_control_plane(
             self,
             cp: torch.Tensor,
-            n_to_keep: int = 256) -> torch.Tensor:
+            n_to_keep: int = 1024) -> torch.Tensor:
         cp = cp.view(1, self.control_plane_dim, self.n_frames)
         cp = sparsify(cp, n_to_keep=n_to_keep)
         cp = cp.view(1, 1, self.control_plane_dim, self.n_frames)
