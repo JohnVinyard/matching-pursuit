@@ -950,9 +950,11 @@ def overfit_model():
             c(model.control_signal[0, 0])
 
 
-            x = stft(target, 2048, 256, pad=True)
-            y = stft(recon, 2048, 256, pad=True)
+            # x = stft(target, 2048, 256, pad=True)
+            # y = stft(recon, 2048, 256, pad=True)
 
+            x = flattened_multiband_spectrogram(target, {'xs': (64, 16)})
+            y = flattened_multiband_spectrogram(recon, {'xs': (64, 16)})
 
             loss = torch.abs(x - y).sum()
 
