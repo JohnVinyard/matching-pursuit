@@ -219,6 +219,7 @@ def execute_layer(
 
     mixes = mix.view(1, 1, n_resonances, 1, 1, 2)
     mixes = torch.softmax(mixes, dim=-1)
+    # print(mixes.shape, routed.shape, x.shape)
     stacked = torch.stack([routed, x.reshape(*routed.shape)], dim=-1)
     x = mixes * stacked
     x = torch.sum(x, dim=-1)
@@ -560,7 +561,7 @@ class ResonanceLayer(nn.Module):
 
         self.attack_envelopes = nn.Parameter(
             # decaying_noise(self.control_plane_dim, 256, 4, 20, device=device, include_noise=False)
-            torch.zeros(self.control_plane_dim, 128).uniform_(-1, 1)
+            torch.zeros(self.control_plane_dim, self.attack_full_size).uniform_(-1, 1)
         )
 
         self.router = nn.Parameter(
@@ -570,7 +571,7 @@ class ResonanceLayer(nn.Module):
         #     n_resonances * expressivity, n_samples, 64, randomize_phases=True, windowed=True)
 
         self.resonance = DampedHarmonicOscillatorBlock(
-            n_samples, 64, n_resonances, expressivity
+            n_samples, 16, n_resonances, expressivity
         )
 
         self.mix = nn.Parameter(torch.zeros(self.n_resonances, 2).uniform_(-1, 1))
@@ -882,7 +883,7 @@ def l0_norm(x: torch.Tensor):
 
 def overfit_model():
     n_samples = 2 ** 17
-    resonance_window_size = 1024
+    resonance_window_size = 2048
     step_size = resonance_window_size // 2
     n_frames = n_samples // step_size
 
@@ -891,7 +892,7 @@ def overfit_model():
     control_plane_dim = 16
     n_resonances = 16
     expressivity = 2
-    n_to_keep = 512
+    n_to_keep = 1024
 
     target = get_one_audio_segment(n_samples)
     model = OverfitResonanceStack(
@@ -976,8 +977,8 @@ def overfit_model():
             iteration += 1
 
             if iteration > 0 and iteration % 10000 == 0:
-                # print('Serializing')
-                # generate_param_dict('resonancemodelparams', remote_logger, model)
+                print('Serializing')
+                generate_param_dict('resonancemodelparams', remote_logger, model)
                 input('Continue?')
 
     train()
