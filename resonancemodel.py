@@ -1,3 +1,31 @@
+"""[markdown]
+
+# The Idea
+
+Blah Blah Blah
+
+# The Results
+
+Blah Blah
+
+"""
+
+"""[markdown]
+
+# Example 1
+
+"""
+
+# example_1
+
+"""[markdown]
+
+# Example 2
+
+"""
+
+# example_2
+
 from base64 import b64encode
 from typing import Tuple, Callable, Union, Dict, Any
 
@@ -871,6 +899,7 @@ def produce_overfit_model(
         optimizer.zero_grad()
         recon, fcs = model.forward()
         loss = loss_func(target, recon)
+        print(i, loss.item())
         loss.backward()
         optimizer.step()
 
@@ -905,6 +934,7 @@ def produce_content_section(
         n_iterations: int,
         loss_func: LossFunc
 ) -> CompositeComponent:
+
     result = produce_overfit_model(
         n_samples,
         resonance_window_size,
@@ -948,8 +978,9 @@ def conv_instrument_dict(
         n_to_keep: int,
         n_iterations: int,
         loss_func: LossFunc) -> Dict[str, Any]:
+
     examples = {
-        f'example_{i}': produce_content_section(
+        f'example_{i+1}': produce_content_section(
             logger,
             n_samples,
             resonance_window_size,
@@ -974,7 +1005,7 @@ def conv_instrument_dict(
 
 
 def generate_article(n_iteraations: int, n_examples: int):
-    collection = S3Collection('resonance-model-article', is_public=True, cors_enabled=True)
+    collection = S3Collection('resonancemodel', is_public=True, cors_enabled=True)
     logger = conjure.Logger(collection)
 
     content = conv_instrument_dict(
@@ -994,7 +1025,7 @@ def generate_article(n_iteraations: int, n_examples: int):
         __file__,
         'html',
         title='Conv Instrument',
-        web_components_version='0.0.79',
+        web_components_version='0.0.90',
         **content
     )
 
@@ -1096,9 +1127,9 @@ def overfit_model():
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--mode', required=True, choices=['train', 'article'])
-    parser.add_argument('--examples', type=int, default=2)
+    parser.add_argument('--mode', choices=['train', 'article'], default='train')
     parser.add_argument('--iterations', type=int, default=10000)
+    parser.add_argument('--examples', type=int, default=2)
     args = parser.parse_args()
 
     if args.mode == 'train':
