@@ -1,4 +1,4 @@
-from typing import Union, Optional, List
+from typing import Union, Optional, List, Tuple
 
 from .audiostream import audio_stream
 import torch
@@ -48,7 +48,7 @@ def get_one_audio_segment(
         n_samples: int,
         samplerate: int = 22050,
         device: Union[torch.device, None] = None,
-        pattern: str = '*.wav',
+        pattern: Union[str, Tuple[str]] = ('*.wav', '*.mp3'),
         audio_path: Optional[str] = None) -> torch.Tensor:
     ai = AudioIterator(
         batch_size=1,

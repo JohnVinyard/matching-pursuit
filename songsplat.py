@@ -1,4 +1,6 @@
 import argparse
+import os.path
+from random import choice
 from typing import Generator, Tuple, Union, Dict
 
 import librosa
@@ -226,7 +228,7 @@ class EventGenerator(nn.Module):
         resonances = resonances.view(batch, n_events, self.expressivity, self.n_samples)
 
         n = self.to_noise(events).view(batch, n_events, 1, self.n_frames)
-        n = torch.abs(n)
+        # n = torch.abs(n)
 
         n = interpolate_last_axis(n, desired_size=self.n_samples // 4)
         n = ensure_last_axis_length(n, desired_size=self.n_samples)
@@ -324,8 +326,11 @@ class Model(nn.Module):
         return n_params / self.total_samples
 
     def generate_random(self, n_events):
-        events = torch.zeros(n_events, self.event_latent_dim, device=device) \
-            .normal_(self.events.mean().item(), self.events.std().item())
+        # events = torch.zeros(n_events, self.event_latent_dim, device=device) \
+        #     .normal_(self.events.mean().item(), self.events.std().item())
+
+        indices = np.random.permutation(self.total_events)[:n_events, ...]
+        events = self.events[indices]
 
         samples = self.generator.forward(events[None, ...])
 
@@ -421,6 +426,7 @@ def train(
         device: torch.device,
         n_segment_samples: int = 2 ** 15,
         window_size: int = 1024):
+
     recon_audio, orig_audio, rnd = loggers(
         ['recon', 'orig', 'rnd'],
         'audio/wav',
@@ -442,6 +448,11 @@ def train(
         rnd
     ], port=9999, n_workers=1, web_components_version='0.0.89')
 
+    if os.path.isdir(path):
+        fn = choice(os.listdir(path))
+        path = os.path.join(path, fn)
+        print(f'Chose {path}')
+
     iterator = dataset(
         path=path,
         device=device,
@@ -450,21 +461,19 @@ def train(
 
     _, total_samples, _, _, _ = next(iterator)
 
-    # pos_encoding_size = calculate_pos_encoding_size(total_samples)
 
     model = Model(
         total_samples=total_samples,
         n_frames=total_samples // (window_size // 2),
         samplerate=22050,
         event_latent_dim=32,
-        events_per_second=16,
+        events_per_second=8,
         window_size=window_size,
         n_segment_samples=n_segment_samples
     ).to(device)
 
     optim = Adam(model.parameters(), lr=1e-3)
 
-    # tmp_schedule = torch.linspace(1, 1e-4, 10000)
 
     for i, pair in enumerate(iterator):
 
