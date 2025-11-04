@@ -1,3 +1,5 @@
+# videoexample
+
 """[markdown]
 
 # The Idea
@@ -26,6 +28,14 @@ Blah Blah
 
 # example_2
 
+"""[markdown]
+
+Thanks for reading!
+
+"""
+
+# citation
+
 from base64 import b64encode
 from typing import Tuple, Callable, Union, Dict, Any
 
@@ -38,7 +48,8 @@ from torch.optim import Adam
 
 import conjure
 from conjure import serve_conjure, SupportedContentType, NumpyDeserializer, NumpySerializer, Logger, MetaData, \
-    CompositeComponent, AudioComponent, ConvInstrumentComponent, conjure_article, CitationComponent, S3Collection
+    CompositeComponent, AudioComponent, ConvInstrumentComponent, conjure_article, CitationComponent, S3Collection, \
+    VideoComponent
 from data import get_one_audio_segment
 from modules import max_norm, interpolate_last_axis, sparsify, unit_norm, flattened_multiband_spectrogram
 from modules.transfer import fft_convolve
@@ -58,13 +69,14 @@ step_size = resonance_window_size // 2
 n_frames = n_samples // step_size
 
 # KLUDGE: control_plane_dim and n_resonances
-# must have the same value
+# must have the same value (for now)
 control_plane_dim = 16
 n_resonances = 16
 expressivity = 2
-n_to_keep = 128
+n_to_keep = 64
 
 
+# TODO: Move this into conjure
 def encode_array(arr: Union[np.ndarray, torch.Tensor], serializer: NumpySerializer) -> str:
     if isinstance(arr, torch.Tensor):
         arr = arr.data.cpu().numpy()
@@ -993,6 +1005,12 @@ def conv_instrument_dict(
         for i in range(n_examples)}
 
     return dict(
+        videoexample=VideoComponent(
+            src='https://state-space-model-demo-3.s3.us-east-1.amazonaws.com/rnn-instr-demo.mp4#t=14.5',
+            width=500,
+            height=500,
+            start_time=1.4
+        ),
         **examples,
         citation=CitationComponent(
             tag='johnvinyardresonancemodel',

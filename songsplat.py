@@ -11,7 +11,7 @@ from torch.optim import Adam
 
 from conjure import LmdbCollection, numpy_conjure, loggers, serve_conjure, SupportedContentType, NumpySerializer, \
     NumpyDeserializer
-from modules import max_norm, sparse_softmax, interpolate_last_axis, flattened_multiband_spectrogram
+from modules import max_norm, sparse_softmax, interpolate_last_axis, flattened_multiband_spectrogram, iterative_loss
 from modules.transfer import fft_convolve, hierarchical_dirac, \
     damped_harmonic_oscillator
 from modules.upsample import upsample_with_holes, ensure_last_axis_length
@@ -165,6 +165,25 @@ class DampedHarmonicOscillatorBlock(nn.Module):
     def forward(self) -> torch.Tensor:
         return self._materialize_resonances(self.damping.device)
 
+
+class SampleEventGenerator(nn.Module):
+    def __init__(
+            self,
+            latent_dim: int,
+            n_frames: int,
+            window_size: int):
+        super().__init__()
+
+        self.latent_dim = latent_dim
+        self.n_frames = n_frames
+        self.window_size = window_size
+        self.window = HalfLappedWindowParams(window_size)
+        self.n_samples = self.window.total_samples(n_frames)
+
+        self.to_samples = nn.Linear(latent_dim, self.n_samples, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.to_samples(x)
 
 class EventGenerator(nn.Module):
 
@@ -499,10 +518,10 @@ def train(
 
         # print(mx)
         # confidence_loss = torch.abs(0.99 - mx).sum() * 100
-        # l = iterative_loss(samples, recon, transform, ratio_loss=False, sort_channels=True)  # + confidence_loss
+        l = iterative_loss(samples, recon, transform, ratio_loss=False, sort_channels=True)  # + confidence_loss
 
         # print(recon_summed.shape)
-        l = loss(recon_summed, samples)  # + confidence_loss
+        # l = loss(recon_summed, samples)  # + confidence_loss
         l.backward()
         optim.step()
         print(i, l.item(),
