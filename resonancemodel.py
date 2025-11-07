@@ -1,77 +1,118 @@
+"""[markdown]
+
+In this micro-experiment, I ask whether it's possible to factor short audio segments into two distinct parts:  first a
+control-signal, an abstract representation of the actions a human performer would take, and second, an "instrument",
+representing the resonances of the instrument(s) being played, and the room in which the performance occurs.
+
+The instrument artifact can be used to produce _new_ musical performances, while the two factors together constitute
+a compressive and interpretable representation of the original signal.
+
+To make this more concrete, here's a video of me using a learned instrument to produce a new audio segment via a
+hand-tracking interface.
+"""
+
 # videoexample
+
 
 """[markdown]
 
-# TODO
-
-- EMPHASIZE NATURAL SOUNDS
-- write blog post
-- longer audio training examples
-- talk about compression ratio in the blog post
-- n_examples must be hard-coded
+If you're excited to listen and play, feel free to [jump ahead](#Examples) to the audio examples!
 
 
 # Extracting Instruments from Audio Recordings
 
-My primary focus over the last two years has been on
+My primary focus over the last two years has been on finding
 [sparse representations of audio signals](https://blog.cochlea.xyz/sparse-interpretable-audio-codec-paper.html).
-One fruitful approach thus far has been to "factor" audio signals into two components:
+One promising approach has been to build models that factor audio signals into two components:
 
-1. a control signal describing the way energy is injected into some system, e.g. acoustic instrument(s) and the rooms in
-    which they are played
-2. The acoustic resonances of the system itself; describing how energy injected from the control plane
-    is stored and emitted over time.
+1. a control signal, describing the way energy is _injected_ into some system;  the work of a human performer.
+2. The acoustic resonances of the system itself; describing how energy injected from the control signal
+    is stored by the system and emitted over time.
 
-As a side-effect, I've started to investigate whether this factorization can be used to extract useful artifacts from
-very small datasets and even individual audio segments.
+Human musicians _aren't- engaged in wiggling physical objects many hundreds or thousands of times per-second, but they
+do learn to skillfully manipulate these properties to create engaging music.  This mental model naturally leads to 
+sparser, score-like representations of musical audio.
 
-This micro-experiment asks whether it is possible to extract a playable instrument from a single audio recording of
-one or more acoustic instruments performing a piece of music.  This approach should meet two criteria:
-
-- reproduce the original recording faithfully given the instrument model and control signal
-- allow a user to produce _new_ audio sequences by injecting energy into the learned system,
-    constituting a new control signal
-
-# User Interface
-
-In this experiment, the control signal is defined as a sparse, N-dimensional vector, varying at ~20hz.  In this
-experiment, I chose a familiar and natural interface, mapping hand-tracking landmarks onto the control plane.
-[MediaPipe](https://mediapipe.readthedocs.io/en/latest/solutions/hands.html) proved indispensable for this first pass,
-It made building the first draft UI feel pretty effortless.
-
-That said, I'm very excited about the possibilities here, as multi-dimensional, time-varying sensor data is
-all around us, streaming from smartphones, watches, WiFi signals and more.
-
-The weights for the model are persisted, and then used by a TypeScript, WebAudio implementation of the decoder that runs
-in the browser.
+I've also begun to investigate whether this approach can extract useful artifacts from very small datasets, and in 
+this case, even individual audio segments.
 
 # The Model
 
-I've attempted a similar approach before, using a
-[single-layer recurrent neural network to model the instrument](https://blog.cochlea.xyz/ssm.html).  This yieled some
-success, but the frame-based approach caused many audible-artifacts that I wasn't entirely happy with.
+Instead of compiling a massive dataset and worshipping at the altar of the 
+["Bitter Lesson"](https://en.wikipedia.org/wiki/Bitter_lesson), I instead cram this experiment full of inductive 
+biases, imposing my own, rudimentary mental model of a musical instrument as a form of regularization.  
+My hypothesis is that we can learn something _useful_ from even a few seconds of audio by insisting that it fits a
+simple model of physics and resonance.
 
-In this new work, the control signal is a 16-dimensional time-varying vector running at ~20hz.  This signal is first
-convolved with a small set "attack envelopes", which are multiplied with uniform noise.  This is then convolved with
-some number of resonances, parameterized by a set of damped harmonic oscillators.  Finally, the resonance output is
-multiplied by a learnable gain, followed by a non-linearity (`tanh`).
+I've attempted a similar experiment before, using a
+[single-layer recurrent neural network to model the instrument](https://blog.cochlea.xyz/ssm.html).  This yielded some 
+limited success, but the frame-based approach caused many audible artifacts that I wasn't happy with.
 
-Another important aspect of acoustic instrument performance is _deformations_, or changes from the resting state of
-the physical object.  A deformation might be the turn of a tuning peg on a guitar or a change in the position of a slide
-on a trombone. Deformations of the instrument itself are modeled as a time-varying mix of resonances, ultimately
-affecting how energy is routed to each resonance. As a concrete example, the control signal might become non-zero,
-modeling a plucked guitar string.  Then the deformation mix might oscillate between two different resonances,
+In this new experiment, the control signal is a 16-dimensional time-varying vector running at ~20hz.  This signal is first
+convolved with a small set "attack envelopes", which are multiplied with uniform (white) noise.  These attacks are then 
+routed to and convolved with some number of resonances, parameterized by a set of damped harmonic oscillators.  
+Finally, the resonance output is multiplied by a learnable gain, followed by a non-linearity (`tanh`) to simulate subtle 
+distortions.
+
+We also model _deformations_, or changes from the resting state of
+the physical object.  A deformation  in the real-world might be the turn of a tuning peg on a guitar or a change in the 
+position of a slide on a trombone. Deformations are modeled as a time-varying change in the weights that determine 
+how energy is routed to different resonances. As a concrete example, the control signal might become non-zero,
+modeling a transient pluck of a  guitar string.  Then the deformation mix might oscillate between two different resonances,
 modeling the change in bridge height induced by a whammy/tremolo bar.
 
 # The Loss
 
-We fit the model using a simple, L1 loss on the short-time fourier transforms of the target and reconstruction, as well
-as a sparsity loss to encourage a control signal that is simple and depends on resonances for much of the audio content.
+We fit the model using a simple, L1 loss on the short-time fourier transforms of the target and reconstruction.  
+I have a strong intuition that a more perceptually-informed loss would work better, and require even _less_ overall 
+model capacity, but that's an experiment for another day!
+
+
+# User Interface
+
+Our control signal is defined as a sparse, N-dimensional vector, varying at ~20hz.  For this work, 
+I chose a familiar and natural interface, the human hand.  We project hand-tracking landmarks onto the control 
+signal's input space.  I must note that [MediaPipe](https://mediapipe.readthedocs.io/en/latest/solutions/hands.html) 
+proved indispensable for this first pass, making this part of the implementation straightforward.
+
+I'm certain that the current interface is not ideal, and I'm very excited about alternative possibilities.
+We're literally _swimming_ in multi-dimensional, time-varying sensor data, streaming from smartphones, watches, 
+WiFi signals and much more!  
+
+After overfitting a single audio segment of ~12 seconds, weights for the model are persisted, and then used by a 
+[WebAudio](https://developer.mozilla.org/en-US/docs/Web/API/Web_Audio_API) implementation of the decoder that runs 
+in the browser.
+
+To ensure that the browser-based implentation can perform in realtime, the model we learn is _tiny_, with a control plane
+dimension of 16, a resonance count of 16, and "expressivity" of 2, the latter defining how many alternative resonances 
+make up out deformation space.
 
 # The Results
 
+## Reconstruction Quality
 
-TODO...
+The reconstruction quality leaves much to be desired, but there's no doubt that the model captures many key aspects of 
+the sound.  What's more, the "instrument" artifact allows us to play in the resonance space of the original recording, 
+producing the same timbres in novel arrangements. 
+
+## Model Size and Compression Ratio
+
+Comparing the model size, including the control signal and deformations, which vary over time, we end up with a 
+representation about 8% the size of the original WAV audio.  Clearly, this compression is (beyond) lossy, and there's 
+much room for improvement.
+
+## Size of Web Audio Parameters
+
+We fully "materialize" both the attack envelopes and resonances to our full sample rate (22050hz, in this case) to avoid
+implementing the interpolation and damped-harmonic oscillator code in TypeScript/JavaScript.  This increases the size 
+of the stored model significantly and could be replaced with a one-time upsampling operation prior to decoding in 
+future versions, to save disk space.
+
+"""
+
+"""[markdown]
+
+# Examples
 
 """
 
@@ -150,6 +191,7 @@ attack_full_size = 2048
 attack_n_frames = 256
 deformation_frame_size = 128
 
+web_components_version = '0.0.97'
 
 use_learned_deformations_for_random = False
 
@@ -875,7 +917,8 @@ def conv_instrument_dict(
             expressivity,
             n_to_keep,
             n_iterations,
-            loss_func)
+            loss_func,
+            example_number=1)
         for i in range(n_examples)}
 
     return dict(
@@ -916,8 +959,8 @@ def generate_article(n_iteraations: int, n_examples: int):
     conjure_article(
         __file__,
         'html',
-        title='Conv Instrument',
-        web_components_version='0.0.96',
+        title='Learning Playable WebAudio Instruments from Audio Examples',
+        web_components_version=web_components_version,
         **content
     )
 
@@ -969,7 +1012,7 @@ def overfit_model():
         [t, r, c, rand, res, deformations, routing, att],
         port=9999,
         n_workers=1,
-        web_components_version='0.0.93')
+        web_components_version=web_components_version)
 
     t(max_norm(target))
 
