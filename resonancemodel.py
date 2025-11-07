@@ -123,8 +123,9 @@ from modules import max_norm, interpolate_last_axis, sparsify, unit_norm, flatte
 from modules.transfer import fft_convolve
 from modules.upsample import upsample_with_holes, ensure_last_axis_length
 from util import device, encode_audio, make_initializer
-from util.overfit import LossFunc
 import argparse
+
+LossFunc = Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]
 
 MaterializeResonances = Callable[..., torch.Tensor]
 
@@ -132,7 +133,7 @@ init_weights = make_initializer(0.02)
 
 # TODO: How to package up and share these params
 n_samples = 2 ** 17
-resonance_window_size = 2048
+resonance_window_size = 256
 step_size = resonance_window_size // 2
 n_frames = n_samples // step_size
 
@@ -141,7 +142,16 @@ n_frames = n_samples // step_size
 control_plane_dim = 16
 n_resonances = 16
 expressivity = 2
-n_to_keep = 64
+n_to_keep = 128
+do_sparsify = True
+sparsity_coefficient = 0
+
+attack_full_size = 2048
+attack_n_frames = 256
+deformation_frame_size = 128
+
+
+use_learned_deformations_for_random = False
 
 
 # TODO: Move this into conjure
@@ -348,7 +358,9 @@ class DampedHarmonicOscillatorBlock(nn.Module):
         return x.view(1, 1, self.n_resonances, self.expressivity, self.n_samples) * ramp[None, None, None, None, :]
 
     def forward(self) -> torch.Tensor:
-        return self._materialize_resonances(self.damping.device)
+        x = self._materialize_resonances(self.damping.device)
+        x = unit_norm(x)
+        return x
 
 
 class ResonanceLayer(nn.Module):
@@ -369,20 +381,18 @@ class ResonanceLayer(nn.Module):
         self.n_samples = n_samples
         self.base_resonance = base_resonance
 
-        self.attack_full_size = 2048
+        self.attack_full_size = attack_full_size
 
         resonance_coeffs = resonance_window_size // 2 + 1
 
         self.attack_envelopes = nn.Parameter(
             # decaying_noise(self.control_plane_dim, 256, 4, 20, device=device, include_noise=False)
-            torch.zeros(self.control_plane_dim, self.attack_full_size).uniform_(-1, 1)
+            torch.zeros(self.control_plane_dim, attack_n_frames).uniform_(-1, 1)
         )
 
         self.router = nn.Parameter(
             torch.zeros((self.control_plane_dim, self.n_resonances)).uniform_(-1, 1))
 
-        # self.resonance = SampleLookupBlock(
-        #     n_resonances * expressivity, n_samples, 64, randomize_phases=True, windowed=True)
 
         self.resonance = DampedHarmonicOscillatorBlock(
             n_samples, 16, n_resonances, expressivity
@@ -390,33 +400,6 @@ class ResonanceLayer(nn.Module):
 
         self.mix = nn.Parameter(torch.zeros(self.n_resonances, 2).uniform_(-1, 1))
 
-        # self.resonance = LatentResonanceBlock(
-        #     n_samples, n_resonances, expressivity, latent_dim=16)
-
-        # self.resonance = FFTResonanceBlock(
-        #     n_samples, resonance_window_size, n_resonances, expressivity, base_resonance)
-
-        # self.resonance = MultibandFFTResonanceBlock(
-        #     n_resonances,
-        #     n_samples,
-        #     expressivity,
-        #     smallest_band_size=16384,
-        #     base_resonance=0.01,
-        #     window_size=512)
-
-        # def init_resonance() -> torch.Tensor:
-        #     # base resonance
-        #     res = torch.zeros((n_resonances, resonance_coeffs, 1)).uniform_(0.01, 1)
-        #     # variations or deformations of the base resonance
-        #     deformation = torch.zeros((1, resonance_coeffs, expressivity)).uniform_(-0.02, 0.02)
-        #     # expand into (n_resonances, n_deformations)
-        #     return res + deformation
-        #
-        # self.resonances = nn.ParameterDict(dict(
-        #     amp=init_resonance(),
-        #     phase=init_resonance(),
-        #     decay=init_resonance(),
-        # ))
 
         self.gains = nn.Parameter(torch.zeros((n_resonances, 1)).uniform_(0.01, 1.1))
 
@@ -449,7 +432,7 @@ class ResonanceLayer(nn.Module):
             res,
             deformations,
             self.gains,
-            self.resonance_window_size,
+            self.attack_full_size,
         )
         return output, fwd, cs
 
@@ -535,6 +518,7 @@ class OverfitResonanceStack(nn.Module):
             n_frames: int,
             base_resonance: float = 0.5,
             n_to_keep: int = 1024):
+
         super().__init__()
         self.expressivity = expressivity
         self.n_resonances = n_resonances
@@ -545,6 +529,12 @@ class OverfitResonanceStack(nn.Module):
         self.n_frames = n_frames
         self.n_to_keep = n_to_keep
 
+        # self.resonance_frame_size = 1024
+
+        self.deformation_frame_size = deformation_frame_size
+        self.deformation_frames = n_samples // self.deformation_frame_size
+
+
         control_plane = torch.zeros(
             (1, 1, control_plane_dim, n_frames)) \
             .uniform_(-0.01, 0.01)
@@ -552,7 +542,7 @@ class OverfitResonanceStack(nn.Module):
         self.control_plane = nn.Parameter(control_plane)
 
         deformations = torch.zeros(
-            (1, 1, expressivity, n_frames)).uniform_(-0.01, 0.01)
+            (1, 1, expressivity, self.deformation_frames)).uniform_(-0.01, 0.01)
         self.deformations = nn.Parameter(deformations)
 
         self.network = ResonanceStack(
@@ -569,7 +559,7 @@ class OverfitResonanceStack(nn.Module):
 
     @property
     def flattened_deformations(self):
-        return self.deformations.view(self.expressivity, self.n_frames)
+        return self.deformations.view(self.expressivity, self.deformation_frames)
 
     def _get_mapping(self, n_components: int) -> np.ndarray:
         cs = self.control_signal.data.cpu().numpy() \
@@ -603,8 +593,12 @@ class OverfitResonanceStack(nn.Module):
             self,
             cp: torch.Tensor,
             n_to_keep: int = None,
-            do_sparsify: bool = False) -> torch.Tensor:
+            do_sparsify: bool = do_sparsify) -> torch.Tensor:
         cp = cp.view(1, self.control_plane_dim, self.n_frames)
+
+
+        # cp = cp - cp.max()
+        # cp = cp / cp.sum()
 
         if do_sparsify:
             cp = sparsify(cp, n_to_keep=n_to_keep or self.n_to_keep)
@@ -663,7 +657,7 @@ class OverfitResonanceStack(nn.Module):
         hand = self.get_hand_tracking_mapping().T
         assert hand.shape == (self.control_plane_dim, 21 * 3)
 
-        router = self.get_router(0)
+        router = self.get_router(0).T
         assert router.shape == (self.control_plane_dim, self.n_resonances)
 
         gains = self.get_gains(0).view(-1)
@@ -676,8 +670,8 @@ class OverfitResonanceStack(nn.Module):
 
         mixes = self.get_mixes(0)
 
-        print(mixes.data.cpu().numpy())
-        print(torch.softmax(mixes, dim=-1).data.cpu().numpy())
+        # print(mixes.data.cpu().numpy())
+        # print(torch.softmax(mixes, dim=-1).data.cpu().numpy())
 
         serializer = NumpySerializer()
 
@@ -712,13 +706,17 @@ class OverfitModelResult:
 
 
 def transform(x: torch.Tensor) -> torch.Tensor:
-    return flattened_multiband_spectrogram(x, {'xs': (64, 16)})
+    return stft(x, 2048, 256, pad=True)
 
 
-def compute_loss(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+def compute_loss(
+        x: torch.Tensor,
+        y: torch.Tensor,
+        cp: torch.Tensor,
+        sparsity_loss: float = sparsity_coefficient) -> torch.Tensor:
     x = transform(x)
     y = transform(y)
-    return torch.abs(x - y).sum()
+    return torch.abs(x - y).sum() + (torch.abs(cp).sum() * sparsity_loss)
 
 
 def produce_overfit_model(
@@ -756,13 +754,13 @@ def produce_overfit_model(
     for i in range(n_iterations):
         optimizer.zero_grad()
         recon, fcs, cp = model.forward()
-        loss = loss_func(target, recon)
+        loss = loss_func(target, recon, cp)
         print(i, loss.item())
         loss.backward()
         optimizer.step()
 
     with torch.no_grad():
-        rnd = model.random(use_learned_deformations=True)[0]
+        rnd = model.random(use_learned_deformations=use_learned_deformations_for_random)[0]
 
     return OverfitModelResult(
         target=max_norm(target),
@@ -809,6 +807,8 @@ def produce_content_section(
     rand_component = produce_audio_component(logger, 'rand', result.rand)
 
     _, meta = generate_param_dict('model', logger, result.model)
+
+    print('INSTRUMENT URI', meta.public_uri)
     instr_component = ConvInstrumentComponent(meta.public_uri)
 
     return CompositeComponent(
@@ -885,7 +885,7 @@ def conv_instrument_dict(
             height=500,
             start_time=1.4
         ),
-        examples=examples,
+        examples=CompositeComponent(**examples),
         citation=CitationComponent(
             tag='johnvinyardresonancemodel',
             author='Vinyard, John',
@@ -917,7 +917,7 @@ def generate_article(n_iteraations: int, n_examples: int):
         __file__,
         'html',
         title='Conv Instrument',
-        web_components_version='0.0.93',
+        web_components_version='0.0.96',
         **content
     )
 
@@ -983,10 +983,12 @@ def overfit_model():
             r(max_norm(recon))
             c(model.control_signal[0, 0])
 
-            x = stft(target, 2048, 256, pad=True)
-            y = stft(recon, 2048, 256, pad=True)
+            # x = stft(target, 2048, 256, pad=True)
+            # y = stft(recon, 2048, 256, pad=True)
+            #
+            # loss = torch.abs(x - y).sum() #+ torch.abs(cp).sum()
 
-            loss = torch.abs(x - y).sum() + torch.abs(cp).sum()
+            loss = compute_loss(target, recon, cp)
 
             loss.backward()
             optimizer.step()
@@ -994,7 +996,7 @@ def overfit_model():
             print(
                 iteration,
                 loss.item(),
-                model.compression_ratio(n_samples),
+                model.compression_ratio(n_samples).item(),
                 model.active_elements.item(),
                 model.sparsity.item())
 
@@ -1005,7 +1007,7 @@ def overfit_model():
             att(fcs)
 
             with torch.no_grad():
-                rand(max_norm(model.random(use_learned_deformations=True)[0]))
+                rand(max_norm(model.random(use_learned_deformations=use_learned_deformations_for_random)[0]))
                 rz = model.get_materialized_resonance(0).view(-1, n_samples)
                 res(max_norm(rz[np.random.randint(0, n_resonances * expressivity - 1)]))
 
