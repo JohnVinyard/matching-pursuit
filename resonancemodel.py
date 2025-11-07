@@ -61,6 +61,9 @@ how energy is routed to different resonances. As a concrete example, the control
 modeling a transient pluck of a  guitar string.  Then the deformation mix might oscillate between two different resonances,
 modeling the change in bridge height induced by a whammy/tremolo bar.
 
+**Importantly**, assuming we've chosen a model with sufficient capacity to describe the resonances, the control signal
+scales with the length of the audio segment, but the model of the resonances does not;  it is _constant_.
+
 # The Loss
 
 We fit the model using a simple, L1 loss on the short-time fourier transforms of the target and reconstruction.  
