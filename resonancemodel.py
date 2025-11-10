@@ -194,8 +194,8 @@ control_plane_dim = 16
 n_resonances = 16
 expressivity = 2
 n_to_keep = 128
-do_sparsify = False
-sparsity_coefficient = 1
+do_sparsify = True
+sparsity_coefficient = 0
 
 attack_full_size = 2048
 attack_n_frames = 256
@@ -443,7 +443,7 @@ class ResonanceLayer(nn.Module):
 
         self.attack_envelopes = nn.Parameter(
             # decaying_noise(self.control_plane_dim, 256, 4, 20, device=device, include_noise=False)
-            torch.zeros(self.control_plane_dim, attack_n_frames).uniform_(-0.01, 0.01)
+            torch.zeros(self.control_plane_dim, attack_n_frames).uniform_(-1, 1)
         )
 
         self.router = nn.Parameter(
@@ -593,7 +593,7 @@ class OverfitResonanceStack(nn.Module):
 
         control_plane = torch.zeros(
             (1, 1, control_plane_dim, n_frames)) \
-            .uniform_(0.0001, 0.01)
+            .uniform_(-0.01, 0.01)
 
         self.control_plane = nn.Parameter(control_plane)
 
