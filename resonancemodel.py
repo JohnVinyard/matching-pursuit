@@ -1,11 +1,11 @@
 """[markdown]
 
 In this micro-experiment, I ask whether it's possible to factor short audio segments into two distinct parts:  first a
-control-signal, an abstract representation of the actions a human performer would take, and second, an "instrument",
-representing the resonances of the instrument(s) being played, and the room in which the performance occurs.
+control-signal, an abstract representation of the actions taken by a human performer, and second, an "instrument",
+representing the resonances of the physical object(s) being played, and the room in which the performance occurs.
 
-The instrument artifact can be used to produce _new_ musical performances, while the two factors together constitute
-a compressive and interpretable representation of the original signal.
+The weights, or learned parameters of the instrument artifact can be used to produce _new_ musical performances,
+while the two factors together constitute a (lossy) compressive and interpretable representation of the original signal.
 
 To make this more concrete, here's a video of me using a learned instrument to produce a new audio segment via a
 hand-tracking interface.
@@ -16,7 +16,8 @@ hand-tracking interface.
 
 """[markdown]
 
-If you're excited to listen and play, feel free to [jump ahead](#Examples) to the audio examples!
+If you're excited to just listen to reconstructions and play with the "instrument" artifacts, feel free to 
+[jump ahead](#Examples) to the audio examples!
 
 
 # Extracting Instruments from Audio Recordings
@@ -29,18 +30,18 @@ One promising approach has been to build models that factor audio signals into t
 2. The acoustic resonances of the system itself; describing how energy injected from the control signal
     is stored by the system and emitted over time.
 
-Human musicians _aren't- engaged in wiggling physical objects many hundreds or thousands of times per-second, but they
+Human musicians _aren't_ engaged in wiggling physical objects many hundreds or thousands of times per-second, but they
 do learn to skillfully manipulate these properties to create engaging music.  This mental model naturally leads to 
 sparser, score-like representations of musical audio.
 
 I've also begun to investigate whether this approach can extract useful artifacts from very small datasets, and in 
-this case, even individual audio segments.
+this case, even _individual audio segments_.
 
 # The Model
 
 Instead of compiling a massive dataset and worshipping at the altar of the 
 ["Bitter Lesson"](https://en.wikipedia.org/wiki/Bitter_lesson), I instead cram this experiment full of inductive 
-biases, imposing my own, rudimentary mental model of a musical instrument as a form of regularization.  
+biases, imposing my own, rudimentary mental model of a musical instrument as a strong form of regularization.  
 My hypothesis is that we can learn something _useful_ from even a few seconds of audio by insisting that it fits a
 simple model of physics and resonance.
 
@@ -50,7 +51,8 @@ limited success, but the frame-based approach caused many audible artifacts that
 
 In this new experiment, the control signal is a 16-dimensional time-varying vector running at ~20hz.  This signal is first
 convolved with a small set "attack envelopes", which are multiplied with uniform (white) noise.  These attacks are then 
-routed to and convolved with some number of resonances, parameterized by a set of damped harmonic oscillators.  
+routed to and convolved with some number of resonances, parameterized by a set of 
+[damped harmonic oscillators](https://phys.libretexts.org/Bookshelves/University_Physics/University_Physics_(OpenStax)/Book%3A_University_Physics_I_-_Mechanics_Sound_Oscillations_and_Waves_(OpenStax)/15%3A_Oscillations/15.06%3A_Damped_Oscillations).  
 Finally, the resonance output is multiplied by a learnable gain, followed by a non-linearity (`tanh`) to simulate subtle 
 distortions.
 
@@ -70,13 +72,18 @@ We fit the model using a simple, L1 loss on the short-time fourier transforms of
 I have a strong intuition that a more perceptually-informed loss would work better, and require even _less_ overall 
 model capacity, but that's an experiment for another day!
 
+We encourage sparsity in the control signal with an addition L1 loss on control signal magnitudes, pushing most entries
+to zero.
+
+For the examples on this page, we train the model for 10,000 iterations using the Adam optimizer.
+
 
 # User Interface
 
 Our control signal is defined as a sparse, N-dimensional vector, varying at ~20hz.  For this work, 
 I chose a familiar and natural interface, the human hand.  We project hand-tracking landmarks onto the control 
-signal's input space.  I must note that [MediaPipe](https://mediapipe.readthedocs.io/en/latest/solutions/hands.html) 
-proved indispensable for this first pass, making this part of the implementation straightforward.
+signal's input space.  I should note that [MediaPipe](https://mediapipe.readthedocs.io/en/latest/solutions/hands.html) 
+proved indispensable for this first pass, making this part of the implementation straightforward and quick.
 
 I'm certain that the current interface is not ideal, and I'm very excited about alternative possibilities.
 We're literally _swimming_ in multi-dimensional, time-varying sensor data, streaming from smartphones, watches, 
@@ -86,7 +93,7 @@ After overfitting a single audio segment of ~12 seconds, weights for the model a
 [WebAudio](https://developer.mozilla.org/en-US/docs/Web/API/Web_Audio_API) implementation of the decoder that runs 
 in the browser.
 
-To ensure that the browser-based implentation can perform in realtime, the model we learn is _tiny_, with a control plane
+To ensure that the browser-based implementation can perform in realtime, the model we learn is _tiny_, with a control plane
 dimension of 16, a resonance count of 16, and "expressivity" of 2, the latter defining how many alternative resonances 
 make up out deformation space.
 
@@ -96,12 +103,12 @@ make up out deformation space.
 
 The reconstruction quality leaves much to be desired, but there's no doubt that the model captures many key aspects of 
 the sound.  What's more, the "instrument" artifact allows us to play in the resonance space of the original recording, 
-producing the same timbres in novel arrangements. 
+producing the same tones and timbres in novel arrangements. 
 
 ## Model Size and Compression Ratio
 
 Comparing the model size, including the control signal and deformations, which vary over time, we end up with a 
-representation about 8% the size of the original WAV audio.  Clearly, this compression is (beyond) lossy, and there's 
+representation about 14% the size of the original WAV audio.  Clearly, this compression is lossy, and there's 
 much room for improvement.
 
 ## Size of Web Audio Parameters
@@ -131,10 +138,10 @@ The approach is promising, but there are many questions left to explore:
 
 - how to create an efficient implementation using JS and the WebAudio API such that we can use larger 
     control planes, more resonances, and more expressivity?
-- the control-plane representation is overly-simplistic.  Are there better models
-- all of thie seems to be driving toward physical modelling synthesis.  Can we just create a differentiable physics simulation?
+- the control-plane representation is overly-simplistic.  Are there better models?
+- This work _seems_ to be driving toward physical modelling synthesis.  Can we just create a differentiable physics simulation?
 - what is a good, natural, intuitive set of sensor data that is readily available using smartphones or some other 
-    pervasive technology that can be mapped on the control-plane dimensions
+    pervasive technology that can be mapped on the control-plane dimensions in natural and fun ways?
 
 """
 
@@ -161,7 +168,7 @@ from torch.optim import Adam
 import conjure
 from conjure import serve_conjure, SupportedContentType, NumpyDeserializer, NumpySerializer, Logger, MetaData, \
     CompositeComponent, AudioComponent, ConvInstrumentComponent, conjure_article, CitationComponent, S3Collection, \
-    VideoComponent
+    VideoComponent, ImageComponent
 from data import get_one_audio_segment
 from modules import max_norm, interpolate_last_axis, sparsify, unit_norm, flattened_multiband_spectrogram, stft
 from modules.transfer import fft_convolve
@@ -187,14 +194,14 @@ control_plane_dim = 16
 n_resonances = 16
 expressivity = 2
 n_to_keep = 128
-do_sparsify = True
-sparsity_coefficient = 0
+do_sparsify = False
+sparsity_coefficient = 1
 
 attack_full_size = 2048
 attack_n_frames = 256
 deformation_frame_size = 128
 
-web_components_version = '0.0.100'
+web_components_version = '0.0.101'
 
 use_learned_deformations_for_random = False
 
@@ -234,6 +241,7 @@ def materialize_attack_envelopes(
         low_res: torch.Tensor,
         window_size: int,
         is_fft: bool = False) -> torch.Tensor:
+
     if low_res.shape[-1] == window_size:
         return low_res * torch.zeros_like(low_res).uniform_(-1, 1)
 
@@ -247,8 +255,8 @@ def materialize_attack_envelopes(
 
     impulse = impulse * torch.zeros_like(impulse).uniform_(-1, 1)
 
-    ramp = make_ramp(impulse.shape[-1], ramp_length=10, device=impulse.device)
-    impulse = impulse * ramp
+    # ramp = make_ramp(impulse.shape[-1], ramp_length=10, device=impulse.device)
+    # impulse = impulse * ramp
     return impulse
 
 
@@ -585,7 +593,7 @@ class OverfitResonanceStack(nn.Module):
 
         control_plane = torch.zeros(
             (1, 1, control_plane_dim, n_frames)) \
-            .uniform_(-0.01, 0.01)
+            .uniform_(0.0001, 0.01)
 
         self.control_plane = nn.Parameter(control_plane)
 
@@ -751,6 +759,7 @@ class OverfitModelResult:
     target: torch.Tensor
     recon: torch.Tensor
     rand: torch.Tensor
+    control_signal: torch.Tensor
 
 
 def transform(x: torch.Tensor) -> torch.Tensor:
@@ -815,7 +824,8 @@ def produce_overfit_model(
         target=max_norm(target),
         recon=max_norm(recon),
         rand=max_norm(rnd),
-        model=model
+        model=model,
+        control_signal=cp
     )
 
 
@@ -827,6 +837,10 @@ def produce_audio_component(
     component = AudioComponent(meta.public_uri, height=200)
     return component
 
+def produce_control_signal_component(logger: conjure.Logger, key: str, control_signal: torch.Tensor) -> ImageComponent:
+    _, meta = logger.log_matrix_with_cmap(key, control_signal.view(control_plane_dim, n_frames), cmap='gray')
+    component = ImageComponent(meta.public_uri, height=200)
+    return component
 
 def produce_content_section(
         logger: conjure.Logger,
@@ -854,6 +868,7 @@ def produce_content_section(
     orig_component = produce_audio_component(logger, 'orig', result.target)
     recon_component = produce_audio_component(logger, 'recon', result.recon)
     rand_component = produce_audio_component(logger, 'rand', result.rand)
+    cs_component = produce_control_signal_component(logger, 'cs', result.control_signal)
 
     _, meta = generate_param_dict('model', logger, result.model)
 
@@ -866,6 +881,8 @@ def produce_content_section(
         orig_component=orig_component,
         recon=f'## Reconstruction',
         recon_component=recon_component,
+        control_signal_header=f'## Sparse Control Signal',
+        control_signal=cs_component,
         rand=f'## Random Audio',
         rand_component=rand_component,
         conv=f'## Hand-Controlled Instrument',
@@ -895,7 +912,7 @@ def conv_instrument_dict(
             n_to_keep,
             n_iterations,
             loss_func,
-            example_number=1)
+            example_number=i + 1)
         for i in range(n_examples)}
 
     return dict(
