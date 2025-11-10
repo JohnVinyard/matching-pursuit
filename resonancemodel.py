@@ -414,8 +414,8 @@ class DampedHarmonicOscillatorBlock(nn.Module):
         x = x * self.amplitudes ** 2
         x = torch.sum(x, dim=0)
 
-        ramp = make_ramp(self.n_samples, ramp_length=10, device=x.device)
-        return x.view(1, 1, self.n_resonances, self.expressivity, self.n_samples) * ramp[None, None, None, None, :]
+        # ramp = make_ramp(self.n_samples, ramp_length=10, device=x.device)
+        return x.view(1, 1, self.n_resonances, self.expressivity, self.n_samples) #* ramp[None, None, None, None, :]
 
     def forward(self) -> torch.Tensor:
         x = self._materialize_resonances(self.damping.device)
