@@ -10,6 +10,7 @@ while the two factors together constitute a (lossy) compressive and interpretabl
 To make this more concrete, here's a video of me using a learned instrument to produce a new audio segment via a
 hand-tracking interface.
 """
+from modules.decompose import fft_resample
 
 # videoexample
 
@@ -196,6 +197,7 @@ expressivity = 2
 n_to_keep = 128
 do_sparsify = True
 sparsity_coefficient = 0
+n_oscillators = 16
 
 attack_full_size = 2048
 attack_n_frames = 256
@@ -240,7 +242,8 @@ def make_ramp(n_samples: int, ramp_length: int, device: torch.device) -> torch.T
 def materialize_attack_envelopes(
         low_res: torch.Tensor,
         window_size: int,
-        is_fft: bool = False) -> torch.Tensor:
+        is_fft: bool = False,
+        add_noise: bool = True) -> torch.Tensor:
 
     if low_res.shape[-1] == window_size:
         return low_res * torch.zeros_like(low_res).uniform_(-1, 1)
@@ -249,11 +252,12 @@ def materialize_attack_envelopes(
         low_res = torch.view_as_complex(low_res)
         low_res = torch.fft.irfft(low_res)
 
-    # impulse = fft_resample(low_res[None, ...], desired_size=window_size, is_lowest_band=True)[0]
+    impulse = fft_resample(low_res[None, ...], desired_size=window_size, is_lowest_band=True)[0]
 
-    impulse = interpolate_last_axis(low_res, desired_size=window_size)
+    # impulse = interpolate_last_axis(low_res, desired_size=window_size)
 
-    impulse = impulse * torch.zeros_like(impulse).uniform_(-1, 1)
+    if add_noise:
+        impulse = impulse * torch.zeros_like(impulse).uniform_(-1, 1)
 
     # ramp = make_ramp(impulse.shape[-1], ramp_length=10, device=impulse.device)
     # impulse = impulse * ramp
@@ -451,7 +455,7 @@ class ResonanceLayer(nn.Module):
 
 
         self.resonance = DampedHarmonicOscillatorBlock(
-            n_samples, 64, n_resonances, expressivity
+            n_samples, n_oscillators, n_resonances, expressivity
         )
 
         self.mix = nn.Parameter(torch.zeros(self.n_resonances, 2).uniform_(-1, 1))
@@ -463,7 +467,9 @@ class ResonanceLayer(nn.Module):
         return self.mix
 
     def get_attack_envelopes(self):
-        return materialize_attack_envelopes(self.attack_envelopes, self.attack_full_size)
+        # The web audio component adds random noise each time, instead of "baking" a single
+        # uniform sampling into the attack envelopes
+        return materialize_attack_envelopes(self.attack_envelopes, self.attack_full_size, add_noise=False)
 
     def get_materialized_resonance(self):
         return self.resonance.forward()
@@ -652,9 +658,9 @@ class OverfitResonanceStack(nn.Module):
             do_sparsify: bool = do_sparsify) -> torch.Tensor:
         cp = cp.view(1, self.control_plane_dim, self.n_frames)
 
-
-        # cp = cp - cp.max()
-        # cp = cp / cp.sum()
+        # I _think_ this allows gradients to flow back to all elements, rather than
+        # just the top-k
+        cp = cp - cp.mean()
 
         if do_sparsify:
             cp = sparsify(cp, n_to_keep=n_to_keep or self.n_to_keep)

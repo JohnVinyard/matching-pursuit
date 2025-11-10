@@ -216,7 +216,7 @@ class EventGenerator(nn.Module):
 
         self.resonances = DampedHarmonicOscillatorBlock(
             n_samples=self.n_samples,
-            n_oscillators=64,
+            n_oscillators=16,
             n_resonances=n_resonances,
             expressivity=1)
 
