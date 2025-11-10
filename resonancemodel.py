@@ -194,7 +194,7 @@ attack_full_size = 2048
 attack_n_frames = 256
 deformation_frame_size = 128
 
-web_components_version = '0.0.97'
+web_components_version = '0.0.100'
 
 use_learned_deformations_for_random = False
 
@@ -307,7 +307,10 @@ def execute_layer(
 
     mixes = mix.view(1, 1, n_resonances, 1, 1, 2)
     mixes = torch.softmax(mixes, dim=-1)
-    stacked = torch.stack([routed, x.reshape(*routed.shape)], dim=-1)
+    stacked = torch.stack([
+        routed,
+        x.reshape(*routed.shape)
+    ], dim=-1)
     x = mixes * stacked
     x = torch.sum(x, dim=-1)
 
@@ -432,7 +435,7 @@ class ResonanceLayer(nn.Module):
 
         self.attack_envelopes = nn.Parameter(
             # decaying_noise(self.control_plane_dim, 256, 4, 20, device=device, include_noise=False)
-            torch.zeros(self.control_plane_dim, attack_n_frames).uniform_(-1, 1)
+            torch.zeros(self.control_plane_dim, attack_n_frames).uniform_(-0.01, 0.01)
         )
 
         self.router = nn.Parameter(
@@ -440,7 +443,7 @@ class ResonanceLayer(nn.Module):
 
 
         self.resonance = DampedHarmonicOscillatorBlock(
-            n_samples, 16, n_resonances, expressivity
+            n_samples, 64, n_resonances, expressivity
         )
 
         self.mix = nn.Parameter(torch.zeros(self.n_resonances, 2).uniform_(-1, 1))
@@ -752,6 +755,7 @@ class OverfitModelResult:
 
 def transform(x: torch.Tensor) -> torch.Tensor:
     return stft(x, 2048, 256, pad=True)
+    # return flattened_multiband_spectrogram(x, { 'xs': (64, 16)})
 
 
 def compute_loss(
@@ -867,36 +871,6 @@ def produce_content_section(
         conv=f'## Hand-Controlled Instrument',
         conv_component=instr_component,
     )
-
-
-# def produce_content_sections(
-#         n_examples: int,
-#         logger: conjure.Logger,
-#         n_samples: int,
-#         resonance_window_size: int,
-#         control_plane_dim: int,
-#         n_resonances: int,
-#         expressivity: int,
-#         n_to_keep: int,
-#         n_iterations: int,
-#         loss_func: LossFunc,
-#     ) -> CompositeComponent:
-#
-#     elements = {n: produce_content_section(
-#         logger,
-#         n_samples,
-#         resonance_window_size,
-#         control_plane_dim,
-#         n_resonances,
-#         expressivity,
-#         n_to_keep,
-#         n_iterations,
-#         loss_func,
-#         n + 1
-#     ) for n in range(n_examples)}
-#
-#     return CompositeComponent(**elements)
-
 
 
 def conv_instrument_dict(
