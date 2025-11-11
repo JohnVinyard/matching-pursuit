@@ -10,7 +10,6 @@ while the two factors together constitute a (lossy) compressive and interpretabl
 To make this more concrete, here's a video of me using a learned instrument to produce a new audio segment via a
 hand-tracking interface.
 """
-from modules.decompose import fft_resample
 
 # videoexample
 
@@ -176,6 +175,8 @@ from modules.transfer import fft_convolve
 from modules.upsample import upsample_with_holes, ensure_last_axis_length
 from util import device, encode_audio, make_initializer
 import argparse
+from modules.decompose import fft_resample
+
 
 LossFunc = Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]
 
@@ -195,9 +196,9 @@ control_plane_dim = 16
 n_resonances = 16
 expressivity = 2
 n_to_keep = 128
-do_sparsify = True
-sparsity_coefficient = 0
-n_oscillators = 16
+do_sparsify = False
+sparsity_coefficient = 1
+n_oscillators = 64
 
 attack_full_size = 2048
 attack_n_frames = 256
@@ -660,7 +661,7 @@ class OverfitResonanceStack(nn.Module):
 
         # I _think_ this allows gradients to flow back to all elements, rather than
         # just the top-k
-        cp = cp - cp.mean()
+        # cp = cp - cp.mean()
 
         if do_sparsify:
             cp = sparsify(cp, n_to_keep=n_to_keep or self.n_to_keep)
@@ -769,8 +770,8 @@ class OverfitModelResult:
 
 
 def transform(x: torch.Tensor) -> torch.Tensor:
-    return stft(x, 2048, 256, pad=True)
-    # return flattened_multiband_spectrogram(x, { 'xs': (64, 16)})
+    # return stft(x, 2048, 256, pad=True)
+    return flattened_multiband_spectrogram(x, { 'xs': (64, 16)})
 
 
 def compute_loss(
