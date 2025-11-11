@@ -68,12 +68,13 @@ scales with the length of the audio segment, but the model of the resonances doe
 
 # The Loss
 
-We fit the model using a simple, L1 loss on the short-time fourier transforms of the target and reconstruction.  
+We fit the model using a simple, L1 loss on a multi-resolution short-time fourier transform of the target and reconstruction.  
 I have a strong intuition that a more perceptually-informed loss would work better, and require even _less_ overall 
 model capacity, but that's an experiment for another day!
 
 We encourage sparsity in the control signal with an addition L1 loss on control signal magnitudes, pushing most entries
-to zero.
+to zero.  We hope that the model will rely heavily on resonances in the object, rather than a high-energy, busy control
+signal.
 
 For the examples on this page, we train the model for 10,000 iterations using the Adam optimizer.
 
@@ -253,9 +254,9 @@ def materialize_attack_envelopes(
         low_res = torch.view_as_complex(low_res)
         low_res = torch.fft.irfft(low_res)
 
-    impulse = fft_resample(low_res[None, ...], desired_size=window_size, is_lowest_band=True)[0]
+    # impulse = fft_resample(low_res[None, ...], desired_size=window_size, is_lowest_band=True)[0]
 
-    # impulse = interpolate_last_axis(low_res, desired_size=window_size)
+    impulse = interpolate_last_axis(low_res, desired_size=window_size)
 
     if add_noise:
         impulse = impulse * torch.zeros_like(impulse).uniform_(-1, 1)
@@ -661,7 +662,7 @@ class OverfitResonanceStack(nn.Module):
 
         # I _think_ this allows gradients to flow back to all elements, rather than
         # just the top-k
-        # cp = cp - cp.mean()
+        cp = cp + cp.mean()
 
         if do_sparsify:
             cp = sparsify(cp, n_to_keep=n_to_keep or self.n_to_keep)
@@ -802,6 +803,8 @@ def produce_overfit_model(
     n_frames = n_samples // step_size
 
     target = get_one_audio_segment(n_samples)
+    target = max_norm(target)
+
     model = OverfitResonanceStack(
         n_layers=1,
         n_samples=n_samples,
@@ -972,6 +975,8 @@ def overfit_model():
     """
 
     target = get_one_audio_segment(n_samples)
+    target = max_norm(target)
+
     model = OverfitResonanceStack(
         n_layers=1,
         n_samples=n_samples,
