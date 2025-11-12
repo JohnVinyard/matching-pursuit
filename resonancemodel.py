@@ -50,7 +50,7 @@ I've attempted a similar experiment before, using a
 limited success, but the frame-based approach caused many audible artifacts that I wasn't happy with.
 
 In this new experiment, the control signal is a 16-dimensional time-varying vector running at ~20hz.  This signal is first
-convolved with a small set "attack envelopes", which are multiplied with uniform (white) noise.  These attacks are then 
+convolved with a small set of "attack envelopes", which are multiplied with uniform (white) noise.  These attacks are then 
 routed to and convolved with some number of resonances, parameterized by a set of 
 [damped harmonic oscillators](https://phys.libretexts.org/Bookshelves/University_Physics/University_Physics_(OpenStax)/Book%3A_University_Physics_I_-_Mechanics_Sound_Oscillations_and_Waves_(OpenStax)/15%3A_Oscillations/15.06%3A_Damped_Oscillations).  
 Finally, the resonance output is multiplied by a learnable gain, followed by a non-linearity (`tanh`) to simulate subtle 
@@ -137,11 +137,11 @@ Thanks for reading!
 
 The approach is promising, but there are many questions left to explore:
 
-- how to create an efficient implementation using JS and the WebAudio API such that we can use larger 
-    control planes, more resonances, and more expressivity?
-- the control-plane representation is overly-simplistic.  Are there better models?
-- This work _seems_ to be driving toward physical modelling synthesis.  Can we just create a differentiable physics simulation?
-- what is a good, natural, intuitive set of sensor data that is readily available using smartphones or some other 
+1. how to create an efficient implementation using JavaScript and the WebAudio API such that we can use larger 
+    control planes, more resonances, and more expressivity/deform-ability?
+1. the control-plane representation is overly-simplistic.  Are there better models?
+1. This work _seems_ to be driving toward physical modelling synthesis.  Can we just create a differentiable physics simulation?
+1. what is a good, natural, intuitive set of sensor data that is readily available using smartphones or some other 
     pervasive technology that can be mapped on the control-plane dimensions in natural and fun ways?
 
 """
@@ -171,12 +171,11 @@ from conjure import serve_conjure, SupportedContentType, NumpyDeserializer, Nump
     CompositeComponent, AudioComponent, ConvInstrumentComponent, conjure_article, CitationComponent, S3Collection, \
     VideoComponent, ImageComponent
 from data import get_one_audio_segment
-from modules import max_norm, interpolate_last_axis, sparsify, unit_norm, flattened_multiband_spectrogram, stft
+from modules import max_norm, interpolate_last_axis, sparsify, unit_norm, stft
 from modules.transfer import fft_convolve
 from modules.upsample import upsample_with_holes, ensure_last_axis_length
 from util import device, encode_audio, make_initializer
 import argparse
-from modules.decompose import fft_resample
 
 
 LossFunc = Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]
@@ -734,8 +733,6 @@ class OverfitResonanceStack(nn.Module):
 
         mixes = self.get_mixes(0)
 
-        # print(mixes.data.cpu().numpy())
-        # print(torch.softmax(mixes, dim=-1).data.cpu().numpy())
 
         serializer = NumpySerializer()
 
@@ -772,7 +769,6 @@ class OverfitModelResult:
 
 def transform(x: torch.Tensor) -> torch.Tensor:
     return stft(x, 2048, 256, pad=True)
-    # return flattened_multiband_spectrogram(x, { 'xs': (64, 16)})
 
 
 def compute_loss(
@@ -927,7 +923,7 @@ def conv_instrument_dict(
 
     return dict(
         videoexample=VideoComponent(
-            src='https://state-space-model-demo-3.s3.us-east-1.amazonaws.com/rnn-instr-demo.mp4#t=14.5',
+            src='https://resonancemodel.s3.us-east-1.amazonaws.com/resonancemodel.mp4',
             width=500,
             height=500,
             start_time=1.4
@@ -963,7 +959,7 @@ def generate_article(n_iteraations: int, n_examples: int):
     conjure_article(
         __file__,
         'html',
-        title='Learning Playable WebAudio Instruments from Audio Examples',
+        title='Extracting Playable Instrument Models from Short Audio Examples',
         web_components_version=web_components_version,
         **content
     )
@@ -1032,10 +1028,6 @@ def overfit_model():
             r(max_norm(recon))
             c(model.control_signal[0, 0])
 
-            # x = stft(target, 2048, 256, pad=True)
-            # y = stft(recon, 2048, 256, pad=True)
-            #
-            # loss = torch.abs(x - y).sum() #+ torch.abs(cp).sum()
 
             loss = compute_loss(target, recon, cp)
 
