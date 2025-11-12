@@ -198,7 +198,7 @@ n_resonances = 16
 expressivity = 2
 n_to_keep = 128
 do_sparsify = False
-sparsity_coefficient = 1
+sparsity_coefficient = 0.5
 n_oscillators = 64
 
 attack_full_size = 2048
@@ -771,8 +771,8 @@ class OverfitModelResult:
 
 
 def transform(x: torch.Tensor) -> torch.Tensor:
-    # return stft(x, 2048, 256, pad=True)
-    return flattened_multiband_spectrogram(x, { 'xs': (64, 16)})
+    return stft(x, 2048, 256, pad=True)
+    # return flattened_multiband_spectrogram(x, { 'xs': (64, 16)})
 
 
 def compute_loss(
