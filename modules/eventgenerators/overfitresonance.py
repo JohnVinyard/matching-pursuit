@@ -291,7 +291,7 @@ class DampedHarmonicOscillatorLookup(nn.Module):
         x = damped_harmonic_oscillator(
             time=self.time,
             mass=torch.sigmoid(mass[..., None]),
-            damping=torch.sigmoid(damping[..., None]) * 10,
+            damping=torch.sigmoid(damping[..., None]) * 30,
             tension=10 ** tension[..., None],
             initial_displacement=initial_displacement[..., None],
             initial_velocity=0

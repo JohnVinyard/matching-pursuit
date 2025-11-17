@@ -1,7 +1,7 @@
 import argparse
 import os.path
 from random import choice
-from typing import Generator, Tuple, Union, Dict
+from typing import Generator, Tuple, Union, Dict, List
 
 import librosa
 import numpy as np
@@ -11,7 +11,8 @@ from torch.optim import Adam
 
 from conjure import LmdbCollection, numpy_conjure, loggers, serve_conjure, SupportedContentType, NumpySerializer, \
     NumpyDeserializer
-from modules import max_norm, sparse_softmax, interpolate_last_axis, flattened_multiband_spectrogram, iterative_loss
+from modules import max_norm, sparse_softmax, interpolate_last_axis, flattened_multiband_spectrogram, iterative_loss, \
+    stft
 from modules.transfer import fft_convolve, hierarchical_dirac, \
     damped_harmonic_oscillator
 from modules.upsample import upsample_with_holes, ensure_last_axis_length
@@ -30,23 +31,38 @@ def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
-def decaying_noise(n_items: int, n_samples: int, low_exp: int, high_exp: int, device: torch.device):
-    t = torch.linspace(1, 0, n_samples, device=device)
-    pos = torch.zeros(n_items, device=device).uniform_(low_exp, high_exp)
-    noise = torch.zeros(n_items, n_samples, device=device).uniform_(-1, 1)
-    return (t[None, :] ** pos[:, None]) * noise
+# def decaying_noise(n_items: int, n_samples: int, low_exp: int, high_exp: int, device: torch.device):
+#     t = torch.linspace(1, 0, n_samples, device=device)
+#     pos = torch.zeros(n_items, device=device).uniform_(low_exp, high_exp)
+#     noise = torch.zeros(n_items, n_samples, device=device).uniform_(-1, 1)
+#     return (t[None, :] ** pos[:, None]) * noise
 
 
 def transform(x: torch.Tensor) -> torch.Tensor:
-    return flattened_multiband_spectrogram(x, {'sm': (64, 16)})
+    # return flattened_multiband_spectrogram(x, {'sm': (64, 16)})
+    return stft(x, 2048, 256, pad=True)
 
 
-def loss(recon: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    r = transform(recon)
-    t = transform(target)
-    l = torch.abs(r - t).sum()
-    return l
+# def loss(recon: torch.Tensor, target: torch.Tensor, events: torch.Tensor) -> torch.Tensor:
+#     r = transform(recon)
+#     t = transform(target)
+#
+#     # event_norms = torch.norm(events, dim=-1, keepdim=True)
+#     l = torch.abs(r - t).sum() #+ (torch.abs(event_norms).sum() * 0)
+#     return l
 
+
+def nearest_power_of_two(n: float) -> int:
+    x = np.log2(n)
+    x = np.ceil(x)
+    return x
+
+# def mix(channels: List[torch.Tensor], mx: torch.Tensor) -> torch.Tensor:
+#     x = torch.stack(channels, dim=-1)
+#     mx = torch.softmax(mx, dim=-1)
+#     x = x * mx
+#     x = torch.sum(x, dim=-1)
+#     return x
 
 class SimpleLookup(nn.Module):
     def __init__(
@@ -67,7 +83,7 @@ class SimpleLookup(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch, n_items, dim = x.shape
         x = self.from_latent(x)
-        x = torch.relu(x)
+        # x = torch.relu(x)
         x = x.view(batch, n_items, self.expressivity, -1)
         x = x @ self.items
         return x
@@ -148,7 +164,7 @@ class DampedHarmonicOscillatorBlock(nn.Module):
         x = damped_harmonic_oscillator(
             time=time,
             mass=torch.sigmoid(self.mass[..., None]),
-            damping=torch.sigmoid(self.damping[..., None]) * 20,
+            damping=torch.sigmoid(self.damping[..., None]) * 30,
             tension=10 ** self.tension[..., None],
             initial_displacement=self.initial_displacement[..., None],
             initial_velocity=0
@@ -158,9 +174,9 @@ class DampedHarmonicOscillatorBlock(nn.Module):
         x = x * self.amplitudes ** 2
         x = torch.sum(x, dim=0)
 
-        ramp = torch.ones(self.n_samples, device=device)
-        ramp[:10] = torch.linspace(0, 1, 10, device=device)
-        return x.view(1, 1, self.n_resonances, self.expressivity, self.n_samples) * ramp[None, None, None, None, :]
+        # ramp = torch.ones(self.n_samples, device=device)
+        # ramp[:10] = torch.linspace(0, 1, 10, device=device)
+        return x.view(1, 1, self.n_resonances, self.expressivity, self.n_samples) #* ramp[None, None, None, None, :]
 
     def forward(self) -> torch.Tensor:
         return self._materialize_resonances(self.damping.device)
@@ -208,7 +224,7 @@ class EventGenerator(nn.Module):
         self.max_resonance = 0.99
         self.resonance_span = self.max_resonance - self.base_resonance
 
-        n_envelopes = 64
+        # n_envelopes = 64
         n_resonances = 32
         n_deformations = 32
 
@@ -224,7 +240,8 @@ class EventGenerator(nn.Module):
 
         # note: the noise envelope is 4x the frame rate, as it is upsampled
         # to 1/4 the overall number of frames
-        self.to_noise = SimpleLookup(latent_dim, n_envelopes, n_frames, 1)
+        # self.to_noise = SimpleLookup(latent_dim, n_envelopes, n_frames, 1)
+        self.to_noise = nn.Linear(latent_dim, n_frames, bias=False)
 
         self.to_deformation = SimpleLookup(latent_dim, n_deformations, n_frames, expressivity)
 
@@ -239,9 +256,10 @@ class EventGenerator(nn.Module):
         batch, n_events, dim = events.shape
 
         # materialize resonances into sample space (n_resonances, n_samples)
-
         resonances = self.resonances.forward().view(self.n_resonances, -1)
-        x = self.to_resonance(events).view(batch, n_events * self.expressivity, self.latent_dim)
+        # produce a selection of the resonances
+        x = self.to_resonance(events)
+        x = x.view(batch, n_events * self.expressivity, self.n_resonances)
         resonances = x @ resonances
 
         resonances = resonances.view(batch, n_events, self.expressivity, self.n_samples)
@@ -316,6 +334,7 @@ class Model(nn.Module):
         self.samplerate = samplerate
         self.total_seconds = total_samples / samplerate
         self.events_per_second = events_per_second
+
         self.total_events = int(self.total_seconds * self.events_per_second)
 
         self.events = nn.Parameter(torch.zeros(self.total_events, self.event_latent_dim).uniform_(-0.01, 0.01))
@@ -464,8 +483,9 @@ def train(
         orig_audio,
         recon_audio,
         events,
+        # times,
         rnd
-    ], port=9999, n_workers=1, web_components_version='0.0.89')
+    ], port=9999, n_workers=1, web_components_version='0.0.101')
 
     if os.path.isdir(path):
         fn = choice(os.listdir(path))
@@ -486,7 +506,7 @@ def train(
         n_frames=total_samples // (window_size // 2),
         samplerate=22050,
         event_latent_dim=32,
-        events_per_second=8,
+        events_per_second=4,
         window_size=window_size,
         n_segment_samples=n_segment_samples
     ).to(device)
@@ -511,6 +531,7 @@ def train(
             print(e)
             continue
 
+        # times(positions)
         recon_summed = torch.sum(recon, dim=1, keepdim=True)
 
         # log recon audio
@@ -518,10 +539,14 @@ def train(
 
         # print(mx)
         # confidence_loss = torch.abs(0.99 - mx).sum() * 100
-        l = iterative_loss(samples, recon, transform, ratio_loss=False, sort_channels=True)  # + confidence_loss
+
+        # event_norms = torch.norm(model.events, dim=-1, keepdim=True)
+
+        # iterative loss seems to be important for producing
+        # playable events
+        l = iterative_loss(samples, recon, transform, ratio_loss=False, sort_channels=True)
 
         # print(recon_summed.shape)
-        # l = loss(recon_summed, samples)  # + confidence_loss
         l.backward()
         optim.step()
         print(i, l.item(),

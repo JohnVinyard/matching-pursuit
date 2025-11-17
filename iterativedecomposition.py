@@ -79,9 +79,9 @@ def transform(x: torch.Tensor):
 
 def loss_transform(x: torch.Tensor) -> torch.Tensor:
     # batch, n_events, time = x.shape
-    # x = stft(x, transform_window_size, transform_step_size, pad=True)
+    x = stft(x, transform_window_size, transform_step_size, pad=True)
     # x = x.view(batch, n_events, -1)
-    x = flattened_multiband_spectrogram(x, {'spec': (64, 16)})
+    # x = flattened_multiband_spectrogram(x, {'spec': (64, 16)})
     return x
 
 

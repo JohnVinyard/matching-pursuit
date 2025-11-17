@@ -234,10 +234,10 @@ def decaying_noise(
         return (t[None, :] ** pos[:, None])
 
 
-def make_ramp(n_samples: int, ramp_length: int, device: torch.device) -> torch.Tensor:
-    ramp = torch.ones(n_samples, device=device)
-    ramp[:ramp_length] = torch.linspace(0, 1, ramp_length, device=device)
-    return ramp
+# def make_ramp(n_samples: int, ramp_length: int, device: torch.device) -> torch.Tensor:
+#     ramp = torch.ones(n_samples, device=device)
+#     ramp[:ramp_length] = torch.linspace(0, 1, ramp_length, device=device)
+#     return ramp
 
 
 def materialize_attack_envelopes(
