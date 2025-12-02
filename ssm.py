@@ -193,11 +193,6 @@ class InstrumentModel(nn.Module):
         self.out_proj = nn.Linear(state_dim, window_size, bias=False)
 
 
-        n_freqs = 32
-        self.n_freqs = n_freqs
-        self.to_amp = nn.Linear(state_dim, n_freqs, bias=False)
-        self.to_freq = nn.Linear(state_dim, n_freqs, bias=True)
-
         self.apply(init_weights)
 
     def forward(self, control: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -212,45 +207,20 @@ class InstrumentModel(nn.Module):
 
         # try to ensure that the input signal only includes low-frequency info
         proj = control @ self.proj
-        # window = torch.hamming_window(proj.shape[-1], device=proj.device)[None, None, :]
-        # proj = proj * window
 
         assert proj.shape == (batch, frames, self.input_dim)
         x, hidden = self.net.forward(proj)
 
-        amps = self.to_amp(x).permute(0, 2, 1) ** 2
-        freqs = torch.sigmoid(self.to_freq(x).permute(0, 2, 1)) * 128
-        freqs = 440 * (2 ** ((freqs - 69) / 12))
-        freqs = freqs / (22050 / 2)
+        result = x.view(batch, 1, -1)
 
 
-        orig_freqs = freqs
+        end_values = result[:, 0:-1, -1]
+        start_values = result[:, 1:, 0]
+
+        diff = start_values - end_values
 
 
-        amps = interpolate_last_axis(amps, n_samples)
-        freqs = interpolate_last_axis(freqs, n_samples)
-
-        osc = torch.sin(torch.cumsum(freqs * 2 * np.pi, dim=-1))
-
-        result = amps * osc
-        result = torch.sum(result, dim=1, keepdim=True)
-
-
-
-
-        # result = self.out_proj(x)
-        # conv = self.out_conv(x)
-        # result = fft_convolve(result, conv)
-        #
-        # end_values = result[:, 0:-1, -1]
-        # start_values = result[:, 1:, 0]
-        #
-        # diff = start_values - end_values
-        # result = result.reshape(batch, 1, -1)
-
-        # result = torch.sin(result)
-
-        return result, 0
+        return result, diff
 
 
 """[markdown]
@@ -778,7 +748,7 @@ def train_and_monitor():
 
         for iteration in count():
             optim.zero_grad()
-            recon, _ = model.forward()
+            recon, diff = model.forward()
 
             # filtered = F.conv1d(recon, filt, stride=1, padding=n_samples, dilation=128)
             # print(filtered.shape)
@@ -789,7 +759,7 @@ def train_and_monitor():
             # + (sparsity_loss(model.control_signal) * 0) \
             # + torch.abs(filtered).sum()
 
-            loss = reconstruction_loss(recon, target)
+            loss = reconstruction_loss(recon, target) + ((diff ** 2).sum() * 100)
 
             envelopes(model.control_signal.view(control_plane_dim, -1))
             loss.backward()

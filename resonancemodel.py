@@ -10,6 +10,8 @@ while the two factors together constitute a (lossy) compressive and interpretabl
 To make this more concrete, here's a video of me using a learned instrument to produce a new audio segment via a
 hand-tracking interface.
 """
+from modules.infoloss import CorrelationLoss
+from spiking import SpikingModel, AutocorrelationLoss
 
 # videoexample
 
@@ -162,7 +164,7 @@ from typing import Tuple, Callable, Union, Dict, Any
 import numpy as np
 import torch
 from attr import dataclass
-from sklearn.decomposition import DictionaryLearning
+from sklearn.decomposition import DictionaryLearning, SparsePCA
 from torch import nn
 from torch.optim import Adam
 
@@ -171,7 +173,7 @@ from conjure import serve_conjure, SupportedContentType, NumpyDeserializer, Nump
     CompositeComponent, AudioComponent, ConvInstrumentComponent, conjure_article, CitationComponent, S3Collection, \
     VideoComponent, ImageComponent
 from data import get_one_audio_segment
-from modules import max_norm, interpolate_last_axis, sparsify, unit_norm, stft
+from modules import max_norm, interpolate_last_axis, sparsify, unit_norm, stft, flattened_multiband_spectrogram
 from modules.transfer import fft_convolve
 from modules.upsample import upsample_with_holes, ensure_last_axis_length
 from util import device, encode_audio, make_initializer
@@ -195,13 +197,13 @@ n_frames = n_samples // step_size
 control_plane_dim = 16
 n_resonances = 16
 expressivity = 2
-n_to_keep = 128
+n_to_keep = 32
 do_sparsify = False
-sparsity_coefficient = 0.5
+sparsity_coefficient = 0.000001
 n_oscillators = 64
 
 attack_full_size = 2048
-attack_n_frames = 256
+attack_n_frames = 2048
 deformation_frame_size = 128
 
 web_components_version = '0.0.101'
@@ -628,9 +630,12 @@ class OverfitResonanceStack(nn.Module):
         cs = self.control_signal.data.cpu().numpy() \
             .reshape(self.control_plane_dim, self.n_frames).T
         pca = DictionaryLearning(n_components=n_components)
+        # pca = SparsePCA(n_components=n_components)
         pca.fit(cs)
         # this will be of shape (n_components, control_plane_dim)
-        return pca.components_
+        x = pca.components_
+        # x = np.random.uniform(-1, 1, x.shape)
+        return x
 
     def get_hand_tracking_mapping(self) -> np.ndarray:
         mapping = self._get_mapping(n_components=21 * 3)
@@ -767,9 +772,24 @@ class OverfitModelResult:
     control_signal: torch.Tensor
 
 
-def transform(x: torch.Tensor) -> torch.Tensor:
-    return stft(x, 2048, 256, pad=True)
 
+
+def transform(x: torch.Tensor) -> torch.Tensor:
+    # return stft(x, 2048, 256, pad=True)
+    return flattened_multiband_spectrogram(x, {'xs': (64, 16)}, normalize=True)
+
+
+def l0_norm(x: torch.Tensor):
+    mask = (x > 0).float()
+
+    forward = mask
+    backward = x
+
+    y = backward + (forward - backward).detach()
+
+    return y.sum()
+
+loss_model = CorrelationLoss().to(device)
 
 def compute_loss(
         x: torch.Tensor,
@@ -778,7 +798,13 @@ def compute_loss(
         sparsity_loss: float = sparsity_coefficient) -> torch.Tensor:
     x = transform(x)
     y = transform(y)
-    return torch.abs(x - y).sum() + (torch.abs(cp).sum() * sparsity_loss)
+    recon_loss = torch.abs(x - y).sum()
+
+    # recon_loss =  loss_model.multiband_noise_loss(x, y, 64, 16)
+    sparsity_term = l0_norm(cp)
+
+    return recon_loss + (sparsity_term * sparsity_loss)
+
 
 
 def produce_overfit_model(

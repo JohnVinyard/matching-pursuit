@@ -19,7 +19,8 @@ BandEncodingPackage = Tuple[List[LocalEventTuple], Callable, Shape]
 def multiband_spectrogram(
         x: torch.Tensor,
         stft_spec: Dict[str, Tuple[int, int]],
-        smallest_band_size: int = 512):
+        smallest_band_size: int = 512,
+        normalize: bool = False):
 
     bands = fft_frequency_decompose(x, smallest_band_size)
 
@@ -32,7 +33,7 @@ def multiband_spectrogram(
 
     for name, sizes in stft_spec.items():
         ws, step = sizes
-        d = {f'{k}_{name}': stft(v, ws, step, pad=True) for k, v in bands.items()}
+        d = {f'{k}_{name}': stft(v, ws, step, pad=True) / v.numel() if normalize else 1 for k, v in bands.items()}
         accum = dict(**accum, **d)
 
 
@@ -42,9 +43,11 @@ def multiband_spectrogram(
 def flattened_multiband_spectrogram(
         x: torch.Tensor,
         stft_spec: Dict[str, Tuple[int, int]],
-        smallest_band_size: int = 512):
+        smallest_band_size: int = 512,
+        normalize: bool = False):
+
     batch_size, channels, _ = x.shape
-    bands = multiband_spectrogram(x, stft_spec, smallest_band_size)
+    bands = multiband_spectrogram(x, stft_spec, smallest_band_size, normalize=normalize)
     return torch.cat([b.reshape(batch_size, channels, -1) for b in bands.values()], dim=-1)
 
 

@@ -14,6 +14,7 @@ from modules import stft, sparsify, sparsify_vectors, iterative_loss, max_norm, 
 from modules.anticausal import AntiCausalAnalysis
 from modules.eventgenerators.generator import EventGenerator
 from modules.eventgenerators.overfitresonance import OverfitResonanceModel
+from modules.infoloss import CorrelationLoss
 from modules.mixer import MixerStack
 from modules.multiheadtransform import MultiHeadTransform
 from util import device, encode_audio, make_initializer
@@ -101,8 +102,6 @@ class Discriminator(nn.Module):
         spec = stft(x, 2048, 256, pad=True).view(x.shape[0], -1, 1025).permute(0, 2, 1)
         x = self.net(spec)
         return x
-
-
 
 
 class MixerEncoder(nn.Module):
@@ -428,7 +427,7 @@ def train_and_monitor(
         f'training on {n_seconds} of audio and {n_events} events with')
     print('==========================================')
 
-    model_filename = 'iterativedecomposition21.dat'
+    model_filename = 'iterativedecomposition22.dat'
 
     def train():
 
@@ -443,7 +442,7 @@ def train_and_monitor(
             noise_deformations=16,
             instr_expressivity=2,
             n_events=1,
-            n_resonances=128,
+            n_resonances=4096,
             n_envelopes=64,
             # n_decays=64,
             n_deformations=64,
@@ -456,7 +455,6 @@ def train_and_monitor(
             fft_resonance=False,
             context_dim=context_dim
         )
-
 
         model = Model(
             resonance_model=resonance_model,
@@ -479,10 +477,8 @@ def train_and_monitor(
         optim = Adam(model.parameters(), lr=1e-4)
         # disc_optim = Adam(disc.parameters(), lr=1e-3)
 
-
         max_ss_weight = 0.1
         # ss_weights = torch.linspace(0, max_ss_weight, 8192, device=device) ** 2
-
 
         # disc_loss_factor = 100
 
@@ -515,7 +511,6 @@ def train_and_monitor(
                 target = target * weighting
                 recon_summed = recon_summed * weighting
 
-
                 # loss from iterative_loss will be negative since we're maximizing
                 # the amount of energy removed
                 loss = iterative_loss(
@@ -525,16 +520,18 @@ def train_and_monitor(
                     ratio_loss=False,
                     sort_channels=True)
                 # loss = reconstruction_loss(recon_summed, target)
+                # loss = loss_model.multiband_noise_loss(target, recon_summed, 64, 16)
 
-
+            if torch.isnan(loss).any() or torch.isinf(loss).any():
+                print(f'Something wonky, skipping grad update')
+                optim.zero_grad()
+                continue
 
             scaler.scale(loss).backward()
             scaler.step(optim)
             scaler.update()
             print(i, loss.item())
             optim.zero_grad()
-
-
 
             # TODO: sample scale/amplitude of one-hot time vectors
             # for completely realistic ground-truth generations.

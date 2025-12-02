@@ -327,9 +327,9 @@ class SpikingModel(nn.Module):
         # TODO: Figure out mask here
 
         # compute periodicity
-        y = F.pad(y, (0, self.periodicity_size // 4))
-        y = y.unfold(-1, self.periodicity_size, self.periodicity_size // 4)
-        y = torch.abs(torch.fft.rfft(y, dim=-1))
+        # y = F.pad(y, (0, self.periodicity_size // 4))
+        # y = y.unfold(-1, self.periodicity_size, self.periodicity_size // 4)
+        # y = torch.abs(torch.fft.rfft(y, dim=-1))
 
         #
         # y = y - torch.mean(y, dim=-1, keepdim=True)

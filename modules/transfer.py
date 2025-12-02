@@ -25,13 +25,10 @@ def damped_harmonic_oscillator(
 ) -> torch.Tensor:
 
     x = (damping / (2 * mass))
-    # if torch.isnan(x).sum() > 0:
-    #     print('x first appearance of NaN')
 
+    # omega = torch.sqrt(torch.clamp(tension - (x ** 2), 1e-12, np.inf))
 
-    omega = torch.sqrt(torch.clamp(tension - (x ** 2), 1e-12, np.inf))
-    # if torch.isnan(omega).sum() > 0:
-    #     print('omega first appearance of NaN')
+    omega = torch.sqrt(torch.abs(tension - (x ** 2)))
 
     phi = torch.atan2(
         (initial_velocity + (x * initial_displacement)),

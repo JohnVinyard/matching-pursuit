@@ -4,6 +4,7 @@ import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
+from torch.nn.utils import weight_norm
 
 from config import Config
 from modules import interpolate_last_axis, select_items, NeuralReverb, SSM, sparse_softmax, sparsify, \
@@ -260,6 +261,7 @@ class MultibandResonanceLookup(Lookup):
 
 
 
+
 class DampedHarmonicOscillatorLookup(nn.Module):
 
     def __init__(self, latent_dim: int, n_samples: int, n_oscillators: int, n_resonances: int):
@@ -269,11 +271,18 @@ class DampedHarmonicOscillatorLookup(nn.Module):
         self.n_oscillators = n_oscillators
         self.n_resonances = n_resonances
 
-        self.to_mass = nn.Linear(latent_dim, n_oscillators)
-        self.to_damping = nn.Linear(latent_dim, n_oscillators)
-        self.to_tension = nn.Linear(latent_dim, n_oscillators)
-        self.to_initial_displacement = nn.Linear(latent_dim, n_oscillators)
-        self.to_amplitudes = nn.Linear(latent_dim, n_oscillators)
+        m = weight_norm(nn.Linear(latent_dim, n_oscillators))
+        d = weight_norm(nn.Linear(latent_dim, n_oscillators))
+        t = weight_norm(nn.Linear(latent_dim, n_oscillators))
+        i = weight_norm(nn.Linear(latent_dim, n_oscillators))
+        a = weight_norm(nn.Linear(latent_dim, n_oscillators))
+
+        self.to_mass = m
+        self.to_damping = d
+        self.to_tension = t
+        self.to_initial_displacement = i
+        self.to_amplitudes = a
+
 
         time = torch.linspace(0, 10, self.n_samples, device=device) \
             .view(1, 1, 1, self.n_samples)
@@ -282,17 +291,25 @@ class DampedHarmonicOscillatorLookup(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch, n_events, expressivity, latent_dim = x.shape
 
-        mass = self.to_mass(x)
-        damping = self.to_damping(x)
-        tension = self.to_tension(x)
-        initial_displacement = self.to_initial_displacement(x)
-        amplitudes = self.to_amplitudes(x)
+        # gross and fiddly
+        mass = torch.sigmoid(self.to_mass(x) * 100)
+        damping = torch.sigmoid(self.to_damping(x) * 100) * 30
+        tension = 10 ** (4 + (torch.sigmoid(self.to_tension(x) * 100) * 5))
+        initial_displacement = self.to_initial_displacement(x) * 100
+        amplitudes = self.to_amplitudes(x) * 100
+
+        # print('=====================')
+        # print(mass.min().item(), mass.max().item())
+        # print(damping.min().item(), damping.max().item())
+        # print(tension.min().item(), tension.max().item())
+        # print(initial_displacement.min().item(), initial_displacement.max().item())
+        # print(amplitudes.min().item(), amplitudes.max().item())
 
         x = damped_harmonic_oscillator(
             time=self.time,
-            mass=torch.sigmoid(mass[..., None]),
-            damping=torch.sigmoid(damping[..., None]) * 30,
-            tension=10 ** tension[..., None],
+            mass=mass[..., None],
+            damping=damping[..., None],
+            tension=tension[..., None],
             initial_displacement=initial_displacement[..., None],
             initial_velocity=0
         )
@@ -303,9 +320,9 @@ class DampedHarmonicOscillatorLookup(nn.Module):
         x = x * amplitudes ** 2
         x = torch.sum(x, dim=-2)
 
-        ramp = torch.ones(self.n_samples, device=device)
-        ramp[:10] = torch.linspace(0, 1, 10, device=device)
-        x = x.view(batch, n_events, expressivity, self.n_samples) * ramp[None, None, None, :]
+        # ramp = torch.ones(self.n_samples, device=device)
+        # ramp[:10] = torch.linspace(0, 1, 10, device=device)
+        # x = x.view(batch, n_events, expressivity, self.n_samples) * ramp[None, None, None, :]
         x = unit_norm(x, dim=-1)
         return x
 
@@ -439,7 +456,6 @@ class SampleLookup(Lookup):
         if self.windowed:
             x = x * torch.hamming_window(x.shape[-1], device=x.device)
 
-        # TODO: Unit norm
         x = unit_norm(x)
         return x
 
@@ -1156,7 +1172,6 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
         verb_mix = torch.softmax(room_mix, dim=-1)[:, :, None, :]
         stacked = torch.stack([wet, final.view(*verb.shape)], dim=-1)
         stacked = stacked * verb_mix
-
         final = stacked.sum(dim=-1)
 
         intermediates['wet'] = final

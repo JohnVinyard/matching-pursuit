@@ -2,11 +2,11 @@ from typing import Tuple
 import torch
 from torch import nn
 
-from modules import stft, max_norm
+from modules import stft, unit_norm, flattened_multiband_spectrogram
 from modules.decompose import fft_resample
+from modules.overlap_add import overlap_add
 from modules.upsample import upsample_with_holes
 from util.overfit import overfit_model
-from torch.nn import functional as F
 
 
 def ensure_symmetric(x: torch.Tensor) -> None:
@@ -16,7 +16,7 @@ def ensure_symmetric(x: torch.Tensor) -> None:
 
 def sparse_forces(shape: Tuple, probability: float):
     sparse = torch.zeros(shape).bernoulli_(p=probability)
-    rand = torch.zeros(shape).uniform_(-0.001, 0.001)
+    rand = torch.zeros(shape).uniform_(-0.0001, 0.0001)
     return sparse * rand
 
 
@@ -30,7 +30,7 @@ def _torch_spring_mesh(
         mixer: torch.Tensor,
         constrained_mask: torch.Tensor,
         forces: torch.Tensor
-) -> torch.Tensor:
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     forces is (n_samples, n_nodes, dim) representing any outside forces applied to each
     node at each timestep
@@ -48,6 +48,7 @@ def _torch_spring_mesh(
 
     # initialize a vector to hold recorded samples from the simulation
     recording: torch.Tensor = torch.zeros(n_samples, device=node_positions.device)
+    node_forces: torch.Tensor = torch.zeros(n_samples, n_masses, device=node_positions.device)
 
     # first derivative of node displacement
     velocities = torch.zeros_like(node_positions)
@@ -86,6 +87,8 @@ def _torch_spring_mesh(
         node_positions = node_positions + (velocities * constrained_mask[..., None])
 
         f = m * accelerations
+        node_forces[t] = torch.sum(f, dim=-1)
+
         mixed = mixer @ f[:, 0]
 
         # recording[t] = velocities[32, 0]
@@ -94,8 +97,7 @@ def _torch_spring_mesh(
         # clear all the accumulated forces
         velocities = velocities * damping
 
-
-    return recording
+    return recording, node_forces
 
 
 def torch_spring_mesh(
@@ -108,15 +110,14 @@ def torch_spring_mesh(
         constrained_mask: torch.Tensor,
         forces: torch.Tensor,
         interpolate: int = 1):
-    recording = _torch_spring_mesh(
+    recording, node_forces = _torch_spring_mesh(
         node_positions, masses, tensions, damping, n_samples, mixer, constrained_mask, forces)
 
     if interpolate > 1:
-        # recording = F.interpolate(recording.view(1, 1, -1), scale_factor=interpolate, mode='linear')
         recording = fft_resample(recording.view(1, 1, -1), desired_size=n_samples * interpolate, is_lowest_band=True)
         recording = recording.view(-1)
 
-    return recording.view(1, 1, -1)
+    return recording.view(1, 1, -1), node_forces
 
 
 class Model(nn.Module):
@@ -126,7 +127,9 @@ class Model(nn.Module):
             n_nodes: int,
             node_dim: int,
             control_frame_rate: int,
-            n_samples: int):
+            n_samples: int,
+            n_filters: int = 64,
+            filter_latent_dim: int = 8):
         super().__init__()
 
         self.n_nodes = n_nodes
@@ -134,16 +137,26 @@ class Model(nn.Module):
         self.control_frame_rate = control_frame_rate
         self.n_samples = n_samples
         self.n_frames = n_samples // control_frame_rate
+        self.window_size = control_frame_rate * 2
+        self.n_filters = n_filters
+        self.filter_latent_dim = filter_latent_dim
+
+        self.n_coeffs = self.window_size // 2 + 1
+        self.ratio = int((self.n_frames / self.n_samples) * self.n_coeffs)
+
+        self.latents = nn.Parameter(torch.zeros(n_nodes, filter_latent_dim).uniform_(-1, 1))
+        self.filter_map = nn.Parameter(torch.zeros(filter_latent_dim, n_filters).uniform_(-1, 1))
+        self.filters = nn.Parameter(torch.zeros(n_filters, self.window_size).uniform_(-1, 1))
+        self.high_freq_factor = nn.Parameter(torch.zeros(n_nodes, 1).uniform_(-0.001, 0.001))
 
         self.nodes = nn.Parameter(torch.zeros(n_nodes, node_dim).uniform_(-1, 1))
         self.masses = nn.Parameter(torch.zeros(n_nodes, ).uniform_(15, 18))
-
         # TODO: There should be time-varying deformations applied to the tension
-
         self.tensions = nn.Parameter(torch.zeros(n_nodes, n_nodes).uniform_(10, 11))
 
         self.damping = 0.95
 
+        # How much does each mass contribute to the final recording?
         self.mixer = nn.Parameter(torch.zeros(n_nodes, ).uniform_(-0.1, 0.1))
 
         forces = sparse_forces((self.n_frames // 16, self.n_nodes, self.node_dim), probability=0.001)
@@ -176,8 +189,8 @@ class Model(nn.Module):
         x = x.permute(2, 0, 1)
         return x
 
-    def forward(self) -> torch.Tensor:
-        x = torch_spring_mesh(
+    def _forward(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        x, node_forces = torch_spring_mesh(
             node_positions=self.nodes,
             masses=torch.abs(self.masses) * 100 + 1e-8,
             tensions=torch.abs(self.symmetric_tensions) * 4 + 1e-8,
@@ -188,6 +201,40 @@ class Model(nn.Module):
             forces=self.interpolated_forces,
             interpolate=self.control_frame_rate
         )
+        return x, node_forces
+
+    def forward(self) -> torch.Tensor:
+        x, node_forces = self._forward()
+
+        # map the latents for each node to a linear combination of filteres
+        filter_choice = self.filter_map.T @ self.latents.T
+        filters = (self.filters.T @ filter_choice)
+
+        noise = torch.zeros(1, 1, self.n_nodes, self.n_frames, self.window_size, device=x.device).uniform_(-1, 1)
+        noise_spec = torch.fft.rfft(noise * torch.hamming_window(self.window_size, device=filters.device).view(1, 1, 1, 1, self.window_size), dim=-1)
+        filter_spec = torch.fft.rfft(
+            filters.view(1, 1, self.n_nodes, 1, self.window_size) \
+            * torch.hamming_window(self.window_size, device=noise_spec.device).view(1, 1, 1, 1, self.window_size), dim=-1)
+
+
+        conv = noise_spec * filter_spec
+
+        # ensure that the high-frequency filters don't overlap with the simulation frequency
+        conv[..., :self.ratio] = 0
+
+        conv = torch.fft.irfft(conv, dim=-1)
+        conv = unit_norm(conv, dim=-1)
+        conv = conv * self.high_freq_factor.view(1, 1, self.n_nodes, 1, 1) * node_forces.permute(0, 1).view(1, 1, self.n_nodes, -1, 1)
+        # print(conv.shape, node_forces.shape)
+
+
+        conv = overlap_add(conv.view(1, self.n_nodes, -1, self.window_size), apply_window=True)[..., : self.n_samples]
+        conv = torch.sum(conv, dim=1, keepdim=True)
+
+        x = x + conv
+        # print(self.latents.shape, node_forces.shape)
+        # filters = self.latents.T @ node_forces.T
+        # print(filters.shape)
         return x
 
 
@@ -203,7 +250,7 @@ if __name__ == '__main__':
     model = Model(
         n_nodes=128,
         node_dim=2,
-        control_frame_rate=16,
+        control_frame_rate=64,
         n_samples=n_samples
     )
 
