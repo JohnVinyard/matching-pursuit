@@ -15,6 +15,7 @@ class MultiHeadTransform(nn.Module):
             hidden_channels: int,
             shapes: ShapeSpec,
             n_layers: int,
+            do_weight_norm: bool = False,
     ):
         super().__init__()
 
@@ -31,7 +32,9 @@ class MultiHeadTransform(nn.Module):
                 layers=n_layers,
                 in_channels=latent_dim,
                 out_channels=np.prod(shapes[name]),
-                norm=lambda channels: nn.LayerNorm([channels,])
+                do_weight_norm=do_weight_norm,
+                norm=lambda channels: None
+                # norm=lambda channels: nn.LayerNorm([channels,])
             )
             for name, shape in shapes.items()
         }

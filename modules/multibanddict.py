@@ -24,8 +24,6 @@ def multiband_spectrogram(
 
     bands = fft_frequency_decompose(x, smallest_band_size)
 
-    # TODO: Add parameters for these values
-    # normal = stft(x, 2048, 256, pad=True).reshape(-1, 128, 1025).permute(0, 2, 1)
 
     accum = dict(
         # normal=normal
@@ -33,7 +31,7 @@ def multiband_spectrogram(
 
     for name, sizes in stft_spec.items():
         ws, step = sizes
-        d = {f'{k}_{name}': stft(v, ws, step, pad=True) / v.numel() if normalize else 1 for k, v in bands.items()}
+        d = {f'{k}_{name}': stft(v, ws, step, pad=True) / (v.numel() if normalize else 1) for k, v in bands.items()}
         accum = dict(**accum, **d)
 
 

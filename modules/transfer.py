@@ -22,13 +22,16 @@ def damped_harmonic_oscillator(
         tension: torch.Tensor,
         initial_displacement: torch.Tensor,
         initial_velocity: float,
+        do_clamp: bool = True
 ) -> torch.Tensor:
 
     x = (damping / (2 * mass))
 
-    # omega = torch.sqrt(torch.clamp(tension - (x ** 2), 1e-12, np.inf))
+    if do_clamp:
+        omega = torch.sqrt(torch.clamp(tension - (x ** 2), 1e-12, np.inf))
+    else:
+        omega = torch.sqrt(torch.abs(tension - (x ** 2)))
 
-    omega = torch.sqrt(torch.abs(tension - (x ** 2)))
 
     phi = torch.atan2(
         (initial_velocity + (x * initial_displacement)),

@@ -87,8 +87,8 @@ def loss_transform(x: torch.Tensor) -> torch.Tensor:
 
 
 def reconstruction_loss(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    a = stft(a, 2048, 256, pad=True)
-    b = stft(b, 2048, 256, pad=True)
+    a = loss_transform(a)
+    b = loss_transform(b)
     return torch.abs(a - b).sum()
 
 
@@ -166,6 +166,7 @@ class Model(nn.Module):
             hidden_channels=hidden_channels,
             n_layers=2,
             shapes=self.resonance.shape_spec,
+            do_weight_norm=True
         )
 
         # hang on to recent event vectors and use reservoir sampling
@@ -442,7 +443,7 @@ def train_and_monitor(
             noise_deformations=16,
             instr_expressivity=2,
             n_events=1,
-            n_resonances=4096,
+            n_resonances=512,
             n_envelopes=64,
             # n_decays=64,
             n_deformations=64,
@@ -525,6 +526,8 @@ def train_and_monitor(
             if torch.isnan(loss).any() or torch.isinf(loss).any():
                 print(f'Something wonky, skipping grad update')
                 optim.zero_grad()
+                torch.clear_autocast_cache()
+                torch.cuda.empty_cache()
                 continue
 
             scaler.scale(loss).backward()

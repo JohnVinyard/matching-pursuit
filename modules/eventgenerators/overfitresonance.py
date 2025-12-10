@@ -17,7 +17,7 @@ from modules.overlap_add import overlap_add
 from modules.phase import mag_phase_recomposition
 from modules.transfer import fft_convolve, make_waves_vectorized, freq_domain_transfer_function_to_resonance, fft_shift, \
     damped_harmonic_oscillator
-from modules.upsample import ensure_last_axis_length
+from modules.upsample import ensure_last_axis_length, upsample_with_holes
 from util import device
 
 
@@ -271,17 +271,25 @@ class DampedHarmonicOscillatorLookup(nn.Module):
         self.n_oscillators = n_oscillators
         self.n_resonances = n_resonances
 
+        self.n_coeffs = n_samples // 2 + 1
+        self.total_coeffs = self.n_coeffs * 2
+
+        # self.to_res = nn.Linear(latent_dim, self.total_coeffs)
+
         m = weight_norm(nn.Linear(latent_dim, n_oscillators))
         d = weight_norm(nn.Linear(latent_dim, n_oscillators))
         t = weight_norm(nn.Linear(latent_dim, n_oscillators))
         i = weight_norm(nn.Linear(latent_dim, n_oscillators))
         a = weight_norm(nn.Linear(latent_dim, n_oscillators))
 
+
         self.to_mass = m
         self.to_damping = d
         self.to_tension = t
         self.to_initial_displacement = i
         self.to_amplitudes = a
+
+
 
 
         time = torch.linspace(0, 10, self.n_samples, device=device) \
@@ -291,12 +299,20 @@ class DampedHarmonicOscillatorLookup(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch, n_events, expressivity, latent_dim = x.shape
 
+        # coeffs = self.to_res(x).view(batch, n_events, expressivity, self.n_coeffs, 2)
+        # coeffs = torch.view_as_complex(coeffs)
+        # coeffs = torch.fft.irfft(coeffs).view(batch, n_events, expressivity, self.n_samples)
+        # return coeffs
+
+
         # gross and fiddly
         mass = torch.sigmoid(self.to_mass(x) * 100)
         damping = torch.sigmoid(self.to_damping(x) * 100) * 30
-        tension = 10 ** (4 + (torch.sigmoid(self.to_tension(x) * 100) * 5))
+        tension = 10 ** (torch.sigmoid(self.to_tension(x) * 100) * 9)
         initial_displacement = self.to_initial_displacement(x) * 100
         amplitudes = self.to_amplitudes(x) * 100
+
+        # print(mass, tension)
 
         # print('=====================')
         # print(mass.min().item(), mass.max().item())
@@ -311,13 +327,14 @@ class DampedHarmonicOscillatorLookup(nn.Module):
             damping=damping[..., None],
             tension=tension[..., None],
             initial_displacement=initial_displacement[..., None],
-            initial_velocity=0
+            initial_velocity=0,
+            do_clamp=False
         )
 
         amplitudes = amplitudes.view(batch, n_events, expressivity, self.n_oscillators, 1)
 
         x = x.view(batch, n_events, expressivity, self.n_oscillators, self.n_samples)
-        x = x * amplitudes ** 2
+        x = torch.tanh(x * amplitudes)
         x = torch.sum(x, dim=-2)
 
         # ramp = torch.ones(self.n_samples, device=device)
@@ -539,14 +556,12 @@ class Envelopes(Lookup):
 
         # amp = sparsify(envelope, n_to_keep=64)
         amp = interpolate_last_axis(amp, desired_size=self.full_size)
+        # amp = upsample_with_holes(amp, desired_size=self.full_size)
 
         if self.with_noise:
             amp = amp * torch.zeros_like(amp).uniform_(-1, 1)
 
         amp = ensure_last_axis_length(amp, self.padded_size)
-        # diff = self.padded_size - self.full_size
-        # padding = torch.zeros((amp.shape[:-1] + (diff,)), device=amp.device)
-        # amp = torch.cat([amp, padding], dim=-1)
         return amp
 
 

@@ -46,21 +46,21 @@ class Layer(nn.Module):
         super().__init__()
         # ln = weight_norm(nn.Linear(in_channels, out_channels, bias=True))
         # self.mn = ln
-        # self.mn = nn.Linear(in_channels, out_channels)
-        self.mn = nn.Parameter(torch.zeros(in_channels, out_channels))
+        self.mn = nn.Linear(in_channels, out_channels)
+        # self.mn = nn.Parameter(torch.zeros(in_channels, out_channels))
 
-    def perturbed_weights(self) -> torch.Tensor:
-        return torch.zeros_like(self.mn).normal_(self.mn.mean().item(), self.mn.std().item())
+    # def perturbed_weights(self) -> torch.Tensor:
+    #     return torch.zeros_like(self.mn).normal_(self.mn.mean().item(), self.mn.std().item())
 
     def forward(self, x: torch.Tensor, perturb_weights: bool = False) -> torch.Tensor:
         skip = x
-        # x = self.mn(x)
+        x = self.mn(x)
 
-        if perturb_weights:
-            pw = self.perturbed_weights()
-            x = pw @ x
-        else:
-            x = self.mn @ x
+        # if perturb_weights:
+        #     pw = self.perturbed_weights()
+        #     x = pw @ x
+        # else:
+        #     x = self.mn @ x
 
         # if  is None:
         #     x = self.mn @ x
