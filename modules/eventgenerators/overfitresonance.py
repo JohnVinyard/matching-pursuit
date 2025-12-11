@@ -274,7 +274,8 @@ class DampedHarmonicOscillatorLookup(nn.Module):
         self.n_coeffs = n_samples // 2 + 1
         self.total_coeffs = self.n_coeffs * 2
 
-        # self.to_res = nn.Linear(latent_dim, self.total_coeffs)
+        # tr = weight_norm(nn.Linear(latent_dim, self.total_coeffs))
+        # self.to_res = tr
 
         m = weight_norm(nn.Linear(latent_dim, n_oscillators))
         d = weight_norm(nn.Linear(latent_dim, n_oscillators))
@@ -306,11 +307,11 @@ class DampedHarmonicOscillatorLookup(nn.Module):
 
 
         # gross and fiddly
-        mass = torch.sigmoid(self.to_mass(x) * 100)
-        damping = torch.sigmoid(self.to_damping(x) * 100) * 30
-        tension = 10 ** (torch.sigmoid(self.to_tension(x) * 100) * 9)
-        initial_displacement = self.to_initial_displacement(x) * 100
-        amplitudes = self.to_amplitudes(x) * 100
+        mass = torch.sigmoid(self.to_mass(x)) * 2
+        damping = torch.sigmoid(self.to_damping(x)) * 30
+        tension = 10 ** (torch.sigmoid(self.to_tension(x) ) * 9)
+        initial_displacement = self.to_initial_displacement(x) * 10
+        amplitudes = self.to_amplitudes(x) * 10
 
         # print(mass, tension)
 
@@ -328,7 +329,7 @@ class DampedHarmonicOscillatorLookup(nn.Module):
             tension=tension[..., None],
             initial_displacement=initial_displacement[..., None],
             initial_velocity=0,
-            do_clamp=False
+            do_clamp=True
         )
 
         amplitudes = amplitudes.view(batch, n_events, expressivity, self.n_oscillators, 1)
@@ -340,7 +341,7 @@ class DampedHarmonicOscillatorLookup(nn.Module):
         # ramp = torch.ones(self.n_samples, device=device)
         # ramp[:10] = torch.linspace(0, 1, 10, device=device)
         # x = x.view(batch, n_events, expressivity, self.n_samples) * ramp[None, None, None, :]
-        x = unit_norm(x, dim=-1)
+        # x = unit_norm(x, dim=-1)
         return x
 
 
@@ -1002,7 +1003,7 @@ class OverfitResonanceModel(nn.Module, EventGenerator):
             self.r = FFTResonanceLookup(n_resonances, n_samples, 2048, base_resonance=0.02)
         else:
             self.r = DampedHarmonicOscillatorLookup(
-                latent_dim=self.n_resonances, n_samples=n_samples, n_oscillators=32, n_resonances=n_resonances)
+                latent_dim=self.n_resonances, n_samples=n_samples, n_oscillators=16, n_resonances=n_resonances)
 
 
         # TODO: This is an issue because we have gradients for every sample, even though

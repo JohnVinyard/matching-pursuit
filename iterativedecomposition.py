@@ -441,7 +441,7 @@ def train_and_monitor(
             noise_expressivity=2,
             noise_filter_samples=128,
             noise_deformations=16,
-            instr_expressivity=2,
+            instr_expressivity=4,
             n_events=1,
             n_resonances=512,
             n_envelopes=64,
