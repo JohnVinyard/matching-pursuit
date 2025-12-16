@@ -140,7 +140,7 @@ class DampedHarmonicOscillatorBlock(nn.Module):
 
         x = damped_harmonic_oscillator(
             time=time,
-            mass=torch.sigmoid(self.mass[..., None]),
+            mass=torch.sigmoid(self.mass[..., None]) * 2,
             damping=torch.sigmoid(self.damping[..., None]) * 30,
             tension=10 ** self.tension[..., None],
             initial_displacement=self.initial_displacement[..., None],
@@ -148,7 +148,7 @@ class DampedHarmonicOscillatorBlock(nn.Module):
         )
 
         x = x.view(self.n_oscillators, self.n_resonances, self.expressivity, self.n_samples)
-        x = x * self.amplitudes ** 2
+        x = torch.tanh(x * self.amplitudes)
         x = torch.sum(x, dim=0)
 
         return x.view(1, 1, self.n_resonances, self.expressivity, self.n_samples) #* ramp[None, None, None, None, :]

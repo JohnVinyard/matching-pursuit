@@ -166,7 +166,7 @@ class Model(nn.Module):
             hidden_channels=hidden_channels,
             n_layers=2,
             shapes=self.resonance.shape_spec,
-            do_weight_norm=True
+            # do_weight_norm=True
         )
 
         # hang on to recent event vectors and use reservoir sampling
@@ -441,9 +441,9 @@ def train_and_monitor(
             noise_expressivity=2,
             noise_filter_samples=128,
             noise_deformations=16,
-            instr_expressivity=4,
+            instr_expressivity=8,
             n_events=1,
-            n_resonances=512,
+            n_resonances=256,
             n_envelopes=64,
             # n_decays=64,
             n_deformations=64,

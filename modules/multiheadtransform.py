@@ -3,7 +3,7 @@ from typing import Dict, Tuple, Union
 import torch
 import numpy as np
 
-from modules import LinearOutputStack
+from modules import LinearOutputStack, UnitNorm
 from modules.eventgenerators.generator import ShapeSpec
 
 
@@ -33,8 +33,8 @@ class MultiHeadTransform(nn.Module):
                 in_channels=latent_dim,
                 out_channels=np.prod(shapes[name]),
                 do_weight_norm=do_weight_norm,
-                norm=lambda channels: None
-                # norm=lambda channels: nn.LayerNorm([channels,])
+                # norm=lambda channels: None
+                norm=lambda channels: UnitNorm(axis=-1)
             )
             for name, shape in shapes.items()
         }

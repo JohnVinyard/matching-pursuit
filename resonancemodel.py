@@ -10,6 +10,8 @@ while the two factors together constitute a (lossy) compressive and interpretabl
 To make this more concrete, here's a video of me using a learned instrument to produce a new audio segment via a
 hand-tracking interface.
 """
+from torch.nn.utils import weight_norm
+
 from modules.infoloss import CorrelationLoss
 from spiking import SpikingModel, AutocorrelationLoss
 
@@ -174,7 +176,7 @@ from conjure import serve_conjure, SupportedContentType, NumpyDeserializer, Nump
     VideoComponent, ImageComponent
 from data import get_one_audio_segment
 from modules import max_norm, interpolate_last_axis, sparsify, unit_norm, stft, flattened_multiband_spectrogram
-from modules.transfer import fft_convolve
+from modules.transfer import fft_convolve, damped_harmonic_oscillator
 from modules.upsample import upsample_with_holes, ensure_last_axis_length
 from util import device, encode_audio, make_initializer
 import argparse
@@ -199,7 +201,8 @@ n_resonances = 16
 expressivity = 2
 n_to_keep = 32
 do_sparsify = False
-sparsity_coefficient = 0.000001
+# sparsity_coefficient = 0.000001
+sparsity_coefficient = 0.001
 n_oscillators = 64
 
 attack_full_size = 2048
@@ -338,34 +341,57 @@ def execute_layer(
     return summed, before_upsample, cs
 
 
-@torch.jit.script
-def damped_harmonic_oscillator(
-        time: torch.Tensor,
-        mass: torch.Tensor,
-        damping: torch.Tensor,
-        tension: torch.Tensor,
-        initial_displacement: torch.Tensor,
-        initial_velocity: float,
-) -> torch.Tensor:
-    x = (damping / (2 * mass))
+# @torch.jit.script
+# def damped_harmonic_oscillator(
+#         time: torch.Tensor,
+#         mass: torch.Tensor,
+#         damping: torch.Tensor,
+#         tension: torch.Tensor,
+#         initial_displacement: torch.Tensor,
+#         initial_velocity: float,
+# ) -> torch.Tensor:
+#     x = (damping / (2 * mass))
+#
+#     # if torch.isnan(x).sum() > 0:
+#     #     print('x first appearance of NaN')
+#
+#     omega = torch.sqrt(torch.clamp(tension - (x ** 2), 1e-12, np.inf))
+#
+#     # if torch.isnan(omega).sum() > 0:
+#     #     print('omega first appearance of NaN')
+#
+#     phi = torch.atan2(
+#         (initial_velocity + (x * initial_displacement)),
+#         (initial_displacement * omega)
+#     )
+#     a = initial_displacement / torch.cos(phi)
+#
+#     z = a * torch.exp(-x * time) * torch.cos(omega * time - phi)
+#     return z
 
-    # if torch.isnan(x).sum() > 0:
-    #     print('x first appearance of NaN')
 
-    omega = torch.sqrt(torch.clamp(tension - (x ** 2), 1e-12, np.inf))
+class FFTResonanceBlock(nn.Module):
+    def __init__(self, n_samples: int, n_oscillators: int, n_resonances: int, expressivity: int):
+        super().__init__()
+        self.n_samples = n_samples
+        self.n_oscillators = n_oscillators
+        self.n_resonances = n_resonances
+        self.expressivity = expressivity
 
-    # if torch.isnan(omega).sum() > 0:
-    #     print('omega first appearance of NaN')
+        self.n_coeffs = n_samples // 2 + 1
+        self.total_coeffs = self.n_coeffs * 2
 
-    phi = torch.atan2(
-        (initial_velocity + (x * initial_displacement)),
-        (initial_displacement * omega)
-    )
-    a = initial_displacement / torch.cos(phi)
+        latent_dim = 8
+        self.latents = nn.Parameter(torch.zeros(n_resonances, expressivity, latent_dim).uniform_(-1, 1))
+        tr = weight_norm(nn.Linear(latent_dim, self.total_coeffs))
+        self.to_res = tr
 
-    z = a * torch.exp(-x * time) * torch.cos(omega * time - phi)
-    return z
-
+    def forward(self) -> torch.Tensor:
+        coeffs = self.to_res(self.latents).view(1, self.n_resonances, self.expressivity, self.n_coeffs, 2)
+        coeffs = torch.view_as_complex(coeffs)
+        coeffs = torch.fft.irfft(coeffs).view(1, 1, self.n_resonances, self.expressivity, self.n_samples)
+        coeffs = unit_norm(coeffs)
+        return coeffs
 
 class DampedHarmonicOscillatorBlock(nn.Module):
     def __init__(
@@ -406,15 +432,16 @@ class DampedHarmonicOscillatorBlock(nn.Module):
 
         x = damped_harmonic_oscillator(
             time=time,
-            mass=torch.sigmoid(self.mass[..., None]),
+            mass=torch.sigmoid(self.mass[..., None]) * 2,
             damping=torch.sigmoid(self.damping[..., None]) * 30,
             tension=10 ** self.tension[..., None],
             initial_displacement=self.initial_displacement[..., None],
-            initial_velocity=0
+            initial_velocity=0,
+            do_clamp=False
         )
 
         x = x.view(self.n_oscillators, self.n_resonances, self.expressivity, self.n_samples)
-        x = x * self.amplitudes ** 2
+        x = torch.tanh(x * self.amplitudes)
         x = torch.sum(x, dim=0)
 
         # ramp = make_ramp(self.n_samples, ramp_length=10, device=x.device)
@@ -460,6 +487,8 @@ class ResonanceLayer(nn.Module):
         self.resonance = DampedHarmonicOscillatorBlock(
             n_samples, n_oscillators, n_resonances, expressivity
         )
+
+        # self.resonance = FFTResonanceBlock(n_samples, n_oscillators, n_resonances, expressivity)
 
         self.mix = nn.Parameter(torch.zeros(self.n_resonances, 2).uniform_(-1, 1))
 
@@ -775,8 +804,8 @@ class OverfitModelResult:
 
 
 def transform(x: torch.Tensor) -> torch.Tensor:
-    # return stft(x, 2048, 256, pad=True)
-    return flattened_multiband_spectrogram(x, {'xs': (64, 16)}, normalize=True)
+    return stft(x, 2048, 256, pad=True)
+    # return flattened_multiband_spectrogram(x, {'xs': (64, 16)}, normalize=True)
 
 
 def l0_norm(x: torch.Tensor):

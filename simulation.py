@@ -200,7 +200,7 @@ class Model(nn.Module):
     def _forward(self) -> Tuple[torch.Tensor, torch.Tensor]:
         x, node_forces = torch_spring_mesh(
             node_positions=self.nodes,
-            masses=torch.abs(self.masses) * 100 + 1e-8,
+            masses=torch.abs(self.masses) * 10000 + 1e-8,
             tensions=torch.abs(self.symmetric_tensions) * 4 + 1e-8,
             damping=self.damping,
             n_samples=self.n_frames,
@@ -256,11 +256,11 @@ if __name__ == '__main__':
     n_samples = 2 ** 15
 
     model = Model(
-        n_nodes=128,
+        n_nodes=512,
         node_dim=2,
         control_frame_rate=32,
         n_filters=128,
-        filter_latent_dim=64,
+        filter_latent_dim=8,
         n_samples=n_samples
     )
 
