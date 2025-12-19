@@ -30,10 +30,16 @@ def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
+
 def transform(x: torch.Tensor) -> torch.Tensor:
     # return flattened_multiband_spectrogram(x, {'sm': (64, 16)})
     return stft(x, 2048, 256, pad=True)
 
+
+def reconstruction_loss(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    a = transform(a)
+    b = transform(b)
+    return torch.abs(a - b).sum()
 
 def nearest_power_of_two(n: float) -> int:
     x = np.log2(n)
@@ -514,7 +520,8 @@ def train(
 
         # iterative loss seems to be important for producing
         # playable events
-        l = iterative_loss(samples, recon, transform, ratio_loss=False, sort_channels=True)
+        # l = iterative_loss(samples, recon, transform, ratio_loss=False, sort_channels=True)
+        l = reconstruction_loss(samples, recon)
         l.backward()
         optim.step()
         print(i, l.item(),

@@ -14,12 +14,13 @@ from modules.infoloss import CorrelationLoss
 from modules.overlap_add import overlap_add
 from util import encode_audio, make_initializer, device
 from torch.nn.utils.parametrizations import weight_norm
+from torch.nn import functional as F
 
 collection = LmdbCollection('funcsong')
 from copy import deepcopy
 DatasetBatch = Tuple[torch.Tensor, torch.Tensor, int]
 
-init = make_initializer(0.05)
+init = make_initializer(0.02)
 
 
 # thanks to https://discuss.pytorch.org/t/how-do-i-check-the-number-of-parameters-of-a-model/4325/9
@@ -36,7 +37,7 @@ def transform(x: torch.Tensor) -> torch.Tensor:
 def loss(recon: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     r = transform(recon)
     t = transform(target)
-    l = torch.abs(r - t).sum()
+    l = ((r - t) ** 2).mean()
     return l
 
 
@@ -66,7 +67,10 @@ class Layer(nn.Module):
         #     x = self.mn @ x
         # else:
         #     x = alternate_weights @ x
-        x = torch.selu(x)
+        # x = torch.selu(x)
+        # x = F.leaky_relu(x, 0.2)
+        # x = torch.sin(x * 30)
+        x = torch.tanh(x)
         x = x + skip
         return x
 
@@ -82,17 +86,21 @@ class Network(nn.Module):
         super().__init__()
 
         self.window_size = window_size
-        self.step_size = window_size // 2
-        self.n_coeffs = window_size // 2 + 1
+
         self.n_samples = n_samples
         self.n_layers = n_layers
 
         self.input = nn.Linear(in_channels, hidden_channels, bias=True)
         # self.network = nn.Sequential(*[Layer(hidden_channels, hidden_channels) for _ in range(n_layers)])
         self.network = nn.ModuleList([Layer(hidden_channels, hidden_channels) for _ in range(n_layers)])
-        self.output = nn.Linear(hidden_channels, self.n_coeffs * 2, bias=False)
+        if window_size > 1:
+            self.step_size = window_size // 2
+            self.n_coeffs = window_size // 2 + 1
+            self.output = nn.Linear(hidden_channels, self.n_coeffs * 2, bias=False)
+        else:
+            self.output = nn.Linear(hidden_channels, 1, bias=False)
 
-        self.apply(init)
+        # self.apply(init)
 
 
     def forward(self, x: torch.Tensor, perturbed_layer: int = None) -> torch.Tensor:
@@ -105,10 +113,14 @@ class Network(nn.Module):
             x = layer(x, i == perturbed_layer)
 
         x = self.output(x)
-        x = x.view(batch, frames, self.n_coeffs, 2)
-        x = torch.view_as_complex(x)
-        x = torch.fft.irfft(x, dim=-1, norm='ortho')
-        x = overlap_add(x[:, None, :, :], apply_window=True, trim=self.n_samples)
+        if self.window_size > 1:
+            x = x.view(batch, frames, self.n_coeffs, 2)
+            x = torch.view_as_complex(x)
+            x = torch.fft.irfft(x, dim=-1, norm='ortho')
+            x = overlap_add(x[:, None, :, :], apply_window=True, trim=self.n_samples)
+        else:
+            x = x.view(batch, 1, -1)
+
         return x
 
 
@@ -149,7 +161,7 @@ def dataset(
     samples = get_samples(path, 22050)
     n_samples = len(samples)
 
-    step_size = window_size // 2
+    step_size = int(np.ceil(window_size / 2))
     n_frames = n_samples // step_size
     n_segment_frames = n_segment_samples // step_size
 
@@ -191,20 +203,20 @@ def train(
         encode_audio,
         collection)
 
-    encoding, = loggers(
-        ['encoding'],
-        SupportedContentType.Spectrogram.value,
-        to_numpy,
-        collection,
-        NumpySerializer(),
-        NumpyDeserializer())
+    # encoding, = loggers(
+    #     ['encoding'],
+    #     SupportedContentType.Spectrogram.value,
+    #     to_numpy,
+    #     collection,
+    #     NumpySerializer(),
+    #     NumpyDeserializer())
 
     serve_conjure([
         orig_audio,
         recon_audio,
         perturbed,
-        encoding
-    ], port=9999, n_workers=1)
+        # encoding
+    ], port=9999, n_workers=1, web_components_version='0.0.101')
 
     model = Network(
         in_channels=n_pos_encoding_channels,
@@ -216,6 +228,8 @@ def train(
 
     model_params = count_parameters(model)
 
+    loss_model = CorrelationLoss().to(device)
+
     for i, pair in enumerate(dataset(
             path=path,
             device=device,
@@ -225,7 +239,7 @@ def train(
             batch_size=batch_size)):
         pos, samples, total_samples = pair
 
-        encoding(pos[0])
+        # encoding(pos[0])
 
         # log original audio
         orig_audio(max_norm(samples))
@@ -240,7 +254,8 @@ def train(
         # log recon audio
         recon_audio(max_norm(recon))
 
-        l = loss(recon, samples)
+        # l = loss(recon, samples)
+        l = loss_model.multiband_noise_loss(samples, recon, 64, 16)
         l.backward()
         optim.step()
         print(i, l.item(), f'Compression Ratio: {(model_params / total_samples):.2f}')
@@ -256,7 +271,7 @@ if __name__ == '__main__':
         torch.device('cuda'),
         n_segment_samples=2 ** 16,
         window_size=1024,
-        n_pos_encoding_channels=4096,
+        n_pos_encoding_channels=2048,
         hidden_channels=128,
         n_layers=4,
         batch_size=32)

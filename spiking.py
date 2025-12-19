@@ -7,8 +7,6 @@ from torch.optim import Adam
 
 from data import get_one_audio_segment, AudioIterator
 from modules import gammatone_filter_bank, max_norm, unit_norm, fft_frequency_decompose, stft, sparsify
-from modules.anticausal import AntiCausalAnalysis
-from modules.infoloss import CorrelationLoss
 from modules.mixer import MixerStack
 from modules.overfitraw import OverfitRawAudio
 from modules.overlap_add import overlap_add
@@ -16,8 +14,6 @@ from modules.transfer import fft_convolve
 from conjure import LmdbCollection, Logger, loggers, serve_conjure
 from util import device, encode_audio, make_initializer
 from itertools import count
-from torch.nn.utils.clip_grad import clip_grad_norm_, clip_grad_value_
-from torch.nn.utils import weight_norm
 
 import matplotlib
 
@@ -327,15 +323,16 @@ class SpikingModel(nn.Module):
         # TODO: Figure out mask here
 
         # compute periodicity
-        # y = F.pad(y, (0, self.periodicity_size // 4))
-        # y = y.unfold(-1, self.periodicity_size, self.periodicity_size // 4)
-        # y = torch.abs(torch.fft.rfft(y, dim=-1))
+        y = F.pad(y, (0, self.periodicity_size // 4))
+        y = y.unfold(-1, self.periodicity_size, self.periodicity_size // 4)
+        y = torch.abs(torch.fft.rfft(y, dim=-1))
 
         #
         # y = y - torch.mean(y, dim=-1, keepdim=True)
         # y = y[:, :, 1:, :] - y[:, :, :-1, :]
 
         # y = torch.relu(y)
+
         #
         # fwd = (y > 0).float()
         # back = y
@@ -555,14 +552,9 @@ def overfit_model():
         memory_size=64,
         frame_memory_size=64).to(device)
 
-    # ae = AutoEncoder(2048, 256, 32).to(device)
-
-    # loss_model = AutocorrelationLoss(n_channels=64, filter_size=64).to(device)
-
-    loss_model = HyperDimensionalLoss().to(device)
 
     overfit_model = OverfitRawAudio(target.shape, std=0.01, normalize=True).to(device)
-    optim = Adam(overfit_model.parameters(), lr=1e-3)
+    optim = Adam(overfit_model.parameters(), lr=1e-2)
 
     collection = LmdbCollection('spiking')
 
