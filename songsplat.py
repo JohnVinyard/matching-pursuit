@@ -405,7 +405,7 @@ class Model(nn.Module):
 @numpy_conjure(collection)
 def get_samples(path: str, samplerate: int) -> np.ndarray:
     samples, sr = librosa.load(path, sr=samplerate, mono=True)
-    return samples[:2**19]
+    return samples[:]
 
 
 def dataset(

@@ -3,13 +3,11 @@ import numpy as np
 import torch
 from torch import nn
 
-from freqdomain import fft_shift
-from modules import unit_norm, stft
+from modules import unit_norm, stft, fft_frequency_recompose, flattened_multiband_spectrogram
 from modules.transfer import fft_convolve, hierarchical_dirac
 from modules.upsample import ensure_last_axis_length
 from util import device, make_initializer
 from util.overfit import overfit_model
-
 
 init = make_initializer(0.02)
 
@@ -29,7 +27,7 @@ class Splitter(nn.Module):
         batch, n_events, latent_dim = x.shape
 
         to = self.to_time_offset(x).view(batch, n_events, -1, self.time_dim, 2)
-        offsets = base_time.view(batch, n_events, 1, -1, 2) + (to * self.scale)
+        offsets = (base_time.view(batch, n_events, 1, -1, 2) * 1) + (to * self.scale)
         offsets = offsets.view(batch, n_events * self.branching_factor, self.time_dim, 2)
 
         split = self.split(x) * self.scale
@@ -46,6 +44,7 @@ class Model(nn.Module):
             n_events: int = 128,
             n_atoms: int = 32,
             atom_size: int = 512,
+            smallest_atom_size: int = 8,
             latent_dim: int = 16):
         super().__init__()
         self.n_samples = n_samples
@@ -56,9 +55,19 @@ class Model(nn.Module):
 
         self.total_layers = int(np.log2(n_events))
 
+        # self.smallest_size = 4
+        # self.smallest = int(np.log2(self.smallest_size))
+
         self.time_dim = int(np.log2(n_samples))
 
-        self.base_latent = nn.Parameter(torch.zeros(1, latent_dim).uniform_(-1, 1))
+        # the "root" latent
+        self.base_latent = nn.Parameter(torch.zeros(1, latent_dim).uniform_(-0.01, 0.01))
+
+        start_log = int(np.log2(smallest_atom_size))
+        end_log = int(np.log2(atom_size))
+
+        self.maps = nn.ModuleDict(
+            {str(2 ** i): nn.Linear(latent_dim, self.n_atoms) for i in range(start_log, end_log)})
 
         self.layers = nn.ModuleList([
             Splitter(
@@ -68,19 +77,33 @@ class Model(nn.Module):
                 scale=1) for i in range(self.total_layers)
         ])
 
-        self.atoms = nn.Parameter(torch.zeros(n_atoms, atom_size).uniform_(-0.01, 0.01))
-        self.to_atoms = nn.Linear(latent_dim, n_atoms)
+        self.atoms = nn.ParameterDict({
+            str(2 ** i): nn.Parameter(torch.zeros(n_atoms, 2 ** i).uniform_(-0.01, 0.01))
+            for i in range(start_log, end_log)
+        })
+
+        # self.atoms = nn.Parameter(torch.zeros(n_atoms, atom_size).uniform_(-1, 1))
+        # self.to_atoms = nn.Linear(latent_dim, n_atoms)
         self.to_amp = nn.Linear(latent_dim, 1)
 
         self.apply(init)
 
     def _to_atoms(self, latents: torch.Tensor) -> torch.Tensor:
-        atoms = self.to_atoms(latents)
-        atoms = atoms @ self.atoms
+        # atoms = self.to_atoms(latents)
+        # atoms = atoms @ self.atoms
+
+        atoms_dict = {int(size): layer.forward(latents) @ self.atoms[size] for size, layer in self.maps.items()}
+        # for k, v in atoms_dict.items():
+        #     print(k, v.shape)
+
+        atoms = fft_frequency_recompose(atoms_dict, desired_size=self.atom_size)
+
         window = torch.hamming_window(self.atom_size, device=latents.device)
         atoms = atoms * window
+        # print(atoms.shape)
+
         atoms = ensure_last_axis_length(atoms, self.n_samples)
-        atoms = unit_norm(atoms)
+        # atoms = unit_norm(atoms)
         return atoms
 
     def forward(self) -> torch.Tensor:
@@ -94,13 +117,14 @@ class Model(nn.Module):
             base_times, x = layer.forward(x, base_times)
 
         atoms = self._to_atoms(x)
+
         amps = self.to_amp(x)
         atoms = atoms * amps
 
         base_times = base_times.view(batch, self.n_events, self.time_dim, 2)
 
         scheduled = hierarchical_dirac(base_times, soft=False)
-        scheduled = scheduled.view(batch, -1, self.n_samples)
+        scheduled = scheduled.reshape(batch, -1, self.n_samples)
         scheduled = fft_convolve(atoms, scheduled)
 
         scheduled = torch.sum(scheduled, dim=1, keepdim=True)
@@ -108,19 +132,22 @@ class Model(nn.Module):
 
 
 def loss_func(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    a = stft(a, 2048, 256, pad=True)
-    b = stft(b, 2048, 256, pad=True)
+    # a = stft(a, 2048, 256, pad=True)
+    a = flattened_multiband_spectrogram(a, {'xs': (64, 16)}, smallest_band_size=512)
+    b = flattened_multiband_spectrogram(b, {'xs': (64, 16)}, smallest_band_size=512)
+    # b = stft(b, 2048, 256, pad=True)
     return torch.abs(a - b).sum()
 
 
 def overfit():
-    n_samples = 2 ** 16
+    n_samples = 2 ** 17
 
     model = Model(
         n_samples=n_samples,
-        n_events=64,
+        n_events=128,
         n_atoms=128,
         atom_size=1024,
+        smallest_atom_size=32,
         latent_dim=16
     ).to(device)
 

@@ -72,27 +72,37 @@ def unit_norm(x: torch.Tensor, dim: int=-1, epsilon: float=1e-8):
     return x / (n + epsilon)
 
 def goo():
-    dimension = 512
+    dimension = 64
     home = torch.zeros(dimension)
     mass = torch.zeros(1).uniform_(1000, 10000)
-    tension = torch.zeros(dimension).uniform_(20, 1000)
-    position = torch.zeros(dimension).uniform_(-1, 1)
+    tension = torch.zeros(dimension).uniform_(20, 30)
+    position = torch.zeros(dimension)
 
     n_samples = 2 ** 18
-    # forces = torch.zeros(n_samples, dimension)
-    # forces[0, :] = torch.zeros(dimension).uniform_(-0.02, 0.02)
+
+
+    forces = torch.zeros(n_samples, dimension)
+    forces[8192, :] = torch.zeros(dimension).uniform_(-0.02, 0.02)
+    forces[8192 * 5, :] = torch.zeros(dimension).uniform_(-0.03, 0.03)
+
     mic = unit_norm(torch.zeros(dimension).uniform_(-1, 1))
     recording = torch.zeros(n_samples, 1)
     damping = 0.9998
     velocity = torch.zeros(dimension)
 
+    gain = torch.zeros(dimension).uniform_(0.1, 100)
+
+    # gain = torch.zeros(dimension).uniform_(0.01, 0.1)
+
     for i in range(n_samples):
         direction = home - position
-        acc = (tension * direction) / mass
+        acc = forces[i, :] + ((tension * direction) / mass)
         velocity += acc
         velocity *= damping
         position += velocity
-        recording[i] = velocity @ mic
+
+        # TODO: This needs to be applied as part of the simulation
+        recording[i] = torch.tanh(velocity * gain) @ mic
 
     return recording
 

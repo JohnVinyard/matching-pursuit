@@ -75,7 +75,7 @@ scales with the length of the audio segment, but the model of the resonances doe
 We fit the model using a simple, L1 loss on a multi-resolution short-time fourier transform of the target and reconstruction.  
 I have a strong intuition that a more perceptually-informed loss would work better, and require even _less_ overall 
 model capacity, but that's an experiment for another day!
-
+https://resonancemodel.s3.amazonaws.com/resonancemodelparams_edf586c557f7e829549d57e5e95e3dcf8388e8a0
 We encourage sparsity in the control signal with an addition L1 loss on control signal magnitudes, pushing most entries
 to zero.  We hope that the model will rely heavily on resonances in the object, rather than a high-energy, busy control
 signal.
@@ -176,7 +176,7 @@ from conjure import serve_conjure, SupportedContentType, NumpyDeserializer, Nump
     VideoComponent, ImageComponent
 from data import get_one_audio_segment
 from modules import max_norm, interpolate_last_axis, sparsify, unit_norm, stft, flattened_multiband_spectrogram
-from modules.transfer import fft_convolve, damped_harmonic_oscillator
+from modules.transfer import fft_convolve, damped_harmonic_oscillator, freq_domain_transfer_function_to_resonance
 from modules.upsample import upsample_with_holes, ensure_last_axis_length
 from util import device, encode_audio, make_initializer
 import argparse
@@ -369,29 +369,116 @@ def execute_layer(
 #     z = a * torch.exp(-x * time) * torch.cos(omega * time - phi)
 #     return z
 
-
 class FFTResonanceBlock(nn.Module):
-    def __init__(self, n_samples: int, n_oscillators: int, n_resonances: int, expressivity: int):
+    def __init__(
+            self,
+            n_samples: int,
+            resonance_window_size: int,
+            n_resonances: int,
+            expressivity: int,
+            base_resonance: float = 0.5):
         super().__init__()
         self.n_samples = n_samples
-        self.n_oscillators = n_oscillators
+        self.resonance_window_size = resonance_window_size
         self.n_resonances = n_resonances
         self.expressivity = expressivity
+        self.base_resonance = base_resonance
 
-        self.n_coeffs = n_samples // 2 + 1
-        self.total_coeffs = self.n_coeffs * 2
+        resonance_coeffs = resonance_window_size // 2 + 1
+        self.n_coeffs = resonance_coeffs
 
-        latent_dim = 8
-        self.latents = nn.Parameter(torch.zeros(n_resonances, expressivity, latent_dim).uniform_(-1, 1))
-        tr = weight_norm(nn.Linear(latent_dim, self.total_coeffs))
-        self.to_res = tr
+        def init_resonance() -> torch.Tensor:
+            # base resonance
+            res = torch.zeros((n_resonances, resonance_coeffs, 1)).uniform_(0.01, 1)
+            # variations or deformations of the base resonance
+            deformation = torch.zeros((1, resonance_coeffs, expressivity)).uniform_(-0.02, 0.02)
+            # expand into (n_resonances, n_deformations)
+            return res + deformation
 
-    def forward(self) -> torch.Tensor:
-        coeffs = self.to_res(self.latents).view(1, self.n_resonances, self.expressivity, self.n_coeffs, 2)
-        coeffs = torch.view_as_complex(coeffs)
-        coeffs = torch.fft.irfft(coeffs).view(1, 1, self.n_resonances, self.expressivity, self.n_samples)
-        coeffs = unit_norm(coeffs)
-        return coeffs
+        self.resonances = nn.ParameterDict(dict(
+            amp=init_resonance(),
+            phase=init_resonance(),
+            decay=init_resonance(),
+            phase_dither=init_resonance()
+        ))
+
+    def _materialize_fft_resonances(
+            self,
+            window_size: int,
+            base_resonance: float,
+            n_samples: int,
+            amp: torch.Tensor,
+            phase: torch.Tensor,
+            decay: torch.Tensor,
+            phase_dither: torch.Tensor) -> torch.Tensor:
+        res_span = 1 - base_resonance
+        res_factor = 0.99
+
+        n_resonances, n_coeffs, expressivity = amp.shape
+
+        step_size = window_size // 2
+        n_resonance_frames = n_samples // step_size
+
+        amp = amp.permute(0, 2, 1)
+        phase = phase.permute(0, 2, 1)
+        decay = decay.permute(0, 2, 1)
+        phase_dither = phase_dither.permute(0, 2, 1)
+
+        # materialize resonances
+        # print(amp.shape, decay.shape, phase_dither.shape)
+        res = freq_domain_transfer_function_to_resonance(
+            window_size,
+            base_resonance + ((torch.sigmoid(decay) * res_span) * res_factor),
+            n_resonance_frames,
+            apply_decay=True,
+            start_phase=torch.tanh(phase) * np.pi,
+            start_mags=amp ** 2,
+            phase_dither=torch.tanh(phase_dither).reshape(-1, 1, self.n_coeffs),
+            log_space_scan=False,
+            apply_window=False,
+            overrlap_add=True)
+
+        res = res.view(1, 1, n_resonances, expressivity, n_samples)
+        res = unit_norm(res)
+        return res
+
+    def forward(self, *args) -> torch.Tensor:
+        return self._materialize_fft_resonances(
+            self.resonance_window_size,
+            self.base_resonance,
+            self.n_samples,
+            self.resonances['amp'],
+            self.resonances['phase'],
+            self.resonances['decay'],
+            self.resonances['phase_dither'])
+
+
+# class FFTResonanceBlock(nn.Module):
+#     def __init__(self, n_samples: int, n_oscillators: int, n_resonances: int, expressivity: int):
+#         super().__init__()
+#         self.n_samples = n_samples
+#         self.n_oscillators = n_oscillators
+#         self.n_resonances = n_resonances
+#         self.expressivity = expressivity
+#
+#         self.n_coeffs = n_samples // 2 + 1
+#         self.total_coeffs = self.n_coeffs * 2
+#
+#         latent_dim = 8
+#         self.latents = nn.Parameter(torch.zeros(n_resonances, expressivity, latent_dim).uniform_(-1, 1))
+#         tr = weight_norm(nn.Linear(latent_dim, self.total_coeffs))
+#         self.to_res = tr
+#
+#         decay = torch.linspace(1, 0, n_samples) ** 4
+#         self.register_buffer('decay', decay)
+#
+#     def forward(self) -> torch.Tensor:
+#         coeffs = self.to_res(self.latents).view(1, self.n_resonances, self.expressivity, self.n_coeffs, 2)
+#         coeffs = torch.view_as_complex(coeffs)
+#         coeffs = torch.fft.irfft(coeffs).view(1, 1, self.n_resonances, self.expressivity, self.n_samples)
+#         coeffs = coeffs * self.decay
+#         coeffs = unit_norm(coeffs)
+#         return coeffs
 
 class DampedHarmonicOscillatorBlock(nn.Module):
     def __init__(
@@ -441,11 +528,13 @@ class DampedHarmonicOscillatorBlock(nn.Module):
         )
 
         x = x.view(self.n_oscillators, self.n_resonances, self.expressivity, self.n_samples)
-        x = torch.tanh(x * self.amplitudes)
-        x = torch.sum(x, dim=0)
+        x = x * self.amplitudes
 
-        # ramp = make_ramp(self.n_samples, ramp_length=10, device=x.device)
-        return x.view(1, 1, self.n_resonances, self.expressivity, self.n_samples) #* ramp[None, None, None, None, :]
+
+        x = torch.sum(x, dim=0)
+        x = x.view(1, 1, self.n_resonances, self.expressivity, self.n_samples)
+
+        return x
 
     def forward(self) -> torch.Tensor:
         x = self._materialize_resonances(self.damping.device)
@@ -488,7 +577,9 @@ class ResonanceLayer(nn.Module):
             n_samples, n_oscillators, n_resonances, expressivity
         )
 
-        # self.resonance = FFTResonanceBlock(n_samples, n_oscillators, n_resonances, expressivity)
+        # self.resonance = FFTResonanceBlock(
+        #     n_samples, resonance_window_size, n_resonances, expressivity, base_resonance=0.02)
+
 
         self.mix = nn.Parameter(torch.zeros(self.n_resonances, 2).uniform_(-1, 1))
 

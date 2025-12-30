@@ -12,6 +12,7 @@ from conjure import LmdbCollection, numpy_conjure, loggers, serve_conjure, Suppo
 from modules import stft, max_norm
 from modules.infoloss import CorrelationLoss
 from modules.overlap_add import overlap_add
+from modules.transfer import damped_harmonic_oscillator
 from util import encode_audio, make_initializer, device
 from torch.nn.utils.parametrizations import weight_norm
 from torch.nn import functional as F
@@ -37,7 +38,7 @@ def transform(x: torch.Tensor) -> torch.Tensor:
 def loss(recon: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     r = transform(recon)
     t = transform(target)
-    l = ((r - t) ** 2).mean()
+    l = torch.abs(r - t).sum()
     return l
 
 
@@ -67,10 +68,10 @@ class Layer(nn.Module):
         #     x = self.mn @ x
         # else:
         #     x = alternate_weights @ x
-        # x = torch.selu(x)
+        x = torch.selu(x)
         # x = F.leaky_relu(x, 0.2)
-        # x = torch.sin(x * 30)
-        x = torch.tanh(x)
+        # x = torch.sin(x)
+        # x = torch.tanh(x)
         x = x + skip
         return x
 
@@ -82,6 +83,7 @@ class Network(nn.Module):
             hidden_channels: int,
             n_layers: int,
             n_samples: int,
+            n_oscillators: int = 32,
             window_size: int = 1024):
         super().__init__()
 
@@ -89,6 +91,8 @@ class Network(nn.Module):
 
         self.n_samples = n_samples
         self.n_layers = n_layers
+
+        self.n_oscillators = n_oscillators
 
         self.input = nn.Linear(in_channels, hidden_channels, bias=True)
         # self.network = nn.Sequential(*[Layer(hidden_channels, hidden_channels) for _ in range(n_layers)])
@@ -98,9 +102,16 @@ class Network(nn.Module):
             self.n_coeffs = window_size // 2 + 1
             self.output = nn.Linear(hidden_channels, self.n_coeffs * 2, bias=False)
         else:
-            self.output = nn.Linear(hidden_channels, 1, bias=False)
+            # self.output = nn.Linear(hidden_channels, 1, bias=False)
 
-        # self.apply(init)
+            self.to_mass = nn.Linear(hidden_channels, n_oscillators, bias=True)
+            self.to_tension = nn.Linear(hidden_channels, n_oscillators, bias=True)
+            self.to_time = nn.Linear(hidden_channels, n_oscillators, bias=False)
+            self.to_damping = nn.Linear(hidden_channels, n_oscillators, bias=True)
+            self.to_initial_displacement = nn.Linear(hidden_channels, n_oscillators, bias=False)
+            self.to_amplitudes = nn.Linear(hidden_channels, n_oscillators, bias=True)
+
+        self.apply(init)
 
 
     def forward(self, x: torch.Tensor, perturbed_layer: int = None) -> torch.Tensor:
@@ -112,14 +123,34 @@ class Network(nn.Module):
         for i, layer in enumerate(self.network):
             x = layer(x, i == perturbed_layer)
 
-        x = self.output(x)
+        # x = self.output(x)
         if self.window_size > 1:
             x = x.view(batch, frames, self.n_coeffs, 2)
             x = torch.view_as_complex(x)
             x = torch.fft.irfft(x, dim=-1, norm='ortho')
             x = overlap_add(x[:, None, :, :], apply_window=True, trim=self.n_samples)
         else:
-            x = x.view(batch, 1, -1)
+            mass = torch.sigmoid(self.to_mass(x))
+            damping = torch.sigmoid(self.to_damping(x)) * 10
+            tension = 10 ** (torch.sigmoid(self.to_tension(x)) * 9)
+            initial_displacement = self.to_initial_displacement(x) * 10
+            amplitudes = self.to_amplitudes(x) * 10
+            time = torch.sigmoid(self.to_time(x))
+
+            x = damped_harmonic_oscillator(
+                time=time,
+                mass=mass,
+                damping=damping,
+                tension=tension,
+                initial_displacement=initial_displacement,
+                initial_velocity=0,
+                do_clamp=False
+            )
+            amplitudes = amplitudes.view(batch, -1, self.n_oscillators)
+            x = x * amplitudes
+            x = torch.sum(x, dim=-1, keepdim=True)
+            x = x.permute(0, 2, 1)
+            # x = x.view(batch, 1, -1)
 
         return x
 
@@ -195,10 +226,11 @@ def train(
         n_pos_encoding_channels: int = 64,
         batch_size: int = 8,
         hidden_channels: int = 128,
+        n_oscillators: int = 16,
         n_layers: int = 4):
 
-    recon_audio, orig_audio, perturbed = loggers(
-        ['recon', 'orig', 'perturbed'],
+    recon_audio, orig_audio = loggers(
+        ['recon', 'orig'],
         'audio/wav',
         encode_audio,
         collection)
@@ -214,7 +246,6 @@ def train(
     serve_conjure([
         orig_audio,
         recon_audio,
-        perturbed,
         # encoding
     ], port=9999, n_workers=1, web_components_version='0.0.101')
 
@@ -222,13 +253,14 @@ def train(
         in_channels=n_pos_encoding_channels,
         hidden_channels=hidden_channels,
         n_layers=n_layers,
+        n_oscillators=n_oscillators,
         n_samples=n_segment_samples,
         window_size=window_size).to(device)
-    optim = Adam(model.parameters(), lr=1e-3)
+    optim = Adam(model.parameters(), lr=1e-4)
 
     model_params = count_parameters(model)
 
-    loss_model = CorrelationLoss().to(device)
+    # loss_model = CorrelationLoss().to(device)
 
     for i, pair in enumerate(dataset(
             path=path,
@@ -247,15 +279,15 @@ def train(
         optim.zero_grad()
         recon = model.forward(pos)
 
-        with torch.no_grad():
-            pert = model.forward(pos, perturbed_layer=np.random.randint(0, model.n_layers))
-            perturbed(max_norm(pert))
+        # with torch.no_grad():
+        #     pert = model.forward(pos, perturbed_layer=np.random.randint(0, model.n_layers))
+        #     perturbed(max_norm(pert))
 
         # log recon audio
         recon_audio(max_norm(recon))
 
-        # l = loss(recon, samples)
-        l = loss_model.multiband_noise_loss(samples, recon, 64, 16)
+        l = loss(recon, samples)
+        # l = loss_model.multiband_noise_loss(samples, recon, 64, 16)
         l.backward()
         optim.step()
         print(i, l.item(), f'Compression Ratio: {(model_params / total_samples):.2f}')
@@ -269,9 +301,10 @@ if __name__ == '__main__':
     train(
         args.path,
         torch.device('cuda'),
-        n_segment_samples=2 ** 16,
-        window_size=1024,
+        n_segment_samples=2 ** 15,
+        window_size=1,
         n_pos_encoding_channels=2048,
         hidden_channels=128,
+        n_oscillators=16,
         n_layers=4,
-        batch_size=32)
+        batch_size=4)
