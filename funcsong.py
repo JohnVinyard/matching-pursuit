@@ -21,7 +21,7 @@ collection = LmdbCollection('funcsong')
 from copy import deepcopy
 DatasetBatch = Tuple[torch.Tensor, torch.Tensor, int]
 
-init = make_initializer(0.02)
+init = make_initializer(0.01)
 
 
 # thanks to https://discuss.pytorch.org/t/how-do-i-check-the-number-of-parameters-of-a-model/4325/9
@@ -68,12 +68,13 @@ class Layer(nn.Module):
         #     x = self.mn @ x
         # else:
         #     x = alternate_weights @ x
-        x = torch.selu(x)
+        # x = torch.selu(x)
         # x = F.leaky_relu(x, 0.2)
         # x = torch.sin(x)
-        # x = torch.tanh(x)
+        x = torch.tanh(x)
         x = x + skip
         return x
+
 
 
 class Network(nn.Module):
@@ -111,6 +112,9 @@ class Network(nn.Module):
             self.to_initial_displacement = nn.Linear(hidden_channels, n_oscillators, bias=False)
             self.to_amplitudes = nn.Linear(hidden_channels, n_oscillators, bias=True)
 
+
+        self.network_gain = nn.Parameter(torch.zeros(1).fill_(0.1))
+
         self.apply(init)
 
 
@@ -130,12 +134,12 @@ class Network(nn.Module):
             x = torch.fft.irfft(x, dim=-1, norm='ortho')
             x = overlap_add(x[:, None, :, :], apply_window=True, trim=self.n_samples)
         else:
-            mass = torch.sigmoid(self.to_mass(x))
+            mass = torch.sigmoid(self.to_mass(x)) * 2
             damping = torch.sigmoid(self.to_damping(x)) * 10
             tension = 10 ** (torch.sigmoid(self.to_tension(x)) * 9)
             initial_displacement = self.to_initial_displacement(x) * 10
             amplitudes = self.to_amplitudes(x) * 10
-            time = torch.sigmoid(self.to_time(x))
+            time = torch.sigmoid(self.to_time(x)) * 2
 
             x = damped_harmonic_oscillator(
                 time=time,
@@ -150,6 +154,9 @@ class Network(nn.Module):
             x = x * amplitudes
             x = torch.sum(x, dim=-1, keepdim=True)
             x = x.permute(0, 2, 1)
+
+            x = x * torch.abs(self.network_gain)
+
             # x = x.view(batch, 1, -1)
 
         return x
@@ -256,7 +263,7 @@ def train(
         n_oscillators=n_oscillators,
         n_samples=n_segment_samples,
         window_size=window_size).to(device)
-    optim = Adam(model.parameters(), lr=1e-4)
+    optim = Adam(model.parameters(), lr=1e-3)
 
     model_params = count_parameters(model)
 
@@ -303,8 +310,8 @@ if __name__ == '__main__':
         torch.device('cuda'),
         n_segment_samples=2 ** 15,
         window_size=1,
-        n_pos_encoding_channels=2048,
+        n_pos_encoding_channels=4096,
         hidden_channels=128,
         n_oscillators=16,
         n_layers=4,
-        batch_size=4)
+        batch_size=8)

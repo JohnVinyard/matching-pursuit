@@ -3,6 +3,7 @@ from subprocess import Popen, PIPE
 import torch
 from matplotlib import pyplot as plt
 from soundfile import SoundFile
+from torch import nn
 from torch.nn import functional as F
 from typing import Union
 import numpy as np
@@ -14,7 +15,6 @@ def encode_audio(
         samplerate: int = 22050,
         format='WAV',
         subtype='PCM_16') -> bytes:
-
     if isinstance(x, torch.Tensor):
         x = x.data.cpu().numpy()
 
@@ -37,7 +37,7 @@ def encode_audio(
     return io.read()
 
 
-def listen_to_sound(samples:bytes, wait_for_user_input: bool = True) -> None:
+def listen_to_sound(samples: bytes, wait_for_user_input: bool = True) -> None:
     proc = Popen(f'aplay', shell=True, stdin=PIPE)
     print('PROC', proc.stdin)
     if proc.stdin is not None:
@@ -47,12 +47,12 @@ def listen_to_sound(samples:bytes, wait_for_user_input: bool = True) -> None:
     if wait_for_user_input:
         input('Next')
 
+
 def stft(
         x: torch.Tensor,
         ws: int = 2048,
         step: int = 256,
         pad: bool = True):
-
     frames = x.shape[-1] // step
 
     if pad:
@@ -63,23 +63,93 @@ def stft(
     x = x * win[None, None, :]
     x = torch.abs(torch.fft.rfft(x, norm='ortho'))
 
-
     x = x[:, :, :frames, :]
     return x
 
-def unit_norm(x: torch.Tensor, dim: int=-1, epsilon: float=1e-8):
+
+def unit_norm(x: torch.Tensor, dim: int = -1, epsilon: float = 1e-8):
     n = torch.norm(x, dim=dim, keepdim=True)
     return x / (n + epsilon)
 
+
+class GooLayer(nn.Module):
+
+    def __init__(self, dimension: int, n_masses: int, damping: float = 0.9998):
+        super().__init__()
+        self.dimension = dimension
+        self.n_masses = n_masses
+        self.damping = damping
+
+        home = torch.zeros(1, 1, dimension, 1)
+        self.register_buffer('home', home)
+
+        self.masses = nn.Parameter(torch.zeros(1, n_masses, 1, 1).uniform_(1000, 10000))
+        self.tensions = nn.Parameter(torch.zeros(1, n_masses, dimension, 1).uniform_(20, 30))
+        self.gains = nn.Parameter(torch.zeros(1, n_masses, 1, 1).uniform_(10, 100))
+
+    def forward(
+            self,
+            forces: torch.Tensor,
+            home_modifier: torch.Tensor,
+            mic: torch.Tensor) -> torch.Tensor:
+        batch, n_masses, dim, n_samples = forces.shape
+        batch, n_masses, dim, _ = mic.shape
+        batch, n_masses, dim, n_samples = home_modifier.shape
+
+        # NOTE: home is defined as zero for each node/mass, so this
+        # could simply be home_modifier directly
+        h = self.home + home_modifier
+
+        position = torch.zeros(batch, n_masses, dim, 1, device=forces.device)
+        velocity = torch.zeros(batch, n_masses, dim, 1, device=forces.device)
+        recording = torch.zeros(batch, n_masses, n_samples, 1, device=forces.device)
+
+        for i in range(n_samples):
+            direction = h[..., i: i + 1] - position
+            acc = forces[..., i: i + 1] + ((self.tensions * direction) / self.masses)
+            velocity += acc
+            velocity *= self.damping
+            position += velocity
+
+            r = torch.tanh(velocity * self.gains)
+            r = r.permute(0, 1, 3, 2) @ mic
+
+            recording[..., i: i + 1, :] = r
+
+        return recording
+
+
+def exercise_goo_layer():
+    n_samples = 2 ** 17
+    n_masses = 8
+    dim = 16
+    batch_size = 1
+
+    forces = torch.zeros(batch_size, n_masses, dim, n_samples).bernoulli_(p=0.00002)
+    forces = forces * torch.zeros_like(forces).uniform_(-0.01, 0.01)
+
+    home_modifier = torch.zeros(batch_size, n_masses, dim, n_samples)
+    mics = torch.zeros(batch_size, n_masses, dim, 1).uniform_(-1, 1)
+
+    layer_mics = torch.zeros(batch_size, n_masses, 1, 1).uniform_(-1, 1)
+
+    layer = GooLayer(dimension=dim, n_masses=n_masses, damping=0.9991)
+
+    recording = layer.forward(forces, home_modifier, mics)
+
+    final = torch.einsum('abcd,abcd->acd', recording, layer_mics)
+
+    return final.permute(0, 2, 1)
+
+
 def goo():
-    dimension = 64
+    dimension = 3
     home = torch.zeros(dimension)
     mass = torch.zeros(1).uniform_(1000, 10000)
     tension = torch.zeros(dimension).uniform_(20, 30)
     position = torch.zeros(dimension)
 
     n_samples = 2 ** 18
-
 
     forces = torch.zeros(n_samples, dimension)
     forces[8192, :] = torch.zeros(dimension).uniform_(-0.02, 0.02)
@@ -90,7 +160,7 @@ def goo():
     damping = 0.9998
     velocity = torch.zeros(dimension)
 
-    gain = torch.zeros(dimension).uniform_(0.1, 100)
+    gain = torch.zeros(dimension).uniform_(10, 1000)
 
     # gain = torch.zeros(dimension).uniform_(0.01, 0.1)
 
@@ -106,17 +176,26 @@ def goo():
 
     return recording
 
-if __name__ == '__main__':
-    x = goo().view(-1)
 
-    x /= torch.abs(x).max()
-    plt.plot(x)
-    plt.show()
+if __name__ == '__main__':
+    with torch.no_grad():
+        x = exercise_goo_layer()
+        # x /= torch.abs(x).max()
+        plt.plot(x.view(-1))
+        plt.show()
+
+    # x = goo().view(-1)
+    #
+    # x /= torch.abs(x).max()
+    # plt.plot(x)
+    # plt.show()
+    #
 
     listen_to_sound(encode_audio(x), wait_for_user_input=True)
-    x = stft(x.view(1, 1, -1))[0, 0, ...]
 
-    plt.matshow(x.T)
-    plt.show()
+    # x = stft(x.view(1, 1, -1))[0, 0, ...]
+    #
+    # plt.matshow(x.T)
+    # plt.show()
     # plt.plot(x.data.cpu().numpy())
     # plt.show()

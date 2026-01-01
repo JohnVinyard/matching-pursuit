@@ -17,7 +17,7 @@ def ensure_symmetric(x: torch.Tensor) -> None:
 
 def sparse_forces(shape: Tuple, probability: float):
     sparse = torch.zeros(shape).bernoulli_(p=probability)
-    rand = torch.zeros(shape).uniform_(-0.0001, 0.0001)
+    rand = torch.zeros(shape).uniform_(-0.01, 0.01)
     return sparse * rand
 
 
@@ -256,9 +256,9 @@ if __name__ == '__main__':
     n_samples = 2 ** 15
 
     model = Model(
-        n_nodes=512,
+        n_nodes=128,
         node_dim=2,
-        control_frame_rate=32,
+        control_frame_rate=16,
         n_filters=128,
         filter_latent_dim=8,
         n_samples=n_samples
@@ -269,7 +269,7 @@ if __name__ == '__main__':
         recon_loss = compute_loss(target, recon)
         energy_loss = model.force_norm
         # encourage sparse energy
-        return recon_loss + (energy_loss * 100)
+        return recon_loss + (energy_loss * 1)
 
 
     overfit_model(
