@@ -107,6 +107,26 @@ class HalfLappedWindowParams:
         return gd
 
 
+class SpectralResonanceBlock(nn.Module):
+
+    def __init__(self, n_samples: int, n_resonances: int, expressivity: int):
+        super().__init__()
+        self.n_samples = n_samples
+        self.n_resonances = n_resonances
+        self.expressivity = expressivity
+
+        self.n_coeffs = n_samples // 2 + 1
+        self.total_coeffs = self.n_coeffs * 2
+
+        self.res = nn.Parameter(torch.zeros(n_resonances, expressivity, self.n_coeffs, 2).uniform_(-1, 1))
+
+
+    def forward(self):
+        x = torch.view_as_complex(self.res)
+        x = torch.fft.irfft(x, dim=-1, norm='ortho')
+        return x.view(1, 1, self.n_resonances, self.expressivity, self.n_samples) #* ramp[None, None, None, None, :]
+
+
 class DampedHarmonicOscillatorBlock(nn.Module):
     def __init__(
             self,
@@ -189,6 +209,7 @@ class EventGenerator(nn.Module):
             latent_dim: int,
             n_frames: int,
             window_size: int):
+
         super().__init__()
         self.latent_dim = latent_dim
         self.n_frames = n_frames
@@ -196,7 +217,7 @@ class EventGenerator(nn.Module):
         self.window = HalfLappedWindowParams(window_size)
         self.n_samples = self.window.total_samples(n_frames)
 
-        expressivity = 2
+        expressivity = 4
         n_coeffs = self.window.n_coeffs
         self.expressivity = expressivity
         self.n_coeffs = n_coeffs
@@ -206,16 +227,18 @@ class EventGenerator(nn.Module):
         self.resonance_span = self.max_resonance - self.base_resonance
 
         n_envelopes = 64
-        n_resonances = 32
+        n_resonances = 128
         n_deformations = 32
 
         self.n_resonances = n_resonances
 
-        self.resonances = DampedHarmonicOscillatorBlock(
-            n_samples=self.n_samples,
-            n_oscillators=32,
-            n_resonances=n_resonances,
-            expressivity=1)
+        # self.resonances = DampedHarmonicOscillatorBlock(
+        #     n_samples=self.n_samples,
+        #     n_oscillators=32,
+        #     n_resonances=n_resonances,
+        #     expressivity=1)
+
+        self.resonances = SpectralResonanceBlock(n_samples=self.n_samples, n_resonances=self.n_resonances, expressivity=1)
 
         self.to_resonance = nn.Linear(latent_dim, n_resonances * self.expressivity)
 
@@ -405,7 +428,7 @@ class Model(nn.Module):
 @numpy_conjure(collection)
 def get_samples(path: str, samplerate: int) -> np.ndarray:
     samples, sr = librosa.load(path, sr=samplerate, mono=True)
-    return samples[:]
+    return samples[:2**19]
 
 
 def dataset(

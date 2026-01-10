@@ -68,10 +68,10 @@ class Layer(nn.Module):
         #     x = self.mn @ x
         # else:
         #     x = alternate_weights @ x
-        # x = torch.selu(x)
+        x = torch.selu(x)
         # x = F.leaky_relu(x, 0.2)
         # x = torch.sin(x)
-        x = torch.tanh(x)
+        # x = torch.tanh(x)
         x = x + skip
         return x
 
@@ -127,8 +127,8 @@ class Network(nn.Module):
         for i, layer in enumerate(self.network):
             x = layer(x, i == perturbed_layer)
 
-        # x = self.output(x)
         if self.window_size > 1:
+            x = self.output(x)
             x = x.view(batch, frames, self.n_coeffs, 2)
             x = torch.view_as_complex(x)
             x = torch.fft.irfft(x, dim=-1, norm='ortho')
@@ -309,9 +309,9 @@ if __name__ == '__main__':
         args.path,
         torch.device('cuda'),
         n_segment_samples=2 ** 15,
-        window_size=1,
+        window_size=1024,
         n_pos_encoding_channels=4096,
         hidden_channels=128,
         n_oscillators=16,
         n_layers=4,
-        batch_size=8)
+        batch_size=32)

@@ -22,9 +22,10 @@ def overfit_model(
         model: nn.Module,
         loss_func: LossFunc,
         collection_name: PathLike,
-        learning_rate: float = 1e-3):
+        learning_rate: float = 1e-3,
+        device=device):
 
-    target = get_one_audio_segment(n_samples)
+    target = get_one_audio_segment(n_samples).to(device)
 
     model = model.to(device)
     optimizer = Adam(model.parameters(), lr=learning_rate)
@@ -40,7 +41,7 @@ def overfit_model(
         [t, r],
         port=9999,
         n_workers=1,
-        web_components_version='0.0.89')
+        web_components_version='0.0.101')
 
     t(max_norm(target))
 

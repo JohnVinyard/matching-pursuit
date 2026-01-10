@@ -214,33 +214,33 @@ class Model(nn.Module):
     def forward(self) -> torch.Tensor:
         x, node_forces = self._forward()
 
-        # envelopes = interpolate_last_axis(node_forces.T, desired_size=self.n_samples)
-        #
-        # # map the latents for each node to a linear combination of filteres
-        # filter_choice = self.filter_map.T @ self.latents.T
-        # filters = (self.filters.T @ filter_choice).T
-        # filters = ensure_last_axis_length(filters, desired_size=self.n_samples)
-        # filters = unit_norm(filters)
-        # filters = torch.fft.rfft(filters, dim=-1)
-        #
-        # # TODO: the cutoff should be all frequencies below the
-        # # control/simulation rate
-        # filters[..., :self.ratio] = 0
-        # filters = torch.fft.irfft(filters, dim=-1)
-        #
-        # noise = torch.zeros_like(envelopes).uniform_(-0.01, 0.01) * envelopes
-        #
-        # conv = fft_convolve(filters, noise)
-        #
-        # conv = conv * self.high_freq_factor.view(self.n_nodes, 1)
-        # conv = conv.view(1, self.n_nodes, self.n_samples)
-        #
-        # # conv = torch.tanh(conv * self.gains)
-        #
-        # conv = torch.sum(conv, dim=1, keepdim=True)
+        envelopes = interpolate_last_axis(node_forces.T, desired_size=self.n_samples)
+
+        # map the latents for each node to a linear combination of filteres
+        filter_choice = self.filter_map.T @ self.latents.T
+        filters = (self.filters.T @ filter_choice).T
+        filters = ensure_last_axis_length(filters, desired_size=self.n_samples)
+        filters = unit_norm(filters)
+        filters = torch.fft.rfft(filters, dim=-1)
+
+        # TODO: the cutoff should be all frequencies below the
+        # control/simulation rate
+        filters[..., :self.ratio] = 0
+        filters = torch.fft.irfft(filters, dim=-1)
+
+        noise = torch.zeros_like(envelopes).uniform_(-0.01, 0.01) * envelopes
+
+        conv = fft_convolve(filters, noise)
+
+        conv = conv * self.high_freq_factor.view(self.n_nodes, 1)
+        conv = conv.view(1, self.n_nodes, self.n_samples)
+
+        # conv = torch.tanh(conv * self.gains)
+
+        conv = torch.sum(conv, dim=1, keepdim=True)
 
 
-        # x = x + (conv * 0)
+        x = x + conv
 
 
         return x
@@ -258,8 +258,9 @@ if __name__ == '__main__':
     model = Model(
         n_nodes=128,
         node_dim=2,
-        control_frame_rate=16,
+        control_frame_rate=64,
         n_filters=128,
+        filter_size=512,
         filter_latent_dim=8,
         n_samples=n_samples
     )
