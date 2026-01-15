@@ -203,7 +203,7 @@ n_to_keep = 32
 do_sparsify = False
 # sparsity_coefficient = 0.000001
 sparsity_coefficient = 0.001
-n_oscillators = 64
+n_oscillators = 8
 
 attack_full_size = 2048
 attack_n_frames = 2048
@@ -248,6 +248,7 @@ def decaying_noise(
 def materialize_attack_envelopes(
         low_res: torch.Tensor,
         window_size: int,
+        filters: torch.Tensor = None,
         is_fft: bool = False,
         add_noise: bool = True) -> torch.Tensor:
 
@@ -265,6 +266,10 @@ def materialize_attack_envelopes(
     if add_noise:
         impulse = impulse * torch.zeros_like(impulse).uniform_(-1, 1)
 
+    if filters:
+        filters = ensure_last_axis_length(filters, impulse.shape[-1])
+        impulse = fft_convolve(impulse, filters)
+
     # ramp = make_ramp(impulse.shape[-1], ramp_length=10, device=impulse.device)
     # impulse = impulse * ramp
     return impulse
@@ -278,7 +283,9 @@ def execute_layer(
         res: torch.Tensor,
         deformations: torch.Tensor,
         gains: torch.Tensor,
-        window_size: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        window_size: int,
+        attack_filters: torch.Tensor = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+
     batch, n_events, control_plane_dim, frames = control_signal.shape
     batch, n_events, expressivity, def_frames = deformations.shape
 
@@ -299,7 +306,12 @@ def execute_layer(
     # convolve with noise impulse
     routed = upsample_with_holes(routed, n_samples)
 
-    impulse = materialize_attack_envelopes(attack_envelopes, window_size)
+    impulse = materialize_attack_envelopes(
+        attack_envelopes,
+        window_size,
+        attack_filters,
+        add_noise=True)
+
     impulse = ensure_last_axis_length(impulse, n_samples)
 
     impulse = impulse.view(1, 1, control_plane_dim, 1, n_samples)
@@ -480,6 +492,27 @@ class FFTResonanceBlock(nn.Module):
 #         coeffs = unit_norm(coeffs)
 #         return coeffs
 
+
+class DampedHarmonicOscillatorStack(nn.Module):
+    def __init__(
+            self,
+            n_samples: int,
+            n_oscillators: int,
+            n_resonances: int,
+            expressivity: int):
+
+        super().__init__()
+        self.dho1 = DampedHarmonicOscillatorBlock(n_samples, n_oscillators, n_resonances, expressivity)
+        self.dho2 = DampedHarmonicOscillatorBlock(n_samples, n_oscillators, n_resonances, expressivity)
+        self.influence = nn.Parameter(torch.zeros(n_oscillators, n_resonances, expressivity, 1).uniform_(-0.01, 0.01))
+
+    def forward(self):
+        x = self.dho1._materialize_resonances(self.influence.device)
+        x = self.dho2._materialize_resonances(self.influence.device, x, self.influence)
+        x = unit_norm(x)
+        return x
+
+
 class DampedHarmonicOscillatorBlock(nn.Module):
     def __init__(
             self,
@@ -513,15 +546,21 @@ class DampedHarmonicOscillatorBlock(nn.Module):
             torch.zeros(n_oscillators, n_resonances, expressivity, 1) \
                 .uniform_(-1, 1))
 
-    def _materialize_resonances(self, device: torch.device):
+
+    def _materialize_resonances(self, device: torch.device, tension_modifier: torch.Tensor = None, scaling: torch.Tensor = None):
         time = torch.linspace(0, 10, self.n_samples, device=device) \
             .view(1, 1, 1, self.n_samples)
+
+        t = self.tension[..., None]
+
+        if tension_modifier is not None:
+            t = t + (tension_modifier[0] * scaling)
 
         x = damped_harmonic_oscillator(
             time=time,
             mass=torch.sigmoid(self.mass[..., None]) * 2,
             damping=torch.sigmoid(self.damping[..., None]) * 30,
-            tension=10 ** self.tension[..., None],
+            tension=10 ** t,
             initial_displacement=self.initial_displacement[..., None],
             initial_velocity=0,
             do_clamp=False
@@ -536,8 +575,8 @@ class DampedHarmonicOscillatorBlock(nn.Module):
 
         return x
 
-    def forward(self) -> torch.Tensor:
-        x = self._materialize_resonances(self.damping.device)
+    def forward(self, tension_modifier: torch.Tensor = None, scaling: torch.Tensor = None) -> torch.Tensor:
+        x = self._materialize_resonances(self.damping.device, tension_modifier, scaling)
         x = unit_norm(x)
         return x
 
@@ -566,22 +605,28 @@ class ResonanceLayer(nn.Module):
 
         self.attack_envelopes = nn.Parameter(
             # decaying_noise(self.control_plane_dim, 256, 4, 20, device=device, include_noise=False)
-            torch.zeros(self.control_plane_dim, attack_n_frames).uniform_(-1, 1)
+            torch.zeros(self.control_plane_dim, attack_n_frames).uniform_(-0.01, 0.01)
         )
+
+        # self.attack_filters = nn.Parameter(torch.zeros(self.control_plane_dim, 64).uniform_(-0.01, 0.01))
 
         self.router = nn.Parameter(
             torch.zeros((self.control_plane_dim, self.n_resonances)).uniform_(-1, 1))
 
 
-        self.resonance = DampedHarmonicOscillatorBlock(
-            n_samples, n_oscillators, n_resonances, expressivity
-        )
+        # self.resonance = DampedHarmonicOscillatorBlock(
+        #     n_samples, n_oscillators, n_resonances, expressivity
+        # )
+
+        self.resonance = DampedHarmonicOscillatorStack(n_samples, n_oscillators, n_resonances, expressivity)
 
         # self.resonance = FFTResonanceBlock(
-        #     n_samples, resonance_window_size, n_resonances, expressivity, base_resonance=0.02)
+        #     n_samples, resonance_window_size, n_resonances, expressivity, base_resonance=0.9)
 
 
         self.mix = nn.Parameter(torch.zeros(self.n_resonances, 2).uniform_(-1, 1))
+
+
 
 
         self.gains = nn.Parameter(torch.zeros((n_resonances, 1)).uniform_(0.01, 1.1))
@@ -592,7 +637,11 @@ class ResonanceLayer(nn.Module):
     def get_attack_envelopes(self):
         # The web audio component adds random noise each time, instead of "baking" a single
         # uniform sampling into the attack envelopes
-        return materialize_attack_envelopes(self.attack_envelopes, self.attack_full_size, add_noise=False)
+        return materialize_attack_envelopes(
+            self.attack_envelopes,
+            self.attack_full_size,
+            # filters=self.attack_filters,
+            add_noise=True)
 
     def get_materialized_resonance(self):
         return self.resonance.forward()

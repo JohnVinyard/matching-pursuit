@@ -7,18 +7,13 @@ import torch
 from torch import nn
 from torch.optim import Adam
 
-from conjure import LmdbCollection, numpy_conjure, loggers, serve_conjure, SupportedContentType, NumpySerializer, \
-    NumpyDeserializer
-from modules import stft, max_norm
-from modules.infoloss import CorrelationLoss
-from modules.overlap_add import overlap_add
-from modules.transfer import damped_harmonic_oscillator
+from conjure import LmdbCollection, numpy_conjure, loggers, serve_conjure
+from modules import stft, max_norm, fft_frequency_recompose, flattened_multiband_spectrogram
 from util import encode_audio, make_initializer, device
-from torch.nn.utils.parametrizations import weight_norm
 from torch.nn import functional as F
 
 collection = LmdbCollection('funcsong')
-from copy import deepcopy
+
 DatasetBatch = Tuple[torch.Tensor, torch.Tensor, int]
 
 init = make_initializer(0.01)
@@ -30,9 +25,8 @@ def count_parameters(model: nn.Module) -> int:
 
 
 def transform(x: torch.Tensor) -> torch.Tensor:
-    return stft(x, 2048, 256, pad=True)
-
-
+    return flattened_multiband_spectrogram(x, { 'xs': (64, 16)})
+    # return stft(x, 2048, 256, pad=True)
 
 
 def loss(recon: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -68,58 +62,45 @@ class Layer(nn.Module):
         #     x = self.mn @ x
         # else:
         #     x = alternate_weights @ x
-        x = torch.selu(x)
-        # x = F.leaky_relu(x, 0.2)
-        # x = torch.sin(x)
+        # x = torch.selu(x)
+        x = F.leaky_relu(x, 0.2)
+        # x = torch.sin(x * 30)
         # x = torch.tanh(x)
         x = x + skip
         return x
 
 
-
 class Network(nn.Module):
     def __init__(
             self,
+            segment_size: int,
             in_channels: int,
             hidden_channels: int,
             n_layers: int,
             n_samples: int,
-            n_oscillators: int = 32,
-            window_size: int = 1024):
+            smallest_band: int = 512):
         super().__init__()
 
-        self.window_size = window_size
-
+        self.segment_size = segment_size
         self.n_samples = n_samples
         self.n_layers = n_layers
 
-        self.n_oscillators = n_oscillators
+        self.sm = int(np.log2(smallest_band))
+        self.lg = int(np.log2(segment_size))
+
+        print(segment_size, n_samples, )
+
+        self.transforms = (nn.ModuleDict
+                           ({str(2 ** size): nn.Linear(hidden_channels, hidden_channels) for size in range(self.sm, self.lg + 1)}))
+        self.amp_transforms = (nn.ModuleDict
+                           ({str(2 ** size): nn.Linear(hidden_channels, hidden_channels) for size in range(self.sm, self.lg + 1)}))
+
 
         self.input = nn.Linear(in_channels, hidden_channels, bias=True)
-        # self.network = nn.Sequential(*[Layer(hidden_channels, hidden_channels) for _ in range(n_layers)])
         self.network = nn.ModuleList([Layer(hidden_channels, hidden_channels) for _ in range(n_layers)])
-        if window_size > 1:
-            self.step_size = window_size // 2
-            self.n_coeffs = window_size // 2 + 1
-            self.output = nn.Linear(hidden_channels, self.n_coeffs * 2, bias=False)
-        else:
-            # self.output = nn.Linear(hidden_channels, 1, bias=False)
-
-            self.to_mass = nn.Linear(hidden_channels, n_oscillators, bias=True)
-            self.to_tension = nn.Linear(hidden_channels, n_oscillators, bias=True)
-            self.to_time = nn.Linear(hidden_channels, n_oscillators, bias=False)
-            self.to_damping = nn.Linear(hidden_channels, n_oscillators, bias=True)
-            self.to_initial_displacement = nn.Linear(hidden_channels, n_oscillators, bias=False)
-            self.to_amplitudes = nn.Linear(hidden_channels, n_oscillators, bias=True)
-
-
-        self.network_gain = nn.Parameter(torch.zeros(1).fill_(0.1))
-
         self.apply(init)
 
-
     def forward(self, x: torch.Tensor, perturbed_layer: int = None) -> torch.Tensor:
-        batch, dim, frames = x.shape
 
         x = x.permute(0, 2, 1)
         x = self.input(x)
@@ -127,37 +108,24 @@ class Network(nn.Module):
         for i, layer in enumerate(self.network):
             x = layer(x, i == perturbed_layer)
 
-        if self.window_size > 1:
-            x = self.output(x)
-            x = x.view(batch, frames, self.n_coeffs, 2)
-            x = torch.view_as_complex(x)
-            x = torch.fft.irfft(x, dim=-1, norm='ortho')
-            x = overlap_add(x[:, None, :, :], apply_window=True, trim=self.n_samples)
-        else:
-            mass = torch.sigmoid(self.to_mass(x)) * 2
-            damping = torch.sigmoid(self.to_damping(x)) * 10
-            tension = 10 ** (torch.sigmoid(self.to_tension(x)) * 9)
-            initial_displacement = self.to_initial_displacement(x) * 10
-            amplitudes = self.to_amplitudes(x) * 10
-            time = torch.sigmoid(self.to_time(x)) * 2
 
-            x = damped_harmonic_oscillator(
-                time=time,
-                mass=mass,
-                damping=damping,
-                tension=tension,
-                initial_displacement=initial_displacement,
-                initial_velocity=0,
-                do_clamp=False
-            )
-            amplitudes = amplitudes.view(batch, -1, self.n_oscillators)
-            x = x * amplitudes
-            x = torch.sum(x, dim=-1, keepdim=True)
-            x = x.permute(0, 2, 1)
+        total_size = x.shape[1]
+        bands = {}
 
-            x = x * torch.abs(self.network_gain)
+        pool_size = 1
 
-            # x = x.view(batch, 1, -1)
+        for k, layer in self.transforms.items():
+            size = int(k)
+            step = total_size // size
+            z = x[:, ::step, :]
+            a = self.amp_transforms[k].forward(z).permute(0, 2, 1) ** 2
+            a = F.avg_pool1d(a, pool_size, stride=1, padding=pool_size // 2)[..., :a.shape[-1]]
+            z = layer(z).permute(0, 2, 1)
+            bands[k] = torch.sum(z * a, dim=1, keepdim=True)
+            pool_size *= 2
+
+        x = fft_frequency_recompose(bands, desired_size=self.segment_size)
+
 
         return x
 
@@ -165,6 +133,7 @@ class Network(nn.Module):
 @numpy_conjure(collection)
 def get_samples(path: str, samplerate: int) -> np.ndarray:
     samples, sr = librosa.load(path, sr=samplerate, mono=True)
+    print('SAMPLES', samples.shape)
     return samples
 
 
@@ -174,6 +143,7 @@ def pos_encoding(
         total_samples: int,
         n_channels: int,
         device: torch.device) -> torch.Tensor:
+
     start = start_sample / total_samples
     end = stop_sample / total_samples
     n_samples = stop_sample - start_sample
@@ -193,30 +163,31 @@ def dataset(
         path: str,
         device: torch.device,
         n_segment_samples: int = 2 ** 15,
-        window_size: int = 1024,
         n_pos_encoding_channels: int = 64,
         batch_size: int = 8) -> Generator[DatasetBatch, None, None]:
     samples = get_samples(path, 22050)
     n_samples = len(samples)
 
-    step_size = int(np.ceil(window_size / 2))
-    n_frames = n_samples // step_size
-    n_segment_frames = n_segment_samples // step_size
 
     print(
-        f'operating on {n_samples} samples {n_samples / 22050} seconds with batch size {batch_size} and {n_frames} frames')
+        f'operating on {n_samples} samples {n_samples / 22050} seconds with batch size {batch_size} and {n_segment_samples} frames')
 
     while True:
         batch = torch.zeros(batch_size, 1, n_segment_samples, device=device)
-        pos = torch.zeros(batch_size, n_pos_encoding_channels, n_segment_frames, device=device)
+        pos = torch.zeros(batch_size, n_pos_encoding_channels, n_segment_samples, device=device)
 
         for i in range(batch_size):
-            start_index = np.random.randint(n_frames - (n_segment_frames - 1))
-            end_index = start_index + n_segment_frames
+            start_index = np.random.randint(0, n_samples - n_segment_samples)
+            end_index = start_index + n_segment_samples
 
-            chunk = torch.from_numpy(samples[start_index * step_size:end_index * step_size]).to(device)
+            chunk = torch.from_numpy(samples[start_index : end_index]).to(device)
             batch[i, 0, :] = chunk
-            pos[i, :, :] = pos_encoding(start_index, end_index, n_frames, n_pos_encoding_channels, device)
+            pos[i, :, :] = pos_encoding(
+                start_sample=start_index,
+                stop_sample=end_index,
+                total_samples=n_samples,
+                n_channels=n_pos_encoding_channels,
+                device=device)
 
         yield pos, batch, n_samples
 
@@ -229,13 +200,10 @@ def train(
         path: str,
         device: torch.device,
         n_segment_samples: int = 2 ** 15,
-        window_size: int = 1024,
         n_pos_encoding_channels: int = 64,
         batch_size: int = 8,
         hidden_channels: int = 128,
-        n_oscillators: int = 16,
         n_layers: int = 4):
-
     recon_audio, orig_audio = loggers(
         ['recon', 'orig'],
         'audio/wav',
@@ -257,12 +225,11 @@ def train(
     ], port=9999, n_workers=1, web_components_version='0.0.101')
 
     model = Network(
+        segment_size=n_segment_samples,
+        n_samples=n_segment_samples,
         in_channels=n_pos_encoding_channels,
         hidden_channels=hidden_channels,
-        n_layers=n_layers,
-        n_oscillators=n_oscillators,
-        n_samples=n_segment_samples,
-        window_size=window_size).to(device)
+        n_layers=n_layers).to(device)
     optim = Adam(model.parameters(), lr=1e-3)
 
     model_params = count_parameters(model)
@@ -273,7 +240,6 @@ def train(
             path=path,
             device=device,
             n_segment_samples=n_segment_samples,
-            window_size=window_size,
             n_pos_encoding_channels=n_pos_encoding_channels,
             batch_size=batch_size)):
         pos, samples, total_samples = pair
@@ -309,9 +275,7 @@ if __name__ == '__main__':
         args.path,
         torch.device('cuda'),
         n_segment_samples=2 ** 15,
-        window_size=1024,
         n_pos_encoding_channels=4096,
         hidden_channels=128,
-        n_oscillators=16,
         n_layers=4,
-        batch_size=32)
+        batch_size=8)
