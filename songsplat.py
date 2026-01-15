@@ -12,7 +12,7 @@ from torch.optim import Adam
 from conjure import LmdbCollection, numpy_conjure, loggers, serve_conjure, SupportedContentType, NumpySerializer, \
     NumpyDeserializer
 from modules import max_norm, sparse_softmax, interpolate_last_axis, iterative_loss, \
-    stft, flattened_multiband_spectrogram
+    stft, flattened_multiband_spectrogram, unit_norm
 from modules.transfer import fft_convolve, damped_harmonic_oscillator
 from modules.upsample import upsample_with_holes, ensure_last_axis_length
 from util import encode_audio, make_initializer, device
@@ -46,92 +46,6 @@ def nearest_power_of_two(n: float) -> int:
     x = np.ceil(x)
     return x
 
-
-def convolve(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    mx = max(a.shape[-1], b.shape[-1])
-    if a.shape[-1] < mx:
-        a = ensure_last_axis_length(a, mx)
-    if b.shape[-1] < mx:
-        b = ensure_last_axis_length(b, mx)
-
-    x = fft_convolve(a, b)
-    return x
-
-def mix(a: torch.Tensor, b: torch.Tensor, mx: torch.Tensor) -> torch.Tensor:
-    x = torch.stack([a, b], dim=-1)
-    mx = torch.softmax(mx, dim=-1)
-    x = x @ mx
-    return x
-
-def with_gain(x: torch.Tensor, gain: torch.Tensor) -> torch.Tensor:
-    return torch.tanh(x * gain)
-
-class ResonanceGenerator(nn.Module):
-    def __init__(self, n_resonances: int, n_samples: int):
-        super().__init__()
-        self.n_resonances = n_resonances
-        self.n_samples = n_samples
-
-    def _materialize_resonances(self) -> torch.Tensor:
-        pass
-
-    def forward(self) -> torch.Tensor:
-        return self._materialize_resonances()[None, :, None, :]
-
-
-class SampleResonanceGenerator(ResonanceGenerator):
-    def __init__(self, n_resonances: int, n_samples: int):
-        super().__init__(n_resonances, n_samples)
-        self.resonances = nn.Parameter(torch.zeros(n_resonances, n_samples).uniform_(-1, 1))
-
-    def _materialize_resonances(self) -> torch.Tensor:
-        return self.resonances
-
-class ResonanceBlock(nn.Module):
-
-    def __init__(self, generator: ResonanceGenerator):
-        super().__init__()
-        self.generator = generator
-
-    def forward(
-            self,
-            signal: torch.Tensor,
-            deformations: torch.Tensor,
-            mx: torch.Tensor,
-            gain: torch.Tensor) -> torch.Tensor:
-
-        resonances = self.generator.forward()
-        size = resonances.shape[-1]
-
-        x = convolve(resonances, signal[:, None, :, :])
-        # apply deformations
-        d = torch.softmax(interpolate_last_axis(deformations, desired_size=size), dim=2)
-        x = torch.sum(x * d, dim=2)
-        # mix "dry" and "wet"
-        x = mix(signal, x, mx)
-        # apply gain and non-linearity
-        x = with_gain(x, gain)
-        return x
-
-
-def test_resonance_block(
-        batch_size: int,
-        n_events: int,
-        attack_size: int,
-        resonance_size: int,
-        n_resonances: int,
-        expressivity: int):
-
-    noise = torch.zeros(batch_size, n_events, attack_size).uniform_(-1, 1)
-    mx = torch.zeros(batch_size, n_events, 2).uniform_(-1, 1)
-    deformations = torch.zeros(batch_size, n_events, expressivity, resonance_size // 16).uniform_(-1, 1)
-    gains = torch.zeros(batch_size, n_events, 1).uniform_(0.1, 1)
-
-    generator = SampleResonanceGenerator(n_resonances, resonance_size)
-    block = ResonanceBlock(generator)
-
-    result = block.forward(noise, deformations, mx, gains)
-    print(result.shape)
 
 
 class SimpleLookup(nn.Module):
@@ -247,15 +161,25 @@ class DampedHarmonicOscillatorBlock(nn.Module):
             torch.zeros(n_oscillators, n_resonances, expressivity, 1) \
                 .uniform_(-1, 1))
 
-    def _materialize_resonances(self, device: torch.device):
+    def _materialize_resonances(
+            self,
+            device: torch.device,
+            tension_modifiers: torch.Tensor = None,
+            influence: torch.Tensor = None):
+
         time = torch.linspace(0, 10, self.n_samples, device=device) \
             .view(1, 1, 1, self.n_samples)
+
+        t = self.tension[..., None]
+
+        if tension_modifiers is not None and influence is not None:
+            t = t + (tension_modifiers[0] * influence)
 
         x = damped_harmonic_oscillator(
             time=time,
             mass=torch.sigmoid(self.mass[..., None]) * 2,
             damping=torch.sigmoid(self.damping[..., None]) * 30,
-            tension=10 ** self.tension[..., None],
+            tension=10 ** t,
             initial_displacement=self.initial_displacement[..., None],
             initial_velocity=0
         )
@@ -266,96 +190,146 @@ class DampedHarmonicOscillatorBlock(nn.Module):
 
         return x.view(1, 1, self.n_resonances, self.expressivity, self.n_samples) #* ramp[None, None, None, None, :]
 
-    def forward(self) -> torch.Tensor:
-        return self._materialize_resonances(self.damping.device)
+    def forward(self, tension_modifiers: torch.Tensor = None, influence: torch.Tensor = None) -> torch.Tensor:
+        return self._materialize_resonances(self.damping.device, tension_modifiers, influence)
 
 
-class DampedHarmonicOscillatorLayer(nn.Module):
-
-    def __init__(self, latent_dim: int, n_osc: int, n_samples: int):
-        super().__init__()
-        self.latent_dim = latent_dim
-        self.n_osc = n_osc
-        self.n_samples = n_samples
-
-        self.to_mass = nn.Linear(latent_dim, self.n_osc)
-        self.to_tension = nn.Linear(latent_dim, self.n_osc)
-        self.to_damping = nn.Linear(latent_dim, self.n_osc)
-        self.to_initial_position = nn.Linear(latent_dim, self.n_osc)
-        self.to_amp = nn.Linear(latent_dim, self.n_osc)
-        self.to_scales = nn.Linear(latent_dim, self.n_osc)
-
-    def forward(self, x: torch.Tensor, tension_modifier: torch.Tensor = None) -> torch.Tensor:
-        m = self.to_mass(x)
-        t = self.to_tension(x)
-
-        if tension_modifier is not None:
-            scales = torch.sigmoid(self.to_scales(x)) * 0.1
-            t = t[..., None] + tension_modifier * scales[..., None]
-        else:
-            t = t[..., None]
-
-        d = self.to_damping(x)
-        _id = torch.tanh(self.to_initial_position(x)) * 0.1
-        a = torch.abs(self.to_amp(x))
-
-        time = torch.linspace(0, 1, self.n_samples, device=x.device)
-
-        x = damped_harmonic_oscillator(
-            time=time,
-            mass=torch.sigmoid(m[..., None]),
-            damping=torch.sigmoid(d[..., None]) * 10,
-            tension=10 ** t,
-            initial_displacement=_id[..., None],
-            initial_velocity=0
-        )
-
-        x = x * a[..., None]
-
-        return x
+# class DampedHarmonicOscillatorLayer(nn.Module):
+#
+#     def __init__(self, latent_dim: int, n_osc: int, n_samples: int):
+#         super().__init__()
+#         self.latent_dim = latent_dim
+#         self.n_osc = n_osc
+#         self.n_samples = n_samples
+#
+#         self.to_mass = nn.Linear(latent_dim, self.n_osc)
+#         self.to_tension = nn.Linear(latent_dim, self.n_osc)
+#         self.to_damping = nn.Linear(latent_dim, self.n_osc)
+#         self.to_initial_position = nn.Linear(latent_dim, self.n_osc)
+#         self.to_amp = nn.Linear(latent_dim, self.n_osc)
+#         self.to_scales = nn.Linear(latent_dim, self.n_osc)
+#
+#     def forward(self, x: torch.Tensor, tension_modifier: torch.Tensor = None) -> torch.Tensor:
+#         m = self.to_mass(x)
+#         t = self.to_tension(x)
+#
+#         if tension_modifier is not None:
+#             scales = torch.sigmoid(self.to_scales(x)) * 0.1
+#             t = t[..., None] + tension_modifier * scales[..., None]
+#         else:
+#             t = t[..., None]
+#
+#         d = self.to_damping(x)
+#         _id = torch.tanh(self.to_initial_position(x)) * 0.1
+#         a = torch.abs(self.to_amp(x))
+#
+#         time = torch.linspace(0, 1, self.n_samples, device=x.device)
+#
+#         x = damped_harmonic_oscillator(
+#             time=time,
+#             mass=torch.sigmoid(m[..., None]),
+#             damping=torch.sigmoid(d[..., None]) * 10,
+#             tension=10 ** t,
+#             initial_displacement=_id[..., None],
+#             initial_velocity=0
+#         )
+#
+#         x = x * a[..., None]
+#
+#         return x
+#
+#
+# class DampedHarmonicOscillatorEventGenerator(nn.Module):
+#     def __init__(self, latent_dim: int, n_osc: int, n_samples: int, n_layers: int):
+#         super().__init__()
+#         self.latent_dim = latent_dim
+#         self.n_osc = n_osc
+#         self.n_samples = n_samples
+#         self.n_layers = n_layers
+#
+#         self.layers = nn.ModuleList([
+#             DampedHarmonicOscillatorLayer(latent_dim, n_osc, n_samples) for _ in range(n_layers)])
+#
+#     def forward(self, x: torch.Tensor) -> torch.Tensor:
+#
+#         output = None
+#
+#         for i, layer in enumerate(self.layers):
+#             output = layer(x, output)
+#
+#
+#         output = torch.sum(output, dim=2, keepdim=True)
+#         output = output.view(-1, 1, self.n_samples)
+#         return output
 
 
 class DampedHarmonicOscillatorEventGenerator(nn.Module):
-    def __init__(self, latent_dim: int, n_osc: int, n_samples: int, n_layers: int):
+
+    def __init__(self, latent_dim: int, n_osc: int, n_samples: int, n_resonances: int, expressivity: int):
         super().__init__()
         self.latent_dim = latent_dim
         self.n_osc = n_osc
         self.n_samples = n_samples
-        self.n_layers = n_layers
+        self.n_resonances = n_resonances
+        self.expressivity = expressivity
 
-        self.layers = nn.ModuleList([
-            DampedHarmonicOscillatorLayer(latent_dim, n_osc, n_samples) for _ in range(n_layers)])
+        self.dho1 = DampedHarmonicOscillatorBlock(n_samples, n_osc, n_resonances, expressivity)
+        self.dho2 = DampedHarmonicOscillatorBlock(n_samples, n_osc, n_resonances, expressivity)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        self.to_mixture = nn.Linear(latent_dim, self.n_resonances)
 
-        output = None
+        self.influence = nn.Parameter(torch.zeros(n_osc, n_resonances, expressivity, 1).uniform_(-0.01, 0.011))
 
-        for i, layer in enumerate(self.layers):
-            output = layer(x, output)
+    def forward(self, latent: torch.Tensor) -> torch.Tensor:
+        mx = self.to_mixture(latent)
+        x = self.dho1._materialize_resonances(device)
+        x = self.dho2._materialize_resonances(device, x, self.influence)
+        x = unit_norm(x)
+        x = x.view(1, -1, self.n_samples)
+        result = mx @ x
+        return result
 
-
-        output = torch.sum(output, dim=2, keepdim=True)
-        output = output.view(-1, 1, self.n_samples)
-        return output
 
 class DampedHarmonicOscillatorResonances(nn.Module):
 
-    def __init__(self, latent_dim: int, n_resonances: int, n_osc: int, n_samples: int, n_layers: int, expressivity: int):
+    def __init__(self, n_osc: int, n_samples: int, n_resonances: int, expressivity: int):
         super().__init__()
-        self.n_resonances = n_resonances
         self.n_osc = n_osc
         self.n_samples = n_samples
-        self.n_layers = n_layers
-        self.latent_dim = latent_dim
-        self.network = DampedHarmonicOscillatorEventGenerator(latent_dim, n_osc, n_samples, n_layers)
-        self.latents = nn.Parameter(torch.zeros(n_resonances, latent_dim).uniform_(-1, 1))
+        self.n_resonances = n_resonances
         self.expressivity = expressivity
 
-    def forward(self):
-        print(self.latents.shape)
-        resonances = self.network(self.latents)
-        print(resonances.shape)
-        return resonances.view(1, 1, self.n_resonances, self.expressivity, self.n_samples)
+        self.dho1 = DampedHarmonicOscillatorBlock(n_samples, n_osc, n_resonances, expressivity)
+        self.dho2 = DampedHarmonicOscillatorBlock(n_samples, n_osc, n_resonances, expressivity)
+
+
+        self.influence = nn.Parameter(torch.zeros(n_osc, n_resonances, expressivity, 1).uniform_(-0.01, 0.011))
+
+    def forward(self) -> torch.Tensor:
+        x = self.dho1._materialize_resonances(device)
+        x = self.dho2._materialize_resonances(device, x, self.influence)
+        x = unit_norm(x)
+        x = x.view(1, -1, self.n_samples)
+        return x
+
+
+
+# class DampedHarmonicOscillatorResonances(nn.Module):
+#
+#     def __init__(self, latent_dim: int, n_resonances: int, n_osc: int, n_samples: int, n_layers: int, expressivity: int):
+#         super().__init__()
+#         self.n_resonances = n_resonances
+#         self.n_osc = n_osc
+#         self.n_samples = n_samples
+#         self.n_layers = n_layers
+#         self.latent_dim = latent_dim
+#         self.network = DampedHarmonicOscillatorEventGenerator(latent_dim, n_osc, n_samples, n_layers)
+#         self.latents = nn.Parameter(torch.zeros(n_resonances, latent_dim).uniform_(-1, 1))
+#         self.expressivity = expressivity
+#
+#     def forward(self):
+#         resonances = self.network(self.latents)
+#         return resonances.view(1, 1, self.n_resonances, self.expressivity, self.n_samples)
 
 
 class SampleEventGenerator(nn.Module):
@@ -403,20 +377,22 @@ class EventGenerator(nn.Module):
         self.resonance_span = self.max_resonance - self.base_resonance
 
         n_envelopes = 64
-        n_resonances = 128
-        n_deformations = 32
+        n_resonances = 16
+        n_deformations = 16
 
         self.n_resonances = n_resonances
 
-        self.resonances = DampedHarmonicOscillatorBlock(
-            n_samples=self.n_samples,
-            n_oscillators=32,
-            n_resonances=n_resonances,
-            expressivity=1)
+        # self.resonances = DampedHarmonicOscillatorBlock(
+        #     n_samples=self.n_samples,
+        #     n_oscillators=32,
+        #     n_resonances=n_resonances,
+        #     expressivity=1)
+
+        self.resonances = DampedHarmonicOscillatorResonances(n_osc=4, n_samples=self.n_samples, n_resonances=n_resonances, expressivity=1)
 
         # self.resonances = SpectralResonanceBlock(n_samples=self.n_samples, n_resonances=self.n_resonances, expressivity=1)
-        self.resonances = DampedHarmonicOscillatorResonances(
-            latent_dim=latent_dim, n_resonances=n_resonances, n_osc=8, n_samples=self.n_samples, n_layers=2, expressivity=1)
+        # self.resonances = DampedHarmonicOscillatorResonances(
+        #     latent_dim=latent_dim, n_resonances=n_resonances, n_osc=8, n_samples=self.n_samples, n_layers=2, expressivity=1)
 
         self.to_resonance = nn.Linear(latent_dim, n_resonances * self.expressivity)
 
@@ -527,6 +503,15 @@ class Model(nn.Module):
 
         n_event_frames = n_segment_samples // self.window_params.step_size
 
+
+        # self.generator = DampedHarmonicOscillatorEventGenerator(
+        #     latent_dim=event_latent_dim,
+        #     n_osc=4,
+        #     n_samples=self.n_segment_samples,
+        #     n_resonances=64,
+        #     expressivity=1
+        # )
+        #
         # self.generator = DampedHarmonicOscillatorEventGenerator(
         #     latent_dim=event_latent_dim,
         #     n_osc=8,
@@ -534,10 +519,10 @@ class Model(nn.Module):
         #     n_layers=1
         # )
 
-        # self.generator = EventGenerator(
-        #     event_latent_dim, n_event_frames, window_size)
+        self.generator = EventGenerator(
+            event_latent_dim, n_event_frames, window_size)
 
-        self.generator = SampleEventGenerator(event_latent_dim, n_event_frames, window_size)
+        # self.generator = SampleEventGenerator(event_latent_dim, n_event_frames, window_size)
 
         self.apply(init)
 
