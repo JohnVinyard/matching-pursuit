@@ -613,7 +613,7 @@ class ResonanceLayer(nn.Module):
             torch.zeros(self.control_plane_dim, attack_n_frames).uniform_(-0.01, 0.01)
         )
 
-        # self.attack_filters = nn.Parameter(torch.zeros(self.control_plane_dim, 64).uniform_(-0.01, 0.01))
+        self.attack_filters = nn.Parameter(torch.zeros(self.control_plane_dim, 64).uniform_(-0.01, 0.01))
 
         self.router = nn.Parameter(
             torch.zeros((self.control_plane_dim, self.n_resonances)).uniform_(-1, 1))
@@ -645,7 +645,7 @@ class ResonanceLayer(nn.Module):
         return materialize_attack_envelopes(
             self.attack_envelopes,
             self.attack_full_size,
-            # filters=self.attack_filters,
+            filters=self.attack_filters,
             add_noise=True)
 
     def get_materialized_resonance(self):
@@ -672,6 +672,7 @@ class ResonanceLayer(nn.Module):
             deformations,
             self.gains,
             self.attack_full_size,
+            self.attack_filters
         )
         return output, fwd, cs
 
