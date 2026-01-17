@@ -9,10 +9,12 @@ import torch
 from torch import nn
 from torch.optim import Adam
 
+import config
+from config import Config
 from conjure import LmdbCollection, numpy_conjure, loggers, serve_conjure, SupportedContentType, NumpySerializer, \
     NumpyDeserializer
 from modules import max_norm, sparse_softmax, interpolate_last_axis, iterative_loss, \
-    stft, flattened_multiband_spectrogram, unit_norm
+    stft, flattened_multiband_spectrogram, unit_norm, NeuralReverb
 from modules.transfer import fft_convolve, damped_harmonic_oscillator
 from modules.upsample import upsample_with_holes, ensure_last_axis_length
 from util import encode_audio, make_initializer, device
@@ -377,18 +379,19 @@ class EventGenerator(nn.Module):
         self.resonance_span = self.max_resonance - self.base_resonance
 
         n_envelopes = 64
-        n_resonances = 16
-        n_deformations = 16
+        n_resonances = 128
+        n_deformations = 32
 
         self.n_resonances = n_resonances
 
-        # self.resonances = DampedHarmonicOscillatorBlock(
-        #     n_samples=self.n_samples,
-        #     n_oscillators=32,
-        #     n_resonances=n_resonances,
-        #     expressivity=1)
+        self.resonances = DampedHarmonicOscillatorBlock(
+            n_samples=self.n_samples,
+            n_oscillators=32,
+            n_resonances=n_resonances,
+            expressivity=1)
 
-        self.resonances = DampedHarmonicOscillatorResonances(n_osc=4, n_samples=self.n_samples, n_resonances=n_resonances, expressivity=1)
+        # self.resonances = DampedHarmonicOscillatorResonances(
+        #     n_osc=8, n_samples=self.n_samples, n_resonances=n_resonances, expressivity=1)
 
         # self.resonances = SpectralResonanceBlock(n_samples=self.n_samples, n_resonances=self.n_resonances, expressivity=1)
         # self.resonances = DampedHarmonicOscillatorResonances(
@@ -398,10 +401,14 @@ class EventGenerator(nn.Module):
 
         # note: the noise envelope is 4x the frame rate, as it is upsampled
         # to 1/4 the overall number of frames
-        # self.to_noise = SimpleLookup(latent_dim, n_envelopes, 4096, 1)
-        self.to_noise = nn.Linear(latent_dim, n_frames, bias=False)
+        self.to_noise = SimpleLookup(latent_dim, n_envelopes, 4096, 1)
+        # self.to_noise = nn.Linear(latent_dim, n_frames, bias=False)
 
         self.to_deformation = SimpleLookup(latent_dim, n_deformations, n_frames, expressivity)
+
+        # self.verb = NeuralReverb.from_directory(Config.impulse_response_path(), 22050, self.n_samples)
+        # self.to_room_mix = nn.Linear(latent_dim, self.verb.n_rooms)
+        # self.dry_wet_mix = nn.Linear(latent_dim, 2)
 
         self.to_mix = nn.Linear(latent_dim, 2)
         self.to_loudness = nn.Linear(latent_dim, 1)
@@ -448,7 +455,14 @@ class EventGenerator(nn.Module):
 
         a = self.to_loudness(events)
 
-        x = x * torch.abs(a)
+        x = torch.tanh(x * a)
+
+        # verb_mix = self.to_room_mix(events)
+        # w = self.verb.forward(x, verb_mix)
+        # dw_mix = torch.softmax(self.dry_wet_mix.forward(events), dim=-1)
+        # s = torch.stack([x, w], dim=-1)
+        #
+        # x = s @ dw_mix[..., None]
 
         return x
 
@@ -584,6 +598,7 @@ class Model(nn.Module):
         times = times[mask]
 
         if events.shape[0] == 0:
+            # self.times.data[:] = self.times.data + torch.zeros_like(self.times).uniform_(-1e3, 1e3)
             raise ValueError('no events')
 
         samples = self.generator.forward(events[None, ...])
@@ -600,7 +615,11 @@ class Model(nn.Module):
 @numpy_conjure(collection)
 def get_samples(path: str, samplerate: int) -> np.ndarray:
     samples, sr = librosa.load(path, sr=samplerate, mono=True)
-    return samples[:2**19]
+    n_samples = 2 ** 18
+    end_sample = samples.shape[-1] - n_samples
+    start_sample = np.random.randint(0, end_sample)
+    end = start_sample + n_samples
+    return samples[start_sample:end]
 
 
 def dataset(
@@ -681,7 +700,7 @@ def train(
         n_frames=total_samples // (window_size // 2),
         samplerate=22050,
         event_latent_dim=32,
-        events_per_second=4,
+        events_per_second=8,
         window_size=window_size,
         n_segment_samples=n_segment_samples
     ).to(device)

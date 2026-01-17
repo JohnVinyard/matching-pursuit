@@ -182,7 +182,7 @@ class BetterGooLayer(nn.Module):
             home_modifier * self.connection_strength)
 
         # compute the filture mixture over time
-        mixture = torch.einsum('abcd,bce->abed', displacement + self.displacement_bias, self.to_filter_mixture)
+        mixture = torch.einsum('abcd,bce->abed', (displacement * 0) + self.displacement_bias, self.to_filter_mixture)
 
         # upsample to full sample rate
         mixture = interpolate_last_axis(mixture, self.n_samples)

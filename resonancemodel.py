@@ -199,10 +199,10 @@ n_frames = n_samples // step_size
 control_plane_dim = 16
 n_resonances = 16
 expressivity = 2
-n_to_keep = 32
+n_to_keep = 256
 do_sparsify = False
 # sparsity_coefficient = 0.000001
-sparsity_coefficient = 0.001
+sparsity_coefficient = 0.1
 n_oscillators = 8
 
 attack_full_size = 2048
@@ -504,11 +504,14 @@ class DampedHarmonicOscillatorStack(nn.Module):
         super().__init__()
         self.dho1 = DampedHarmonicOscillatorBlock(n_samples, n_oscillators, n_resonances, expressivity)
         self.dho2 = DampedHarmonicOscillatorBlock(n_samples, n_oscillators, n_resonances, expressivity)
+        self.dho3 = DampedHarmonicOscillatorBlock(n_samples, n_oscillators, n_resonances, expressivity)
         self.influence = nn.Parameter(torch.zeros(n_oscillators, n_resonances, expressivity, 1).uniform_(-0.01, 0.01))
+        self.influence2 = nn.Parameter(torch.zeros(n_oscillators, n_resonances, expressivity, 1).uniform_(-0.01, 0.01))
 
     def forward(self):
         x = self.dho1._materialize_resonances(self.influence.device)
         x = self.dho2._materialize_resonances(self.influence.device, x, self.influence)
+        x = self.dho3._materialize_resonances(self.influence.device, x, self.influence2)
         x = unit_norm(x)
         return x
 
@@ -964,15 +967,18 @@ def compute_loss(
         x: torch.Tensor,
         y: torch.Tensor,
         cp: torch.Tensor,
+        attack_envelopes: torch.Tensor,
         sparsity_loss: float = sparsity_coefficient) -> torch.Tensor:
+
     x = transform(x)
     y = transform(y)
     recon_loss = torch.abs(x - y).sum()
 
     # recon_loss =  loss_model.multiband_noise_loss(x, y, 64, 16)
     sparsity_term = l0_norm(cp)
+    attack_term = l0_norm(attack_envelopes)
 
-    return recon_loss + (sparsity_term * sparsity_loss)
+    return recon_loss + (sparsity_term * sparsity_loss) + (attack_term * sparsity_loss)
 
 
 
@@ -1224,7 +1230,7 @@ def overfit_model():
             c(model.control_signal[0, 0])
 
 
-            loss = compute_loss(target, recon, cp)
+            loss = compute_loss(target, recon, cp, model.get_attack_envelopes(0))
 
             loss.backward()
             optimizer.step()
@@ -1249,7 +1255,7 @@ def overfit_model():
 
             iteration += 1
 
-            if iteration > 0 and iteration % 10000 == 0:
+            if iteration > 0 and iteration % 20000 == 0:
                 print('Serializing')
                 generate_param_dict('resonancemodelparams', remote_logger, model)
                 input('Continue?')
