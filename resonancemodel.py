@@ -14,6 +14,7 @@ from torch.nn.utils import weight_norm
 
 from config import Config
 from modules.infoloss import CorrelationLoss
+from modules.normal_pdf import pdf2
 from spiking import SpikingModel, AutocorrelationLoss
 
 # videoexample
@@ -202,9 +203,9 @@ control_plane_dim = 32
 n_resonances = 32
 expressivity = 2
 n_to_keep = 256
-do_sparsify = True
+do_sparsify = False
 # sparsity_coefficient = 0.000001
-sparsity_coefficient = 0.0001
+sparsity_coefficient = 0.1
 n_oscillators = 2
 
 attack_full_size = 2048
@@ -586,6 +587,29 @@ class DampedHarmonicOscillatorBlock(nn.Module):
         return x
 
 
+class AttackEnvelopes(nn.Module):
+
+    def __init__(self, control_plane_dim: int, envelope_size: int, n_gaussians: int):
+        super().__init__()
+        self.control_plane_dim = control_plane_dim
+        self.envelope_size = envelope_size
+        self.n_gaussians = n_gaussians
+
+
+        # self.amps = nn.Parameter(torch.zeros(control_plane_dim, 1).uniform_(-0.01, 0.01))
+        self.means = nn.Parameter(torch.zeros(control_plane_dim, n_gaussians).uniform_(-6, 6))
+        self.stds = nn.Parameter(torch.zeros(control_plane_dim, n_gaussians).uniform_(-6, 6))
+
+    def forward(self):
+        '''
+        materialize attack envelopes
+        '''
+        x = pdf2(torch.sigmoid(self.means), torch.sigmoid(self.stds), self.envelope_size, normalize=True)
+        x = torch.sum(x, dim=1)
+        x = unit_norm(x)
+        # x = x * self.amps
+        return x
+
 class ResonanceLayer(nn.Module):
 
     def __init__(
@@ -608,12 +632,15 @@ class ResonanceLayer(nn.Module):
 
         resonance_coeffs = resonance_window_size // 2 + 1
 
-        self.attack_envelopes = nn.Parameter(
-            # decaying_noise(self.control_plane_dim, 256, 4, 20, device=device, include_noise=False)
-            torch.zeros(self.control_plane_dim, attack_n_frames).uniform_(-0.01, 0.01)
-        )
+        self.ae = AttackEnvelopes(self.control_plane_dim, attack_n_frames, n_gaussians=16)
 
-        self.attack_filters = nn.Parameter(torch.zeros(self.control_plane_dim, 64).uniform_(-0.01, 0.01))
+        # self.attack_envelopes = nn.Parameter(
+        #     # decaying_noise(self.control_plane_dim, 256, 4, 20, device=device, include_noise=False)
+        #     torch.zeros(self.control_plane_dim, attack_n_frames).uniform_(-0.01, 0.01)
+        # )
+
+        # self.attack_filters = nn.Parameter(torch.zeros(self.control_plane_dim, 64).uniform_(-0.01, 0.01))
+        self.attack_filters = None
 
         self.router = nn.Parameter(
             torch.zeros((self.control_plane_dim, self.n_resonances)).uniform_(-1, 1))
@@ -639,11 +666,18 @@ class ResonanceLayer(nn.Module):
     def get_mixes(self):
         return self.mix
 
+    @property
+    def attack_envelopes(self):
+        return self.ae.forward()
+
     def get_attack_envelopes(self):
+
+        ae = self.ae.forward()
+
         # The web audio component adds random noise each time, instead of "baking" a single
         # uniform sampling into the attack envelopes
         return materialize_attack_envelopes(
-            self.attack_envelopes,
+            ae,
             self.attack_full_size,
             filters=self.attack_filters,
             add_noise=True)
@@ -662,10 +696,13 @@ class ResonanceLayer(nn.Module):
             control_signal: torch.Tensor,
             deformations: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         res = self.resonance.forward()
+
+        ae = self.ae.forward()
+
         # print(res.shape)
         output, fwd, cs = execute_layer(
             control_signal,
-            self.attack_envelopes,
+            ae,
             self.mix,
             self.router,
             res,

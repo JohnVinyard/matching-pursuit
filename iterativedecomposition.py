@@ -419,7 +419,7 @@ def train_and_monitor(
         envelopes,
         latents,
         reservoir,
-        dist,
+        dist,DampedHarmonicOscillatorLookup
         # self_supervised
     ], port=9999, n_workers=1)
 
