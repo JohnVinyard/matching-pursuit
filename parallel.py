@@ -169,11 +169,12 @@ class Layer(nn.Module):
 
         self.influence = nn.Parameter(torch.zeros(1, self.n_nodes, 1).uniform_(-0.01, 0.01))
 
+
     def forward(self, forces: torch.Tensor, tension_modifier: torch.Tensor = None) -> torch.Tensor:
         # damping = (0.9 + (torch.sigmoid(self.damp) * 0.1)).repeat(1, 1, forces.shape[-1])
         energy = parallel(forces, self.damp)
 
-        mass = torch.sigmoid(self.mass)
+        mass = torch.sigmoid(self.mass) * 500
         tension = self.tension
 
         if tension_modifier is not None:
@@ -199,7 +200,7 @@ class LayerController(nn.Module):
         self.control_rate = control_rate
         self.n_frames = n_samples // control_rate
 
-        self.forces = nn.Parameter(torch.zeros(1, n_nodes, n_samples).bernoulli_(p=0.00001))
+        self.forces = nn.Parameter(torch.zeros(1, n_nodes, n_samples).bernoulli_(p=1e-5))
 
         self.layers = nn.ModuleList([Layer(n_nodes, n_samples, control_rate) for _ in range(self.n_layers)])
 
@@ -212,10 +213,6 @@ class LayerController(nn.Module):
 
 
 def test_osc(n_nodes: int, n_samples:int) -> torch.Tensor:
-    # f = torch.zeros(1, n_nodes, n_samples).bernoulli_(p=0.00001)
-
-    # layer = Layer(n_nodes, n_samples, 128)
-
     controller = LayerController(
         n_layers=3,
         n_nodes=n_nodes,
@@ -223,30 +220,13 @@ def test_osc(n_nodes: int, n_samples:int) -> torch.Tensor:
         control_rate=128
     )
     x = controller.forward()
-
     x = torch.sum(x, dim=1, keepdim=True)
-
     return x
 
-    # d = torch.zeros(n_samples).fill_(0.9998)
-    # e = parallel(f, d)
-    # m = torch.zeros(1).uniform_(0.1, 0.5)
-    # damping = torch.zeros(1).fill_(1)
-    # tension = torch.zeros(1).uniform_(10**4, 10**9)
-    # initial_displacement = torch.zeros(1).fill_(1)
-    #
-    # x = damped_harmonic_oscillator(
-    #     energy=e,
-    #     time=torch.linspace(0, 1, n_samples),
-    #     mass=m,
-    #     damping=damping,
-    #     tension=tension,
-    #     initial_displacement=initial_displacement,
-    # )
-    # return x
 
 def display_osc(n_nodes: int, n_samples: int):
     x = test_osc(n_nodes, n_samples)
+    print(x.max().item())
     x = x / x.max()
 
     spec = stft(x.view(1, 1, -1))
@@ -274,4 +254,4 @@ def harness(n_samples: int, *solutions: Solution):
 
 if __name__ == '__main__':
     # harness(2**15, sequential, parallel)
-    display_osc(16, 2**16)
+    display_osc(32, 2**17)
