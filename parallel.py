@@ -148,14 +148,17 @@ class Layer(nn.Module):
         self.control_rate = control_rate
         self.n_frames = n_samples // control_rate
 
-        # TODO: eventually, this will vary at control rate
+        # TODO: eventually, this will vary at control rate and will have "momentum",
+        # springing back to a baseline value
+
         # self.damp = nn.Parameter(torch.zeros(1, self.n_nodes, 1).uniform_(-6, 6))
         damp = torch.zeros(1, self.n_nodes, n_samples).fill_(0.9998)
         self.register_buffer('damp', damp)
 
         self.mass = nn.Parameter(torch.zeros(1, self.n_nodes, 1).uniform_(-6, 6))
 
-        # TODO: eventually, this will vary at control rate
+        # TODO: eventually, this will vary at control rate and will have "momentum",
+        # springing back to a baseline value
         self.tension = nn.Parameter(torch.zeros(1, self.n_nodes, 1).uniform_(4, 9))
 
         d = torch.zeros(1, self.n_nodes, 1).fill_(1)
@@ -167,18 +170,23 @@ class Layer(nn.Module):
         t = torch.linspace(0, 10, self.n_samples)
         self.register_buffer('t', t)
 
-        self.influence = nn.Parameter(torch.zeros(1, self.n_nodes, 1).uniform_(-0.01, 0.01))
+        # self.influence = nn.Parameter(torch.zeros(1, self.n_nodes, 1).uniform_(-0.01, 0.01))
+
+        self.force_router = nn.Parameter(torch.zeros(self.n_nodes, self.n_nodes).uniform_(-0.01, 0.01))
+        self.tension_router = nn.Parameter(torch.zeros(self.n_nodes, self.n_nodes).uniform_(-0.001, 0.001))
 
 
     def forward(self, forces: torch.Tensor, tension_modifier: torch.Tensor = None) -> torch.Tensor:
         # damping = (0.9 + (torch.sigmoid(self.damp) * 0.1)).repeat(1, 1, forces.shape[-1])
+        forces = torch.einsum('abc,bd->adc', forces, self.force_router)
         energy = parallel(forces, self.damp)
 
         mass = torch.sigmoid(self.mass) * 500
         tension = self.tension
 
         if tension_modifier is not None:
-            tension = tension + (tension_modifier * self.influence)
+            tension_modifier = torch.einsum('abc,bd->adc', tension_modifier, self.tension_router)
+            tension = tension + tension_modifier
 
         x = damped_harmonic_oscillator(
             energy=energy,
