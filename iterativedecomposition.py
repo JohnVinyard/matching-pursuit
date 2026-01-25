@@ -419,7 +419,7 @@ def train_and_monitor(
         envelopes,
         latents,
         reservoir,
-        dist,DampedHarmonicOscillatorLookup
+        dist,
         # self_supervised
     ], port=9999, n_workers=1)
 
@@ -437,16 +437,16 @@ def train_and_monitor(
         hidden_channels = 128
 
         resonance_model = OverfitResonanceModel(
-            n_noise_filters=32,
-            noise_expressivity=2,
-            noise_filter_samples=128,
-            noise_deformations=16,
-            instr_expressivity=8,
+            n_noise_filters=16,
+            noise_expressivity=1,
+            noise_filter_samples=32,
+            noise_deformations=8,
+            instr_expressivity=1,
             n_events=1,
-            n_resonances=256,
-            n_envelopes=64,
+            n_resonances=16,
+            n_envelopes=8,
             # n_decays=64,
-            n_deformations=64,
+            n_deformations=16,
             n_samples=n_samples,
             n_frames=n_frames,
             samplerate=samplerate,

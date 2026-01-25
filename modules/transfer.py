@@ -70,7 +70,7 @@ class ExponentialTransform(nn.Module):
         return result
 
 
-def hierarchical_dirac(elements: torch.Tensor, soft: bool = False):
+def hierarchical_dirac(elements: torch.Tensor, soft: bool = False, return_logits: bool = False):
     """
     Produce a dirac/one-hot encoding from a binary encoded
     tensor of the shape (..., log2, 2)
@@ -122,7 +122,10 @@ def hierarchical_dirac(elements: torch.Tensor, soft: bool = False):
 
             current_size = new_size
 
-    return signal
+    if return_logits:
+        return signal, chosen
+    else:
+        return signal
 
 
 def gaussian_bandpass_filtered(

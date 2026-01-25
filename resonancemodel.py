@@ -10,12 +10,6 @@ while the two factors together constitute a (lossy) compressive and interpretabl
 To make this more concrete, here's a video of me using a learned instrument to produce a new audio segment via a
 hand-tracking interface.
 """
-from torch.nn.utils import weight_norm
-
-from config import Config
-from modules.infoloss import CorrelationLoss
-from modules.normal_pdf import pdf2
-from spiking import SpikingModel, AutocorrelationLoss
 
 # videoexample
 
@@ -164,6 +158,9 @@ If you'd like to cite this article, you can use the following [BibTeX block](htt
 
 from base64 import b64encode
 from typing import Tuple, Callable, Union, Dict, Any
+from config import Config
+from modules.normal_pdf import pdf2
+
 
 import numpy as np
 import torch
@@ -199,18 +196,20 @@ n_frames = n_samples // step_size
 
 # KLUDGE: control_plane_dim and n_resonances
 # must have the same value (for now)
-control_plane_dim = 32
-n_resonances = 32
+control_plane_dim = 16
+n_resonances = 16
 expressivity = 2
 n_to_keep = 256
 do_sparsify = False
 # sparsity_coefficient = 0.000001
-sparsity_coefficient = 0.1
+sparsity_coefficient = 0.05
 n_oscillators = 2
 
 attack_full_size = 2048
 attack_n_frames = 2048
 deformation_frame_size = 128
+attack_filter_size = 16
+use_attack_filters = False
 
 web_components_version = '0.0.101'
 
@@ -269,7 +268,7 @@ def materialize_attack_envelopes(
     if add_noise:
         impulse = impulse * torch.zeros_like(impulse).uniform_(-1, 1)
 
-    if filters:
+    if filters is not None:
         filters = ensure_last_axis_length(filters, impulse.shape[-1])
         impulse = fft_convolve(impulse, filters)
 
@@ -604,7 +603,13 @@ class AttackEnvelopes(nn.Module):
         '''
         materialize attack envelopes
         '''
-        x = pdf2(torch.sigmoid(self.means), torch.sigmoid(self.stds), self.envelope_size, normalize=True)
+        x = pdf2(
+            torch.sigmoid(self.means),
+            torch.sigmoid(self.stds),
+            self.envelope_size,
+            normalize=True
+        )
+
         x = torch.sum(x, dim=1)
         x = unit_norm(x)
         # x = x * self.amps
@@ -639,8 +644,10 @@ class ResonanceLayer(nn.Module):
         #     torch.zeros(self.control_plane_dim, attack_n_frames).uniform_(-0.01, 0.01)
         # )
 
-        # self.attack_filters = nn.Parameter(torch.zeros(self.control_plane_dim, 64).uniform_(-0.01, 0.01))
-        self.attack_filters = None
+        if use_attack_filters:
+            self.attack_filters = nn.Parameter(torch.zeros(self.control_plane_dim, attack_filter_size).uniform_(-0.01, 0.01))
+        else:
+            self.attack_filters = None
 
         self.router = nn.Parameter(
             torch.zeros((self.control_plane_dim, self.n_resonances)).uniform_(-1, 1))
@@ -924,6 +931,12 @@ class OverfitResonanceStack(nn.Module):
             rcp, self.deformations if use_learned_deformations else torch.zeros_like(self.deformations))
         return x
 
+    def get_room_ir(self):
+        return self.verb.compute_mix(self.room_mix)
+
+    def get_ir_mix(self):
+        return self.dry_wet_mix
+
     def forward(
             self,
             cp: torch.Tensor = None,
@@ -966,6 +979,10 @@ class OverfitResonanceStack(nn.Module):
 
         mixes = self.get_mixes(0)
 
+        room_ir = self.get_room_ir().view(-1)
+        verb_mix = self.get_ir_mix().view(-1)
+
+
 
         serializer = NumpySerializer()
 
@@ -975,7 +992,9 @@ class OverfitResonanceStack(nn.Module):
             resonances=encode_array(resonances, serializer),
             hand=encode_array(hand, serializer),
             attacks=encode_array(attacks, serializer),
-            mix=encode_array(mixes, serializer)
+            mix=encode_array(mixes, serializer),
+            room_impulse_response=encode_array(room_ir, serializer),
+            reverb_mix=encode_array(verb_mix, serializer)
         )
 
         return params

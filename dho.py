@@ -1,8 +1,11 @@
+from typing import List
+
 import numpy as np
 import torch
 from torch import nn
 
-from modules import interpolate_last_axis, stft, sparsify
+import conjure
+from modules import interpolate_last_axis, stft, sparsify, max_norm
 from modules.transfer import damped_harmonic_oscillator
 from modules.upsample import upsample_with_holes
 from util import make_initializer
@@ -81,6 +84,8 @@ class DampedHarmonicOscillatorController(nn.Module):
         self.influence = nn.Parameter(torch.zeros(n_oscillators, 1, 1).uniform_(-0.001, 0.001))
         self.influence2 = nn.Parameter(torch.zeros(n_oscillators, 1, 1).uniform_(-0.0001, 0.0001))
 
+
+
     def forward(self):
 
         time_modifier = upsample_with_holes(self.times, desired_size=self.n_samples)
@@ -103,16 +108,43 @@ def compute_loss(target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
     r = stft(recon, 2048, 256, pad=True)
     return torch.abs(t - r).sum()
 
+def to_numpy(x: torch.Tensor) -> np.ndarray:
+    return x.data.cpu().numpy()
+
+
+def add_loggers(collection: conjure.LmdbCollection) -> List[conjure.Conjure]:
+    other_loggers = conjure.loggers(
+        ['time'],
+        conjure.SupportedContentType.Spectrogram.value,
+        to_numpy,
+        collection,
+        conjure.NumpySerializer(),
+        conjure.NumpyDeserializer())
+    return other_loggers
+
+
 if __name__ == '__main__':
     n_samples = 2 ** 17
+    n_oscillators = 32
+
+    model = DampedHarmonicOscillatorController(
+        n_samples=n_samples,
+        control_rate=256,
+        n_oscillators=n_oscillators
+    )
+
+    def training_loop_hook(iteration: int, loggers: List[conjure.Conjure]):
+        t, = loggers
+        # TODO: unable to tell if time is moving forward or backward here
+        times = max_norm(model.times.view(n_oscillators, -1))
+        t(times)
 
     overfit_model(
         n_samples=n_samples,
-        model=DampedHarmonicOscillatorController(
-            n_samples=n_samples,
-            control_rate=256,
-            n_oscillators=32),
+        model=model,
         loss_func=compute_loss,
         collection_name='dho',
+        logger_factory=add_loggers,
+        training_loop_hook=training_loop_hook,
         learning_rate=1e-3
     )

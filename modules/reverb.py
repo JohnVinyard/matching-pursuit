@@ -75,20 +75,17 @@ class NeuralReverb(nn.Module):
         audio = np.concatenate(audio, axis=0)
         return NeuralReverb(n_samples, audio.shape[0], audio)
 
-        
-
-    def forward(self, x, reverb_mix):
-
+    def compute_mix(self, reverb_mix: torch.Tensor) -> torch.Tensor:
         # choose a linear mixture of "rooms"
         mix = (reverb_mix[:, None, :] @ self.rooms)
-        
+        return mix
 
+    def forward(self, x, reverb_mix):
+        mix = self.compute_mix(reverb_mix)
         orig_shape = x.shape
         x = x.view(mix.shape)
         x = simple_fft_convolve(mix, x)
         x = x.view(*orig_shape)
-
-
         return x
 
 
