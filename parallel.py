@@ -1,13 +1,33 @@
 from io import BytesIO
 from subprocess import Popen, PIPE
 from typing import Tuple, Callable, List
+from torch import nn
 
 import torch
 from matplotlib import pyplot as plt
 import numpy as np
 from soundfile import SoundFile
+from torch.nn import functional as F
 
 Solution = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
+
+def stft(
+        x: torch.Tensor,
+        ws: int = 512,
+        step: int = 256,
+        pad: bool = False):
+
+    frames = x.shape[-1] // step
+
+    if pad:
+        x = F.pad(x, (0, ws))
+    x = x.unfold(-1, ws, step)
+    win = torch.hann_window(ws).to(x.device)
+    x = x * win[None, None, :]
+    x = torch.fft.rfft(x, norm='ortho')
+    x = torch.abs(x)
+    x = x[:, :, :frames, :]
+    return x
 
 # TODO: It might be nice to move this into zounds
 def listen_to_sound(
@@ -120,30 +140,125 @@ def test(nsamples: int):
     x = sequential(f, d)
     return x
 
-def test_osc(n_samples:int) -> torch.Tensor:
-    f = torch.zeros(n_samples).bernoulli_(p=0.0001)
-    d = torch.zeros(n_samples).fill_(0.9998)
-    e = parallel(f, d)
-    m = torch.zeros(1).uniform_(0.1, 0.5)
-    damping = torch.zeros(1).fill_(1)
-    tension = torch.zeros(1).uniform_(10**4, 10**9)
-    initial_displacement = torch.zeros(1).fill_(1)
+class Layer(nn.Module):
+    def __init__(self, n_nodes: int, n_samples: int, control_rate: int):
+        super().__init__()
+        self.n_nodes = n_nodes
+        self.n_samples = n_samples
+        self.control_rate = control_rate
+        self.n_frames = n_samples // control_rate
 
-    x = damped_harmonic_oscillator(
-        energy=e,
-        time=torch.linspace(0, 1, n_samples),
-        mass=m,
-        damping=damping,
-        tension=tension,
-        initial_displacement=initial_displacement,
+        # TODO: eventually, this will vary at control rate
+        # self.damp = nn.Parameter(torch.zeros(1, self.n_nodes, 1).uniform_(-6, 6))
+        damp = torch.zeros(1, self.n_nodes, n_samples).fill_(0.9998)
+        self.register_buffer('damp', damp)
+
+        self.mass = nn.Parameter(torch.zeros(1, self.n_nodes, 1).uniform_(-6, 6))
+
+        # TODO: eventually, this will vary at control rate
+        self.tension = nn.Parameter(torch.zeros(1, self.n_nodes, 1).uniform_(4, 9))
+
+        d = torch.zeros(1, self.n_nodes, 1).fill_(1)
+        self.register_buffer('d', d)
+
+        _id = torch.zeros(1, self.n_nodes, 1).fill_(1)
+        self.register_buffer('_id', _id)
+
+        t = torch.linspace(0, 10, self.n_samples)
+        self.register_buffer('t', t)
+
+        self.influence = nn.Parameter(torch.zeros(1, self.n_nodes, 1).uniform_(-0.01, 0.01))
+
+    def forward(self, forces: torch.Tensor, tension_modifier: torch.Tensor = None) -> torch.Tensor:
+        # damping = (0.9 + (torch.sigmoid(self.damp) * 0.1)).repeat(1, 1, forces.shape[-1])
+        energy = parallel(forces, self.damp)
+
+        mass = torch.sigmoid(self.mass)
+        tension = self.tension
+
+        if tension_modifier is not None:
+            tension = tension + (tension_modifier * self.influence)
+
+        x = damped_harmonic_oscillator(
+            energy=energy,
+            time=self.t,
+            mass=mass,
+            damping=self.d,
+            tension=10 ** tension,
+            initial_displacement=self._id,
+        )
+
+        return x
+
+class LayerController(nn.Module):
+    def __init__(self, n_layers: int, n_nodes: int, n_samples: int, control_rate: int):
+        super().__init__()
+        self.n_layers = n_layers
+        self.n_nodes = n_nodes
+        self.n_samples = n_samples
+        self.control_rate = control_rate
+        self.n_frames = n_samples // control_rate
+
+        self.forces = nn.Parameter(torch.zeros(1, n_nodes, n_samples).bernoulli_(p=0.00001))
+
+        self.layers = nn.ModuleList([Layer(n_nodes, n_samples, control_rate) for _ in range(self.n_layers)])
+
+
+    def forward(self):
+        tm = None
+        for i, layer in enumerate(self.layers):
+            tm = layer.forward(forces=self.forces, tension_modifier=tm)
+        return tm
+
+
+def test_osc(n_nodes: int, n_samples:int) -> torch.Tensor:
+    # f = torch.zeros(1, n_nodes, n_samples).bernoulli_(p=0.00001)
+
+    # layer = Layer(n_nodes, n_samples, 128)
+
+    controller = LayerController(
+        n_layers=3,
+        n_nodes=n_nodes,
+        n_samples=n_samples,
+        control_rate=128
     )
+    x = controller.forward()
+
+    x = torch.sum(x, dim=1, keepdim=True)
+
     return x
 
-def display_osc(n_samples: int):
-    x = test_osc(n_samples)
+    # d = torch.zeros(n_samples).fill_(0.9998)
+    # e = parallel(f, d)
+    # m = torch.zeros(1).uniform_(0.1, 0.5)
+    # damping = torch.zeros(1).fill_(1)
+    # tension = torch.zeros(1).uniform_(10**4, 10**9)
+    # initial_displacement = torch.zeros(1).fill_(1)
+    #
+    # x = damped_harmonic_oscillator(
+    #     energy=e,
+    #     time=torch.linspace(0, 1, n_samples),
+    #     mass=m,
+    #     damping=damping,
+    #     tension=tension,
+    #     initial_displacement=initial_displacement,
+    # )
+    # return x
+
+def display_osc(n_nodes: int, n_samples: int):
+    x = test_osc(n_nodes, n_samples)
     x = x / x.max()
-    arr = x.data.cpu().numpy()
+
+    spec = stft(x.view(1, 1, -1))
+    spec = spec.view(-1, spec.shape[-1])
+    spec = spec.data.cpu().numpy()
+
+
+    arr = x.data.cpu().numpy().reshape((-1,))
     plt.plot(arr)
+    plt.show()
+
+    plt.matshow(spec)
     plt.show()
 
     listen_to_sound(arr, wait_for_user_input=True)
@@ -159,4 +274,4 @@ def harness(n_samples: int, *solutions: Solution):
 
 if __name__ == '__main__':
     # harness(2**15, sequential, parallel)
-    display_osc(2**16)
+    display_osc(16, 2**16)
