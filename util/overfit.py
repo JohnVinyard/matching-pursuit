@@ -18,9 +18,9 @@ LossFunc = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 
 LoggerFactory = Callable[[conjure.LmdbCollection], List[conjure.Conjure]]
 
-TrainingLoopHook = Callable[[int, List[conjure.Conjure]], None]
+TrainingLoopHook = Callable[[int, List[conjure.Conjure], nn.Module], None]
 
-def default_training_loop_hook(iteration: int, loggers: List[conjure.Conjure]):
+def default_training_loop_hook(iteration: int, loggers: List[conjure.Conjure], model: nn.Module):
     pass
 
 def add_loggers(collection: conjure.LmdbCollection) -> List[conjure.Conjure]:
@@ -65,5 +65,5 @@ def overfit_model(
         loss = loss_func(recon, target)
         loss.backward()
         optimizer.step()
-        training_loop_hook(i, other_loggers)
+        training_loop_hook(i, other_loggers, model)
         print(i, loss.item())
