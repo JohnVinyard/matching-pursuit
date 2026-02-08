@@ -10,6 +10,8 @@ while the two factors together constitute a (lossy) compressive and interpretabl
 To make this more concrete, here's a video of me using a learned instrument to produce a new audio segment via a
 hand-tracking interface.
 """
+from modules.infoloss import CorrelationLoss
+from modules.latent_loss import covariance
 
 # videoexample
 
@@ -197,16 +199,19 @@ n_frames = n_samples // step_size
 # KLUDGE: control_plane_dim and n_resonances
 # must have the same value (for now)
 control_plane_dim = 16
-n_resonances = 16
+n_resonances = control_plane_dim
+
 expressivity = 2
 n_to_keep = 256
 do_sparsify = False
 # sparsity_coefficient = 0.000001
-sparsity_coefficient = 0.05
+sparsity_coefficient = 0.1
 n_oscillators = 2
 
+attack_n_frames = 128
 attack_full_size = 2048
-attack_n_frames = 2048
+
+
 deformation_frame_size = 128
 attack_filter_size = 16
 use_attack_filters = False
@@ -510,10 +515,22 @@ class DampedHarmonicOscillatorStack(nn.Module):
         self.influence = nn.Parameter(torch.zeros(n_oscillators, n_resonances, expressivity, 1).uniform_(-0.01, 0.01))
         self.influence2 = nn.Parameter(torch.zeros(n_oscillators, n_resonances, expressivity, 1).uniform_(-0.01, 0.01))
 
+        self.mix = nn.Parameter(torch.zeros(3).uniform_(-1, 1))
+
     def forward(self):
+
+        outputs = []
+
         x = self.dho1._materialize_resonances(self.influence.device)
+        outputs.append(x)
         x = self.dho2._materialize_resonances(self.influence.device, x, self.influence)
+        outputs.append(x)
         x = self.dho3._materialize_resonances(self.influence.device, x, self.influence2)
+        outputs.append(x)
+
+        outputs = torch.stack(outputs, dim=-1)
+        x = outputs @ torch.softmax(self.mix, dim=-1)
+
         x = unit_norm(x)
         return x
 
@@ -586,6 +603,8 @@ class DampedHarmonicOscillatorBlock(nn.Module):
         return x
 
 
+
+
 class AttackEnvelopes(nn.Module):
 
     def __init__(self, control_plane_dim: int, envelope_size: int, n_gaussians: int):
@@ -598,14 +617,16 @@ class AttackEnvelopes(nn.Module):
         # self.amps = nn.Parameter(torch.zeros(control_plane_dim, 1).uniform_(-0.01, 0.01))
         self.means = nn.Parameter(torch.zeros(control_plane_dim, n_gaussians).uniform_(-6, 6))
         self.stds = nn.Parameter(torch.zeros(control_plane_dim, n_gaussians).uniform_(-6, 6))
+        self.max_std = nn.Parameter(torch.zeros(1).fill_(0.01))
 
     def forward(self):
         '''
         materialize attack envelopes
+        materialize attack envelopes
         '''
         x = pdf2(
             torch.sigmoid(self.means),
-            torch.sigmoid(self.stds),
+            1e-12 + (torch.abs(self.max_std) * torch.sigmoid(self.stds)),
             self.envelope_size,
             normalize=True
         )
@@ -637,12 +658,12 @@ class ResonanceLayer(nn.Module):
 
         resonance_coeffs = resonance_window_size // 2 + 1
 
-        self.ae = AttackEnvelopes(self.control_plane_dim, attack_n_frames, n_gaussians=16)
+        # self.ae = AttackEnvelopes(self.control_plane_dim, attack_full_size, n_gaussians=8)
 
-        # self.attack_envelopes = nn.Parameter(
-        #     # decaying_noise(self.control_plane_dim, 256, 4, 20, device=device, include_noise=False)
-        #     torch.zeros(self.control_plane_dim, attack_n_frames).uniform_(-0.01, 0.01)
-        # )
+        self.attack_envelopes = nn.Parameter(
+            # decaying_noise(self.control_plane_dim, 256, 4, 20, device=device, include_noise=False)
+            torch.zeros(self.control_plane_dim, attack_n_frames).uniform_(-0.01, 0.01)
+        )
 
         if use_attack_filters:
             self.attack_filters = nn.Parameter(torch.zeros(self.control_plane_dim, attack_filter_size).uniform_(-0.01, 0.01))
@@ -673,13 +694,14 @@ class ResonanceLayer(nn.Module):
     def get_mixes(self):
         return self.mix
 
-    @property
-    def attack_envelopes(self):
-        return self.ae.forward()
+    # @property
+    # def attack_envelopes(self):
+    #     return self.ae.forward()
 
     def get_attack_envelopes(self):
 
-        ae = self.ae.forward()
+        # ae = self.ae.forward()
+        ae = self.attack_envelopes
 
         # The web audio component adds random noise each time, instead of "baking" a single
         # uniform sampling into the attack envelopes
@@ -704,7 +726,8 @@ class ResonanceLayer(nn.Module):
             deformations: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         res = self.resonance.forward()
 
-        ae = self.ae.forward()
+        # ae = self.ae.forward()
+        ae = self.attack_envelopes
 
         # print(res.shape)
         output, fwd, cs = execute_layer(
@@ -1036,7 +1059,7 @@ def l0_norm(x: torch.Tensor):
 
     return y.sum()
 
-# loss_model = CorrelationLoss().to(device)
+loss_model = CorrelationLoss(n_elements=512).to(device)
 
 def compute_loss(
         x: torch.Tensor,
@@ -1045,15 +1068,23 @@ def compute_loss(
         attack_envelopes: torch.Tensor,
         sparsity_loss: float = sparsity_coefficient) -> torch.Tensor:
 
-    x = transform(x)
-    y = transform(y)
-    recon_loss = torch.abs(x - y).sum()
+    # cpd = cp.shape[-2]
+    # corr = cp.permute(0, 1, 3, 2).view(-1, cpd)
+    # cov = covariance(corr).sum()
+    recon_loss = torch.abs(transform(x) - transform(y)).sum()
 
-    # recon_loss =  loss_model.multiband_noise_loss(x, y, 64, 16)
+
+    # x = transform(x)
+    # y = transform(y)
+    recon_loss = (0.5 * loss_model.multiband_noise_loss(x, y, 64, 16)) + (0.5 * recon_loss)
+
     sparsity_term = l0_norm(cp)
-    attack_term = l0_norm(attack_envelopes)
+    # attack_term = l0_norm(attack_envelopes)
 
-    return recon_loss + (sparsity_term * sparsity_loss) + (attack_term * sparsity_loss)
+    if do_sparsify:
+        return recon_loss
+
+    return recon_loss + (sparsity_term * sparsity_loss) #+ (attack_term * sparsity_loss)
 
 
 
@@ -1089,7 +1120,7 @@ def produce_overfit_model(
         n_to_keep=n_to_keep
     ).to(device)
 
-    optimizer = Adam(model.parameters(), lr=1e-3)
+    optimizer = Adam(model.parameters(), lr=1e-4)
 
     for i in range(n_iterations):
         optimizer.zero_grad()

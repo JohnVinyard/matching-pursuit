@@ -15,6 +15,7 @@ from conjure import LmdbCollection, numpy_conjure, loggers, serve_conjure, Suppo
     NumpyDeserializer
 from modules import max_norm, sparse_softmax, interpolate_last_axis, iterative_loss, \
     stft, flattened_multiband_spectrogram, unit_norm, NeuralReverb
+from modules.normal_pdf import pdf2
 from modules.transfer import fft_convolve, damped_harmonic_oscillator
 from modules.upsample import upsample_with_holes, ensure_last_axis_length
 from util import encode_audio, make_initializer, device
@@ -303,14 +304,28 @@ class DampedHarmonicOscillatorResonances(nn.Module):
 
         self.dho1 = DampedHarmonicOscillatorBlock(n_samples, n_osc, n_resonances, expressivity)
         self.dho2 = DampedHarmonicOscillatorBlock(n_samples, n_osc, n_resonances, expressivity)
+        self.dho3 = DampedHarmonicOscillatorBlock(n_samples, n_osc, n_resonances, expressivity)
 
 
         self.influence = nn.Parameter(torch.zeros(n_osc, n_resonances, expressivity, 1).uniform_(-0.01, 0.011))
+        self.influence2 = nn.Parameter(torch.zeros(n_osc, n_resonances, expressivity, 1).uniform_(-0.01, 0.011))
+
+        self.mix = nn.Parameter(torch.zeros(3).uniform_(-1, 1))
 
     def forward(self) -> torch.Tensor:
+
+        outputs = []
         x = self.dho1._materialize_resonances(device)
+        outputs.append(x)
         x = self.dho2._materialize_resonances(device, x, self.influence)
-        x = unit_norm(x)
+        outputs.append(x)
+        x = self.dho2._materialize_resonances(device, x, self.influence2)
+        outputs.append(x)
+
+        x = torch.stack(outputs, dim=-1)
+        x = x @ torch.softmax(self.mix, dim=-1)
+
+        # x = unit_norm(x)
         x = x.view(1, -1, self.n_samples)
         return x
 
@@ -354,6 +369,52 @@ class SampleEventGenerator(nn.Module):
         x = self.to_samples(x)
         return x
 
+class AttackEnvelopes(nn.Module):
+
+    def __init__(self, latent_dim: int, envelope_size: int, n_gaussians: int):
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.envelope_size = envelope_size
+        self.n_gaussians = n_gaussians
+
+
+        # self.amps = nn.Parameter(torch.zeros(control_plane_dim, 1).uniform_(-0.01, 0.01))
+
+        self.means = nn.Linear(latent_dim, n_gaussians)
+        self.stds = nn.Linear(latent_dim, n_gaussians)
+
+        # self.means = nn.Parameter(torch.zeros(control_plane_dim, n_gaussians).uniform_(-6, 6))
+        # self.stds = nn.Parameter(torch.zeros(control_plane_dim, n_gaussians).uniform_(-6, 6))
+        self.max_std = nn.Parameter(torch.zeros(1).fill_(0.01))
+
+    def forward(self, latent: torch.Tensor) -> torch.Tensor:
+        '''
+        materialize attack envelopes
+        materialize attack envelopes
+        '''
+        print(latent.shape)
+
+        batch = latent.shape[0]
+
+        m = torch.sigmoid(self.means.forward(latent))
+        s = torch.sigmoid(self.stds.forward(latent))
+
+
+        x = pdf2(
+            m,
+            1e-12 + (torch.abs(self.max_std) * s),
+            self.envelope_size,
+            normalize=True
+        )
+
+
+        x = torch.sum(x, dim=2)
+        x = unit_norm(x)
+        x = x.view(batch, -1, 1, self.envelope_size)
+        print(x.shape)
+        # x = x * self.amps
+        return x
+
 class EventGenerator(nn.Module):
 
     def __init__(
@@ -384,11 +445,11 @@ class EventGenerator(nn.Module):
 
         self.n_resonances = n_resonances
 
-        self.resonances = DampedHarmonicOscillatorBlock(
-            n_samples=self.n_samples,
-            n_oscillators=32,
-            n_resonances=n_resonances,
-            expressivity=1)
+        # self.resonances = DampedHarmonicOscillatorBlock(
+        #     n_samples=self.n_samples,
+        #     n_oscillators=32,
+        #     n_resonances=n_resonances,
+        #     expressivity=1)
 
         # self.resonances = DampedHarmonicOscillatorResonances(
         #     n_osc=8, n_samples=self.n_samples, n_resonances=n_resonances, expressivity=1)
@@ -397,18 +458,21 @@ class EventGenerator(nn.Module):
         # self.resonances = DampedHarmonicOscillatorResonances(
         #     latent_dim=latent_dim, n_resonances=n_resonances, n_osc=8, n_samples=self.n_samples, n_layers=2, expressivity=1)
 
+        self.resonances = DampedHarmonicOscillatorResonances(
+            n_osc=2, n_samples=self.n_samples, n_resonances=n_resonances, expressivity=1)
+
         self.to_resonance = nn.Linear(latent_dim, n_resonances * self.expressivity)
 
         # note: the noise envelope is 4x the frame rate, as it is upsampled
         # to 1/4 the overall number of frames
-        self.to_noise = SimpleLookup(latent_dim, n_envelopes, 4096, 1)
-        # self.to_noise = nn.Linear(latent_dim, n_frames, bias=False)
+        # self.to_noise = SimpleLookup(latent_dim, n_envelopes, 4096, 1)
+        self.to_noise = AttackEnvelopes(latent_dim, 4096, n_gaussians=8)
 
         self.to_deformation = SimpleLookup(latent_dim, n_deformations, n_frames, expressivity)
 
-        # self.verb = NeuralReverb.from_directory(Config.impulse_response_path(), 22050, self.n_samples)
-        # self.to_room_mix = nn.Linear(latent_dim, self.verb.n_rooms)
-        # self.dry_wet_mix = nn.Linear(latent_dim, 2)
+        self.verb = NeuralReverb.from_directory(Config.impulse_response_path(), 22050, self.n_samples)
+        self.to_room_mix = nn.Linear(latent_dim, self.verb.n_rooms)
+        self.dry_wet_mix = nn.Linear(latent_dim, 2)
 
         self.to_mix = nn.Linear(latent_dim, 2)
         self.to_loudness = nn.Linear(latent_dim, 1)
@@ -457,12 +521,12 @@ class EventGenerator(nn.Module):
 
         x = torch.tanh(x * a)
 
-        # verb_mix = self.to_room_mix(events)
-        # w = self.verb.forward(x, verb_mix)
-        # dw_mix = torch.softmax(self.dry_wet_mix.forward(events), dim=-1)
-        # s = torch.stack([x, w], dim=-1)
-        #
-        # x = s @ dw_mix[..., None]
+        verb_mix = self.to_room_mix(events)
+        w = self.verb.forward(x, verb_mix)
+        dw_mix = torch.softmax(self.dry_wet_mix.forward(events), dim=-1)
+        s = torch.stack([x, w], dim=-1)
+
+        x = s @ dw_mix[..., None]
 
         return x
 
@@ -615,7 +679,7 @@ class Model(nn.Module):
 @numpy_conjure(collection)
 def get_samples(path: str, samplerate: int) -> np.ndarray:
     samples, sr = librosa.load(path, sr=samplerate, mono=True)
-    n_samples = 2 ** 18
+    n_samples = 2 ** 20
     end_sample = samples.shape[-1] - n_samples
     start_sample = np.random.randint(0, end_sample)
     end = start_sample + n_samples
@@ -734,8 +798,8 @@ def train(
 
         # iterative loss seems to be important for producing
         # playable events
-        # l = iterative_loss(samples, recon, transform, ratio_loss=False, sort_channels=True)
-        l = reconstruction_loss(samples, recon)
+        l = iterative_loss(samples, recon, transform, ratio_loss=False, sort_channels=True)
+        # l = reconstruction_loss(samples, recon)
         l.backward()
         optim.step()
         print(i, l.item(),

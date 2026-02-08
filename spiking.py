@@ -327,6 +327,8 @@ class SpikingModel(nn.Module):
         y = y.unfold(-1, self.periodicity_size, self.periodicity_size // 4)
         y = torch.abs(torch.fft.rfft(y, dim=-1))
 
+
+
         #
         # y = y - torch.mean(y, dim=-1, keepdim=True)
         # y = y[:, :, 1:, :] - y[:, :, :-1, :]

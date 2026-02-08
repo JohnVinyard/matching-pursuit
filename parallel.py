@@ -13,10 +13,16 @@ from torch.nn import functional as F
 
 import conjure
 from conjure.logger import encode_audio
-from modules import sparsify
+from modules import sparsify, interpolate_last_axis, max_norm
+from modules.transfer import fft_convolve
 from modules.upsample import upsample_with_holes
-from util import device
+from resonancemodel import n_to_keep
+from util import device, count_parameters
 from util.overfit import overfit_model
+
+import matplotlib
+matplotlib.use('Qt5Agg')
+from matplotlib import pyplot as plt
 
 Solution = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 
@@ -125,29 +131,42 @@ def parallel_sr_independent(
 
     # Parallel scan formulation
     p = torch.cumprod(alpha, dim=-1)
-    s = torch.cumsum(b / p, dim=-1)
+    s = torch.cumsum(b / (p + 1e-12), dim=-1)
 
     return p * s
 
 
-def parallel(forces: torch.Tensor, damping: torch.Tensor, log_space_decay: bool = False) -> torch.Tensor:
+def parallel(forces: torch.Tensor, damping: torch.Tensor) -> torch.Tensor:
     # a[i] = d[i]
     # b[i] = d[i] * f[i]
     b = damping * forces
 
-    if log_space_decay:
-        damping = torch.log(damping + 1e-12)
-        damping = torch.cumsum(damping, dim=-1)
-        p = torch.exp(damping)
-    else:
-        # p[i] = prod_{j<=i} d[j]
-        p = torch.cumprod(damping, dim=-1)
+    # p[i] = prod_{j<=i} d[j]
+    p = torch.cumprod(damping, dim=-1)
 
     # sum_{k<=i} b[k] / p[k]
     s = torch.cumsum(b / p, dim=-1)
 
     # o[i] = p[i] * s[i]
     return p * s
+
+def parallel_conv(forces: torch.Tensor, damping: torch.Tensor, frame_size: int = 128) -> torch.Tensor:
+
+    start = torch.ones(damping.shape[0], damping.shape[1], 1, device=forces.device)
+    d = damping.repeat(1, 1, forces.shape[-1] // frame_size)
+    d = torch.cat([start, d], dim=-1)
+
+    # d = torch.exp(torch.cumsum(torch.log(d), dim=-1))[..., :-1]
+    d = torch.cumprod(d, dim=-1)[..., :-1]
+
+    # no-op when frame-rate = sample-rate
+    d = interpolate_last_axis(d, desired_size=forces.shape[-1])
+
+    # print(forces.shape, d.shape)
+
+    # print(forces.shape, d.shape)
+    x = fft_convolve(forces, d)
+    return x
 
 
 def generate_params(n_samples: int) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -195,14 +214,21 @@ class Layer(nn.Module):
         # self.influence = nn.Parameter(torch.zeros(1, self.n_nodes, 1).uniform_(-0.01, 0.01))
 
         self.force_router = nn.Parameter(torch.zeros(self.n_nodes, self.n_nodes).uniform_(-0.01, 0.01))
-        self.tension_router = nn.Parameter(torch.zeros(self.n_nodes, self.n_nodes).uniform_(-0.001, 0.001))
+        self.tension_router = nn.Parameter(torch.zeros(self.n_nodes, self.n_nodes).uniform_(-0.01, 0.01))
+
+        self.base_resonance = 0.5
+        self.max_resonance = 0.999
+        self.diff = (1 - self.base_resonance)
+
 
     def forward(self, forces: torch.Tensor, tension_modifier: torch.Tensor = None) -> torch.Tensor:
         forces = torch.einsum('abc,bd->adc', forces, self.force_router)
 
-        damp = 0.9997 + (torch.sigmoid(self.damp) * 0.0002)
-        damp = damp.repeat(1, 1, self.n_samples)
-        energy = parallel(forces, damp)
+        damp = self.base_resonance + (torch.sigmoid(self.damp) * self.diff)
+        # damp = damp.repeat(1, 1, self.n_samples)
+        # energy = parallel(forces, damp)
+
+        energy = parallel_conv(forces, damp, frame_size=1)
 
         mass = torch.sigmoid(self.mass) * 500
         tension = self.tension
@@ -240,9 +266,11 @@ class LayerController(nn.Module):
         self.n_frames = n_samples // control_rate
         self.n_to_keep = n_to_keep
 
-        self.forces = nn.Parameter(torch.zeros(1, n_nodes, self.n_frames).bernoulli_(p=1e-4))
+        self.forces = nn.Parameter(torch.zeros(1, n_nodes, self.n_frames).uniform_(0, 0.01))
 
         self.layers = nn.ModuleList([Layer(n_nodes, n_samples, control_rate) for _ in range(self.n_layers)])
+
+        self.mix = nn.Parameter(torch.zeros(self.n_layers))
 
     def materialize_forces(
             self, forces:
@@ -263,15 +291,20 @@ class LayerController(nn.Module):
         f = sparsify(f, n_to_keep=n_to_keep or self.n_to_keep)
         return f
 
+    def compression_ratio(self):
+        # For each sparse event, we need amplitude, time, and control_plane dimension
+
+        params_per_event = 3
+        params = count_parameters(self.layers) + (self.n_to_keep * params_per_event)
+
+        return params / self.n_samples
+
     def random_forward(self, sum_output: bool = True, n_to_keep: int = None) -> torch.Tensor:
-        f = torch.zeros_like(self.forces).uniform_(0, 1)
+        f = torch.zeros_like(self.forces).uniform_(0, self.forces.max().item()) ** 2
         return self.forward(sum_output=sum_output, forces=f, n_to_keep=n_to_keep)
 
     def forward(self, sum_output: bool = True, forces: torch.Tensor = None, n_to_keep: int = None) -> torch.Tensor:
 
-        # forces = forces or self.forces
-        # forces = forces + forces.mean()
-        # sparse_forces = sparsify(forces, n_to_keep=self.n_to_keep)
 
         if forces is not None:
             sparse_forces = self.materialize_forces(forces, n_to_keep=n_to_keep)
@@ -279,8 +312,13 @@ class LayerController(nn.Module):
             sparse_forces  = self.materialize_forces(self.forces, n_to_keep=n_to_keep)
 
         tm = None
+        outputs = []
         for i, layer in enumerate(self.layers):
             tm = layer.forward(forces=sparse_forces, tension_modifier=tm)
+            outputs.append(tm)
+
+        tm = torch.stack(outputs, dim=-1)
+        tm = tm @ torch.softmax(self.mix, dim=-1)
 
         if sum_output:
             tm = torch.sum(tm, dim=1, keepdim=True)
@@ -293,7 +331,8 @@ def test_osc(n_nodes: int, n_samples: int) -> torch.Tensor:
         n_layers=3,
         n_nodes=n_nodes,
         n_samples=n_samples,
-        control_rate=128
+        control_rate=128,
+        n_to_keep=256,
     )
     x = controller.forward()
     x = torch.sum(x, dim=1, keepdim=True)
@@ -308,12 +347,13 @@ def loss_func(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 
 
-def overfit_osc(n_nodes: int, n_samples: int, n_layers: int):
+def overfit_osc(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int):
     controller = LayerController(
         n_layers=n_layers,
         n_nodes=n_nodes,
         n_samples=n_samples,
-        control_rate=128
+        control_rate=128,
+        n_to_keep=n_to_keep
     ).to(device)
 
     def logger_factory(collection):
@@ -347,9 +387,10 @@ def overfit_osc(n_nodes: int, n_samples: int, n_layers: int):
         frce_logger = loggers[-2]
 
         with torch.no_grad():
-            rnd = model.random_forward(n_to_keep=16)
-            rnd_logger(rnd)
+            rnd = model.random_forward(n_to_keep=8)
+            rnd_logger(max_norm(rnd))
             f = model.materialize_forces(do_upsample=False)
+            f = f / (f.max() + 1e-12)
             frce_logger(f)
 
 
@@ -383,6 +424,29 @@ def display_osc(n_nodes: int, n_samples: int):
 
     listen_to_sound(arr, wait_for_user_input=True)
 
+def compare():
+    n_samples = 2 ** 15
+    frame_size = 1
+    n_frames = n_samples // frame_size
+
+    decay = 0.9
+    sr_dependent = torch.zeros(n_frames).fill_(decay)
+    forces = torch.zeros(n_frames).bernoulli_(p=1e-3) * torch.zeros(n_frames).uniform_(0, 1)
+
+    a = parallel(forces, sr_dependent)
+    # a = parallel_sr_independent(forces, sr_dependent, 1)
+
+    # a = interpolate_last_axis(a, n_samples)
+    # f = upsample_with_holes(forces, n_samples)
+
+    # print('NaN', torch.isnan(b).sum().item(), 'inf', torch.isinf(b).sum().item(), b.numel())
+    print(torch.isnan(a).sum() / n_samples)
+    # b = interpolate_last_axis(b, n_samples)
+
+    plt.plot(a)
+    plt.plot(forces)
+    # plt.plot(b)
+    plt.show()
 
 def harness(n_samples: int, *solutions: Solution):
     f, d = generate_params(n_samples)
@@ -394,6 +458,5 @@ def harness(n_samples: int, *solutions: Solution):
 
 
 if __name__ == '__main__':
-    # harness(2**15, sequential, parallel)
-    # display_osc(32, 2**17)
-    overfit_osc(n_nodes=64, n_samples=2 ** 17, n_layers=3)
+    # compare()
+    overfit_osc(n_nodes=32, n_samples=2 ** 17, n_layers=3, n_to_keep=256)
