@@ -392,7 +392,6 @@ class AttackEnvelopes(nn.Module):
         materialize attack envelopes
         materialize attack envelopes
         '''
-        print(latent.shape)
 
         batch = latent.shape[0]
 
@@ -411,8 +410,6 @@ class AttackEnvelopes(nn.Module):
         x = torch.sum(x, dim=2)
         x = unit_norm(x)
         x = x.view(batch, -1, 1, self.envelope_size)
-        print(x.shape)
-        # x = x * self.amps
         return x
 
 class EventGenerator(nn.Module):

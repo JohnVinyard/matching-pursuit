@@ -205,7 +205,7 @@ expressivity = 2
 n_to_keep = 256
 do_sparsify = False
 # sparsity_coefficient = 0.000001
-sparsity_coefficient = 0.1
+sparsity_coefficient = 0.05
 n_oscillators = 2
 
 attack_n_frames = 128
@@ -1059,7 +1059,7 @@ def l0_norm(x: torch.Tensor):
 
     return y.sum()
 
-loss_model = CorrelationLoss(n_elements=512).to(device)
+# loss_model = CorrelationLoss(n_elements=512).to(device)
 
 def compute_loss(
         x: torch.Tensor,
@@ -1076,7 +1076,7 @@ def compute_loss(
 
     # x = transform(x)
     # y = transform(y)
-    recon_loss = (0.5 * loss_model.multiband_noise_loss(x, y, 64, 16)) + (0.5 * recon_loss)
+    # recon_loss = (0.5 * loss_model.multiband_noise_loss(x, y, 64, 16)) + (0.5 * recon_loss)
 
     sparsity_term = l0_norm(cp)
     # attack_term = l0_norm(attack_envelopes)
