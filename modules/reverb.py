@@ -83,7 +83,7 @@ class NeuralReverb(nn.Module):
     def forward(self, x, reverb_mix):
         mix = self.compute_mix(reverb_mix)
         orig_shape = x.shape
-        x = x.view(mix.shape)
+        x = x.view(mix.shape[0], -1, mix.shape[-1])
         x = simple_fft_convolve(mix, x)
         x = x.view(*orig_shape)
         return x

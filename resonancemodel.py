@@ -177,7 +177,7 @@ from conjure import serve_conjure, SupportedContentType, NumpyDeserializer, Nump
     VideoComponent, ImageComponent
 from data import get_one_audio_segment
 from modules import max_norm, interpolate_last_axis, sparsify, unit_norm, stft, flattened_multiband_spectrogram, \
-    NeuralReverb
+    NeuralReverb, iterative_loss, sparse_softmax
 from modules.transfer import fft_convolve, damped_harmonic_oscillator, freq_domain_transfer_function_to_resonance
 from modules.upsample import upsample_with_holes, ensure_last_axis_length
 from util import device, encode_audio, make_initializer
@@ -202,10 +202,10 @@ control_plane_dim = 16
 n_resonances = control_plane_dim
 
 expressivity = 2
-n_to_keep = 256
-do_sparsify = False
+n_to_keep = 32
+do_sparsify = True
 # sparsity_coefficient = 0.000001
-sparsity_coefficient = 0.05
+sparsity_coefficient = 0.1
 n_oscillators = 2
 
 attack_n_frames = 128
@@ -294,7 +294,8 @@ def execute_layer(
         attack_filters: torch.Tensor = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
     batch, n_events, control_plane_dim, frames = control_signal.shape
-    batch, n_events, expressivity, def_frames = deformations.shape
+    batch, _, expressivity, def_frames = deformations.shape
+
 
     # route control plane to resonance plane at control-rate
     routed = (control_signal.permute(0, 1, 3, 2) @ routing).permute(0, 1, 3, 2)
@@ -306,6 +307,7 @@ def execute_layer(
     # ensure that resonances all have unit norm so that control
     # plane energy drives overall loudness/response
     res = unit_norm(res)
+
 
     # "route" energy from control plane to resonances
     routed = routed.view(batch, n_events, n_resonances, 1, frames)
@@ -324,7 +326,7 @@ def execute_layer(
     impulse = impulse.view(1, 1, control_plane_dim, 1, n_samples)
     routed = fft_convolve(impulse, routed)
 
-    cs = routed.view(1, control_plane_dim, n_samples).sum(dim=1, keepdim=True)
+    cs = routed.view(1, n_events, control_plane_dim, n_samples).sum(dim=1, keepdim=True)
 
     # convolve control plane with all resonances
     conv = fft_convolve(routed, res)
@@ -336,7 +338,8 @@ def execute_layer(
 
     d = torch.softmax(d, dim=-2)
 
-    d = d.view(batch, n_events, 1, expressivity, def_frames)
+
+    d = d.view(batch, 1, 1, expressivity, def_frames)
     d = interpolate_last_axis(d, n_samples)
 
     x = d * conv
@@ -670,8 +673,9 @@ class ResonanceLayer(nn.Module):
         else:
             self.attack_filters = None
 
-        self.router = nn.Parameter(
-            torch.zeros((self.control_plane_dim, self.n_resonances)).uniform_(-1, 1))
+        r = torch.zeros(self.control_plane_dim, self.n_resonances).uniform_(-1, 1)
+        self.router = nn.Parameter(r)
+
 
 
         # self.resonance = DampedHarmonicOscillatorBlock(
@@ -829,7 +833,9 @@ class OverfitResonanceStack(nn.Module):
             expressivity: int,
             n_frames: int,
             base_resonance: float = 0.5,
-            n_to_keep: int = 1024):
+            n_to_keep: int = 1024,
+            n_events: int = 32,
+            n_event_frames: int = 32):
 
         super().__init__()
         self.expressivity = expressivity
@@ -841,17 +847,26 @@ class OverfitResonanceStack(nn.Module):
         self.n_frames = n_frames
         self.n_to_keep = n_to_keep
 
+        self.n_events = n_events
+        self.n_event_frames = n_event_frames
+
         # self.resonance_frame_size = 1024
 
         self.deformation_frame_size = deformation_frame_size
         self.deformation_frames = n_samples // self.deformation_frame_size
 
 
-        control_plane = torch.zeros(
-            (1, 1, control_plane_dim, n_frames)) \
-            .uniform_(-0.01, 0.01)
+        # control_plane = torch.zeros(
+        #     (1, 1, control_plane_dim, n_frames)) \
+        #     .uniform_(-0.01, 0.01)
+        #
+        # self.control_plane = nn.Parameter(control_plane)
 
+        control_plane = torch.zeros(1, n_events, control_plane_dim, n_event_frames).uniform_(-0.01, 0.01)
         self.control_plane = nn.Parameter(control_plane)
+
+        self.times = nn.Parameter(torch.zeros(1, n_events, 1, n_frames).uniform_(-1, 1))
+
 
         deformations = torch.zeros(
             (1, 1, expressivity, self.deformation_frames)).uniform_(-0.01, 0.01)
@@ -909,28 +924,59 @@ class OverfitResonanceStack(nn.Module):
     def get_attack_envelopes(self, layer: int) -> torch.Tensor:
         return self.network.get_attack_envelopes(layer)
 
-    def _process_control_plane(
-            self,
-            cp: torch.Tensor,
-            n_to_keep: int = None,
-            do_sparsify: bool = do_sparsify) -> torch.Tensor:
-        cp = cp.view(1, self.control_plane_dim, self.n_frames)
+    # def _process_control_plane(
+    #         self,
+    #         cp: torch.Tensor,
+    #         n_to_keep: int = None,
+    #         do_sparsify: bool = do_sparsify) -> torch.Tensor:
+    #     cp = cp.view(1, self.control_plane_dim, self.n_frames)
+    #
+    #     # I _think_ this allows gradients to flow back to all elements, rather than
+    #     # just the top-k
+    #     cp = cp + cp.mean()
+    #
+    #     if do_sparsify:
+    #         cp = sparsify(cp, n_to_keep=n_to_keep or self.n_to_keep)
+    #
+    #     cp = cp.view(1, 1, self.control_plane_dim, self.n_frames)
+    #     cp = torch.relu(cp)
+    #     return cp
+    #
+    # @property
+    # def control_signal(self):
+    #     cp = self.control_plane
+    #     cp = self._process_control_plane(cp)
+    #     return cp
 
-        # I _think_ this allows gradients to flow back to all elements, rather than
-        # just the top-k
+    def _process_control_plane(self, cp: torch.Tensor, n_to_keep: int = 32, do_sparsify: bool = do_sparsify):
         cp = cp + cp.mean()
+        cp = sparsify(cp.view(-1, self.control_plane_dim, self.n_event_frames), n_to_keep=n_to_keep)
+        cp = cp.view(-1, self.n_events, self.control_plane_dim, self.n_event_frames)
+        # cp = torch.relu(cp)
 
-        if do_sparsify:
-            cp = sparsify(cp, n_to_keep=n_to_keep or self.n_to_keep)
+        cp = ensure_last_axis_length(cp, desired_size=self.n_frames)
 
-        cp = cp.view(1, 1, self.control_plane_dim, self.n_frames)
-        cp = torch.relu(cp)
-        return cp
+        times = sparse_softmax(self.times, dim=-1, normalize=True)
+        scheduled = fft_convolve(cp, times)
+        return scheduled
 
     @property
     def control_signal(self):
-        cp = self.control_plane
-        cp = self._process_control_plane(cp)
+        # cp = self.control_plane
+        # cp = cp + cp.mean()
+        # cp = sparsify(cp.view(-1, self.control_plane_dim, self.n_event_frames), n_to_keep=32)
+        # cp = cp.view(-1, self.n_events, self.control_plane_dim, self.n_event_frames)
+        #
+        # cp = ensure_last_axis_length(cp, desired_size=self.n_frames)
+        #
+        # times = sparse_softmax(self.times, dim=-1, normalize=True)
+        # scheduled = fft_convolve(cp, times)
+
+        cp = self._process_control_plane(
+            self.control_plane, n_to_keep=self.n_to_keep, do_sparsify=do_sparsify)
+
+        # total = (cp.view(-1) > 0).sum()
+        # print('TOTAL', total.item())
         return cp
 
     @property
@@ -949,8 +995,9 @@ class OverfitResonanceStack(nn.Module):
             self.control_plane.min().item(),
             self.control_plane.max().item())
 
-        rcp = self._process_control_plane(rcp, n_to_keep=16, do_sparsify=True)
-        x = self.forward(
+        # intentionally fewer top-k than the model in "reconstruction" mode
+        rcp = self._process_control_plane(rcp, n_to_keep=4, do_sparsify=True)
+        x, _, _ = self.forward(
             rcp, self.deformations if use_learned_deformations else torch.zeros_like(self.deformations))
         return x
 
@@ -964,14 +1011,20 @@ class OverfitResonanceStack(nn.Module):
             self,
             cp: torch.Tensor = None,
             deformations: torch.Tensor = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+
         cp = cp if cp is not None else self.control_signal
         deformations = deformations if deformations is not None else self.deformations
         x, cs = self.network.forward(cp, deformations)
 
+        cp = torch.sum(cp, dim=1, keepdim=True)
+
+
         wet = self.verb.forward(x, torch.softmax(self.room_mix, dim=-1))
+        wet = wet.view(-1, self.n_events, self.n_samples)
 
         stacked = torch.stack([x, wet], dim=-1)
         x = stacked @ torch.softmax(self.dry_wet_mix, dim=-1)
+
 
         return x, cs, cp
 
@@ -1046,7 +1099,7 @@ class OverfitModelResult:
 
 def transform(x: torch.Tensor) -> torch.Tensor:
     return stft(x, 2048, 256, pad=True)
-    # return flattened_multiband_spectrogram(x, {'xs': (64, 16)}, normalize=True)
+    # return flattened_multiband_spectrogram(x, {'xs': (64, 16)}, normalize=False)
 
 
 def l0_norm(x: torch.Tensor):
@@ -1298,8 +1351,8 @@ def overfit_model():
     remote_collection = conjure.S3Collection('resonancemodel', is_public=True, cors_enabled=True)
     remote_logger = conjure.Logger(remote_collection)
 
-    t, r, rand, res, att = conjure.loggers(
-        ['target', 'recon', 'random', 'resonance', 'att'],
+    t, r, rnd = conjure.loggers(
+        ['target', 'recon', 'rnd'],
         'audio/wav',
         encode_audio,
         collection,
@@ -1308,8 +1361,8 @@ def overfit_model():
     def to_numpy(x: torch.Tensor) -> np.ndarray:
         return x.data.cpu().numpy()
 
-    c, deformations, routing = conjure.loggers(
-        ['control', 'deformations', 'routing'],
+    c, = conjure.loggers(
+        ['control'],
         SupportedContentType.Spectrogram.value,
         to_numpy,
         collection,
@@ -1318,7 +1371,7 @@ def overfit_model():
         store_history=True)
 
     serve_conjure(
-        [t, r, c, rand, res, deformations, routing, att],
+        [t, r, c, rnd],
         port=9999,
         n_workers=1,
         web_components_version=web_components_version)
@@ -1332,11 +1385,17 @@ def overfit_model():
             optimizer.zero_grad()
             recon, fcs, cp = model.forward()
 
-            r(max_norm(recon))
-            c(model.control_signal[0, 0])
+            rs = torch.sum(recon, dim=1, keepdim=True)
+            r(max_norm(rs))
+
+            x = torch.sum(model.control_signal, dim=1)[0, ...]
+            x = x / (x.max() + 1e-12)
+            c(x)
 
 
-            loss = compute_loss(target, recon, cp, model.get_attack_envelopes(0))
+            # loss = compute_loss(target, recon, cp, model.get_attack_envelopes(0))
+
+            loss = iterative_loss(target, recon, transform=transform)
 
             loss.backward()
             optimizer.step()
@@ -1348,16 +1407,17 @@ def overfit_model():
                 model.active_elements.item(),
                 model.sparsity.item())
 
-            deformations(model.flattened_deformations)
-            routing(torch.abs(model.get_router(0)))
+            # deformations(model.flattened_deformations)
+            # routing(torch.abs(model.get_router(0)))
 
-            fcs = max_norm(fcs)
-            att(fcs)
+            # fcs = max_norm(fcs)
+            # att(fcs)
 
-            with torch.no_grad():
-                rand(max_norm(model.random(use_learned_deformations=use_learned_deformations_for_random)[0]))
-                rz = model.get_materialized_resonance(0).view(-1, n_samples)
-                res(max_norm(rz[np.random.randint(0, n_resonances * expressivity - 1)]))
+            if iteration % 100 == 0:
+                with torch.no_grad():
+                    rnd(max_norm(model.random(use_learned_deformations=use_learned_deformations_for_random)[0]))
+                    # rz = model.get_materialized_resonance(0).view(-1, n_samples)
+                    # res(max_norm(rz[np.random.randint(0, n_resonances * expressivity - 1)]))
 
             iteration += 1
 

@@ -15,8 +15,8 @@ from conjure import LmdbCollection, numpy_conjure, loggers, serve_conjure, Suppo
     NumpyDeserializer
 from modules import max_norm, sparse_softmax, interpolate_last_axis, iterative_loss, \
     stft, flattened_multiband_spectrogram, unit_norm, NeuralReverb
-from modules.normal_pdf import pdf2
-from modules.transfer import fft_convolve, damped_harmonic_oscillator
+from modules.normal_pdf import pdf2, gamma_pdf
+from modules.transfer import fft_convolve, damped_harmonic_oscillator, fft_shift, hierarchical_dirac
 from modules.upsample import upsample_with_holes, ensure_last_axis_length
 from util import encode_audio, make_initializer, device
 
@@ -35,8 +35,8 @@ def count_parameters(model):
 
 
 def transform(x: torch.Tensor) -> torch.Tensor:
-    # return flattened_multiband_spectrogram(x, {'sm': (64, 16)})
-    return stft(x, 2048, 256, pad=True)
+    return flattened_multiband_spectrogram(x, {'sm': (64, 16)})
+    # return stft(x, 2048, 256, pad=True)
 
 
 def reconstruction_loss(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
@@ -382,6 +382,10 @@ class AttackEnvelopes(nn.Module):
 
         self.means = nn.Linear(latent_dim, n_gaussians)
         self.stds = nn.Linear(latent_dim, n_gaussians)
+        self.amps = nn.Linear(latent_dim, n_gaussians)
+
+        self.pos = nn.Linear(latent_dim, n_gaussians * int(np.log2(envelope_size)) * 2)
+        self.overall_amp = nn.Linear(latent_dim, 1)
 
         # self.means = nn.Parameter(torch.zeros(control_plane_dim, n_gaussians).uniform_(-6, 6))
         # self.stds = nn.Parameter(torch.zeros(control_plane_dim, n_gaussians).uniform_(-6, 6))
@@ -394,21 +398,39 @@ class AttackEnvelopes(nn.Module):
         '''
 
         batch = latent.shape[0]
+        n_events = latent.shape[1]
 
-        m = torch.sigmoid(self.means.forward(latent))
-        s = torch.sigmoid(self.stds.forward(latent))
+        # m = torch.sigmoid(self.means.forward(latent))
+        # s = torch.sigmoid(self.stds.forward(latent))
+        #
+        #
+        # x = pdf2(
+        #     m,
+        #     1e-12 + (torch.abs(self.max_std) * s),
+        #     self.envelope_size,
+        #     normalize=True
+        # )
+
+        m = torch.abs(self.means.forward(latent))
+        s = torch.abs(self.stds.forward(latent))
+        a = torch.abs(self.amps.forward(latent))
+        oa = self.overall_amp.forward(latent)
+
+        p = self.pos.forward(latent)
+        p = p.view(batch, n_events, self.n_gaussians, -1, 2)
+        # p = sparse_softmax(p, dim=-1, normalize=True)
+        p = hierarchical_dirac(p, soft=False)
+
+        x = gamma_pdf(m, s, n_elements=self.envelope_size, normalize=False)
 
 
-        x = pdf2(
-            m,
-            1e-12 + (torch.abs(self.max_std) * s),
-            self.envelope_size,
-            normalize=True
-        )
-
-
+        x = x * a[..., None]
+        # print(x.shape, p.shape)
+        # x = fft_shift(x, p[..., None])
+        x = fft_convolve(x, p)
         x = torch.sum(x, dim=2)
         x = unit_norm(x)
+        x = x * oa
         x = x.view(batch, -1, 1, self.envelope_size)
         return x
 
@@ -676,7 +698,7 @@ class Model(nn.Module):
 @numpy_conjure(collection)
 def get_samples(path: str, samplerate: int) -> np.ndarray:
     samples, sr = librosa.load(path, sr=samplerate, mono=True)
-    n_samples = 2 ** 20
+    n_samples = 2 ** 21
     end_sample = samples.shape[-1] - n_samples
     start_sample = np.random.randint(0, end_sample)
     end = start_sample + n_samples
