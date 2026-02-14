@@ -35,8 +35,8 @@ def count_parameters(model):
 
 
 def transform(x: torch.Tensor) -> torch.Tensor:
-    return flattened_multiband_spectrogram(x, {'sm': (64, 16)})
-    # return stft(x, 2048, 256, pad=True)
+    # return flattened_multiband_spectrogram(x, {'sm': (64, 16)})
+    return stft(x, 2048, 256, pad=True)
 
 
 def reconstruction_loss(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
@@ -736,6 +736,16 @@ def to_numpy(x: torch.Tensor):
     return x.data.cpu().numpy()
 
 
+def l0_norm(x: torch.Tensor):
+    mask = (x > 0).float()
+
+    forward = mask
+    backward = x
+
+    y = backward + (forward - backward).detach()
+
+    return y.sum()
+
 def train(
         path: str,
         device: torch.device,
@@ -814,11 +824,13 @@ def train(
         # log recon audio
         recon_audio(max_norm(recon_summed))
 
+        recon_active = torch.norm(recon, dim=-1, keepdim=True)
+        recon_loss = l0_norm(recon_active)
+
 
         # iterative loss seems to be important for producing
         # playable events
-        l = iterative_loss(samples, recon, transform, ratio_loss=False, sort_channels=True)
-        # l = reconstruction_loss(samples, recon)
+        l = iterative_loss(samples, recon, transform, ratio_loss=False, sort_channels=True) + recon_loss
         l.backward()
         optim.step()
         print(i, l.item(),

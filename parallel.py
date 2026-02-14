@@ -216,7 +216,7 @@ class Layer(nn.Module):
         self.force_router = nn.Parameter(torch.zeros(self.n_nodes, self.n_nodes).uniform_(-0.01, 0.01))
         self.tension_router = nn.Parameter(torch.zeros(self.n_nodes, self.n_nodes).uniform_(-0.01, 0.01))
 
-        self.base_resonance = 0.5
+        self.base_resonance = 0.9
         self.max_resonance = 0.999
         self.diff = (1 - self.base_resonance)
 
