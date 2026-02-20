@@ -1,6 +1,7 @@
 from typing import Dict
 
 import torch
+from openpyxl.styles.builtins import total
 from torch import nn
 from torch.nn import functional as F
 from torch.optim import Adam
@@ -237,17 +238,11 @@ class SpikingModel(nn.Module):
         self.periodicity_memory_size = frame_memory_size
 
         memory = (torch.linspace(0, 1, steps=self.memory_size))[None, :]
-        decay = torch.linspace(2, 32, steps=n_channels)[:, None]
+        decay = torch.linspace(1.1, 10, steps=n_channels)[:, None]
         memory = memory ** decay
         memory /= memory.sum(dim=-1, keepdim=True)
-
         self.register_buffer('memory', memory, persistent=False)
 
-        periodicity_memory = \
-            (torch.linspace(0, 1, self.periodicity_memory_size) ** 2) \
-                .view(1, 1, self.periodicity_memory_size)
-
-        self.register_buffer('periodicity_memory', periodicity_memory, persistent=False)
 
     def multiband(self, audio: torch.Tensor, hard: bool = False, normalize: bool = True) -> Dict[int, torch.Tensor]:
 
@@ -282,6 +277,9 @@ class SpikingModel(nn.Module):
 
 
     def forward(self, audio: torch.Tensor, hard: bool = True, normalize: bool = True):
+
+        audio_size = audio.numel()
+
         batch = audio.shape[-1]
 
         n_samples = audio.shape[-1]
@@ -318,31 +316,29 @@ class SpikingModel(nn.Module):
 
 
 
-        # print(f'Channel {audio.shape[-1]} with sparsity {(fwd.sum() / fwd.numel())} and {fwd.sum()} non-zero elements')
-
-        # TODO: Figure out mask here
-
         # compute periodicity
         y = F.pad(y, (0, self.periodicity_size // 4))
         y = y.unfold(-1, self.periodicity_size, self.periodicity_size // 4)
         y = torch.abs(torch.fft.rfft(y, dim=-1))
 
+        values, indices = torch.topk(y, k=8, dim=-1)
+
+        z = torch.zeros_like(y)
+        z = torch.scatter(z, dim=-1, index=indices, src=values)
 
 
-        #
-        # y = y - torch.mean(y, dim=-1, keepdim=True)
-        # y = y[:, :, 1:, :] - y[:, :, :-1, :]
+        fwd = z
+        back = y
+        # layer two of spiking response.  Sparse periodicities
+        # propagate forward, full spectrum propagates back
+        y = back + (fwd - back).detach()
 
-        # y = torch.relu(y)
+        total_spikes = (fwd > 0).sum()
 
-        #
-        # fwd = (y > 0).float()
-        # back = y
-        #
-        # # layer one of spiking response.  Unit responses propagate forward,
-        # # initial real-values propagate backward
-        #
-        # y = back + (fwd - back).detach()
+        # print(y.shape, y.numel(), total_spikes, total_spikes.item() / y.numel())
+        ratio = total_spikes / audio_size
+
+        print(f'Band {audio.shape[-1]}: {ratio:.2f}')
 
         return y
 
@@ -556,7 +552,7 @@ def overfit_model():
 
 
     overfit_model = OverfitRawAudio(target.shape, std=0.01, normalize=True).to(device)
-    optim = Adam(overfit_model.parameters(), lr=1e-2)
+    optim = Adam(overfit_model.parameters(), lr=1e-3)
 
     collection = LmdbCollection('spiking')
 
@@ -583,8 +579,8 @@ def overfit_model():
 
         # ae.forward(target)
 
-        loss = loss_model.compute_loss(target, recon)
-        # loss = loss_model.compute_multiband_loss(target, recon)
+        # loss = loss_model.compute_loss(target, recon)
+        loss = loss_model.compute_multiband_loss(target, recon, hard=True, normalize=True)
 
         # loss = torch.abs(target_features - recon_features).sum()
         loss.backward()

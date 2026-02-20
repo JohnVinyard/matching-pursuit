@@ -5,6 +5,7 @@ import librosa
 import numpy as np
 import torch
 from torch import nn
+from torch.nn.utils import weight_norm
 from torch.optim import Adam
 
 from conjure import LmdbCollection, numpy_conjure, loggers, serve_conjure
@@ -36,36 +37,117 @@ def loss(recon: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     return l
 
 
+class DampedHarmonicOscillatorBlock(nn.Module):
+    def __init__(
+            self,
+            n_samples: int,
+            n_oscillators: int,
+            n_resonances: int,
+            expressivity: int):
+        super().__init__()
+        self.n_samples = n_samples
+        self.n_oscillators = n_oscillators
+        self.n_resonances = n_resonances
+        self.expressivity = expressivity
+
+        self.damping = nn.Parameter(
+            torch.zeros(n_oscillators, n_resonances, expressivity) \
+                .uniform_(0.5, 1.5))
+
+        self.mass = nn.Parameter(
+            torch.zeros(n_oscillators, n_resonances, expressivity) \
+                .uniform_(-2, 2))
+
+        self.tension = nn.Parameter(
+            torch.zeros(n_oscillators, n_resonances, expressivity) \
+                .uniform_(4, 9))
+
+        self.initial_displacement = nn.Parameter(
+            torch.zeros(n_oscillators, n_resonances, expressivity) \
+                .uniform_(-1, 2))
+
+        self.amplitudes = nn.Parameter(
+            torch.zeros(n_oscillators, n_resonances, expressivity, 1) \
+                .uniform_(-1, 1))
+
+
+    def _materialize_resonances(self, energy: torch.Tensor, device: torch.device, tension_modifier: torch.Tensor = None, scaling: torch.Tensor = None):
+        time = torch.linspace(0, 10, self.n_samples, device=device) \
+            .view(1, 1, 1, self.n_samples)
+
+        t = self.tension[..., None]
+
+        if tension_modifier is not None:
+            t = t + (tension_modifier[0] * scaling)
+
+        x = damped_harmonic_oscillator(
+            energy=energy,
+            time=time,
+            mass=torch.sigmoid(self.mass[..., None]) * 2,
+            damping=torch.sigmoid(self.damping[..., None]) * 30,
+            tension=10 ** t,
+            initial_displacement=self.initial_displacement[..., None],
+            initial_velocity=0,
+            do_clamp=False
+        )
+
+        x = x.view(self.n_oscillators, self.n_resonances, self.expressivity, self.n_samples)
+        x = x * self.amplitudes
+
+
+        x = torch.sum(x, dim=0)
+        x = x.view(1, 1, self.n_resonances, self.expressivity, self.n_samples)
+
+        return x
+
+class DampedHarmonicOscillatorStack(nn.Module):
+    def __init__(
+            self,
+            n_samples: int,
+            n_oscillators: int,
+            n_resonances: int,
+            expressivity: int):
+
+        super().__init__()
+        self.dho1 = DampedHarmonicOscillatorBlock(n_samples, n_oscillators, n_resonances, expressivity)
+        self.dho2 = DampedHarmonicOscillatorBlock(n_samples, n_oscillators, n_resonances, expressivity)
+        self.dho3 = DampedHarmonicOscillatorBlock(n_samples, n_oscillators, n_resonances, expressivity)
+        self.influence = nn.Parameter(torch.zeros(n_oscillators, n_resonances, expressivity, 1).uniform_(-0.01, 0.01))
+        self.influence2 = nn.Parameter(torch.zeros(n_oscillators, n_resonances, expressivity, 1).uniform_(-0.01, 0.01))
+
+
+        self.mix = nn.Parameter(torch.zeros(3).uniform_(-1, 1))
+
+    def forward(self):
+
+        outputs = []
+
+        x = self.dho1._materialize_resonances(self.influence.device)
+        outputs.append(x)
+        x = self.dho2._materialize_resonances(self.influence.device, x, self.influence)
+        outputs.append(x)
+        x = self.dho3._materialize_resonances(self.influence.device, x, self.influence2)
+        outputs.append(x)
+
+        outputs = torch.stack(outputs, dim=-1)
+        x = outputs @ torch.softmax(self.mix, dim=-1)
+
+        return x
+
 class Layer(nn.Module):
 
     def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
-        # ln = weight_norm(nn.Linear(in_channels, out_channels, bias=True))
-        # self.mn = ln
-        self.mn = nn.Linear(in_channels, out_channels)
-        # self.mn = nn.Parameter(torch.zeros(in_channels, out_channels))
+        ln = weight_norm(nn.Linear(in_channels, out_channels, bias=True))
+        self.mn = ln
 
-    # def perturbed_weights(self) -> torch.Tensor:
-    #     return torch.zeros_like(self.mn).normal_(self.mn.mean().item(), self.mn.std().item())
 
-    def forward(self, x: torch.Tensor, perturb_weights: bool = False) -> torch.Tensor:
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         skip = x
         x = self.mn(x)
-
-        # if perturb_weights:
-        #     pw = self.perturbed_weights()
-        #     x = pw @ x
-        # else:
-        #     x = self.mn @ x
-
-        # if  is None:
-        #     x = self.mn @ x
-        # else:
-        #     x = alternate_weights @ x
-        # x = torch.selu(x)
+        x = torch.selu(x)
         x = F.leaky_relu(x, 0.2)
-        # x = torch.sin(x * 30)
-        # x = torch.tanh(x)
         x = x + skip
         return x
 
@@ -77,24 +159,13 @@ class Network(nn.Module):
             in_channels: int,
             hidden_channels: int,
             n_layers: int,
-            n_samples: int,
-            smallest_band: int = 512):
+            n_samples: int):
+
         super().__init__()
 
         self.segment_size = segment_size
         self.n_samples = n_samples
         self.n_layers = n_layers
-
-        self.sm = int(np.log2(smallest_band))
-        self.lg = int(np.log2(segment_size))
-
-        print(segment_size, n_samples, )
-
-        self.transforms = (nn.ModuleDict
-                           ({str(2 ** size): nn.Linear(hidden_channels, hidden_channels) for size in range(self.sm, self.lg + 1)}))
-        self.amp_transforms = (nn.ModuleDict
-                           ({str(2 ** size): nn.Linear(hidden_channels, hidden_channels) for size in range(self.sm, self.lg + 1)}))
-
 
         self.input = nn.Linear(in_channels, hidden_channels, bias=True)
         self.network = nn.ModuleList([Layer(hidden_channels, hidden_channels) for _ in range(n_layers)])
@@ -109,26 +180,32 @@ class Network(nn.Module):
             x = layer(x, i == perturbed_layer)
 
 
-        total_size = x.shape[1]
-        bands = {}
-
-        pool_size = 1
-
-        for k, layer in self.transforms.items():
-            size = int(k)
-            step = total_size // size
-            z = x[:, ::step, :]
-            a = self.amp_transforms[k].forward(z).permute(0, 2, 1) ** 2
-            a = F.avg_pool1d(a, pool_size, stride=1, padding=pool_size // 2)[..., :a.shape[-1]]
-            z = layer(z).permute(0, 2, 1)
-            bands[k] = torch.sum(z * a, dim=1, keepdim=True)
-            pool_size *= 2
-
-        x = fft_frequency_recompose(bands, desired_size=self.segment_size)
 
 
         return x
 
+
+@torch.jit.script
+def damped_harmonic_oscillator(
+        energy: torch.Tensor,
+        time: torch.Tensor,
+        mass: torch.Tensor,
+        damping: torch.Tensor,
+        tension: torch.Tensor,
+        initial_displacement: torch.Tensor
+) -> torch.Tensor:
+    x = (damping / (2 * mass))
+
+    omega = torch.sqrt(torch.abs(tension - (x ** 2)))
+
+    phi = torch.atan2(
+        (x * initial_displacement),
+        (initial_displacement * omega)
+    )
+    a = initial_displacement / torch.cos(phi)
+
+    z = a * energy * torch.cos(omega * time - phi)
+    return z
 
 @numpy_conjure(collection)
 def get_samples(path: str, samplerate: int) -> np.ndarray:
