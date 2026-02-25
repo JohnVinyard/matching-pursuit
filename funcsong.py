@@ -17,7 +17,7 @@ collection = LmdbCollection('funcsong')
 
 DatasetBatch = Tuple[torch.Tensor, torch.Tensor, int]
 
-init = make_initializer(0.01)
+init = make_initializer(0.02)
 
 
 # thanks to https://discuss.pytorch.org/t/how-do-i-check-the-number-of-parameters-of-a-model/4325/9
@@ -26,8 +26,8 @@ def count_parameters(model: nn.Module) -> int:
 
 
 def transform(x: torch.Tensor) -> torch.Tensor:
-    return flattened_multiband_spectrogram(x, { 'xs': (64, 16)})
-    # return stft(x, 2048, 256, pad=True)
+    # return flattened_multiband_spectrogram(x, { 'xs': (64, 16)})
+    return stft(x, 2048, 256, pad=True)
 
 
 def loss(recon: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -51,23 +51,23 @@ class DampedHarmonicOscillatorBlock(nn.Module):
         self.expressivity = expressivity
 
         self.damping = nn.Parameter(
-            torch.zeros(n_oscillators, n_resonances, expressivity) \
+            torch.zeros(1, n_oscillators, n_resonances, expressivity) \
                 .uniform_(0.5, 1.5))
 
         self.mass = nn.Parameter(
-            torch.zeros(n_oscillators, n_resonances, expressivity) \
+            torch.zeros(1, n_oscillators, n_resonances, expressivity) \
                 .uniform_(-2, 2))
 
         self.tension = nn.Parameter(
-            torch.zeros(n_oscillators, n_resonances, expressivity) \
+            torch.zeros(1, n_oscillators, n_resonances, expressivity) \
                 .uniform_(4, 9))
 
         self.initial_displacement = nn.Parameter(
-            torch.zeros(n_oscillators, n_resonances, expressivity) \
+            torch.zeros(1, n_oscillators, n_resonances, expressivity) \
                 .uniform_(-1, 2))
 
         self.amplitudes = nn.Parameter(
-            torch.zeros(n_oscillators, n_resonances, expressivity, 1) \
+            torch.zeros(1, n_oscillators, n_resonances, expressivity, 1) \
                 .uniform_(-1, 1))
 
 
@@ -87,16 +87,14 @@ class DampedHarmonicOscillatorBlock(nn.Module):
             damping=torch.sigmoid(self.damping[..., None]) * 30,
             tension=10 ** t,
             initial_displacement=self.initial_displacement[..., None],
-            initial_velocity=0,
-            do_clamp=False
         )
 
-        x = x.view(self.n_oscillators, self.n_resonances, self.expressivity, self.n_samples)
+        x = x.view(-1, self.n_oscillators, self.n_resonances, self.expressivity, self.n_samples)
         x = x * self.amplitudes
 
 
-        x = torch.sum(x, dim=0)
-        x = x.view(1, 1, self.n_resonances, self.expressivity, self.n_samples)
+        x = torch.sum(x, dim=1)
+        x = x.view(-1, 1, self.n_resonances, self.expressivity, self.n_samples)
 
         return x
 
@@ -116,21 +114,23 @@ class DampedHarmonicOscillatorStack(nn.Module):
         self.influence2 = nn.Parameter(torch.zeros(n_oscillators, n_resonances, expressivity, 1).uniform_(-0.01, 0.01))
 
 
-        self.mix = nn.Parameter(torch.zeros(3).uniform_(-1, 1))
+        self.mix = nn.Parameter(torch.zeros(1, 1, n_resonances, expressivity, 1, 3).uniform_(-1, 1))
 
-    def forward(self):
+    def forward(self, energy: torch.Tensor):
 
         outputs = []
 
-        x = self.dho1._materialize_resonances(self.influence.device)
+        x = self.dho1._materialize_resonances(energy, self.influence.device)
         outputs.append(x)
-        x = self.dho2._materialize_resonances(self.influence.device, x, self.influence)
+        x = self.dho2._materialize_resonances(energy, self.influence.device, x, self.influence)
         outputs.append(x)
-        x = self.dho3._materialize_resonances(self.influence.device, x, self.influence2)
+        x = self.dho3._materialize_resonances(energy, self.influence.device, x, self.influence2)
         outputs.append(x)
 
         outputs = torch.stack(outputs, dim=-1)
-        x = outputs @ torch.softmax(self.mix, dim=-1)
+
+        x = (outputs * torch.softmax(self.mix, dim=-1)).sum(dim=-1)
+        # x = outputs @ torch.softmax(self.mix, dim=-1)
 
         return x
 
@@ -147,7 +147,7 @@ class Layer(nn.Module):
         skip = x
         x = self.mn(x)
         x = torch.selu(x)
-        x = F.leaky_relu(x, 0.2)
+        # x = F.leaky_relu(x, 0.2)
         x = x + skip
         return x
 
@@ -159,30 +159,44 @@ class Network(nn.Module):
             in_channels: int,
             hidden_channels: int,
             n_layers: int,
-            n_samples: int):
+            n_samples: int,
+            n_resonances: int = 64):
 
         super().__init__()
 
         self.segment_size = segment_size
         self.n_samples = n_samples
         self.n_layers = n_layers
+        self.n_resonances = n_resonances
 
         self.input = nn.Linear(in_channels, hidden_channels, bias=True)
         self.network = nn.ModuleList([Layer(hidden_channels, hidden_channels) for _ in range(n_layers)])
+        self.to_energy = nn.Linear(hidden_channels, n_resonances)
+        self.dho = DampedHarmonicOscillatorStack(segment_size, n_oscillators=2, n_resonances=n_resonances, expressivity=1)
         self.apply(init)
 
-    def forward(self, x: torch.Tensor, perturbed_layer: int = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch = x.shape[0]
 
         x = x.permute(0, 2, 1)
         x = self.input(x)
 
         for i, layer in enumerate(self.network):
-            x = layer(x, i == perturbed_layer)
+            x = layer(x)
+
+        e = torch.abs(self.to_energy(x)).permute(0, 2, 1).view(batch, 1, self.n_resonances, 1, self.segment_size)
+        # e = e.view(batch, -1, self.segment_size)
+        # e = F.avg_pool1d(e, kernel_size=128, stride=1, padding=64)[..., :self.segment_size]
+        # e = e.view(batch, 1, self.n_resonances, 1, self.segment_size)
+
+        d = self.dho(e)
+
+        d = d.view(batch, self.n_resonances, self.segment_size)
+        d = torch.sum(d, dim=1, keepdim=True)
+
+        return d
 
 
-
-
-        return x
 
 
 @torch.jit.script
@@ -353,6 +367,6 @@ if __name__ == '__main__':
         torch.device('cuda'),
         n_segment_samples=2 ** 15,
         n_pos_encoding_channels=4096,
-        hidden_channels=128,
+        hidden_channels=256,
         n_layers=4,
-        batch_size=8)
+        batch_size=4)

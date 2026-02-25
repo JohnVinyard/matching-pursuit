@@ -18,6 +18,7 @@ from modules import max_norm, sparse_softmax, interpolate_last_axis, iterative_l
 from modules.normal_pdf import pdf2, gamma_pdf
 from modules.transfer import fft_convolve, damped_harmonic_oscillator, fft_shift, hierarchical_dirac
 from modules.upsample import upsample_with_holes, ensure_last_axis_length
+from spiking import DecayLoss
 from util import encode_audio, make_initializer, device
 
 collection = LmdbCollection('songsplat')
@@ -378,8 +379,6 @@ class AttackEnvelopes(nn.Module):
         self.n_gaussians = n_gaussians
 
 
-        # self.amps = nn.Parameter(torch.zeros(control_plane_dim, 1).uniform_(-0.01, 0.01))
-
         self.means = nn.Linear(latent_dim, n_gaussians)
         self.stds = nn.Linear(latent_dim, n_gaussians)
         self.amps = nn.Linear(latent_dim, n_gaussians)
@@ -387,29 +386,16 @@ class AttackEnvelopes(nn.Module):
         self.pos = nn.Linear(latent_dim, n_gaussians * int(np.log2(envelope_size)) * 2)
         self.overall_amp = nn.Linear(latent_dim, 1)
 
-        # self.means = nn.Parameter(torch.zeros(control_plane_dim, n_gaussians).uniform_(-6, 6))
-        # self.stds = nn.Parameter(torch.zeros(control_plane_dim, n_gaussians).uniform_(-6, 6))
         self.max_std = nn.Parameter(torch.zeros(1).fill_(0.01))
 
     def forward(self, latent: torch.Tensor) -> torch.Tensor:
         '''
-        materialize attack envelopes
         materialize attack envelopes
         '''
 
         batch = latent.shape[0]
         n_events = latent.shape[1]
 
-        # m = torch.sigmoid(self.means.forward(latent))
-        # s = torch.sigmoid(self.stds.forward(latent))
-        #
-        #
-        # x = pdf2(
-        #     m,
-        #     1e-12 + (torch.abs(self.max_std) * s),
-        #     self.envelope_size,
-        #     normalize=True
-        # )
 
         m = torch.abs(self.means.forward(latent))
         s = torch.abs(self.stds.forward(latent))
@@ -418,15 +404,11 @@ class AttackEnvelopes(nn.Module):
 
         p = self.pos.forward(latent)
         p = p.view(batch, n_events, self.n_gaussians, -1, 2)
-        # p = sparse_softmax(p, dim=-1, normalize=True)
         p = hierarchical_dirac(p, soft=False)
 
         x = gamma_pdf(m, s, n_elements=self.envelope_size, normalize=False)
 
-
         x = x * a[..., None]
-        # print(x.shape, p.shape)
-        # x = fft_shift(x, p[..., None])
         x = fft_convolve(x, p)
         x = torch.sum(x, dim=2)
         x = unit_norm(x)
@@ -484,8 +466,8 @@ class EventGenerator(nn.Module):
 
         # note: the noise envelope is 4x the frame rate, as it is upsampled
         # to 1/4 the overall number of frames
-        # self.to_noise = SimpleLookup(latent_dim, n_envelopes, 4096, 1)
-        self.to_noise = AttackEnvelopes(latent_dim, 4096, n_gaussians=8)
+        self.to_noise = SimpleLookup(latent_dim, n_envelopes, 128, 1)
+        # self.to_noise = AttackEnvelopes(latent_dim, 4096, n_gaussians=8)
 
         self.to_deformation = SimpleLookup(latent_dim, n_deformations, n_frames, expressivity)
 
@@ -698,7 +680,7 @@ class Model(nn.Module):
 @numpy_conjure(collection)
 def get_samples(path: str, samplerate: int) -> np.ndarray:
     samples, sr = librosa.load(path, sr=samplerate, mono=True)
-    n_samples = 2 ** 21
+    n_samples = 2 ** 19
     end_sample = samples.shape[-1] - n_samples
     start_sample = np.random.randint(0, end_sample)
     end = start_sample + n_samples
@@ -801,6 +783,8 @@ def train(
     optim = Adam(model.parameters(), lr=1e-3)
 
 
+    # loss_model = DecayLoss(model.n_segment_samples, n_decays=64, min_decay=2, max_decay=32, window_size=512).to(device)
+
     for i, pair in enumerate(iterator):
 
         samples, total_samples, start_frame, end_frame, n_frames = pair
@@ -824,13 +808,15 @@ def train(
         # log recon audio
         recon_audio(max_norm(recon_summed))
 
-        recon_active = torch.norm(recon, dim=-1, keepdim=True)
-        recon_loss = l0_norm(recon_active)
+        # recon_active = torch.norm(recon, dim=-1, keepdim=True)
+        # recon_loss = l0_norm(recon_active)
 
 
         # iterative loss seems to be important for producing
         # playable events
-        l = iterative_loss(samples, recon, transform, ratio_loss=False, sort_channels=True) + recon_loss
+        l = iterative_loss(samples, recon, transform, ratio_loss=False, sort_channels=False)
+        # l = torch.abs(transform(samples) - transform(recon_summed)).sum() #+ recon_loss
+        # l = loss_model.compute_loss(samples, recon_summed)
         l.backward()
         optim.step()
         print(i, l.item(),

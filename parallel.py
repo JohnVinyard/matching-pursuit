@@ -136,6 +136,10 @@ def parallel_sr_independent(
     return p * s
 
 
+def new_parallel(forces: torch.Tensor, damping: torch.Tensor) -> torch.Tensor:
+    print(forces.shape, damping.shape)
+    raise NotImplementedError('')
+
 def parallel(forces: torch.Tensor, damping: torch.Tensor) -> torch.Tensor:
     # a[i] = d[i]
     # b[i] = d[i] * f[i]
@@ -216,8 +220,8 @@ class Layer(nn.Module):
         self.force_router = nn.Parameter(torch.zeros(self.n_nodes, self.n_nodes).uniform_(-0.01, 0.01))
         self.tension_router = nn.Parameter(torch.zeros(self.n_nodes, self.n_nodes).uniform_(-0.01, 0.01))
 
-        self.base_resonance = 0.9
-        self.max_resonance = 0.999
+        self.base_resonance = 0.9998
+        self.max_resonance = 0.9999
         self.diff = (1 - self.base_resonance)
 
 
@@ -225,10 +229,10 @@ class Layer(nn.Module):
         forces = torch.einsum('abc,bd->adc', forces, self.force_router)
 
         damp = self.base_resonance + (torch.sigmoid(self.damp) * self.diff)
-        # damp = damp.repeat(1, 1, self.n_samples)
-        # energy = parallel(forces, damp)
+        damp = damp.repeat(1, 1, self.n_samples)
+        energy = parallel(forces, damp)
 
-        energy = parallel_conv(forces, damp, frame_size=1)
+        # energy = parallel_conv(forces, damp, frame_size=1)
 
         mass = torch.sigmoid(self.mass) * 500
         tension = self.tension

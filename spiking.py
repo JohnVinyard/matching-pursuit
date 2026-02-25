@@ -8,6 +8,7 @@ from torch.optim import Adam
 
 from data import get_one_audio_segment, AudioIterator
 from modules import gammatone_filter_bank, max_norm, unit_norm, fft_frequency_decompose, stft, sparsify
+from modules.anticausal import AntiCausalAnalysis
 from modules.mixer import MixerStack
 from modules.overfitraw import OverfitRawAudio
 from modules.overlap_add import overlap_add
@@ -56,91 +57,39 @@ class AutoEncoder(nn.Module):
 
         self.start_size = self.n_frames
 
-        # self.encoder = AntiCausalAnalysis(
-        #     self.n_coeffs * 2,
-        #     self.channels,
-        #     2,
-        #     [1, 2, 4, 8, 16, 32, 1],
-        #     # with_activation_norm=True,
-        #     do_norm=True)
-        self.encoder = MixerStack(self.n_coeffs * 2, channels, self.n_frames, 4, 4, channels_last=False)
+        self.encoder = AntiCausalAnalysis(
+            1,
+            self.channels,
+            2,
+            [1, 2, 4, 8, 16, 32, 1],
+            # with_activation_norm=True,
+            do_norm=True)
 
         self.up_proj = nn.Conv1d(self.channels, self.bottleneck_channels, 1, 1, 0)
         self.down_proj = nn.Conv1d(self.bottleneck_channels, self.channels, 1, 1, 0)
 
 
-        self.decoder = MixerStack(channels, channels, self.n_frames, 4, 4, channels_last=False)
-        # self.decoder = AntiCausalAnalysis(
-        #     self.channels,
-        #     self.channels,
-        #     2,
-        #     [1, 2, 4, 8, 16, 32, 1],
-        #     reverse_causality=True,
-        #     # with_activation_norm=True,
-        #     do_norm=True)
+        self.decoder = AntiCausalAnalysis(
+            self.channels,
+            self.channels,
+            2,
+            [1, 2, 4, 8, 16, 32, 1],
+            reverse_causality=True,
+            # with_activation_norm=True,
+            do_norm=True)
 
-        self.to_mag = nn.Linear(self.channels, self.n_coeffs)
-        self.to_phase = nn.Linear(self.channels, self.n_coeffs)
 
-        self.register_buffer('group_delay', torch.linspace(0, np.pi, self.n_coeffs))
-
-        # self.to_samples = nn.Conv1d(self.channels, self.n_coeffs * 2, 1, 1, 0)
+        self.to_samples = nn.Conv1d(self.channels, 1, 1, 1, 0)
 
         self.apply(init)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
 
-        n_samples = x.shape[-1]
-        orig = x
-        batch_size = x.shape[0]
-        x = stft(x, self.window_size, self.step_size, pad=True, return_complex=True)
-
-        # print('ORIG', x.shape)
-        x = x.view(batch_size, self.n_frames, self.n_coeffs, 2)
-        x = x.permute(0, 2, 1, 3)
-        x = x.reshape(batch_size, -1, self.n_frames)
-
         x = self.encoder(x)
         x = self.up_proj(x)
-
-
-        # x = F.dropout(x, 0.01)
-        # x = x - x.mean()
-        # x = torch.relu(x)
-        # x = x / (x.sum() + 1e-8)
-        # x = sparsify(x, n_to_keep=256)
         x = self.down_proj(x)
         x = self.decoder(x)
-        x = x.permute(0, 2, 1)
-
-        # print(x.shape)
-
-        mag = self.to_mag(x)
-        phase = torch.tanh(self.to_phase(x))
-
-        b = mag.shape[0]
-        mag = torch.abs(mag.view(b, self.n_frames, -1))
-        phase = phase.view(b, self.n_frames, -1) * self.group_delay[None, None, :]
-
-        gd = self.group_delay.view(1, 1, -1).repeat(1, self.n_frames, 1)
-        phase = gd + (phase * torch.zeros_like(phase).uniform_(-1, 1))
-
-        phase = torch.cumsum(phase, dim=1)
-
-        x = mag * torch.exp(1j * phase)
-
-        x = torch.fft.irfft(x, dim=-1)
-        x = overlap_add(x[:, None, :, :])[..., :n_samples]
-
-        # x = self.to_samples(x)
-        # x = x.view(batch_size, self.n_coeffs, 2, self.n_frames)
-        # x = x.permute(0, 3, 1, 2)
-        # x = torch.view_as_complex(x.contiguous())
-        # x = torch.fft.irfft(x)
-        # x = overlap_add(x[:, None, :, :], apply_window=True)[..., :n_samples]
-        # x = torch.tanh(x)
-        # x = max_norm(x)
-        # x = torch.sin(x)
+        x = self.to_samples(x)
         return x
 
 
@@ -183,24 +132,24 @@ class SomethingSomething(nn.Module):
 
 
 class DecayLoss(nn.Module):
-    def __init__(self, n_samples, n_decays: int, min_decay: float, max_decay: float):
+    def __init__(self, n_samples, n_decays: int, min_decay: float, max_decay: float, window_size: int):
         super().__init__()
         self.n_samples = n_samples
         self.n_decays = n_decays
         self.min_decay = min_decay
         self.max_decay = max_decay
+        self.window_size = window_size
+        self.step_size = window_size // 2
+        self.n_coeffs = self.window_size // 2 + 1
+        self.n_frames = n_samples // self.step_size
 
-        base = torch.linspace(1, 0, n_samples)[None, :]
+        base = torch.linspace(1, 0, self.n_frames)[None, :]
         decays = torch.linspace(min_decay, max_decay, n_decays)[:, None]
 
         decays = base ** decays
 
-        decays = decays.view(1, self.n_decays, self.n_samples) * torch.zeros(1, 1, self.n_samples).uniform_(-1, 1)
-
+        decays = decays.view(1, 1, self.n_decays, self.n_frames)
         decays = unit_norm(decays)
-
-        # plt.matshow(np.abs(decays.data.cpu().numpy()[0, :, ::512]))
-        # plt.show()
 
         self.register_buffer('decays', decays, persistent=False)
 
@@ -210,7 +159,27 @@ class DecayLoss(nn.Module):
         return torch.abs(x - y).sum()
 
     def forward(self, x):
-        x = fft_convolve(x, self.decays)
+        batch = x.shape[0]
+
+        x = stft(x, ws=self.window_size, step=self.step_size, pad=True).permute(0, 1, 3, 2)
+
+
+        x = fft_convolve(x[:, :, :, None, :], self.decays[:, :, None, :, :])
+        x = x.view(batch, -1, self.n_frames)
+
+        kernel_size = 16
+
+        pooled = F.avg_pool1d(F.pad(x, [kernel_size, 0]), kernel_size=kernel_size, stride=1, padding=0)[..., :self.n_frames]
+
+
+        # print(x.shape, pooled.shape)
+
+
+        x = x - pooled
+        x = torch.relu(x)
+
+
+        # x = x.view(batch, )
 
         # plt.matshow(np.abs(x.data.cpu().numpy()[0, :, ::512]))
         # plt.show()
@@ -275,6 +244,14 @@ class SpikingModel(nn.Module):
         loss = torch.abs(t[mask] - r[mask]).sum()
         return loss
 
+    def compute_sum_loss(self, target: torch.Tensor, recon: torch.Tensor) -> torch.Tensor:
+        t = self.forward(target)
+        r = self.forward(recon)
+
+        a = torch.abs(t - r).sum()
+        b = torch.abs(t.sum() - r.sum()).sum() * 0.25
+        return a + b
+
 
     def forward(self, audio: torch.Tensor, hard: bool = True, normalize: bool = True):
 
@@ -338,7 +315,7 @@ class SpikingModel(nn.Module):
         # print(y.shape, y.numel(), total_spikes, total_spikes.item() / y.numel())
         ratio = total_spikes / audio_size
 
-        print(f'Band {audio.shape[-1]}: {ratio:.2f}')
+        # print(f'Band {audio.shape[-1]}: {ratio:.2f}', total_spikes, fwd.shape)
 
         return y
 
@@ -469,21 +446,16 @@ class AutocorrelationLoss(nn.Module):
 
 
 def train_resource_constrained_autoencoder():
-    loss_model = SpikingModel(
-        n_channels=64,
-        filter_size=64,
-        periodicity_size=64,
-        memory_size=64,
-        frame_memory_size=8).to(device)
 
-    # loss_model = SomethingSomething(64, 16, 512).to(device)
+    loss_model = DecayLoss(
+        n_samples=n_samples,
+        n_decays=16,
+        min_decay=2,
+        max_decay=32,
+        window_size=64).to(device)
 
-    # loss_model = DecayLoss(n_samples, 64, 1, 32).to(device)
 
-    # loss_model = CorrelationLoss(n_elements=2048).to(device)
-    # loss_model = AutocorrelationLoss(n_channels=64, filter_size=64).to(device)
-
-    ae = AutoEncoder(channels=128, bottleneck_channels=512).to(device)
+    ae = AutoEncoder(channels=32, bottleneck_channels=32).to(device)
 
     optim = Adam(ae.parameters(), lr=1e-3)
     collection = LmdbCollection('spiking')
@@ -514,20 +486,9 @@ def train_resource_constrained_autoencoder():
         target = item.view(-1, 1, n_samples)
         recon = ae.forward(target)
 
-        # target_env = F.max_pool1d(target, kernel_size=512, stride=256, padding=256)
-        # recon_env = F.max_pool1d(recon, kernel_size=512, stride=256, padding=256)
-        # env_loss = torch.abs(target_env - recon_env).sum()
-        # loss = loss_model.compute_multiband_loss(target, recon, 64, 16) #+ env_loss
 
-        # loss = loss_model.multiband_noise_loss(target, recon, window_size=64, step=16)
+        loss = loss_model.compute_loss(target, recon)
 
-        # loss = loss_model.compute_loss(target, recon)
-
-        loss = loss_model.compute_multiband_loss(target, recon)
-
-        # loss = torch.abs(
-        #     stft(target, 2048, 256, pad=True) \
-        #     - stft(recon, 2048, 256, pad=True)).sum()
         loss.backward()
         optim.step()
         orig_audio(target)
@@ -539,16 +500,21 @@ def overfit_model():
     target = get_one_audio_segment(n_samples).to(device).view(1, 1, n_samples)
     target = max_norm(target)
 
-    # loss_model = DecayLoss(n_samples, 64, 1, 32).to(device)
+    loss_model = DecayLoss(
+        n_samples=n_samples,
+        n_decays=16,
+        min_decay=2,
+        max_decay=32,
+        window_size=512).to(device)
 
     # loss_model = SomethingSomething(64, 16, 512).to(device)
 
-    loss_model = SpikingModel(
-        n_channels=64,
-        filter_size=64,
-        periodicity_size=64,
-        memory_size=64,
-        frame_memory_size=64).to(device)
+    # loss_model = SpikingModel(
+    #     n_channels=64,
+    #     filter_size=64,
+    #     periodicity_size=64,
+    #     memory_size=64,
+    #     frame_memory_size=64).to(device)
 
 
     overfit_model = OverfitRawAudio(target.shape, std=0.01, normalize=True).to(device)
@@ -579,8 +545,8 @@ def overfit_model():
 
         # ae.forward(target)
 
-        # loss = loss_model.compute_loss(target, recon)
-        loss = loss_model.compute_multiband_loss(target, recon, hard=True, normalize=True)
+        loss = loss_model.compute_loss(target, recon)
+        # loss = loss_model.compute_multiband_loss(target, recon, hard=True, normalize=True)
 
         # loss = torch.abs(target_features - recon_features).sum()
         loss.backward()
@@ -591,5 +557,5 @@ def overfit_model():
 
 
 if __name__ == '__main__':
-    overfit_model()
-    # train_resource_constrained_autoencoder()
+    # overfit_model()
+    train_resource_constrained_autoencoder()

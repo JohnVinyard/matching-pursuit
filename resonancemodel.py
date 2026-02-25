@@ -12,6 +12,7 @@ hand-tracking interface.
 """
 from modules.infoloss import CorrelationLoss
 from modules.latent_loss import covariance
+from spiking import SpikingModel, DecayLoss
 
 # videoexample
 
@@ -161,8 +162,7 @@ If you'd like to cite this article, you can use the following [BibTeX block](htt
 from base64 import b64encode
 from typing import Tuple, Callable, Union, Dict, Any
 from config import Config
-from modules.normal_pdf import pdf2
-
+from modules.normal_pdf import pdf2, gamma_pdf
 
 import numpy as np
 import torch
@@ -178,7 +178,8 @@ from conjure import serve_conjure, SupportedContentType, NumpyDeserializer, Nump
 from data import get_one_audio_segment
 from modules import max_norm, interpolate_last_axis, sparsify, unit_norm, stft, flattened_multiband_spectrogram, \
     NeuralReverb, iterative_loss, sparse_softmax
-from modules.transfer import fft_convolve, damped_harmonic_oscillator, freq_domain_transfer_function_to_resonance
+from modules.transfer import fft_convolve, damped_harmonic_oscillator, freq_domain_transfer_function_to_resonance, \
+    hierarchical_dirac
 from modules.upsample import upsample_with_holes, ensure_last_axis_length
 from util import device, encode_audio, make_initializer
 import argparse
@@ -518,7 +519,7 @@ class DampedHarmonicOscillatorStack(nn.Module):
         self.influence = nn.Parameter(torch.zeros(n_oscillators, n_resonances, expressivity, 1).uniform_(-0.01, 0.01))
         self.influence2 = nn.Parameter(torch.zeros(n_oscillators, n_resonances, expressivity, 1).uniform_(-0.01, 0.01))
 
-        self.mix = nn.Parameter(torch.zeros(3).uniform_(-1, 1))
+        self.mix = nn.Parameter(torch.zeros(1, 1, n_resonances, expressivity, 1, 3).uniform_(-1, 1))
 
     def forward(self):
 
@@ -532,7 +533,9 @@ class DampedHarmonicOscillatorStack(nn.Module):
         outputs.append(x)
 
         outputs = torch.stack(outputs, dim=-1)
-        x = outputs @ torch.softmax(self.mix, dim=-1)
+
+        x = outputs * torch.softmax(self.mix, dim=-1)
+        x = torch.sum(x, dim=-1)
 
         x = unit_norm(x)
         return x
@@ -608,6 +611,7 @@ class DampedHarmonicOscillatorBlock(nn.Module):
 
 
 
+
 class AttackEnvelopes(nn.Module):
 
     def __init__(self, control_plane_dim: int, envelope_size: int, n_gaussians: int):
@@ -621,26 +625,64 @@ class AttackEnvelopes(nn.Module):
         # Instead of generating from a latent, we just generated a group of gamma disttibutions
         # per attack channel
         # self.amps = nn.Parameter(torch.zeros(control_plane_dim, 1).uniform_(-0.01, 0.01))
-        self.means = nn.Parameter(torch.zeros(control_plane_dim, n_gaussians).uniform_(-6, 6))
-        self.stds = nn.Parameter(torch.zeros(control_plane_dim, n_gaussians).uniform_(-6, 6))
-        self.max_std = nn.Parameter(torch.zeros(1).fill_(0.01))
+        self.means = nn.Parameter(torch.zeros(1, 1, control_plane_dim, n_gaussians).uniform_(-6, 6))
+        self.stds = nn.Parameter(torch.zeros(1, 1, control_plane_dim, n_gaussians).uniform_(-6, 6))
+        self.amps = nn.Parameter(torch.zeros(1, 1, control_plane_dim, n_gaussians).uniform_(-6, 6))
+
+        self.pos = nn.Parameter(torch.zeros(1, 1, control_plane_dim, n_gaussians, int(np.log2(envelope_size)), 2).uniform_(-1, 1))
+        self.overall_amp = nn.Parameter(torch.zeros(1, 1, control_plane_dim, 1).uniform_(-1, 1))
+
+        # self.pos = nn.Linear(latent_dim, n_gaussians * int(np.log2(envelope_size)) * 2)
+        # self.overall_amp = nn.Linear(latent_dim, 1)
+
+        # self.max_std = nn.Parameter(torch.zeros(1).fill_(0.01))
 
     def forward(self):
         '''
         materialize attack envelopes
         materialize attack envelopes
         '''
-        x = pdf2(
-            torch.sigmoid(self.means),
-            1e-12 + (torch.abs(self.max_std) * torch.sigmoid(self.stds)),
-            self.envelope_size,
-            normalize=True
-        )
+        # x = pdf2(
+        #     torch.sigmoid(self.means),
+        #     1e-12 + (torch.abs(self.max_std) * torch.sigmoid(self.stds)),
+        #     self.envelope_size,
+        #     normalize=True
+        # )
+        #
+        # x = torch.sum(x, dim=1)
+        # x = unit_norm(x)
+        # # x = x * self.amps
+        # return x
 
-        x = torch.sum(x, dim=1)
+        # batch = latent.shape[0]
+        # n_events = latent.shape[1]
+
+        # m = torch.abs(self.means.forward(latent))
+        # s = torch.abs(self.stds.forward(latent))
+        # a = torch.abs(self.amps.forward(latent))
+        # oa = self.overall_amp.forward(latent)
+
+        # p = self.pos.forward(latent)
+        # p = p.view(batch, n_events, self.n_gaussians, -1, 2)
+
+        m = torch.abs(self.means)
+        s = torch.abs(self.stds)
+        a = torch.abs(self.amps)
+        oa = self.overall_amp
+        p = self.pos
+        p = hierarchical_dirac(p, soft=False)
+
+        x = gamma_pdf(m, s, n_elements=self.envelope_size, normalize=False)
+
+        x = x * a[..., None]
+        x = fft_convolve(x, p)
+        x = torch.sum(x, dim=2)
         x = unit_norm(x)
-        # x = x * self.amps
+        x = x * oa[..., None]
+        x = torch.sum(x, dim=-2)
+        x = x.view(self.control_plane_dim, self.envelope_size)
         return x
+
 
 class ResonanceLayer(nn.Module):
 
@@ -664,12 +706,12 @@ class ResonanceLayer(nn.Module):
 
         resonance_coeffs = resonance_window_size // 2 + 1
 
-        # self.ae = AttackEnvelopes(self.control_plane_dim, attack_full_size, n_gaussians=8)
+        self.ae = AttackEnvelopes(self.control_plane_dim, attack_full_size, n_gaussians=8)
 
-        self.attack_envelopes = nn.Parameter(
-            # decaying_noise(self.control_plane_dim, 256, 4, 20, device=device, include_noise=False)
-            torch.zeros(self.control_plane_dim, attack_n_frames).uniform_(-0.01, 0.01)
-        )
+        # self.attack_envelopes = nn.Parameter(
+        #     # decaying_noise(self.control_plane_dim, 256, 4, 20, device=device, include_noise=False)
+        #     torch.zeros(self.control_plane_dim, attack_n_frames).uniform_(-0.01, 0.01)
+        # )
 
         if use_attack_filters:
             self.attack_filters = nn.Parameter(torch.zeros(self.control_plane_dim, attack_filter_size).uniform_(-0.01, 0.01))
@@ -677,6 +719,7 @@ class ResonanceLayer(nn.Module):
             self.attack_filters = None
 
         r = torch.zeros(self.control_plane_dim, self.n_resonances).uniform_(-1, 1)
+        r = torch.zeros_like(r).bernoulli_(p=0.1) * r
         self.router = nn.Parameter(r)
 
 
@@ -701,9 +744,9 @@ class ResonanceLayer(nn.Module):
     def get_mixes(self):
         return self.mix
 
-    # @property
-    # def attack_envelopes(self):
-    #     return self.ae.forward()
+    @property
+    def attack_envelopes(self):
+        return self.ae.forward()
 
     def get_attack_envelopes(self):
 
@@ -903,6 +946,7 @@ class OverfitResonanceStack(nn.Module):
         print('PCA Weight Shape', mapping.shape)
         return mapping
 
+
     def get_mixes(self, layer: int) -> torch.Tensor:
         return self.network.get_mix(layer)
 
@@ -960,7 +1004,7 @@ class OverfitResonanceStack(nn.Module):
             self.control_plane.max().item())
 
         # intentionally fewer top-k than the model in "reconstruction" mode
-        rcp = self._process_control_plane(rcp, n_to_keep=4, do_sparsify=True)
+        rcp = self._process_control_plane(rcp, n_to_keep=8, do_sparsify=True)
         x, _, _ = self.forward(
             rcp, self.deformations if use_learned_deformations else torch.zeros_like(self.deformations))
         return x
@@ -1060,10 +1104,10 @@ class OverfitModelResult:
 
 
 
-
 def transform(x: torch.Tensor) -> torch.Tensor:
-    return stft(x, 2048, 256, pad=True)
-    # return flattened_multiband_spectrogram(x, {'xs': (64, 16)}, normalize=False)
+    x = stft(x, 2048, 256, pad=True)
+    # x = flattened_multiband_spectrogram(x, {'xs': (64, 16)}, normalize=False)
+    return x
 
 
 def l0_norm(x: torch.Tensor):
@@ -1076,7 +1120,7 @@ def l0_norm(x: torch.Tensor):
 
     return y.sum()
 
-# loss_model = CorrelationLoss(n_elements=512).to(device)
+# loss_model = DecayLoss(n_samples, n_decays=64, min_decay=2, max_decay=32, window_size=256).to(device)
 
 def compute_loss(
         x: torch.Tensor,
@@ -1085,15 +1129,13 @@ def compute_loss(
         attack_envelopes: torch.Tensor,
         sparsity_loss: float = sparsity_coefficient) -> torch.Tensor:
 
-    # cpd = cp.shape[-2]
-    # corr = cp.permute(0, 1, 3, 2).view(-1, cpd)
-    # cov = covariance(corr).sum()
+    cpd = cp.shape[-2]
+    corr = cp.permute(0, 1, 3, 2).view(-1, cpd)
+    cov = covariance(corr).sum()
+
     recon_loss = torch.abs(transform(x) - transform(y)).sum()
+    # recon_loss = loss_model.compute_loss(x, y)
 
-
-    # x = transform(x)
-    # y = transform(y)
-    # recon_loss = (0.5 * loss_model.multiband_noise_loss(x, y, 64, 16)) + (0.5 * recon_loss)
 
     sparsity_term = l0_norm(cp)
     # attack_term = l0_norm(attack_envelopes)
@@ -1101,7 +1143,7 @@ def compute_loss(
     if do_sparsify:
         return recon_loss
 
-    return recon_loss + (sparsity_term * sparsity_loss) #+ (attack_term * sparsity_loss)
+    return recon_loss + (sparsity_term * sparsity_loss) + cov #+ (attack_term * sparsity_loss)
 
 
 
@@ -1137,7 +1179,7 @@ def produce_overfit_model(
         n_to_keep=n_to_keep
     ).to(device)
 
-    optimizer = Adam(model.parameters(), lr=1e-4)
+    optimizer = Adam(model.parameters(), lr=1e-3)
 
     for i in range(n_iterations):
         optimizer.zero_grad()
