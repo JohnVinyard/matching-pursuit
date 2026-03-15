@@ -15,8 +15,9 @@ import conjure
 from conjure.logger import encode_audio
 from modules import sparsify, interpolate_last_axis, max_norm
 from modules.transfer import fft_convolve
-from modules.upsample import upsample_with_holes
+from modules.upsample import upsample_with_holes, ensure_last_axis_length
 from resonancemodel import n_to_keep
+from spiking import SpikingModel
 from util import device, count_parameters
 from util.overfit import overfit_model
 
@@ -95,11 +96,14 @@ def damped_harmonic_oscillator(
     z = a * energy * torch.cos(omega * time - phi)
     return z
 
-
+@torch.jit.script
 def sequential(forces: torch.Tensor, damping: torch.Tensor) -> torch.Tensor:
     output = torch.zeros_like(forces)
     for i in range(forces.shape[-1]):
-        output[i] = (forces[i] + output[i - 1]) * damping[i]
+        if i == 0:
+            output[..., i] = forces[..., i]
+        else:
+            output[..., i] = (forces[..., i] + output[..., i - 1]) * damping[..., i]
     return output
 
 
@@ -196,7 +200,7 @@ class Layer(nn.Module):
         # TODO: eventually, this will vary at control rate and will have "momentum",
         # springing back to a baseline value
 
-        self.damp = nn.Parameter(torch.zeros(1, self.n_nodes, 1).uniform_(-6, 6))
+        self.damp = nn.Parameter(torch.zeros(1, self.n_nodes, self.n_frames).uniform_(-6, 6))
         # damp = torch.zeros(1, self.n_nodes, 1).uniform_(0.9997, 0.9998)
         # self.register_buffer('damp', damp)
 
@@ -220,7 +224,9 @@ class Layer(nn.Module):
         self.force_router = nn.Parameter(torch.zeros(self.n_nodes, self.n_nodes).uniform_(-0.01, 0.01))
         self.tension_router = nn.Parameter(torch.zeros(self.n_nodes, self.n_nodes).uniform_(-0.01, 0.01))
 
-        self.base_resonance = 0.9998
+        self.noise_mix = nn.Parameter(torch.zeros(1, self.n_nodes, 1, 2).uniform_(-0.01, 0.01))
+
+        self.base_resonance = 0.5
         self.max_resonance = 0.9999
         self.diff = (1 - self.base_resonance)
 
@@ -229,12 +235,17 @@ class Layer(nn.Module):
         forces = torch.einsum('abc,bd->adc', forces, self.force_router)
 
         damp = self.base_resonance + (torch.sigmoid(self.damp) * self.diff)
-        damp = damp.repeat(1, 1, self.n_samples)
-        energy = parallel(forces, damp)
+        # damp = damp.repeat(1, 1, self.n_samples)
+        print(forces.shape, damp.shape)
+        energy = sequential(forces, damp)
+        energy = interpolate_last_axis(energy, desired_size=self.n_samples)
+
+        noise_energy = energy * torch.zeros_like(energy).uniform_(-1, 1)
+        # energy = parallel(forces, damp)
 
         # energy = parallel_conv(forces, damp, frame_size=1)
 
-        mass = torch.sigmoid(self.mass) * 500
+        mass = torch.sigmoid(self.mass)
         tension = self.tension
 
         if tension_modifier is not None:
@@ -249,6 +260,10 @@ class Layer(nn.Module):
             tension=10 ** tension,
             initial_displacement=self._id,
         )
+
+        stacked = torch.stack([x, noise_energy], dim=-1)
+        x = stacked * torch.softmax(self.noise_mix, dim=-1)
+        x = torch.sum(x, dim=-1)
 
         return x
 
@@ -274,6 +289,8 @@ class LayerController(nn.Module):
 
         self.layers = nn.ModuleList([Layer(n_nodes, n_samples, control_rate) for _ in range(self.n_layers)])
 
+        self.node_filters = nn.Parameter(torch.zeros(1, n_nodes, 32).uniform_(-1, 1))
+
         self.mix = nn.Parameter(torch.zeros(self.n_layers))
 
     def materialize_forces(
@@ -289,8 +306,8 @@ class LayerController(nn.Module):
 
         f = f + f.mean()
 
-        if do_upsample:
-            f = upsample_with_holes(f, desired_size=self.n_samples)
+        # if do_upsample:
+        #     f = upsample_with_holes(f, desired_size=self.n_samples)
 
         f = sparsify(f, n_to_keep=n_to_keep or self.n_to_keep)
         return f
@@ -324,6 +341,9 @@ class LayerController(nn.Module):
         tm = torch.stack(outputs, dim=-1)
         tm = tm @ torch.softmax(self.mix, dim=-1)
 
+        nf = ensure_last_axis_length(self.node_filters, desired_size=self.n_samples)
+        tm = fft_convolve(tm, nf)
+
         if sum_output:
             tm = torch.sum(tm, dim=1, keepdim=True)
 
@@ -343,20 +363,24 @@ def test_osc(n_nodes: int, n_samples: int) -> torch.Tensor:
     return x
 
 
+loss_model = SpikingModel(64, 64, 64, 64, 64).to(device)
+
 def loss_func(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     a = stft(a)
     b = stft(b)
-    return torch.abs(a - b).sum()
+    base_loss = torch.abs(a - b).sum()
+    return loss_model.compute_multiband_loss(a, b, hard=True, normalize=True) + base_loss
 
 
 
 
 def overfit_osc(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int):
+
     controller = LayerController(
         n_layers=n_layers,
         n_nodes=n_nodes,
         n_samples=n_samples,
-        control_rate=128,
+        control_rate=512,
         n_to_keep=n_to_keep
     ).to(device)
 
@@ -463,4 +487,4 @@ def harness(n_samples: int, *solutions: Solution):
 
 if __name__ == '__main__':
     # compare()
-    overfit_osc(n_nodes=32, n_samples=2 ** 17, n_layers=3, n_to_keep=256)
+    overfit_osc(n_nodes=32, n_samples=2 ** 17, n_layers=3, n_to_keep=512)

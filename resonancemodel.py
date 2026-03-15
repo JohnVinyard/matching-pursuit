@@ -10,9 +10,7 @@ while the two factors together constitute a (lossy) compressive and interpretabl
 To make this more concrete, here's a video of me using a learned instrument to produce a new audio segment via a
 hand-tracking interface.
 """
-from modules.infoloss import CorrelationLoss
-from modules.latent_loss import covariance
-from spiking import SpikingModel, DecayLoss
+from spiking import SpikingModel
 
 # videoexample
 
@@ -163,11 +161,13 @@ from base64 import b64encode
 from typing import Tuple, Callable, Union, Dict, Any
 from config import Config
 from modules.normal_pdf import pdf2, gamma_pdf
+from modules.latent_loss import covariance
+
 
 import numpy as np
 import torch
 from attr import dataclass
-from sklearn.decomposition import DictionaryLearning, SparsePCA
+from sklearn.decomposition import DictionaryLearning, SparsePCA, PCA
 from torch import nn
 from torch.optim import Adam
 
@@ -706,12 +706,12 @@ class ResonanceLayer(nn.Module):
 
         resonance_coeffs = resonance_window_size // 2 + 1
 
-        self.ae = AttackEnvelopes(self.control_plane_dim, attack_full_size, n_gaussians=8)
+        # self.ae = AttackEnvelopes(self.control_plane_dim, attack_full_size, n_gaussians=8)
 
-        # self.attack_envelopes = nn.Parameter(
-        #     # decaying_noise(self.control_plane_dim, 256, 4, 20, device=device, include_noise=False)
-        #     torch.zeros(self.control_plane_dim, attack_n_frames).uniform_(-0.01, 0.01)
-        # )
+        self.attack_envelopes = nn.Parameter(
+            # decaying_noise(self.control_plane_dim, 256, 4, 20, device=device, include_noise=False)
+            torch.zeros(self.control_plane_dim, attack_n_frames).uniform_(-0.01, 0.01)
+        )
 
         if use_attack_filters:
             self.attack_filters = nn.Parameter(torch.zeros(self.control_plane_dim, attack_filter_size).uniform_(-0.01, 0.01))
@@ -719,7 +719,7 @@ class ResonanceLayer(nn.Module):
             self.attack_filters = None
 
         r = torch.zeros(self.control_plane_dim, self.n_resonances).uniform_(-1, 1)
-        r = torch.zeros_like(r).bernoulli_(p=0.1) * r
+        # r = torch.zeros_like(r).bernoulli_(p=0.1) * r
         self.router = nn.Parameter(r)
 
 
@@ -744,9 +744,9 @@ class ResonanceLayer(nn.Module):
     def get_mixes(self):
         return self.mix
 
-    @property
-    def attack_envelopes(self):
-        return self.ae.forward()
+    # @property
+    # def attack_envelopes(self):
+    #     return self.ae.forward()
 
     def get_attack_envelopes(self):
 
@@ -933,8 +933,9 @@ class OverfitResonanceStack(nn.Module):
     def _get_mapping(self, n_components: int) -> np.ndarray:
         cs = self.control_signal.data.cpu().numpy() \
             .reshape(self.control_plane_dim, self.n_frames).T
-        pca = DictionaryLearning(n_components=n_components)
-        # pca = SparsePCA(n_components=n_components)
+        pca = PCA(n_components=n_components)
+        # pca = DictionaryLearning(n_components=n_components)
+        pca = SparsePCA(n_components=n_components)
         pca.fit(cs)
         # this will be of shape (n_components, control_plane_dim)
         x = pca.components_
@@ -946,6 +947,11 @@ class OverfitResonanceStack(nn.Module):
         print('PCA Weight Shape', mapping.shape)
         return mapping
 
+    def get_screen_space_mapping(self) -> np.ndarray:
+        # mapping = torch.zeros(2, self.control_plane_dim).uniform_(-1, 1).data.cpu().numpy()
+        mapping = self._get_mapping(n_components=2)
+        print('PCA screen space shape', mapping.shape)
+        return mapping
 
     def get_mixes(self, layer: int) -> torch.Tensor:
         return self.network.get_mix(layer)
@@ -1050,6 +1056,9 @@ class OverfitResonanceStack(nn.Module):
         hand = self.get_hand_tracking_mapping().T
         assert hand.shape == (self.control_plane_dim, 21 * 3)
 
+        screen = self.get_screen_space_mapping().T
+        assert screen.shape == (self.control_plane_dim, 2)
+
         router = self.get_router(0).T
         assert router.shape == (self.control_plane_dim, self.n_resonances)
 
@@ -1075,6 +1084,7 @@ class OverfitResonanceStack(nn.Module):
             router=encode_array(router, serializer),
             resonances=encode_array(resonances, serializer),
             hand=encode_array(hand, serializer),
+            screen=encode_array(screen, serializer),
             attacks=encode_array(attacks, serializer),
             mix=encode_array(mixes, serializer),
             room_impulse_response=encode_array(room_ir, serializer),
@@ -1121,6 +1131,7 @@ def l0_norm(x: torch.Tensor):
     return y.sum()
 
 # loss_model = DecayLoss(n_samples, n_decays=64, min_decay=2, max_decay=32, window_size=256).to(device)
+loss_model = SpikingModel(64, 64, 64, 64, 64).to(device)
 
 def compute_loss(
         x: torch.Tensor,
@@ -1129,21 +1140,19 @@ def compute_loss(
         attack_envelopes: torch.Tensor,
         sparsity_loss: float = sparsity_coefficient) -> torch.Tensor:
 
-    cpd = cp.shape[-2]
-    corr = cp.permute(0, 1, 3, 2).view(-1, cpd)
-    cov = covariance(corr).sum()
+    # cpd = cp.shape[-2]
+    # corr = cp.permute(0, 1, 3, 2).view(-1, cpd)
+    # cov = covariance(corr).sum()
 
-    recon_loss = torch.abs(transform(x) - transform(y)).sum()
-    # recon_loss = loss_model.compute_loss(x, y)
+    recon_loss = torch.abs(transform(x) - transform(y)).sum() + (loss_model.compute_multiband_loss(x, y, hard=True, normalize=True) * 0.01)
 
 
     sparsity_term = l0_norm(cp)
-    # attack_term = l0_norm(attack_envelopes)
 
     if do_sparsify:
         return recon_loss
 
-    return recon_loss + (sparsity_term * sparsity_loss) + cov #+ (attack_term * sparsity_loss)
+    return recon_loss + (sparsity_term * sparsity_loss)
 
 
 

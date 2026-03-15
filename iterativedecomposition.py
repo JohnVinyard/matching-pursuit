@@ -13,7 +13,7 @@ from modules import stft, sparsify, sparsify_vectors, iterative_loss, max_norm, 
     sparse_softmax, positional_encoding, UNet, flattened_multiband_spectrogram
 from modules.anticausal import AntiCausalAnalysis
 from modules.eventgenerators.generator import EventGenerator
-from modules.eventgenerators.overfitresonance import OverfitResonanceModel
+from modules.eventgenerators.overfitresonance import OverfitResonanceModel, SimpleEventGenerator
 from modules.infoloss import CorrelationLoss
 from modules.mixer import MixerStack
 from modules.multiheadtransform import MultiHeadTransform
@@ -428,7 +428,7 @@ def train_and_monitor(
         f'training on {n_seconds} of audio and {n_events} events with')
     print('==========================================')
 
-    model_filename = 'iterativedecomposition22.dat'
+    model_filename = 'iterativedecomposition23.dat'
 
     def train():
 
@@ -453,9 +453,17 @@ def train_and_monitor(
             hidden_channels=hidden_channels,
             wavetable_device=device,
             fine_positioning=fine_positioning,
-            fft_resonance=False,
+            fft_resonance=True,
             context_dim=context_dim
         )
+
+        # resonance_model = SimpleEventGenerator(
+        #     context_dim=context_dim,
+        #     n_frames=n_frames,
+        #     n_samples=n_samples,
+        #     n_events=1,
+        #     channels=128
+        # )
 
         model = Model(
             resonance_model=resonance_model,

@@ -811,11 +811,12 @@ def train(
         # recon_active = torch.norm(recon, dim=-1, keepdim=True)
         # recon_loss = l0_norm(recon_active)
 
+        #Chose / home / john / workspace / audio - data / jamendo / raw_30s_audio - low - 00 / 00 / 1231100.low.mp3
 
         # iterative loss seems to be important for producing
         # playable events
         l = iterative_loss(samples, recon, transform, ratio_loss=False, sort_channels=False)
-        # l = torch.abs(transform(samples) - transform(recon_summed)).sum() #+ recon_loss
+        # l = torch.abs(transform(samples) - transform(recon_summed)).sum() + recon_loss
         # l = loss_model.compute_loss(samples, recon_summed)
         l.backward()
         optim.step()
