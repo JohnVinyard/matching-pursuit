@@ -17,7 +17,6 @@ from itertools import count
 
 import matplotlib
 
-matplotlib.use('Qt5Agg')
 from matplotlib import pyplot as plt
 import numpy as np
 

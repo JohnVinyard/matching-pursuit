@@ -1,11 +1,10 @@
 numpy
 scipy
 torch
-zounds
 librosa
-lmdb
+lmdb==1.8.1
 conjure
 requests
 matplotlib
-sklearn
+scikit-learn
 selenium==4.27.1

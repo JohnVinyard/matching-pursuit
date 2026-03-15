@@ -22,7 +22,6 @@ from util import device, count_parameters
 from util.overfit import overfit_model
 
 import matplotlib
-matplotlib.use('Qt5Agg')
 from matplotlib import pyplot as plt
 
 Solution = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]

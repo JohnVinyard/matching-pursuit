@@ -9,7 +9,9 @@ try:
             key, value = line.split('=')
             os.environ[key] = value.strip()
             config_values[key] = value.strip()
-except IOError:
+except IOError as e:
+    print(e)
+    print(os.listdir())
     print('WARNING, no .env file found')
 
 
