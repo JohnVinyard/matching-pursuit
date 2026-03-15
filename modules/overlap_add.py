@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 from torch.nn import functional as F
-from scipy.signal import hann
+from scipy.signal.windows import hann
 
 def _torch_overlap_add(x, apply_window=True, flip=False):
     batch, channels, frames, samples = x.shape

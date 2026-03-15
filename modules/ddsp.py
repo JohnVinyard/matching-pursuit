@@ -2,7 +2,7 @@ import torch
 from torch.nn import functional as F
 from torch import nn
 import numpy as np
-from scipy.signal import hann
+from scipy.signal.windows import hann
 from config.dotenv import Config
 from modules.linear import LinearOutputStack
 from modules.physical import Window

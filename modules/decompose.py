@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from scipy.signal import tukey
+from scipy.signal.windows import tukey
 
 def fft_frequency_decompose(x, min_size):
     coeffs = torch.fft.rfft(x, norm='ortho')
