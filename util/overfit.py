@@ -1,5 +1,5 @@
 from os import PathLike
-from typing import Callable, List
+from typing import Callable, List, Tuple
 
 from torch import nn
 import torch
@@ -20,6 +20,14 @@ LoggerFactory = Callable[[conjure.LmdbCollection], List[conjure.Conjure]]
 
 TrainingLoopHook = Callable[[int, List[conjure.Conjure], nn.Module], None]
 
+ModelEval = Callable[[nn.Module], Tuple[torch.Tensor, torch.Tensor]]
+
+def default_model_eval(model: nn.Module, loss_func: LossFunc, target: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    recon = model.forward()
+    loss = loss_func(recon, target)
+    return recon, loss
+
+
 def default_training_loop_hook(iteration: int, loggers: List[conjure.Conjure], model: nn.Module):
     pass
 
@@ -34,6 +42,7 @@ def overfit_model(
         learning_rate: float = 1e-3,
         logger_factory: LoggerFactory = add_loggers,
         training_loop_hook: TrainingLoopHook = default_training_loop_hook,
+        model_eval: ModelEval = default_model_eval,
         device=device):
 
     target = get_one_audio_segment(n_samples).to(device)
@@ -60,9 +69,14 @@ def overfit_model(
 
     for i in count():
         optimizer.zero_grad()
-        recon = model.forward()
+        
+        # recon = model.forward()
+        # loss = loss_func(recon, target)
+        
+        recon, loss = model_eval(model, loss_func, target)
+
         r(max_norm(recon))
-        loss = loss_func(recon, target)
+        
         loss.backward()
         optimizer.step()
         training_loop_hook(i, other_loggers, model)

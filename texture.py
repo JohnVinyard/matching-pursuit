@@ -16,7 +16,7 @@ from util import device, encode_audio
 
 
 def calculate_kurtosis(tensor, dim=-1):
-    mean = torch.mean(tensor, dim--1, keepdim=True)
+    mean = torch.mean(tensor, dim=-1, keepdim=True)
     std_dev = torch.std(tensor, dim=-1, keepdim=True)
     # Calculate the fourth central moment
     fourth_moment = torch.mean((tensor - mean)**4, dim=-1, keepdim=True)
@@ -68,7 +68,13 @@ class AudioFeatures(nn.Module):
             # correlation with neighboring band
             corr_2 = fwd[:, 1:, :] * bwd[:, :-1, :]
 
-            corr = torch.cat((corr_1.view(batch_size, -1), corr_2.view(batch_size, -1)), dim=-1)
+            corr = torch.cat((
+                corr_1.view(batch_size, -1), 
+                corr_2.view(batch_size, -1),
+                calculate_kurtosis(spec, dim=-1).view(batch_size, -1),
+                calculate_kurtosis(spec[:, 1:, :] - spec[:, :-1,], dim=-1).view(batch_size, -1),
+            ),
+            dim=-1)
 
             results.append(corr)
 
@@ -109,4 +115,4 @@ def overfit(n_samples: int, device: torch.device):
 
 
 if __name__ == '__main__':
-    overfit(2**16, device)
+    overfit(2**17, device)

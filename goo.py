@@ -101,16 +101,20 @@ def sim(
 
     # recording = torch.zeros(batch, n_masses, n_samples, 1, device=forces.device)
     f = torch.zeros(batch, n_masses, dim, n_samples, device=forces.device)
-    displacement = torch.zeros(batch, n_masses, dim, n_samples, device=forces.device)
+    
+    velocity_recording = torch.zeros(batch, n_masses, dim, n_samples, device=forces.device)
 
     for i in range(n_samples):
         direction = h[..., i: i + 1] - position
 
-        displacement[..., i: i + 1] = direction
+        
 
         acc = forces[..., i: i + 1] + ((tensions * direction) / masses)
         velocity = velocity + acc
         velocity = velocity * damping
+        
+        velocity_recording[..., i: i + 1] = velocity
+        
         position = position + velocity
 
         r = masses * acc
@@ -123,7 +127,7 @@ def sim(
     # recording = recording.permute(0, 2, 1)
     recording = f.permute(0, 1, 3, 2) @ mics
 
-    return recording, displacement
+    return recording, velocity
 
 
 def unit_norm(x: torch.Tensor, dim: int = -1, epsilon: float = 1e-8):
@@ -170,8 +174,8 @@ class BetterGooLayer(nn.Module):
 
         batch = forces.shape[0]
 
-        # run physical simulation
-        recording, displacement = sim(
+        # run physical simulation at lower sample rate
+        recording, velocity_recording = sim(
             self.home,
             self.tensions,
             self.masses,
@@ -180,9 +184,13 @@ class BetterGooLayer(nn.Module):
             self.mics,
             forces,
             home_modifier * self.connection_strength)
+    
+        # TODO: Combine low-frequency signal with higher-frequency approximation provided
+        # by a stack of damped harmonic oscillators, whose current energy is based on the potential energy
+        # (I guess) of a particular node
 
         # compute the filture mixture over time
-        mixture = torch.einsum('abcd,bce->abed', (displacement * 0) + self.displacement_bias, self.to_filter_mixture)
+        mixture = torch.einsum('abcd,bce->abed', (torch.abs(velocity_recording) * 0) + self.displacement_bias, self.to_filter_mixture)
 
         # upsample to full sample rate
         mixture = interpolate_last_axis(mixture, self.n_samples)
@@ -206,7 +214,7 @@ class BetterGooLayer(nn.Module):
         hf =torch.einsum('abcd,abcd->abd', mixture, filtered) * self.hf_gain + lf
 
 
-        return recording, displacement, hf
+        return recording, velocity_recording, hf
 
 
 
@@ -353,17 +361,17 @@ def generate():
 def check_model():
     n_samples = 2 ** 16
 
-    device = torch.device('cpu')
+    # device = torch.device('cpu')
 
     model = GooPerformance(
         damping=0.9991,
         dimension=4,
         n_masses=16,
         n_layers=3,
-        n_filters=64,
-        n_samples=2 ** 16,
+        n_filters=64,   
+        n_samples=n_samples,
         filter_size=1024,
-        simulation_block_size=8).to(device)
+        simulation_block_size=32).to(device)
 
     overfit_model(
         n_samples=n_samples,

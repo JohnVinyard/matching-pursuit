@@ -50,6 +50,7 @@ def playable(
         x = x.data.cpu().numpy()
     
     if len(x.shape) != 1:
+        # if this is a batch of samples, just take the first
         x = x[0].reshape(-1)
     
     if isinstance(samplerate, int):

@@ -5,6 +5,11 @@ from torch import nn
 class HyperNetworkLayer(nn.Module):
     """
     Hyper-layer that produces layer weights via a factorized matrix
+    
+    
+    Takes a batch of vectors of shape (B, latent_channels)
+    
+    Produces a linear layer mapping from layer_in_channels to layer_out_channels
     """
 
     def __init__(
