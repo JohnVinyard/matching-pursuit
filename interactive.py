@@ -1,14 +1,19 @@
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
+import conjure
 import torch
 from torch import nn
 from modules import stft
+from modules.decompose import fft_resample
+from modules.normalization import max_norm, unit_norm
+from modules.sparse import sparsify
+from spiking import SpikingModel
 from util import device
 
 from modules.hypernetwork import HyperNetworkLayer
 from modules.transfer import fft_convolve
 from modules.upsample import ensure_last_axis_length, interpolate_last_axis
 from util.overfit import overfit_model
-from util.playable import listen_to_sound, playable
+from util.playable import encode_audio, listen_to_sound, playable
 
 
 @torch.jit.script
@@ -35,11 +40,11 @@ class Damping(nn.Module):
         self.base_resonance = base_resonance
         self.max_resonance = 0.9999
         self.diff = self.max_resonance - self.base_resonance
-        self.damping = nn.Parameter(torch.zeros(1, control_plane_dim, 1))
+        self.damping = nn.Parameter(torch.zeros(1, control_plane_dim, 1).uniform_(1e-8, 0.9999))
     
     def forward(self, forces: torch.Tensor, modifier: Optional[torch.Tensor] = None) -> torch.Tensor:
         
-        damping = self.base_resonance + (torch.sigmoid(self.damping) * self.diff)
+        damping = self.base_resonance + (torch.clamp(self.damping, 0, 1) * self.diff)
         
         damping = damping.repeat(1, 1, self.n_frames)
         
@@ -64,9 +69,45 @@ class Performance(nn.Module):
             n_layers: int
         ):
         super().__init__()
+        
+        if control_plane_dim != n_resonances:
+            raise ValueError(
+                f'Control plane dim and resonances must be \
+                the same, but were {control_plane_dim} and {n_resonances} respectively')
+        
+        n_frames = n_samples // control_rate
+        
+        self.instr = Instrument(
+            control_plane_dim, 
+            control_rate, 
+            n_samples, 
+            base_resonance, 
+            n_resonances, 
+            filter_size, 
+            n_layers)
+        
+        self.control = nn.Parameter(torch.zeros(1, control_plane_dim, n_frames).uniform_(-0.01, 0.01))
+        self.deformations = nn.Parameter(torch.zeros_like(self.control))
+        self.damping_mod = nn.Parameter(torch.zeros(1, control_plane_dim, n_frames))
     
-    def forward(self):
-        raise NotImplementedError('implement this')
+    def random(self) -> torch.Tensor:
+        ctl = torch.zeros_like(self.control).uniform_(-0.1, 1)
+        result = self.instr.forward(
+            sparsify(ctl, n_to_keep=128), 
+            torch.zeros_like(self.deformations), 
+            torch.zeros_like(self.damping_mod)
+        )
+        return result
+    
+    def forward(self) -> torch.Tensor:
+        ctl = sparsify(self.control - self.control.mean(), n_to_keep=128)
+        
+        # TODO: reinstate deformations and damping
+        result = self.instr.forward(
+            ctl, 
+            torch.zeros_like(self.deformations), 
+            torch.zeros_like(self.damping_mod))
+        return result
 
 class Instrument(nn.Module):
     
@@ -118,7 +159,7 @@ class Instrument(nn.Module):
         
         stacked = torch.stack(outputs, dim=-1)
         
-        mixed = torch.einsum('bisc,c->bis', stacked, self.mix)
+        mixed = torch.einsum('bisc,c->bis', stacked, torch.softmax(self.mix, dim=-1))
         return mixed
         
         
@@ -150,7 +191,7 @@ class Layer(nn.Module):
         
         self.filters = nn.Parameter(torch.zeros(1, self.n_resonances, self.filter_size).uniform_(-0.01, 0.01))
         
-        self.to_control = nn.Parameter(torch.zeros(self.n_resonances, self.control_plane_dim).uniform_(-0.01, 0.01))
+        # self.to_control = nn.Parameter(torch.zeros(self.n_resonances, self.control_plane_dim).uniform_(-0.01, 0.01))
     
     def forward(
         self, 
@@ -168,91 +209,87 @@ class Layer(nn.Module):
         w = w + self.routing
         
         if deformations is not None:
-            dw, dfunc = self.deform(deformations.permute(0, 2, 1))
+            dw, dfunc = self.deform(sparsify(deformations.permute(0, 2, 1), n_to_keep=64))
             dw = dw.view(batch, self.n_frames, self.control_plane_dim, self.n_resonances)
             w = w + dw
         
-        
         routed = torch.einsum('abc,acbd->adc', damped, w)
         
-        to_control = torch.einsum('brf,rc->bcf', routed, self.to_control)
+        # to_control = torch.einsum('brf,rc->bcf', routed, self.to_control)
+        to_control = routed
         
         
         upsampled = interpolate_last_axis(routed, desired_size=self.n_samples, mode='linear')
-        noise = torch.zeros_like(upsampled).uniform_(-0.01, 0.01)
+        # upsampled = fft_resample(routed, desired_size=self.n_samples, is_lowest_band=True)
         
+        noise = torch.zeros_like(upsampled).uniform_(-0.01, 0.01)
         energy = upsampled * noise
         
         filters = ensure_last_axis_length(self.filters, desired_size=self.n_samples)
+        filters = unit_norm(filters, dim=-1)
         
         with_resonance = fft_convolve(energy, filters)
         
         return to_control, with_resonance
 
+spiking = SpikingModel(64, 64, 64, 64, 64).to(device)
 
 def compute_loss(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    sl = spiking.compute_multiband_loss(a, b, hard=True)
     a = stft(a, 2048, 256, pad=True)
     b = stft(b, 2048, 256, pad=True)
     loss = torch.abs(a - b).sum()
+    return loss + (sl * 1e-5)
 
 if __name__ == '__main__':
     
-    batch_size = 3
-    control_plane_dim = 16
     n_samples = 2 ** 16
     control_rate = 128
-    filter_size = 1024
+    filter_size = 256
+    
+    control_plane_dim = 64
+    n_resonances = 64
+    
     n_frames = n_samples // control_rate
     
-    instr = Instrument(
+    instr = Performance(
         control_plane_dim=control_plane_dim, 
         control_rate=control_rate, 
         n_samples=n_samples, 
         base_resonance=0.02, 
-        n_resonances=32, 
+        n_resonances=n_resonances, 
         filter_size=filter_size, 
         n_layers=3).to(device)
     
-    # l = Layer(
-    #     control_plane_dim=control_plane_dim, 
-    #     control_rate=control_rate, 
-    #     n_samples=n_samples, 
-    #     base_resonance=0.02, 
-    #     n_resonances=32,
-    #     filter_size=filter_size).to(device)
+    def add_loggers(collection: conjure.LmdbCollection):
+        other_loggers = conjure.loggers(
+            ['rnd'],
+            conjure.SupportedContentType.Audio.value,
+            encode_audio,
+            collection)
+        
+        return other_loggers
     
-    control = torch.zeros(batch_size, control_plane_dim, n_frames).bernoulli_(p=0.005).to(device)
-    deformations = torch.zeros_like(control)
-    
-    
-    damping_mod = torch.zeros(batch_size, control_plane_dim, n_frames).to(device)
-    
-    result = instr.forward(control, deformations, damping_mod)
-    
-    print(result.shape)
-    
-    # ctl, samples = l.forward(control, deformations, damping_mod)
-    # samples = torch.sum(samples, dim=1, keepdim=True)
-    # print(samples.shape)
-    
-    # print(control)
-    
-    
-    # p = playable(samples, 22050, normalize=True)-*
-    # listen_to_sound(p, wait_for_user_input=True)
-    
-    def training_loop_hook(iteration: int, loggers: List[conjure.Conjure], model: nn.Module):
-        t, = loggers
-        # TODO: unable to tell if time is moving forward or backward here
-        times = max_norm(model.times.view(n_oscillators, -1))
-        t(times)
+    def training_loop_hook(
+        iteration: int, 
+        loggers: List[conjure.Conjure], 
+        model: Performance):
+        
+        # TODO: Again, these should be indexed by
+        # name.  Relying on remembering the position
+        # is not great
+        rnd = loggers[0]
+        
+        with torch.no_grad():
+            result = model.random()
+            rnd(max_norm(result).view(-1))
 
     overfit_model(
         n_samples=n_samples,
         model=instr,
-        loss_func=compute_loss,
-        collection_name='dho',
         logger_factory=add_loggers,
+        loss_func=compute_loss,
         training_loop_hook=training_loop_hook,
+        collection_name='interactive',
         learning_rate=1e-3
     )
