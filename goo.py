@@ -13,6 +13,7 @@ from time import time
 
 from modules import sparsify
 from modules.decompose import fft_resample
+from modules.fft import randomize_phase
 from modules.reds import interpolate_last_axis
 from modules.transfer import fft_convolve
 from modules.upsample import upsample_with_holes, ensure_last_axis_length
@@ -103,10 +104,13 @@ def sim(
     f = torch.zeros(batch, n_masses, dim, n_samples, device=forces.device)
     
     velocity_recording = torch.zeros(batch, n_masses, dim, n_samples, device=forces.device)
+    
+    displacement = torch.zeros(batch, n_masses, dim, n_samples, device=forces.device)
 
     for i in range(n_samples):
         direction = h[..., i: i + 1] - position
-
+        
+        displacement[..., i: i + 1] = direction
         
 
         acc = forces[..., i: i + 1] + ((tensions * direction) / masses)
@@ -126,8 +130,10 @@ def sim(
     # recording = torch.einsum('abcd,abcd->acd', recording, layer_mics)
     # recording = recording.permute(0, 2, 1)
     recording = f.permute(0, 1, 3, 2) @ mics
+    
+    # print(f.shape, displacement.shape)
 
-    return recording, velocity
+    return recording, velocity_recording
 
 
 def unit_norm(x: torch.Tensor, dim: int = -1, epsilon: float = 1e-8):
@@ -160,8 +166,8 @@ class BetterGooLayer(nn.Module):
         self.masses = nn.Parameter(torch.zeros(1, n_masses, 1, 1).uniform_(50, 5000))
         self.tensions = nn.Parameter(torch.zeros(1, n_masses, dimension, 1).uniform_(30, 300))
         # self.gains = nn.Parameter(torch.zeros(1, n_masses, 1, 1).uniform_(10, 100))
-        self.mics = nn.Parameter(torch.zeros(1, n_masses, dimension, 1).uniform_(-1, 1))
-        self.to_filter_mixture = nn.Parameter(torch.zeros(self.n_masses, self.dimension, self.n_filters).uniform_(-1, 1))
+        self.mics = nn.Parameter(torch.zeros(1, n_masses, dimension, 1).uniform_(-0.011, 0.01))
+        self.to_filter_mixture = nn.Parameter(torch.zeros(self.n_masses, self.dimension, self.n_filters).uniform_(-0.01, 0.01))
         self.displacement_bias = nn.Parameter(torch.zeros(1, self.n_masses, self.dimension, 1).uniform_(-0.01, 0.01))
 
         self.hf_gain = nn.Parameter(torch.zeros(1).fill_(1))
@@ -175,7 +181,7 @@ class BetterGooLayer(nn.Module):
         batch = forces.shape[0]
 
         # run physical simulation at lower sample rate
-        recording, velocity_recording = sim(
+        recording, displacement = sim(
             self.home,
             self.tensions,
             self.masses,
@@ -190,7 +196,7 @@ class BetterGooLayer(nn.Module):
         # (I guess) of a particular node
 
         # compute the filture mixture over time
-        mixture = torch.einsum('abcd,bce->abed', (torch.abs(velocity_recording) * 0) + self.displacement_bias, self.to_filter_mixture)
+        mixture = torch.einsum('abcd,bce->abed', displacement + self.displacement_bias, self.to_filter_mixture)
 
         # upsample to full sample rate
         mixture = interpolate_last_axis(mixture, self.n_samples)
@@ -203,18 +209,19 @@ class BetterGooLayer(nn.Module):
 
         # return recording, displacement, lf
 
-        upsampled  = torch.abs(upsampled) * torch.zeros_like(upsampled).uniform_(-0.01, 0.01)
+        upsampled = torch.abs(upsampled) * torch.zeros_like(upsampled).uniform_(-0.01, 0.01)
 
         # convolve noise with the filters
         # filters = filters * torch.hamming_window(filters.shape[-1], device=filters.device)
+        # filters = randomize_phase(filters)
         f = ensure_last_axis_length(filters, self.n_samples)[:, None, :, :]
-        # f = unit_norm(f)
+        f = unit_norm(f)
         filtered = fft_convolve(f, upsampled[:, :, None, :])
 
-        hf =torch.einsum('abcd,abcd->abd', mixture, filtered) * self.hf_gain + lf
+        hf = torch.einsum('abcd,abcd->abd', mixture, filtered) * self.hf_gain + lf
 
 
-        return recording, velocity_recording, hf
+        return recording, displacement, hf
 
 
 
@@ -362,16 +369,19 @@ def check_model():
     n_samples = 2 ** 16
 
     # device = torch.device('cpu')
+    
+    block_size = 64
+    print(f'Operating at {22050 // block_size} hz')
 
     model = GooPerformance(
         damping=0.9991,
-        dimension=4,
+        dimension=3,
         n_masses=16,
-        n_layers=3,
+        n_layers=2,
         n_filters=64,   
         n_samples=n_samples,
-        filter_size=1024,
-        simulation_block_size=32).to(device)
+        filter_size=512,
+        simulation_block_size=block_size).to(device)
 
     overfit_model(
         n_samples=n_samples,

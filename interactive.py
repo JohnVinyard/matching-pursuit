@@ -4,6 +4,7 @@ import torch
 from torch import nn
 from modules import stft
 from modules.decompose import fft_resample
+from modules.fft import randomize_phase
 from modules.normalization import max_norm, unit_norm
 from modules.sparse import sparsify
 from spiking import SpikingModel
@@ -225,7 +226,8 @@ class Layer(nn.Module):
         noise = torch.zeros_like(upsampled).uniform_(-0.01, 0.01)
         energy = upsampled * noise
         
-        filters = ensure_last_axis_length(self.filters, desired_size=self.n_samples)
+        filters = randomize_phase(self.filters)
+        filters = ensure_last_axis_length(filters, desired_size=self.n_samples)
         filters = unit_norm(filters, dim=-1)
         
         with_resonance = fft_convolve(energy, filters)
@@ -245,7 +247,7 @@ if __name__ == '__main__':
     
     n_samples = 2 ** 16
     control_rate = 128
-    filter_size = 256
+    filter_size = 1024
     
     control_plane_dim = 64
     n_resonances = 64

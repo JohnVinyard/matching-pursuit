@@ -6,6 +6,20 @@ import numpy as np
 def n_fft_coeffs(size: int) -> int:
     return size // 2 + 1
 
+
+def randomize_phase(x: torch.Tensor) -> torch.Tensor:
+    spec = torch.fft.rfft(x, dim=-1)
+    # randomize phases
+    mags = torch.abs(spec)
+    phases = torch.angle(spec)
+    phases = torch.zeros_like(phases).uniform_(-np.pi, np.pi)
+    imag = torch.cumsum(phases, dim=1)
+    imag = (imag + np.pi) % (2 * np.pi) - np.pi
+    spec = mags * torch.exp(1j * imag)
+    x = torch.fft.irfft(spec, dim=-1)
+    return x
+
+
 def fft_convolve(*args, norm=None) -> torch.Tensor:
 
     n_samples = args[0].shape[-1]
