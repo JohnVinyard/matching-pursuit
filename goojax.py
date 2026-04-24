@@ -66,10 +66,10 @@ def tryjax():
     # direction of mics, which project ND vibration into a 1D signal
     mics = random.uniform(mic, (1, batch_size, n_masses, dim, 1), minval=-0.01, maxval=0.01)
     
-    tensions = random.uniform(t, (1, n_masses, dim), minval=30, maxval=300)
+    tensions = random.uniform(t, (1, n_masses, dim), minval=0.01, maxval=1)
     home_pos = np.zeros((1, n_masses, dim))
     
-    masses = random.uniform(m, (1, n_masses, 1), minval=50, maxval=5000)
+    masses = random.uniform(m, (1, n_masses, 1), minval=50, maxval=100)
     
     
     type Position = np.ndarray
@@ -88,7 +88,8 @@ def tryjax():
         
         new_velocity = (velocity + acc) * damping
         new_position = position + new_velocity
-        force = masses * acc
+        # force = masses * acc
+        force = direction
         
         return ((new_position, new_velocity), force)
     
@@ -98,33 +99,32 @@ def tryjax():
     
     start = time()
     
-    force_shape = (n_samples, batch_size, n_masses, dim)
-    forces = random.bernoulli(f, p=1e-5, shape=force_shape)
-    forces = forces * random.uniform(f, shape=force_shape, minval=-0.1, maxval=0.1)
+    # force_shape = (n_samples, batch_size, n_masses, dim)
     
-    final_carry, stacked_force = jax.lax.scan(
+    forces = random.bernoulli(f, p=1e-5, shape=(n_samples, batch_size, n_masses, 1))
+    
+    forces = forces * random.uniform(f, shape=(n_samples, batch_size, n_masses, dim ), minval=-0.1, maxval=0.1)
+    
+    _, stacked_force = jax.lax.scan(
         f=one_iter,
         init=(initial_pos, velocity),
         xs=forces,
         length=n_samples,
     )
     
-    print(final_carry[0].shape, final_carry[1].shape)
     
     samples = np.einsum('abcd,abcde->ba', stacked_force, mics)
-    print(samples.shape)
     
     
     normalized_samples = samples / (samples.max(axis=-1, keepdims=True) + 1e-8)
     
-    print(samples.min(), samples.max(), samples)
     
     
     end = time()
     
     n_seconds = n_samples / 22050
     t = end - start
-    # print(force.shape, n_seconds, t)
+    print(stacked_force.shape, n_seconds, t)
     
     listen_to_sound(normalized_samples[0], wait_for_user_input=True)
     
