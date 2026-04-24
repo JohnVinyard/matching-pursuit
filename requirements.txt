@@ -8,3 +8,6 @@ requests
 matplotlib
 scikit-learn
 selenium==4.27.1
+jax
+jaxlib
+jax[cuda12]

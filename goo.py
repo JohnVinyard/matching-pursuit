@@ -1,12 +1,13 @@
 from subprocess import Popen, PIPE
 
+import conjure
 import torch
 from attr import dataclass
 from matplotlib import pyplot as plt
 from soundfile import SoundFile
 from torch import nn
 from torch.nn import functional as F
-from typing import Union, Tuple
+from typing import List, Union, Tuple
 import numpy as np
 from io import BytesIO
 from time import time
@@ -14,6 +15,7 @@ from time import time
 from modules import sparsify
 from modules.decompose import fft_resample
 from modules.fft import randomize_phase
+from modules.normalization import max_norm
 from modules.reds import interpolate_last_axis
 from modules.transfer import fft_convolve
 from modules.upsample import upsample_with_holes, ensure_last_axis_length
@@ -209,13 +211,13 @@ class BetterGooLayer(nn.Module):
 
         # return recording, displacement, lf
 
-        upsampled = torch.abs(upsampled) * torch.zeros_like(upsampled).uniform_(-0.01, 0.01)
+        upsampled = upsampled * torch.zeros_like(upsampled).uniform_(-0.01, 0.01)
 
         # convolve noise with the filters
         # filters = filters * torch.hamming_window(filters.shape[-1], device=filters.device)
         # filters = randomize_phase(filters)
         f = ensure_last_axis_length(filters, self.n_samples)[:, None, :, :]
-        f = unit_norm(f)
+        # f = unit_norm(f)
         filtered = fft_convolve(f, upsampled[:, :, None, :])
 
         hf = torch.einsum('abcd,abcd->abd', mixture, filtered) * self.hf_gain + lf
@@ -225,7 +227,7 @@ class BetterGooLayer(nn.Module):
 
 
 
-# TODO: Mixer matrix routing energry between masses in subsequent layers
+# TODO: Mixer matrix routing energy between masses in subsequent layers
 class GooStack(nn.Module):
 
     def __init__(
@@ -288,8 +290,10 @@ class GooPerformance(nn.Module):
         self.simulation_block_size = simulation_block_size
 
         self.n_simulation_steps = n_samples // simulation_block_size
+        
+        self.n_force_frames = self.n_simulation_steps // 8
 
-        forces = torch.zeros(1, n_masses, dimension, self.n_simulation_steps // 8).uniform_(-0.1, 0.1)
+        forces = torch.zeros(1, n_masses, dimension, self.n_force_frames).uniform_(-0.1, 0.1)
         # forces = forces * torch.zeros_like(forces).uniform_(-0.1, 0.1)
         self.forces = nn.Parameter(forces)
 
@@ -301,22 +305,48 @@ class GooPerformance(nn.Module):
         self.hf_filters = nn.Parameter(torch.zeros(1, self.n_filters, self.filter_size).uniform_(-0.001, 0.001))
 
         self.layer_mix = nn.Parameter(torch.zeros(n_layers).uniform_(-1, 1))
+    
+    
+    def twod_force_vis(self):
+        return torch.norm(self.forces, dim=2).view(self.dimension, self.n_force_frames)
 
 
-
-
-    def forward(self):
-
-        f = self.forces.view(1, -1, self.forces.shape[-1])
-        f = f + f.mean()
-        f = sparsify(f, n_to_keep=128, salience=torch.abs(f))
-        f = f.view(*self.forces.shape)
+    def random(self) -> torch.Tensor:
+        f = torch.zeros_like(self.forces).uniform_(self.forces.min(), self.forces.max())
+        frame_indices = torch.zeros(1, self.n_masses, 1, self.n_force_frames).bernoulli(p=0.1)
+        dense_forces = torch.zeros(1, self.n_masses, self.dimension, self.n_force_frames).uniform_(-0.1, 0.1)
+        sparse_forces = frame_indices * dense_forces
+        return self._forward(sparse_forces)
+        
+    
+    def _forward(self, forces: torch.Tensor):
+        # f = forces.view(1, -1, self.forces.shape[-1])
+        # f = f + f.mean()
+        # f = sparsify(f, n_to_keep=128, salience=torch.abs(f))
+        # f = f.view(*self.forces.shape)
+        
+        f = forces
         f = upsample_with_holes(f, self.n_simulation_steps)
         recording = self.network.forward(self.hf_filters, f, self.home_modifier)
         recording = torch.einsum('abc,d->ac', recording, torch.softmax(self.layer_mix, dim=-1))[:, None, :]
         print(recording.shape)
         # recording = recording / torch.abs(recording.max()) + 1e-8
-        return recording * 0.1
+        return recording
+
+    def forward(self):
+        
+        return self._forward(self.forces)
+
+        # f = self.forces.view(1, -1, self.forces.shape[-1])
+        # f = f + f.mean()
+        # f = sparsify(f, n_to_keep=128, salience=torch.abs(f))
+        # f = f.view(*self.forces.shape)
+        # f = upsample_with_holes(f, self.n_simulation_steps)
+        # recording = self.network.forward(self.hf_filters, f, self.home_modifier)
+        # recording = torch.einsum('abc,d->ac', recording, torch.softmax(self.layer_mix, dim=-1))[:, None, :]
+        # print(recording.shape)
+        # # recording = recording / torch.abs(recording.max()) + 1e-8
+        # return recording * 0.1
 
 
 def loss_func(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
@@ -325,68 +355,47 @@ def loss_func(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     return torch.abs(a - b).sum()
 
 
-def exercise_goo_stack(device: torch.device = None):
-    n_samples = 2 ** 18
-    simulation_block_size = 4
-    n_simulation_steps = n_samples // simulation_block_size
-
-    n_masses = 8
-    dim = 8
-    batch_size = 1
-    n_layers = 3
-
-    forces = torch.zeros(batch_size, n_masses, dim, n_simulation_steps, device=device).bernoulli_(p=1e-6)
-    forces = forces * torch.zeros_like(forces, device=device).uniform_(-0.01, 0.01)
-
-    home_modifier = torch.zeros(batch_size, n_masses, dim, n_simulation_steps, device=device)
-    network = GooStack(dim, n_masses, n_layers=n_layers, damping=0.9993).to(device)
-    recording = network.forward(forces, home_modifier)
-
-    recording = fft_resample(recording, n_samples, is_lowest_band=True)
-    recording = recording / torch.abs(recording.max()) + 1e-8
-
-    # layer = GooLayer(dimension=dim, n_masses=n_masses)
-
-    # recording, displacement = layer.forward(forces, home_modifier)
-
-    return recording
-
-
-
-def generate():
-    start = time()
-
-    with torch.no_grad():
-        x = exercise_goo_stack(device=None)
-
-    seconds = x.numel() / 22050
-    stop = time()
-    print(f'Generated {seconds:.2f} seconds of audio in {(stop - start):.2f} seconds')
-    listen_to_sound(encode_audio(x[0]), wait_for_user_input=True)
-
 
 def check_model():
     n_samples = 2 ** 16
-
-    # device = torch.device('cpu')
-    
     block_size = 64
-    print(f'Operating at {22050 // block_size} hz')
-
+    
+    
     model = GooPerformance(
         damping=0.9991,
-        dimension=3,
+        dimension=2,
         n_masses=16,
         n_layers=2,
         n_filters=64,   
         n_samples=n_samples,
-        filter_size=512,
+        filter_size=64,
         simulation_block_size=block_size).to(device)
+    
+    print(f'Operating at {22050 // block_size} hz')
+    
+    def training_loop_hook(iteration: int, loggers: List[conjure.Conjure], model: GooPerformance):
+        forces = loggers[0]
+        with torch.no_grad():
+            result = model.random()
+            forces(max_norm(result, dim=-1).view(-1))
+            
 
+    def add_loggers(collection: conjure.LmdbCollection) -> List[conjure.Conjure]:
+        new_loggers = conjure.loggers(
+            ['forces'], 
+            conjure.SupportedContentType.Audio.value,
+            encode_audio,
+            collection
+        )
+        return new_loggers
+
+    
     overfit_model(
         n_samples=n_samples,
         model=model,
         loss_func=loss_func,
+        logger_factory=add_loggers,
+        training_loop_hook=training_loop_hook,
         collection_name='goo',
         learning_rate=1e-3,
         device=device,

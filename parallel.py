@@ -13,8 +13,10 @@ from torch.nn import functional as F
 
 import conjure
 from conjure.logger import encode_audio
+from torch.optim import Optimizer
 from config.dotenv import Config
 from modules import sparsify, interpolate_last_axis, max_norm
+from modules.latent_loss import latent_loss
 from modules.reverb import NeuralReverb
 from modules.transfer import fft_convolve
 from modules.upsample import upsample_with_holes, ensure_last_axis_length
@@ -211,16 +213,15 @@ class Layer(nn.Module):
 
         # TODO: eventually, this will vary at control rate and will have "momentum",
         # springing back to a baseline value
+        
 
-        self.damp = nn.Parameter(torch.zeros(1, self.n_nodes, self.n_frames).uniform_(1e-8, 0.9999))
-        # damp = torch.zeros(1, self.n_nodes, 1).uniform_(0.9997, 0.9998)
-        # self.register_buffer('damp', damp)
+        self.mass = nn.Parameter(torch.zeros(1, self.n_nodes, 1).uniform_(-6, 6))
 
-        self.mass = nn.Parameter(torch.zeros(1, self.n_nodes, 1).uniform_(1e-8, 1))
-
-        # TODO: eventually, this will vary at control rate and will have "momentum",
-        # springing back to a baseline value
+        # TODO: eventually, tension and damping will vary at control rate and will have "momentum",
+        # springing back to a baseline value, just as the N-dim nodes do
         self.tension = nn.Parameter(torch.zeros(1, self.n_nodes, 1).uniform_(4, 9))
+        self.damp = nn.Parameter(torch.zeros(1, self.n_nodes, 1).uniform_(1e-8, 0.9999))
+        
 
         d = torch.zeros(1, self.n_nodes, 1).fill_(1)
         self.register_buffer('d', d)
@@ -234,8 +235,8 @@ class Layer(nn.Module):
         # self.influence = nn.Parameter(torch.zeros(1, self.n_nodes, 1).uniform_(-0.01, 0.01))
         
 
-        self.force_router = nn.Parameter(torch.zeros(self.n_nodes, self.n_nodes).bernoulli_(p=0.1))
-        self.tension_router = nn.Parameter(torch.zeros(self.n_nodes, self.n_nodes).bernoulli_(p=0.1))
+        self.force_router = nn.Parameter(torch.eye(self.n_nodes, self.n_nodes))
+        self.tension_router = nn.Parameter(torch.eye(self.n_nodes, self.n_nodes))
 
         # self.noise_mix = nn.Parameter(torch.zeros(1, self.n_nodes, 1, 2).uniform_(-0.01, 0.01))
         
@@ -250,7 +251,7 @@ class Layer(nn.Module):
         forces = torch.einsum('abc,bd->adc', forces, self.force_router)
 
         damp = self.base_resonance + (torch.clamp(self.damp, 1e-12, 1) * self.diff)
-        # damp = damp.repeat(1, 1, self.n_samples)
+        damp = damp.repeat(1, 1, self.n_samples)
         energy = sequential(forces, damp)
         energy = interpolate_last_axis(energy, desired_size=self.n_samples)
 
@@ -259,8 +260,7 @@ class Layer(nn.Module):
 
         # energy = parallel_conv(forces, damp, frame_size=1)
 
-        mass = torch.clamp(self.mass, 1e-8, 1) * 10
-        # mass = 10 ** self.mass
+        mass = torch.sigmoid(self.mass) * 2
         tension = self.tension
 
         if tension_modifier is not None:
@@ -280,7 +280,7 @@ class Layer(nn.Module):
         # x = stacked * torch.softmax(self.noise_mix, dim=-1)
         # x = torch.sum(x, dim=-1)
 
-        x = torch.tanh(x * self.gains)
+        # x = torch.tanh(x * self.gains)
         return x
 
 
@@ -309,7 +309,7 @@ class LayerController(nn.Module):
 
         self.layers = nn.ModuleList([Layer(n_nodes, n_samples, control_rate) for _ in range(self.n_layers)])
 
-        self.node_filters = nn.Parameter(torch.zeros(1, n_nodes, 32).uniform_(-0.01, 0.01))
+        self.node_filters = nn.Parameter(torch.zeros(1, n_nodes, 256).uniform_(-0.01, 0.01))
         
         self.filter_mix = nn.Parameter(torch.zeros(2).uniform_(-0.01, 0.01))
 
@@ -326,10 +326,10 @@ class LayerController(nn.Module):
         else:
             f = self.forces
 
-        # f = torch.abs(f)
-        # f = f - f.mean()
-        # f = torch.relu(f)
-        f = f / f.sum()
+        f = torch.abs(f)
+        f = f - f.mean()
+        f = torch.relu(f)
+        # f = f / f.sum()
         
         sparsity = (f > 0).sum() / f.numel()
         print(f'Sparsity {sparsity:.2f}')
@@ -337,7 +337,7 @@ class LayerController(nn.Module):
         # if do_upsample:
         #     f = upsample_with_holes(f, desired_size=self.n_samples)
 
-        f = sparsify(f, n_to_keep=n_to_keep or self.n_to_keep)
+        # f = sparsify(f, n_to_keep=n_to_keep or self.n_to_keep)
         return f
 
     def compression_ratio(self):
@@ -372,14 +372,23 @@ class LayerController(nn.Module):
             outputs.append(tm)
 
 
-        tm = torch.stack(outputs, dim=-1)
-        tm = tm @ self.mix
+        # tm = torch.stack(outputs, dim=-1)
+        # tm = tm @ self.mix
 
+        # apply filters
         nf = ensure_last_axis_length(self.node_filters, desired_size=self.n_samples)
-        tm = fft_convolve(tm, nf)
+        filtered = fft_convolve(tm, nf)
         
+        # wet/dry filter mix
+        x = torch.stack([tm, filtered], dim=-1)
+        x = x * torch.softmax(self.wet_dry_mix, dim=-1)
+        tm = torch.sum(x, dim=-1)
+        
+        
+        # apply conv reverb
         wet = self.verb.forward(tm, self.room_mix)
         
+        # wet/dry reverb mix
         x = torch.stack([tm, wet], dim=-1)
         x = x * torch.softmax(self.wet_dry_mix, dim=-1)
         tm = torch.sum(x, dim=-1)
@@ -410,10 +419,14 @@ def loss_func(a: torch.Tensor, b: torch.Tensor, control: torch.Tensor) -> torch.
     b = stft(b)
     base_loss = torch.abs(a - b).sum()
     
-    # sparsity_loss = l0_norm(control) * 100
     
-    return (loss_model.compute_multiband_loss(a, b, hard=True, normalize=True) * 1) + base_loss #+ sparsity_loss
-    # return base_loss #+ sparsity_loss
+    # control_plane_dim = control.shape[1]
+    
+    sparsity_loss = l0_norm(control) * 100
+    # cov_loss = latent_loss(control.permute(0, 2, 1).view(-1, control_plane_dim))
+    
+    return (loss_model.compute_multiband_loss(a, b, hard=True, normalize=True) * 1) + base_loss + sparsity_loss
+    # return base_loss + sparsity_loss #+ cov_loss
 
 
 
@@ -452,7 +465,13 @@ def overfit_osc(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int):
     def training_loop_hook(
             iteration: int,
             loggers: List[conjure.Conjure],
-            model: LayerController):
+            model: LayerController,
+            optim: Optimizer):
+        
+        if iteration > 5000:
+            print('Changing learning rate')
+            for g in optim.param_groups:
+                g['lr'] = 1e-4
 
         # TODO: index loggers by name
         rnd_logger = loggers[-1]
@@ -480,7 +499,7 @@ def overfit_osc(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int):
         collection_name='parallel',
         logger_factory=logger_factory,
         training_loop_hook=training_loop_hook,
-        learning_rate=1e-4
+        learning_rate=1e-3
     )
 
 
@@ -537,4 +556,4 @@ def harness(n_samples: int, *solutions: Solution):
 
 if __name__ == '__main__':
     # compare()
-    overfit_osc(n_nodes=32, n_samples=2 ** 17, n_layers=3, n_to_keep=64)
+    overfit_osc(n_nodes=32, n_samples=2 ** 17, n_layers=2, n_to_keep=128)

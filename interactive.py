@@ -247,7 +247,7 @@ if __name__ == '__main__':
     
     n_samples = 2 ** 16
     control_rate = 128
-    filter_size = 1024
+    filter_size = 4096
     
     control_plane_dim = 64
     n_resonances = 64

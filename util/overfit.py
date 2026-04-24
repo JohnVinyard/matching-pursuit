@@ -8,7 +8,7 @@ from data import get_one_audio_segment
 from .device import device
 from modules import max_norm
 from .playable import encode_audio
-from torch.optim import Adam
+from torch.optim import Adam, Optimizer
 import conjure
 from conjure import serve_conjure
 from itertools import count
@@ -18,7 +18,7 @@ LossFunc = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 
 LoggerFactory = Callable[[conjure.LmdbCollection], List[conjure.Conjure]]
 
-TrainingLoopHook = Callable[[int, List[conjure.Conjure], nn.Module], None]
+TrainingLoopHook = Callable[[int, List[conjure.Conjure], nn.Module, Optimizer], None]
 
 ModelEval = Callable[[nn.Module], Tuple[torch.Tensor, torch.Tensor]]
 
@@ -28,7 +28,12 @@ def default_model_eval(model: nn.Module, loss_func: LossFunc, target: torch.Tens
     return recon, loss
 
 
-def default_training_loop_hook(iteration: int, loggers: List[conjure.Conjure], model: nn.Module):
+def default_training_loop_hook(
+        iteration: int, 
+        loggers: List[conjure.Conjure], 
+        model: nn.Module, 
+        optim: Optimizer):
+    
     pass
 
 def add_loggers(collection: conjure.LmdbCollection) -> List[conjure.Conjure]:
@@ -79,5 +84,5 @@ def overfit_model(
         
         loss.backward()
         optimizer.step()
-        training_loop_hook(i, other_loggers, model)
+        training_loop_hook(i, other_loggers, model, optimizer)
         print(i, loss.item())
