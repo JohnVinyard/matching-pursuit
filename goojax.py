@@ -3,6 +3,7 @@ from typing import Tuple
 import torch
 import jax
 import jax.numpy as np
+import jax.scipy as sp
 from jax import random
 import matplotlib
 from matplotlib import pyplot as plt
@@ -43,6 +44,15 @@ def listen_to_sound(
     if wait_for_user_input:
         input('Next')
 
+type Position = np.ndarray
+type Velocity = np.ndarray
+type Forces = np.ndarray
+type HomePosition = np.ndarray
+
+    
+type Carry = Tuple[Position, Velocity]
+
+type Inputs = Tuple[Forces, HomePosition]
 
 def tryjax():
     
@@ -55,41 +65,58 @@ def tryjax():
     
     batch_size = 1
     n_masses = 16
-    dim = 4
+    dim = 8
     n_samples = 2 ** 16
     
     rk = random.key(int(time()))
-    rk, f, t, m, mic = random.split(rk, 5)
+    rk, f, t, m, mic, l = random.split(rk, 6)
     
     damping = 0.9998
     
+    # TODO: add a utility to generate a layer
     # direction of mics, which project ND vibration into a 1D signal
     mics = random.uniform(mic, (1, batch_size, n_masses, dim, 1), minval=-0.01, maxval=0.01)
-    
-    tensions = random.uniform(t, (1, n_masses, dim), minval=0.01, maxval=1)
-    home_pos = np.zeros((1, n_masses, dim))
-    
-    masses = random.uniform(m, (1, n_masses, 1), minval=50, maxval=100)
+    limits = random.uniform(l, (1, n_masses, dim), minval=-0.01, maxval=0.01)
+    tensions = random.uniform(t, (1, n_masses, dim), minval=0.00001, maxval=5)
+    masses = random.uniform(m, (1, n_masses, 1), minval=100, maxval=500)
     
     
-    type Position = np.ndarray
-    type Velocity = np.ndarray
-    
-    type Carry = Tuple[Position, Velocity]
+    # home_pos = np.zeros((1, n_masses, dim))
     
     
+    
+    
+    # TODO: add a time-varying home-position here
     @jax.jit
-    def one_iter(carry: Carry, forces: np.ndarray) -> Tuple[Carry, np.ndarray]:
+    def one_iter(carry: Carry, inputs: Inputs) -> Tuple[Carry, np.ndarray]:
         position, velocity = carry
         
+        forces, home_pos = inputs
+        
+        
+        # find displacement
         direction = home_pos - position
         
+        # compute acceleration based on displacement
         acc = forces + ((tensions * direction) / masses)
         
+        # update velocity
         new_velocity = (velocity + acc) * damping
+        
+        # update position
         new_position = position + new_velocity
-        # force = masses * acc
-        force = direction
+        
+        
+        # first, check boundary conditions
+        clamped_pos = np.clip(new_position, -np.abs(limits), np.abs(limits))
+        diff = (np.abs(new_position) - np.abs(clamped_pos)) + 1e-12
+        s = np.sign(diff)
+        
+        new_position = clamped_pos - (1e-12 * -s)
+        new_velocity = new_velocity * s
+        
+                
+        force = home_pos - new_position
         
         return ((new_position, new_velocity), force)
     
@@ -99,19 +126,23 @@ def tryjax():
     
     start = time()
     
-    # force_shape = (n_samples, batch_size, n_masses, dim)
-    
     forces = random.bernoulli(f, p=1e-5, shape=(n_samples, batch_size, n_masses, 1))
     
+    
+    home_pos = np.zeros((n_samples, batch_size, n_masses, dim))
     forces = forces * random.uniform(f, shape=(n_samples, batch_size, n_masses, dim ), minval=-0.1, maxval=0.1)
+    
+    inputs = (forces, home_pos)
     
     _, stacked_force = jax.lax.scan(
         f=one_iter,
         init=(initial_pos, velocity),
-        xs=forces,
+        xs=inputs,
         length=n_samples,
     )
     
+
+    print(stacked_force.min(), stacked_force.max())    
     
     samples = np.einsum('abcd,abcde->ba', stacked_force, mics)
     
@@ -126,60 +157,20 @@ def tryjax():
     t = end - start
     print(stacked_force.shape, n_seconds, t)
     
-    listen_to_sound(normalized_samples[0], wait_for_user_input=True)
+    # listen_to_sound(normalized_samples[0], wait_for_user_input=True)
     
-    plt.plot(normalized_samples[0])
+    # plt.plot(normalized_samples[0])
+    # plt.show()
+    
+    _, _, spec = sp.signal.stft(normalized_samples[0], nperseg=2048, noverlap=256)
+    
+    spec = np.log(1e-12 + np.abs(spec))
+    
+    
+    plt.matshow(np.flipud(spec[:256, :]))
     plt.show()
-    
-        
 
-# @torch.jit.script
-# def sim(
-#         home: torch.Tensor,
-#         tensions: torch.Tensor,
-#         masses: torch.Tensor,
-#         damping: float,
-#         # gains: torch.Tensor,
-#         mics: torch.Tensor,
-#         forces: torch.Tensor,
-#         home_modifier: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
 
-#     batch, n_masses, dim, n_samples = home_modifier.shape
-
-#     # NOTE: home is defined as zero for each node/mass, so this
-#     # could simply be home_modifier directly
-#     h = home + home_modifier
-
-#     position = torch.zeros(batch, n_masses, dim, 1, device=forces.device)
-#     velocity = torch.zeros(batch, n_masses, dim, 1, device=forces.device)
-
-#     f = torch.zeros(batch, n_masses, dim, n_samples, device=forces.device)
-    
-#     velocity_recording = torch.zeros(batch, n_masses, dim, n_samples, device=forces.device)
-    
-#     # displacement = torch.zeros(batch, n_masses, dim, n_samples, device=forces.device)
-
-#     for i in range(n_samples):
-#         direction = h[..., i: i + 1] - position
-        
-#         # displacement[..., i: i + 1] = direction
-        
-
-#         acc = forces[..., i: i + 1] + ((tensions * direction) / masses)
-#         velocity = velocity + acc
-#         velocity = velocity * damping
-        
-#         velocity_recording[..., i: i + 1] = velocity
-        
-#         position = position + velocity
-
-#         r = masses * acc
-#         f[:, :, :, i: i + 1] = r
-
-#     recording = f.permute(0, 1, 3, 2) @ mics
-    
-
-#     return recording, velocity_recording
 
 
 if __name__ == '__main__':

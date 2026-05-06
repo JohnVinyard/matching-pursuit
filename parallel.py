@@ -250,8 +250,10 @@ class Layer(nn.Module):
     def forward(self, forces: torch.Tensor, tension_modifier: torch.Tensor = None) -> torch.Tensor:
         forces = torch.einsum('abc,bd->adc', forces, self.force_router)
 
-        damp = self.base_resonance + (torch.clamp(self.damp, 1e-12, 1) * self.diff)
+        damp = self.base_resonance + (torch.clamp(self.damp, 1e-12, 1) * self.diff)        
         damp = damp.repeat(1, 1, self.n_samples)
+        
+        
         energy = sequential(forces, damp)
         energy = interpolate_last_axis(energy, desired_size=self.n_samples)
 
@@ -260,7 +262,7 @@ class Layer(nn.Module):
 
         # energy = parallel_conv(forces, damp, frame_size=1)
 
-        mass = torch.sigmoid(self.mass) * 2
+        mass = torch.sigmoid(self.mass) * 100
         tension = self.tension
 
         if tension_modifier is not None:
@@ -326,10 +328,12 @@ class LayerController(nn.Module):
         else:
             f = self.forces
 
-        f = torch.abs(f)
+        # f = torch.abs(f)
         f = f - f.mean()
         f = torch.relu(f)
-        # f = f / f.sum()
+
+        
+        # f = f / torch.abs(f).sum()
         
         sparsity = (f > 0).sum() / f.numel()
         print(f'Sparsity {sparsity:.2f}')
@@ -337,7 +341,7 @@ class LayerController(nn.Module):
         # if do_upsample:
         #     f = upsample_with_holes(f, desired_size=self.n_samples)
 
-        # f = sparsify(f, n_to_keep=n_to_keep or self.n_to_keep)
+        # f = sparsify(f, n_to_keep=n_to_keep or self.n_to_keep, salience=torch.abs(f))
         return f
 
     def compression_ratio(self):
@@ -412,7 +416,7 @@ def test_osc(n_nodes: int, n_samples: int) -> torch.Tensor:
     return x
 
 
-loss_model = SpikingModel(64, 64, 64, 64, 64).to(device)
+# loss_model = SpikingModel(64, 64, 64, 64, 64).to(device)
 
 def loss_func(a: torch.Tensor, b: torch.Tensor, control: torch.Tensor) -> torch.Tensor:
     a = stft(a)
@@ -422,11 +426,11 @@ def loss_func(a: torch.Tensor, b: torch.Tensor, control: torch.Tensor) -> torch.
     
     # control_plane_dim = control.shape[1]
     
-    sparsity_loss = l0_norm(control) * 100
+    sparsity_loss = l0_norm(torch.abs(control)) * 100
     # cov_loss = latent_loss(control.permute(0, 2, 1).view(-1, control_plane_dim))
     
-    return (loss_model.compute_multiband_loss(a, b, hard=True, normalize=True) * 1) + base_loss + sparsity_loss
-    # return base_loss + sparsity_loss #+ cov_loss
+    # return (loss_model.compute_multiband_loss(a, b, hard=True, normalize=True) * 1) + base_loss + sparsity_loss
+    return base_loss + sparsity_loss #+ cov_loss
 
 
 
