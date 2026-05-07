@@ -12,6 +12,8 @@ import numpy as np
 from io import BytesIO
 from time import time
 
+from torch.optim import Optimizer
+
 from modules import sparsify
 from modules.decompose import fft_resample
 from modules.fft import randomize_phase
@@ -97,7 +99,8 @@ def sim(
 
     # NOTE: home is defined as zero for each node/mass, so this
     # could simply be home_modifier directly
-    h = home + home_modifier
+    # h = home + home_modifier
+    h = home * (home_modifier * 0)
 
     position = torch.zeros(batch, n_masses, dim, 1, device=forces.device)
     velocity = torch.zeros(batch, n_masses, dim, 1, device=forces.device)
@@ -115,7 +118,7 @@ def sim(
         displacement[..., i: i + 1] = direction
         
 
-        acc = forces[..., i: i + 1] + ((tensions * direction) / masses)
+        acc = forces[..., i: i + 1] + (((tensions + home_modifier[..., i: i + 1]) * direction) / masses)
         velocity = velocity + acc
         velocity = velocity * damping
         
@@ -123,14 +126,10 @@ def sim(
         
         position = position + velocity
 
-        r = masses * acc
-        f[:, :, :, i: i + 1] = r
-        # r = r.permute(0, 1, 3, 2) @ mics
+        # r = masses * acc
+        f[:, :, :, i: i + 1] = displacement[..., i: i + 1]
+        
 
-        # recording[..., i: i + 1, :] = r
-
-    # recording = torch.einsum('abcd,abcd->acd', recording, layer_mics)
-    # recording = recording.permute(0, 2, 1)
     recording = f.permute(0, 1, 3, 2) @ mics
     
     # print(f.shape, displacement.shape)
@@ -312,41 +311,23 @@ class GooPerformance(nn.Module):
 
 
     def random(self) -> torch.Tensor:
-        f = torch.zeros_like(self.forces).uniform_(self.forces.min(), self.forces.max())
-        frame_indices = torch.zeros(1, self.n_masses, 1, self.n_force_frames).bernoulli(p=0.1)
-        dense_forces = torch.zeros(1, self.n_masses, self.dimension, self.n_force_frames).uniform_(-0.1, 0.1)
+        # f = torch.zeros_like(self.forces).uniform_(float(self.forces.min()), float(self.forces.max()))
+        frame_indices = torch.zeros(1, self.n_masses, 1, self.n_force_frames, device=self.home_modifier.device).bernoulli(p=0.1)
+        dense_forces = torch.zeros(1, self.n_masses, self.dimension, self.n_force_frames, device=self.home_modifier.device).uniform_(-0.1, 0.1)
         sparse_forces = frame_indices * dense_forces
         return self._forward(sparse_forces)
         
     
     def _forward(self, forces: torch.Tensor):
-        # f = forces.view(1, -1, self.forces.shape[-1])
-        # f = f + f.mean()
-        # f = sparsify(f, n_to_keep=128, salience=torch.abs(f))
-        # f = f.view(*self.forces.shape)
-        
         f = forces
         f = upsample_with_holes(f, self.n_simulation_steps)
         recording = self.network.forward(self.hf_filters, f, self.home_modifier)
         recording = torch.einsum('abc,d->ac', recording, torch.softmax(self.layer_mix, dim=-1))[:, None, :]
         print(recording.shape)
-        # recording = recording / torch.abs(recording.max()) + 1e-8
         return recording
 
     def forward(self):
-        
         return self._forward(self.forces)
-
-        # f = self.forces.view(1, -1, self.forces.shape[-1])
-        # f = f + f.mean()
-        # f = sparsify(f, n_to_keep=128, salience=torch.abs(f))
-        # f = f.view(*self.forces.shape)
-        # f = upsample_with_holes(f, self.n_simulation_steps)
-        # recording = self.network.forward(self.hf_filters, f, self.home_modifier)
-        # recording = torch.einsum('abc,d->ac', recording, torch.softmax(self.layer_mix, dim=-1))[:, None, :]
-        # print(recording.shape)
-        # # recording = recording / torch.abs(recording.max()) + 1e-8
-        # return recording * 0.1
 
 
 def loss_func(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
@@ -373,7 +354,12 @@ def check_model():
     
     print(f'Operating at {22050 // block_size} hz')
     
-    def training_loop_hook(iteration: int, loggers: List[conjure.Conjure], model: GooPerformance):
+    def training_loop_hook(
+        iteration: int, 
+        loggers: List[conjure.Conjure], 
+        model: GooPerformance, 
+        optimizer: Optimizer):
+        
         forces = loggers[0]
         with torch.no_grad():
             result = model.random()

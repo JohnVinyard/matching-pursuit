@@ -130,9 +130,11 @@ def tryjax():
     n_masses = 16
     dim = 3
     n_samples = 2 ** 16
+    
+    n_layers = 3
 
     rk = random.key(int(time()))
-    rk, m, m2, f, p, inf = random.split(rk, 6)
+    rk, m, m2, m3, f, p, inf1, inf2, mx = random.split(rk, 9)
 
     mics = random.uniform(
         m, (1, batch_size, n_masses, dim, 1), minval=-0.01, maxval=0.01)
@@ -140,17 +142,30 @@ def tryjax():
     mics2 = random.uniform(
         m2, (1, batch_size, n_masses, dim, 1), minval=-0.01, maxval=0.01)
     
+    mics3 = random.uniform(
+        m2, (1, batch_size, n_masses, dim, 1), minval=-0.01, maxval=0.01)
+    
     influence = random.uniform(
-        inf, (n_masses, n_masses, dim), minval=-0.05, maxval=0.05
+        inf1, (n_masses, n_masses, dim), minval=-0.05, maxval=0.05
+    )
+    
+    influence2 = random.uniform(
+        inf2, (n_masses, n_masses, dim), minval=-0.05, maxval=0.05
     )
 
     one_iter = create_iter_func(n_masses, dim, seed=int(time()) + 11)
     two_iter = create_iter_func(n_masses, dim, seed=int(time()) + 21)
+    three_iter = create_iter_func(n_masses, dim, seed=int(time()) + 31)
 
     initial_pos = np.zeros((batch_size, n_masses, dim))
     initial_pos_2 = np.zeros((batch_size, n_masses, dim))
+    initial_pos_3 = np.zeros((batch_size, n_masses, dim))
+    
     velocity = np.zeros((batch_size, n_masses, dim))
     velocity_2 = np.zeros((batch_size, n_masses, dim))
+    velocity_3 = np.zeros((batch_size, n_masses, dim))
+    
+    layer_mix = random.uniform(mx, (n_layers,), minval=-1, maxval=1)
 
     start = time()
 
@@ -185,10 +200,28 @@ def tryjax():
         xs=inputs2,
         length=n_samples,
     )
+    
+    force2_with_influence = np.einsum('abcd,ecd->abcd', stacked_force_2, influence2)
+    
+    inputs3 = (zero_force, force2_with_influence)
+    
+    _, stacked_force_3 = jax.lax.scan(
+        f=three_iter,
+        init=(initial_pos_3, velocity_3),
+        xs=inputs3,
+        length=n_samples,
+    )
 
-    # samples = np.einsum('abcd,abcde->ba', stacked_force, mics)
+    samples = np.einsum('abcd,abcde->ba', stacked_force, mics)
     samples2 = np.einsum('abcd,abcde->ba', stacked_force_2, mics2)
-    samples = samples2
+    samples3 = np.einsum('abcd,abcde->ba', stacked_force_3, mics3)
+    
+    stacked = np.stack([samples, samples2, samples3], axis=0)
+    print(stacked.shape)
+    
+    samples = np.einsum('sba,s->ba',stacked, layer_mix)
+    print(samples.shape)
+    
 
     normalized_samples = samples / (samples.max(axis=-1, keepdims=True) + 1e-8)
 
@@ -197,6 +230,7 @@ def tryjax():
     n_seconds = n_samples / 22050
     t = end - start
     print(stacked_force.shape, n_seconds, t)
+    
     
     listen_to_sound(normalized_samples[0], wait_for_user_input=True)
 
