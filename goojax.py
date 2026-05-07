@@ -56,9 +56,9 @@ def create_layer_parameters(n_masses: int, dim: int, seed:int) -> LayerParameter
     rk = random.key(seed)
     rk, t, m, l, d = random.split(rk, 5)
 
-    limits = random.uniform(l, (1, n_masses, dim), minval=-5, maxval=5)
-    tensions = random.uniform(t, (1, n_masses, dim), minval=0.001, maxval=10)
-    masses = random.uniform(m, (1, n_masses, 1), minval=10, maxval=1000)
+    limits = random.uniform(l, (1, n_masses, dim), minval=-10, maxval=10)
+    tensions = random.uniform(t, (1, n_masses, dim), minval=0.001, maxval=2)
+    masses = random.uniform(m, (1, n_masses, 1), minval=1, maxval=1000)
     damping = random.uniform(d, (1, n_masses, 1), minval=0.9990, maxval=0.998)
 
     return LayerParameters(
@@ -98,12 +98,12 @@ def create_iter_func(n_masses: int, dim: int, seed: int):
         new_position = position + new_velocity
 
         # first, check boundary conditions
-        # clamped_pos = np.clip(new_position, -np.abs(limits), np.abs(limits))
-        # diff = (np.abs(new_position) - np.abs(clamped_pos)) + 1e-12
-        # s = np.sign(diff)
+        clamped_pos = np.clip(new_position, -np.abs(limits), np.abs(limits))
+        diff = (np.abs(new_position) - np.abs(clamped_pos)) + 1e-12
+        s = np.sign(diff)
 
-        # new_position = clamped_pos - (1e-12 * -s)
-        # new_velocity = new_velocity * s
+        new_position = clamped_pos - (1e-12 * -s)
+        new_velocity = new_velocity * s
 
         # this is really just displacement
         force = home_pos - new_position
@@ -128,7 +128,7 @@ def tryjax():
 
     batch_size = 1
     n_masses = 16
-    dim = 1
+    dim = 3
     n_samples = 2 ** 16
 
     rk = random.key(int(time()))
@@ -186,9 +186,9 @@ def tryjax():
         length=n_samples,
     )
 
-    samples = np.einsum('abcd,abcde->ba', stacked_force, mics)
+    # samples = np.einsum('abcd,abcde->ba', stacked_force, mics)
     samples2 = np.einsum('abcd,abcde->ba', stacked_force_2, mics2)
-    samples = samples + samples2
+    samples = samples2
 
     normalized_samples = samples / (samples.max(axis=-1, keepdims=True) + 1e-8)
 
