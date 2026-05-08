@@ -153,9 +153,13 @@ def tryjax():
         inf2, (n_masses, n_masses, dim), minval=-0.05, maxval=0.05
     )
 
-    one_iter = create_iter_func(n_masses, dim, seed=int(time()) + 11)
-    two_iter = create_iter_func(n_masses, dim, seed=int(time()) + 21)
-    three_iter = create_iter_func(n_masses, dim, seed=int(time()) + 31)
+    one_seed = int(time()) + 2
+    two_seed = int(time()) + 22
+    three_seed = int(time()) + 222
+    
+    one_iter = create_iter_func(n_masses, dim, seed=one_seed)
+    two_iter = create_iter_func(n_masses, dim, seed=two_seed)
+    three_iter = create_iter_func(n_masses, dim, seed=three_seed)
 
     initial_pos = np.zeros((batch_size, n_masses, dim))
     initial_pos_2 = np.zeros((batch_size, n_masses, dim))
@@ -217,10 +221,8 @@ def tryjax():
     samples3 = np.einsum('abcd,abcde->ba', stacked_force_3, mics3)
     
     stacked = np.stack([samples, samples2, samples3], axis=0)
-    print(stacked.shape)
     
     samples = np.einsum('sba,s->ba',stacked, layer_mix)
-    print(samples.shape)
     
 
     normalized_samples = samples / (samples.max(axis=-1, keepdims=True) + 1e-8)

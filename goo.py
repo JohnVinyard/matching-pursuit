@@ -2,23 +2,19 @@ from subprocess import Popen, PIPE
 
 import conjure
 import torch
-from attr import dataclass
-from matplotlib import pyplot as plt
 from soundfile import SoundFile
 from torch import nn
 from torch.nn import functional as F
 from typing import List, Union, Tuple
 import numpy as np
 from io import BytesIO
-from time import time
 
 from torch.optim import Optimizer
 
-from modules import sparsify
 from modules.decompose import fft_resample
-from modules.fft import randomize_phase
 from modules.normalization import max_norm
 from modules.reds import interpolate_last_axis
+from modules.sparse import sparsify_vectors
 from modules.transfer import fft_convolve
 from modules.upsample import upsample_with_holes, ensure_last_axis_length
 from util import device
@@ -87,8 +83,7 @@ def sim(
         home: torch.Tensor,
         tensions: torch.Tensor,
         masses: torch.Tensor,
-        damping: float,
-        # gains: torch.Tensor,
+        damping: torch.Tensor,
         mics: torch.Tensor,
         forces: torch.Tensor,
         home_modifier: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -100,7 +95,7 @@ def sim(
     # NOTE: home is defined as zero for each node/mass, so this
     # could simply be home_modifier directly
     # h = home + home_modifier
-    h = home * (home_modifier * 0)
+    h = home + (home_modifier * 0)
 
     position = torch.zeros(batch, n_masses, dim, 1, device=forces.device)
     velocity = torch.zeros(batch, n_masses, dim, 1, device=forces.device)
@@ -149,24 +144,27 @@ class BetterGooLayer(nn.Module):
             n_samples: int,
             n_filters: int,
             dimension: int,
-            n_masses: int,
-            damping: float = 0.9998):
+            n_masses: int):
 
         super().__init__()
         self.n_samples = n_samples
         self.n_filters = n_filters
         self.dimension = dimension
         self.n_masses = n_masses
-        self.damping = damping
 
         home = torch.zeros(1, 1, dimension, 1)
         self.register_buffer('home', home)
 
         self.connection_strength = nn.Parameter(torch.zeros(1, n_masses, 1, 1).fill_(1))
+        
+        self.min_damp = 0.5
+        self.max_damp = 0.9998
 
         self.masses = nn.Parameter(torch.zeros(1, n_masses, 1, 1).uniform_(50, 5000))
         self.tensions = nn.Parameter(torch.zeros(1, n_masses, dimension, 1).uniform_(30, 300))
-        # self.gains = nn.Parameter(torch.zeros(1, n_masses, 1, 1).uniform_(10, 100))
+        
+        self.damping = nn.Parameter(torch.zeros(1, n_masses, 1, 1).uniform_(self.min_damp, self.max_damp))
+        
         self.mics = nn.Parameter(torch.zeros(1, n_masses, dimension, 1).uniform_(-0.011, 0.01))
         self.to_filter_mixture = nn.Parameter(torch.zeros(self.n_masses, self.dimension, self.n_filters).uniform_(-0.01, 0.01))
         self.displacement_bias = nn.Parameter(torch.zeros(1, self.n_masses, self.dimension, 1).uniform_(-0.01, 0.01))
@@ -186,8 +184,7 @@ class BetterGooLayer(nn.Module):
             self.home,
             self.tensions,
             self.masses,
-            self.damping,
-            # self.gains,
+            torch.clamp(self.damping, self.min_damp, self.max_damp),
             self.mics,
             forces,
             home_modifier * self.connection_strength)
@@ -213,10 +210,9 @@ class BetterGooLayer(nn.Module):
         upsampled = upsampled * torch.zeros_like(upsampled).uniform_(-0.01, 0.01)
 
         # convolve noise with the filters
-        # filters = filters * torch.hamming_window(filters.shape[-1], device=filters.device)
         # filters = randomize_phase(filters)
         f = ensure_last_axis_length(filters, self.n_samples)[:, None, :, :]
-        # f = unit_norm(f)
+        f = unit_norm(f)
         filtered = fft_convolve(f, upsampled[:, :, None, :])
 
         hf = torch.einsum('abcd,abcd->abd', mixture, filtered) * self.hf_gain + lf
@@ -234,8 +230,7 @@ class GooStack(nn.Module):
             n_filters: int,
             dimension: int,
             n_masses: int,
-            n_layers: int,
-            damping: float = 0.9998):
+            n_layers: int):
 
         super().__init__()
         self.n_samples = n_samples
@@ -245,7 +240,7 @@ class GooStack(nn.Module):
         self.n_filters = n_filters
 
         self.network = nn.ModuleList([
-            BetterGooLayer(n_samples, n_filters,dimension, n_masses, damping) for _ in range(n_layers)])
+            BetterGooLayer(n_samples, n_filters,dimension, n_masses) for _ in range(n_layers)])
 
         self.mix = nn.Parameter(torch.zeros(n_layers).uniform_(-1, 1))
 
@@ -270,7 +265,6 @@ class GooPerformance(nn.Module):
             self,
             dimension: int,
             n_masses: int,
-            damping: float = 0.9998,
             n_layers: int = 3,
             n_samples: int = 2 ** 16,
             simulation_block_size: int = 4,
@@ -280,7 +274,6 @@ class GooPerformance(nn.Module):
         super().__init__()
         self.dimension = dimension
         self.n_masses = n_masses
-        self.damping = damping
         self.n_filters = n_filters
         self.filter_size = filter_size
 
@@ -299,7 +292,7 @@ class GooPerformance(nn.Module):
         home_modifier = torch.zeros(1, n_masses, dimension, self.n_simulation_steps)
         self.register_buffer('home_modifier', home_modifier)
 
-        self.network = GooStack(n_samples, n_filters, dimension, n_masses, n_layers, damping)
+        self.network = GooStack(n_samples, n_filters, dimension, n_masses, n_layers)
 
         self.hf_filters = nn.Parameter(torch.zeros(1, self.n_filters, self.filter_size).uniform_(-0.001, 0.001))
 
@@ -327,6 +320,9 @@ class GooPerformance(nn.Module):
         return recording
 
     def forward(self):
+        f = self.forces.view(self.n_masses, self.dimension, self.n_force_frames)
+        norms = torch.norm(f, dim=1, keepdim=True)
+        f = sparsify_vectors(f, attn=norms, n_to_keep=32)
         return self._forward(self.forces)
 
 
@@ -339,17 +335,16 @@ def loss_func(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 def check_model():
     n_samples = 2 ** 16
-    block_size = 64
+    block_size = 32
     
     
     model = GooPerformance(
-        damping=0.9991,
         dimension=2,
         n_masses=16,
         n_layers=2,
         n_filters=64,   
         n_samples=n_samples,
-        filter_size=64,
+        filter_size=128,
         simulation_block_size=block_size).to(device)
     
     print(f'Operating at {22050 // block_size} hz')

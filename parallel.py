@@ -1,6 +1,6 @@
 from io import BytesIO
 from subprocess import Popen, PIPE
-from typing import Tuple, Callable, List
+from typing import Iterable, Tuple, Callable, List
 
 from conjure import SupportedContentType, NumpySerializer, NumpyDeserializer, IdentitySerializer, IdentityDeserializer
 from torch import nn
@@ -232,19 +232,23 @@ class Layer(nn.Module):
         t = torch.linspace(0, 10, self.n_samples)
         self.register_buffer('t', t)
 
-        # self.influence = nn.Parameter(torch.zeros(1, self.n_nodes, 1).uniform_(-0.01, 0.01))
         
 
         self.force_router = nn.Parameter(torch.eye(self.n_nodes, self.n_nodes))
         self.tension_router = nn.Parameter(torch.eye(self.n_nodes, self.n_nodes))
 
-        # self.noise_mix = nn.Parameter(torch.zeros(1, self.n_nodes, 1, 2).uniform_(-0.01, 0.01))
         
         self.gains = nn.Parameter(torch.zeros(self.n_nodes, 1).uniform_(-1, 1))
 
         self.base_resonance = 0.02
         self.max_resonance = 0.9999
         self.diff = (1 - self.base_resonance)
+    
+    def total_mass_cost(self):
+        return self.mass.sum()
+    
+    def total_tension_cost(self):
+        return self.tension.sum()
 
 
     def forward(self, forces: torch.Tensor, tension_modifier: torch.Tensor = None) -> torch.Tensor:
@@ -309,13 +313,20 @@ class LayerController(nn.Module):
 
         self.forces = nn.Parameter(torch.zeros(1, n_nodes, self.n_frames).uniform_(-1, 1))
 
-        self.layers = nn.ModuleList([Layer(n_nodes, n_samples, control_rate) for _ in range(self.n_layers)])
+        self.layers: Iterable[Layer] = nn.ModuleList([Layer(n_nodes, n_samples, control_rate) for _ in range(self.n_layers)])
 
         self.node_filters = nn.Parameter(torch.zeros(1, n_nodes, 256).uniform_(-0.01, 0.01))
         
         self.filter_mix = nn.Parameter(torch.zeros(2).uniform_(-0.01, 0.01))
 
         self.mix = nn.Parameter(torch.zeros(self.n_layers).uniform_(-0.01, 0.01))
+        
+        
+    def total_mass_cost(self):
+        return sum([l.total_mass_cost() for l in self.layers])
+    
+    def total_tension_cost(self):
+        return sum([l.total_tension_cost() for l in self.layers])
 
     def materialize_forces(
             self, forces:
@@ -416,22 +427,19 @@ def test_osc(n_nodes: int, n_samples: int) -> torch.Tensor:
     return x
 
 
-# loss_model = SpikingModel(64, 64, 64, 64, 64).to(device)
 
-def loss_func(a: torch.Tensor, b: torch.Tensor, control: torch.Tensor) -> torch.Tensor:
+def loss_func(a: torch.Tensor, b: torch.Tensor, control: torch.Tensor, model: LayerController) -> torch.Tensor:
     a = stft(a)
     b = stft(b)
     base_loss = torch.abs(a - b).sum()
     
     
-    # control_plane_dim = control.shape[1]
+    mass_loss = model.total_mass_cost()
+    tension_loss = model.total_tension_cost()
     
     sparsity_loss = l0_norm(torch.abs(control)) * 100
-    # cov_loss = latent_loss(control.permute(0, 2, 1).view(-1, control_plane_dim))
     
-    # return (loss_model.compute_multiband_loss(a, b, hard=True, normalize=True) * 1) + base_loss + sparsity_loss
-    return base_loss + sparsity_loss #+ cov_loss
-
+    return base_loss + sparsity_loss + mass_loss + tension_loss
 
 
 
@@ -491,7 +499,7 @@ def overfit_osc(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int):
 
     def model_eval(model: nn.Module, _, target: torch.Tensor):
         recon, control_signal = model.forward()
-        loss = loss_func(target, recon, control_signal)
+        loss = loss_func(target, recon, control_signal, model)
         return recon, loss
         
 
