@@ -202,11 +202,11 @@ n_frames = n_samples // step_size
 control_plane_dim = 16
 n_resonances = control_plane_dim
 
-expressivity = 2
-n_to_keep = 32
+expressivity = 1
+n_to_keep = 64
 do_sparsify = False
 # sparsity_coefficient = 0.000001
-sparsity_coefficient = 0.1
+sparsity_coefficient = 0.01
 n_oscillators = 2
 
 attack_n_frames = 128
@@ -519,23 +519,24 @@ class DampedHarmonicOscillatorStack(nn.Module):
         self.influence = nn.Parameter(torch.zeros(n_oscillators, n_resonances, expressivity, 1).uniform_(-0.01, 0.01))
         self.influence2 = nn.Parameter(torch.zeros(n_oscillators, n_resonances, expressivity, 1).uniform_(-0.01, 0.01))
 
-        self.mix = nn.Parameter(torch.zeros(1, 1, n_resonances, expressivity, 1, 3).uniform_(-1, 1))
+        # self.mix = nn.Parameter(torch.zeros(1, 1, n_resonances, expressivity, 1, 3).uniform_(-1, 1))
 
     def forward(self):
 
-        outputs = []
+        # outputs = []
 
         x = self.dho1._materialize_resonances(self.influence.device)
-        outputs.append(x)
+        # outputs.append(x)
         x = self.dho2._materialize_resonances(self.influence.device, x, self.influence)
-        outputs.append(x)
+        # outputs.append(x)
         x = self.dho3._materialize_resonances(self.influence.device, x, self.influence2)
-        outputs.append(x)
+        # outputs.append(x)
 
-        outputs = torch.stack(outputs, dim=-1)
+        # outputs = torch.stack(outputs, dim=-1)
 
-        x = outputs * torch.softmax(self.mix, dim=-1)
-        x = torch.sum(x, dim=-1)
+        # x = outputs * torch.softmax(self.mix, dim=-1)
+        # x = torch.sum(x, dim=-1)
+        
 
         x = unit_norm(x)
         return x
@@ -977,7 +978,10 @@ class OverfitResonanceStack(nn.Module):
 
         # I _think_ this allows gradients to flow back to all elements, rather than
         # just the top-k
-        cp = cp + cp.mean()
+        # cp = cp + cp.mean()
+        cp = torch.abs(cp)
+        cp = cp - cp.mean()
+        cp = torch.relu(cp)
 
         if do_sparsify:
             cp = sparsify(cp, n_to_keep=n_to_keep or self.n_to_keep)
@@ -1131,7 +1135,7 @@ def l0_norm(x: torch.Tensor):
     return y.sum()
 
 # loss_model = DecayLoss(n_samples, n_decays=64, min_decay=2, max_decay=32, window_size=256).to(device)
-loss_model = SpikingModel(64, 64, 64, 64, 64).to(device)
+# loss_model = SpikingModel(64, 64, 64, 64, 64).to(device)
 
 def compute_loss(
         x: torch.Tensor,
@@ -1144,7 +1148,7 @@ def compute_loss(
     # corr = cp.permute(0, 1, 3, 2).view(-1, cpd)
     # cov = covariance(corr).sum()
 
-    recon_loss = torch.abs(transform(x) - transform(y)).sum() + (loss_model.compute_multiband_loss(x, y, hard=True, normalize=True) * 0.01)
+    recon_loss = torch.abs(transform(x) - transform(y)).sum() #+ (loss_model.compute_multiband_loss(x, y, hard=True, normalize=True) * 0.01)
 
 
     sparsity_term = l0_norm(cp)
@@ -1362,9 +1366,9 @@ def overfit_model():
 
     optimizer = Adam(model.parameters(), lr=1e-3)
     collection = conjure.LmdbCollection(path='resonancemodel')
-
-    remote_collection = conjure.S3Collection('resonancemodel', is_public=True, cors_enabled=True)
-    remote_logger = conjure.Logger(remote_collection)
+# 
+    # remote_collection = conjure.S3Collection('resonancemodel', is_public=True, cors_enabled=True)
+    # remote_logger = conjure.Logger(remote_collection)
 
     t, r, rnd = conjure.loggers(
         ['target', 'recon', 'rnd'],
@@ -1431,10 +1435,10 @@ def overfit_model():
 
             iteration += 1
 
-            if iteration > 0 and iteration % 20000 == 0:
-                print('Serializing')
-                generate_param_dict('resonancemodelparams', remote_logger, model)
-                input('Continue?')
+            # if iteration > 0 and iteration % 20000 == 0:
+            #     print('Serializing')
+            #     generate_param_dict('resonancemodelparams', remote_logger, model)
+            #     input('Continue?')
 
     train()
 

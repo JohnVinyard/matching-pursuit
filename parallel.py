@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from io import BytesIO
 from subprocess import Popen, PIPE
 from typing import Iterable, Tuple, Callable, List
@@ -17,6 +18,8 @@ from torch.optim import Optimizer
 from config.dotenv import Config
 from modules import sparsify, interpolate_last_axis, max_norm
 from modules.latent_loss import latent_loss
+from modules.multibanddict import flattened_multiband_spectrogram
+from modules.normalization import unit_norm
 from modules.reverb import NeuralReverb
 from modules.transfer import fft_convolve
 from modules.upsample import upsample_with_holes, ensure_last_axis_length
@@ -36,6 +39,97 @@ TODO:
 - add momentum/springiness to tension and damping
 """
 
+@dataclass
+class HyperParameters:
+    n_samples: int
+    n_frames: int
+    
+@dataclass
+class StaticTensors:
+    time: torch.Tensor
+    damping: torch.Tensor
+    initial_displacement: torch.Tensor
+    
+
+@dataclass
+class PerformanceTensors:
+    forces: torch.Tensor
+    damp_mod: torch.Tensor
+    tension_mod: torch.Tensor
+
+def execute_parallel_layer(
+    n_samples: int,
+    n_frames: int,
+    base_resonance: float,
+    resonance_diff: float,
+    mass_coeff: float,
+    t: torch.Tensor,
+    d: torch.Tensor,
+    initial_displacement: torch.Tensor,
+    mass: torch.Tensor,
+    force_router: torch.Tensor,
+    tension_router: torch.Tensor,
+    forces: torch.Tensor, 
+    damp: torch.Tensor,
+    noise_mix: torch.Tensor,
+    tension: torch.Tensor,
+    filt: torch.Tensor,
+    filt_mix: torch.Tensor,
+    tension_modifier: torch.Tensor = None, 
+    damp_mod: torch.Tensor = None,
+    tension_mod: torch.Tensor = None) -> torch.Tensor:
+    
+    
+    # KLUDGE:  This is dumb
+    real_damping = d
+    
+    
+    forces = torch.einsum('abc,bd->adc', forces, force_router)
+    
+    d = damp.repeat(1, 1, n_frames)
+    if damp_mod is not None:
+        d = d + damp_mod
+
+    # DECISION: Is it better to clamp or to use sigmoid?
+    damp = base_resonance + ((torch.clamp(d, 0, 1) ** 2) * resonance_diff)   
+      
+    damp = interpolate_last_axis(damp, desired_size=n_samples)   
+
+    mass = torch.sigmoid(mass) * mass_coeff
+    
+    energy = sequential(forces / mass, d)
+    energy = interpolate_last_axis(energy, desired_size=n_samples)
+    
+    noisy_energy = torch.zeros_like(energy).uniform_(-1, 1)
+    noisy_energy = noisy_energy * energy
+    energy = torch.stack([energy, noisy_energy], dim=-1)
+    energy = torch.einsum('abcd,bd->abc', energy, noise_mix)
+
+    if tension_modifier is not None:
+        tension_modifier = torch.einsum('abc,bd->adc', tension_modifier, tension_router)
+        tension = tension + tension_modifier
+        
+    if tension_mod is not None:
+        tm = interpolate_last_axis(tension_mod, desired_size=n_samples)
+        tension = tension + tm
+
+
+    x = damped_harmonic_oscillator(
+        energy=energy,
+        time=t,
+        mass=mass,
+        damping=real_damping,
+        tension=10 ** tension,
+        initial_displacement=initial_displacement,
+    )
+    
+    filt = fft_convolve(x, ensure_last_axis_length(unit_norm(filt), desired_size=n_samples))
+    x = torch.stack([x, filt], dim=-1)
+    
+    
+    x = torch.einsum('abcd,bd->abc', x, filt_mix)
+    
+    return x
 
 def l0_norm(x: torch.Tensor):
     mask = (x > 0).float()
@@ -46,6 +140,9 @@ def l0_norm(x: torch.Tensor):
     y = backward + (forward - backward).detach()
 
     return y.sum()
+
+def l1_norm(x: torch.Tensor) -> torch.Tensor:
+    return torch.abs(x).sum()
 
 
 def stft(
@@ -204,18 +301,21 @@ def test(nsamples: int):
 
 
 class Layer(nn.Module):
-    def __init__(self, n_nodes: int, n_samples: int, control_rate: int):
+    def __init__(self, n_nodes: int, n_samples: int, control_rate: int, filter_size: int):
         super().__init__()
         self.n_nodes = n_nodes
         self.n_samples = n_samples
         self.control_rate = control_rate
         self.n_frames = n_samples // control_rate
+        self.filter_size = filter_size
 
         # TODO: eventually, this will vary at control rate and will have "momentum",
         # springing back to a baseline value
         
 
         self.mass = nn.Parameter(torch.zeros(1, self.n_nodes, 1).uniform_(-6, 6))
+        
+        self.mass_coeff = 2
 
         # TODO: eventually, tension and damping will vary at control rate and will have "momentum",
         # springing back to a baseline value, just as the N-dim nodes do
@@ -233,62 +333,64 @@ class Layer(nn.Module):
         self.register_buffer('t', t)
 
         
+        self.filt = nn.Parameter(torch.zeros(1, self.n_nodes, self.filter_size).uniform_(-0.01, 0.01))
+        self.filt_mix = nn.Parameter(torch.zeros(self.n_nodes, 2).uniform_(-0.01, 0.01))
+        
+        # DECISION:  Should there be separate routing matrices for force and tension, or just one?
 
-        self.force_router = nn.Parameter(torch.eye(self.n_nodes, self.n_nodes))
-        self.tension_router = nn.Parameter(torch.eye(self.n_nodes, self.n_nodes))
+        self.force_router = nn.Parameter(torch.zeros(self.n_nodes, self.n_nodes).uniform_(-0.01, 0.01) + torch.eye(self.n_nodes, self.n_nodes))
+        self.tension_router = nn.Parameter(torch.zeros(self.n_nodes, self.n_nodes).uniform_(-0.01, 0.01) + torch.eye(self.n_nodes, self.n_nodes))
+        
+        self.noise_mix = nn.Parameter(torch.zeros(self.n_nodes, 2).uniform_(-1, 1))
 
         
-        self.gains = nn.Parameter(torch.zeros(self.n_nodes, 1).uniform_(-1, 1))
 
         self.base_resonance = 0.02
-        self.max_resonance = 0.9999
+        self.max_resonance = 0.999
         self.diff = (1 - self.base_resonance)
     
     def total_mass_cost(self):
-        return self.mass.sum()
+        return (torch.sigmoid(self.mass) * self.mass_coeff).sum()
     
     def total_tension_cost(self):
-        return self.tension.sum()
+        return torch.abs(self.tension).sum()
+    
+    def total_damp_cost(self):
+        damp = self.base_resonance + (torch.sigmoid(self.damp) * self.diff)
+        return damp.sum()
 
 
-    def forward(self, forces: torch.Tensor, tension_modifier: torch.Tensor = None) -> torch.Tensor:
-        forces = torch.einsum('abc,bd->adc', forces, self.force_router)
-
-        damp = self.base_resonance + (torch.clamp(self.damp, 1e-12, 1) * self.diff)        
-        damp = damp.repeat(1, 1, self.n_samples)
+    def forward(
+        self, 
+        forces: torch.Tensor, 
+        tension_modifier: torch.Tensor = None, 
+        damp_mod: torch.Tensor = None,
+        tension_mod: torch.Tensor = None) -> torch.Tensor:
         
-        
-        energy = sequential(forces, damp)
-        energy = interpolate_last_axis(energy, desired_size=self.n_samples)
-
-        # noise_energy = energy * torch.zeros_like(energy).uniform_(-1, 1)
-        # energy = parallel(forces, damp)
-
-        # energy = parallel_conv(forces, damp, frame_size=1)
-
-        mass = torch.sigmoid(self.mass) * 100
-        tension = self.tension
-
-        if tension_modifier is not None:
-            tension_modifier = torch.einsum('abc,bd->adc', tension_modifier, self.tension_router)
-            tension = tension + tension_modifier
-
-        x = damped_harmonic_oscillator(
-            energy=energy,
-            time=self.t,
-            mass=mass,
-            damping=self.d,
-            tension=10 ** tension,
+        x = execute_parallel_layer(
+            n_samples=self.n_samples,
+            n_frames=self.n_frames,
+            base_resonance=self.base_resonance,
+            resonance_diff=self.diff,
+            mass=self.mass,
+            mass_coeff=self.mass_coeff,
+            t=self.t,
+            d=self.d,
             initial_displacement=self._id,
+            filt=self.filt,
+            filt_mix=self.filt_mix,
+            force_router=self.force_router,
+            tension_router=self.tension_router,
+            forces=forces,
+            tension_modifier=tension_modifier,
+            damp_mod=damp_mod,
+            tension_mod=tension_mod,
+            noise_mix=self.noise_mix,
+            tension=self.tension,
+            damp=self.damp
         )
-
-        # stacked = torch.stack([x, noise_energy], dim=-1)
-        # x = stacked * torch.softmax(self.noise_mix, dim=-1)
-        # x = torch.sum(x, dim=-1)
-
-        # x = torch.tanh(x * self.gains)
         return x
-
+        
 
 class LayerController(nn.Module):
     def __init__(
@@ -297,7 +399,8 @@ class LayerController(nn.Module):
             n_nodes: int,
             n_samples: int,
             control_rate: int,
-            n_to_keep: int = 1024):
+            n_to_keep: int = 1024,
+            filter_size: int = 32):
 
         super().__init__()
         self.n_layers = n_layers
@@ -306,31 +409,54 @@ class LayerController(nn.Module):
         self.control_rate = control_rate
         self.n_frames = n_samples // control_rate
         self.n_to_keep = n_to_keep
+        self.filter_size = filter_size
         
         self.verb = NeuralReverb.from_directory(Config.impulse_response_path(), samplerate=22050, n_samples=n_samples)
         self.room_mix = nn.Parameter(torch.zeros(1, self.verb.n_rooms).uniform_(-1, 1))
         self.wet_dry_mix = nn.Parameter(torch.zeros(2).uniform_(-0.01, 0.01))
 
-        self.forces = nn.Parameter(torch.zeros(1, n_nodes, self.n_frames).uniform_(-1, 1))
+        self.forces = nn.Parameter(torch.zeros(1, n_nodes, self.n_frames).uniform_(-0.01, 0.01))
+        self.damp_mod = nn.Parameter(torch.zeros(1, n_nodes, self.n_frames).uniform_(-1, 1))
+        self.tension_mod = nn.Parameter(torch.zeros(1, n_nodes, self.n_frames).uniform_(-1, 1))
 
-        self.layers: Iterable[Layer] = nn.ModuleList([Layer(n_nodes, n_samples, control_rate) for _ in range(self.n_layers)])
+        # DECISION: should masses and tensions be "tied" via a multiplicative relationship, or completely independent?
+        self.layers: Iterable[Layer] = nn.ModuleList([Layer(n_nodes, n_samples, control_rate, filter_size) for _ in range(self.n_layers)])
 
-        self.node_filters = nn.Parameter(torch.zeros(1, n_nodes, 256).uniform_(-0.01, 0.01))
-        
-        self.filter_mix = nn.Parameter(torch.zeros(2).uniform_(-0.01, 0.01))
 
         self.mix = nn.Parameter(torch.zeros(self.n_layers).uniform_(-0.01, 0.01))
         
-        
+    @property
+    def total_params(self):
+        return \
+            64 + 16 + 16 \
+                + sum([count_parameters(x) for x in self.layers]) \
+                + self.room_mix.numel() \
+                + self.wet_dry_mix.numel() \
+                + self.mix.numel()
+    
     def total_mass_cost(self):
         return sum([l.total_mass_cost() for l in self.layers])
     
     def total_tension_cost(self):
         return sum([l.total_tension_cost() for l in self.layers])
+    
+    def total_damp_cost(self):
+        return sum([l.total_damp_cost() for l in self.layers])
+    
+    
+    def materialize_damping_mod(self):
+        dm = self.damp_mod * 0.001
+        dm = sparsify(dm, n_to_keep=16, salience=torch.abs(dm))
+        return dm
+    
+    def materialize_tension_mod(self):
+        tm = self.tension_mod * 0.001
+        tm = sparsify(tm, n_to_keep=16, salience=torch.abs(tm))
+        return tm
 
     def materialize_forces(
-            self, forces:
-            torch.Tensor = None,
+            self, 
+            forces: torch.Tensor = None,
             do_upsample: bool = True,
             n_to_keep: int = None) -> torch.Tensor:
 
@@ -339,20 +465,22 @@ class LayerController(nn.Module):
         else:
             f = self.forces
 
-        # f = torch.abs(f)
+        f = torch.abs(f)
         f = f - f.mean()
         f = torch.relu(f)
 
         
-        # f = f / torch.abs(f).sum()
+        # f = f / f.sum()
         
-        sparsity = (f > 0).sum() / f.numel()
-        print(f'Sparsity {sparsity:.2f}')
+        # sparsity = (f > 0).sum() / f.numel()
+        # print(f'Sparsity {sparsity:.2f}')
 
         # if do_upsample:
         #     f = upsample_with_holes(f, desired_size=self.n_samples)
 
-        # f = sparsify(f, n_to_keep=n_to_keep or self.n_to_keep, salience=torch.abs(f))
+        # DECISION: is it better to implement a sparsity loss, or a hard sparsity?
+        
+        f = sparsify(f, n_to_keep=n_to_keep or self.n_to_keep)
         return f
 
     def compression_ratio(self):
@@ -364,8 +492,12 @@ class LayerController(nn.Module):
         return params / self.n_samples
 
     def random_forward(self, sum_output: bool = True, n_to_keep: int = None) -> Tuple[torch.Tensor, torch.Tensor]:
-        f = torch.zeros_like(self.forces).uniform_(0, self.forces.max().item()) ** 2
-        f = sparsify(f, n_to_keep=n_to_keep)
+        try:
+            f = torch.zeros_like(self.forces).uniform_(0, self.forces.max().item()) ** 2
+            f = sparsify(f, n_to_keep=n_to_keep)
+        except:
+            f = torch.zeros_like(self.forces).uniform_(0, 1)
+        
         return self.forward(sum_output=sum_output, forces=f, n_to_keep=n_to_keep)
 
     def forward(
@@ -380,32 +512,35 @@ class LayerController(nn.Module):
         else:
             sparse_forces  = self.materialize_forces(self.forces, n_to_keep=n_to_keep)
 
+        dm = self.materialize_damping_mod()
+        tm = self.materialize_tension_mod()
+        
         tm = None
         outputs = []
         for i, layer in enumerate(self.layers):
-            tm = layer.forward(forces=sparse_forces, tension_modifier=tm)
+            tm = layer.forward(
+                forces=sparse_forces, 
+                tension_modifier=tm, 
+                damp_mod=dm, 
+                tension_mod=tm
+            )
             outputs.append(tm)
 
 
+
+        # DECISION: should all outputs be stacked and mixed, or only the last layer, exclusively?
+        # CONCLUSION: Stacking leads to bad results with too many high frequencies
         # tm = torch.stack(outputs, dim=-1)
         # tm = tm @ self.mix
 
-        # apply filters
-        nf = ensure_last_axis_length(self.node_filters, desired_size=self.n_samples)
-        filtered = fft_convolve(tm, nf)
-        
-        # wet/dry filter mix
-        x = torch.stack([tm, filtered], dim=-1)
-        x = x * torch.softmax(self.wet_dry_mix, dim=-1)
-        tm = torch.sum(x, dim=-1)
-        
+        # DECISION: Does the conv reverb cause issues because it's outside the energy calculation?
         
         # apply conv reverb
         wet = self.verb.forward(tm, self.room_mix)
         
         # wet/dry reverb mix
         x = torch.stack([tm, wet], dim=-1)
-        x = x * torch.softmax(self.wet_dry_mix, dim=-1)
+        x = x * self.wet_dry_mix
         tm = torch.sum(x, dim=-1)
 
         if sum_output:
@@ -414,32 +549,43 @@ class LayerController(nn.Module):
         return tm, sparse_forces
 
 
-def test_osc(n_nodes: int, n_samples: int) -> torch.Tensor:
-    controller = LayerController(
-        n_layers=3,
-        n_nodes=n_nodes,
-        n_samples=n_samples,
-        control_rate=128,
-        n_to_keep=32,
-    )
-    x = controller.forward()
-    x = torch.sum(x, dim=1, keepdim=True)
-    return x
-
-
+# spiking = SpikingModel(64, 64, 64, 64, 64).to(device)
 
 def loss_func(a: torch.Tensor, b: torch.Tensor, control: torch.Tensor, model: LayerController) -> torch.Tensor:
-    a = stft(a)
-    b = stft(b)
+    
+    
+    # ma = flattened_multiband_spectrogram(a, { 'xs': (64, 16)})
+    # mb = flattened_multiband_spectrogram(b, { 'xs': (64, 16)})
+    # sl = spiking.compute_multiband_loss(a, b, hard=True, normalize=False) * 0.0001
+    
+    
+    a = stft(a, 2048, 256, pad=False)
+    b = stft(b, 2048, 256, pad=False)
+    
+    
+    
     base_loss = torch.abs(a - b).sum()
+    # mb_loss = torch.abs(ma - mb).sum()
     
     
-    mass_loss = model.total_mass_cost()
-    tension_loss = model.total_tension_cost()
     
-    sparsity_loss = l0_norm(torch.abs(control)) * 100
+    # how many control channels are used
+    # channels = torch.sum(control, dim=-1)
+    # channel_loss = l0_norm(channels) * 10
     
-    return base_loss + sparsity_loss + mass_loss + tension_loss
+    
+    # mass_loss = model.total_mass_cost()
+    # tension_loss = model.total_tension_cost()
+    # damp_loss = model.total_damp_cost() * 10
+    
+    # print('MASS', mass_loss.item())
+    # print('TENSION', tension_loss.item())
+    # print('DAMP', damp_loss.item())
+    
+    # sparsity_loss = l0_norm(torch.abs(control)) * 100
+    # energy_loss = l1_norm(control)
+    
+    return base_loss
 
 
 
@@ -480,7 +626,10 @@ def overfit_osc(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int):
             model: LayerController,
             optim: Optimizer):
         
-        if iteration > 5000:
+        # params_count = count_parameters(model)
+        print('N PARAMS', model.total_params)
+        
+        if iteration == 5000:
             print('Changing learning rate')
             for g in optim.param_groups:
                 g['lr'] = 1e-4
@@ -511,7 +660,8 @@ def overfit_osc(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int):
         collection_name='parallel',
         logger_factory=logger_factory,
         training_loop_hook=training_loop_hook,
-        learning_rate=1e-3
+        learning_rate=1e-3,
+        port=9998
     )
 
 
@@ -564,8 +714,11 @@ def harness(n_samples: int, *solutions: Solution):
         plt.plot(x.data.cpu().numpy())
 
     plt.show()
+    plt.show()
 
 
 if __name__ == '__main__':
     # compare()
-    overfit_osc(n_nodes=32, n_samples=2 ** 17, n_layers=2, n_to_keep=128)
+    
+    # DECISION:  How many layers are appropriate/sufficient?
+    overfit_osc(n_nodes=32, n_samples=2 ** 17, n_layers=2, n_to_keep=64)

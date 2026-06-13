@@ -48,7 +48,8 @@ def overfit_model(
         logger_factory: LoggerFactory = add_loggers,
         training_loop_hook: TrainingLoopHook = default_training_loop_hook,
         model_eval: ModelEval = default_model_eval,
-        device=device):
+        device=device,
+        port: int = 9999):
 
     target = get_one_audio_segment(n_samples).to(device)
 
@@ -66,7 +67,7 @@ def overfit_model(
 
     serve_conjure(
         [t, r, *other_loggers],
-        port=9999,
+        port=port,
         n_workers=1,
         web_components_version='0.0.101')
 

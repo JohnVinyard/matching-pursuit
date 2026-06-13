@@ -14,12 +14,14 @@ from torch.optim import Optimizer
 from modules.decompose import fft_resample
 from modules.normalization import max_norm
 from modules.reds import interpolate_last_axis
-from modules.sparse import sparsify_vectors
+from modules.sparse import sparsify, sparsify_vectors
 from modules.transfer import fft_convolve
 from modules.upsample import upsample_with_holes, ensure_last_axis_length
+from spiking import SpikingModel
 from util import device
 from util.overfit import overfit_model
 from torch.nn import functional as F
+
 
 def encode_audio(
         x: Union[torch.Tensor, np.ndarray],
@@ -102,31 +104,32 @@ def sim(
 
     # recording = torch.zeros(batch, n_masses, n_samples, 1, device=forces.device)
     f = torch.zeros(batch, n_masses, dim, n_samples, device=forces.device)
-    
-    velocity_recording = torch.zeros(batch, n_masses, dim, n_samples, device=forces.device)
-    
-    displacement = torch.zeros(batch, n_masses, dim, n_samples, device=forces.device)
+
+    velocity_recording = torch.zeros(
+        batch, n_masses, dim, n_samples, device=forces.device)
+
+    displacement = torch.zeros(
+        batch, n_masses, dim, n_samples, device=forces.device)
 
     for i in range(n_samples):
         direction = h[..., i: i + 1] - position
-        
-        displacement[..., i: i + 1] = direction
-        
 
-        acc = forces[..., i: i + 1] + (((tensions + home_modifier[..., i: i + 1]) * direction) / masses)
+        displacement[..., i: i + 1] = direction
+
+        acc = forces[..., i: i + 1] + \
+            (((tensions + home_modifier[..., i: i + 1]) * direction) / masses)
         velocity = velocity + acc
         velocity = velocity * damping
-        
+
         velocity_recording[..., i: i + 1] = velocity
-        
+
         position = position + velocity
 
         # r = masses * acc
         f[:, :, :, i: i + 1] = displacement[..., i: i + 1]
-        
 
     recording = f.permute(0, 1, 3, 2) @ mics
-    
+
     # print(f.shape, displacement.shape)
 
     return recording, velocity_recording
@@ -135,7 +138,6 @@ def sim(
 def unit_norm(x: torch.Tensor, dim: int = -1, epsilon: float = 1e-8):
     n = torch.norm(x, dim=dim, keepdim=True)
     return x / (n + epsilon)
-
 
 
 class BetterGooLayer(nn.Module):
@@ -155,19 +157,26 @@ class BetterGooLayer(nn.Module):
         home = torch.zeros(1, 1, dimension, 1)
         self.register_buffer('home', home)
 
-        self.connection_strength = nn.Parameter(torch.zeros(1, n_masses, 1, 1).fill_(1))
-        
-        self.min_damp = 0.5
-        self.max_damp = 0.9998
+        self.connection_strength = nn.Parameter(
+            torch.zeros(1, n_masses, 1, 1).fill_(1))
 
-        self.masses = nn.Parameter(torch.zeros(1, n_masses, 1, 1).uniform_(50, 5000))
-        self.tensions = nn.Parameter(torch.zeros(1, n_masses, dimension, 1).uniform_(30, 300))
-        
-        self.damping = nn.Parameter(torch.zeros(1, n_masses, 1, 1).uniform_(self.min_damp, self.max_damp))
-        
-        self.mics = nn.Parameter(torch.zeros(1, n_masses, dimension, 1).uniform_(-0.011, 0.01))
-        self.to_filter_mixture = nn.Parameter(torch.zeros(self.n_masses, self.dimension, self.n_filters).uniform_(-0.01, 0.01))
-        self.displacement_bias = nn.Parameter(torch.zeros(1, self.n_masses, self.dimension, 1).uniform_(-0.01, 0.01))
+        self.min_damp = 0.5
+        self.max_damp = 0.99
+
+        self.masses = nn.Parameter(torch.zeros(
+            1, n_masses, 1, 1).uniform_(50, 5000))
+        self.tensions = nn.Parameter(torch.zeros(
+            1, n_masses, dimension, 1).uniform_(30, 300))
+
+        self.damping = nn.Parameter(torch.zeros(
+            1, n_masses, 1, 1).uniform_(self.min_damp, self.max_damp))
+
+        self.mics = nn.Parameter(torch.zeros(
+            1, n_masses, dimension, 1).uniform_(-0.011, 0.01))
+        self.to_filter_mixture = nn.Parameter(torch.zeros(
+            self.n_masses, self.dimension, self.n_filters).uniform_(-0.01, 0.01))
+        self.displacement_bias = nn.Parameter(torch.zeros(
+            1, self.n_masses, self.dimension, 1).uniform_(-0.01, 0.01))
 
         self.hf_gain = nn.Parameter(torch.zeros(1).fill_(1))
 
@@ -188,13 +197,14 @@ class BetterGooLayer(nn.Module):
             self.mics,
             forces,
             home_modifier * self.connection_strength)
-    
+
         # TODO: Combine low-frequency signal with higher-frequency approximation provided
         # by a stack of damped harmonic oscillators, whose current energy is based on the potential energy
         # (I guess) of a particular node
 
         # compute the filture mixture over time
-        mixture = torch.einsum('abcd,bce->abed', displacement + self.displacement_bias, self.to_filter_mixture)
+        mixture = torch.einsum(
+            'abcd,bce->abed', displacement + self.displacement_bias, self.to_filter_mixture)
 
         # upsample to full sample rate
         mixture = interpolate_last_axis(mixture, self.n_samples)
@@ -207,7 +217,8 @@ class BetterGooLayer(nn.Module):
 
         # return recording, displacement, lf
 
-        upsampled = upsampled * torch.zeros_like(upsampled).uniform_(-0.01, 0.01)
+        upsampled = upsampled * \
+            torch.zeros_like(upsampled).uniform_(-0.01, 0.01)
 
         # convolve noise with the filters
         # filters = randomize_phase(filters)
@@ -215,11 +226,10 @@ class BetterGooLayer(nn.Module):
         f = unit_norm(f)
         filtered = fft_convolve(f, upsampled[:, :, None, :])
 
-        hf = torch.einsum('abcd,abcd->abd', mixture, filtered) * self.hf_gain + lf
-
+        hf = (torch.einsum('abcd,abcd->abd', mixture,
+              filtered) * self.hf_gain * 0) + lf
 
         return recording, displacement, hf
-
 
 
 # TODO: Mixer matrix routing energy between masses in subsequent layers
@@ -240,7 +250,7 @@ class GooStack(nn.Module):
         self.n_filters = n_filters
 
         self.network = nn.ModuleList([
-            BetterGooLayer(n_samples, n_filters,dimension, n_masses) for _ in range(n_layers)])
+            BetterGooLayer(n_samples, n_filters, dimension, n_masses) for _ in range(n_layers)])
 
         self.mix = nn.Parameter(torch.zeros(n_layers).uniform_(-1, 1))
 
@@ -248,7 +258,8 @@ class GooStack(nn.Module):
         recordings = []
 
         for i, layer in enumerate(self.network):
-            r, h, hf = layer(forces if i == 0 else torch.zeros_like(forces), home_modifier, filters)
+            r, h, hf = layer(forces if i == 0 else torch.zeros_like(
+                forces), home_modifier, filters)
             recordings.append(hf)
             home_modifier = h
 
@@ -282,95 +293,113 @@ class GooPerformance(nn.Module):
         self.simulation_block_size = simulation_block_size
 
         self.n_simulation_steps = n_samples // simulation_block_size
-        
+
         self.n_force_frames = self.n_simulation_steps // 8
 
-        forces = torch.zeros(1, n_masses, dimension, self.n_force_frames).uniform_(-0.1, 0.1)
+        forces = torch.zeros(1, n_masses, dimension,
+                             self.n_force_frames).uniform_(-0.1, 0.1)
         # forces = forces * torch.zeros_like(forces).uniform_(-0.1, 0.1)
         self.forces = nn.Parameter(forces)
 
-        home_modifier = torch.zeros(1, n_masses, dimension, self.n_simulation_steps)
+        home_modifier = torch.zeros(
+            1, n_masses, dimension, self.n_simulation_steps)
         self.register_buffer('home_modifier', home_modifier)
 
-        self.network = GooStack(n_samples, n_filters, dimension, n_masses, n_layers)
+        self.network = GooStack(n_samples, n_filters,
+                                dimension, n_masses, n_layers)
 
-        self.hf_filters = nn.Parameter(torch.zeros(1, self.n_filters, self.filter_size).uniform_(-0.001, 0.001))
+        self.hf_filters = nn.Parameter(torch.zeros(
+            1, self.n_filters, self.filter_size).uniform_(-0.001, 0.001))
 
         self.layer_mix = nn.Parameter(torch.zeros(n_layers).uniform_(-1, 1))
-    
-    
+
     def twod_force_vis(self):
         return torch.norm(self.forces, dim=2).view(self.dimension, self.n_force_frames)
 
-
     def random(self) -> torch.Tensor:
         # f = torch.zeros_like(self.forces).uniform_(float(self.forces.min()), float(self.forces.max()))
-        frame_indices = torch.zeros(1, self.n_masses, 1, self.n_force_frames, device=self.home_modifier.device).bernoulli(p=0.1)
-        dense_forces = torch.zeros(1, self.n_masses, self.dimension, self.n_force_frames, device=self.home_modifier.device).uniform_(-0.1, 0.1)
+        frame_indices = torch.zeros(
+            1, self.n_masses, 1, self.n_force_frames, device=self.home_modifier.device).bernoulli(p=0.01)
+        dense_forces = torch.zeros(1, self.n_masses, self.dimension, self.n_force_frames,
+                                   device=self.home_modifier.device).uniform_(-0.1, 0.1)
         sparse_forces = frame_indices * dense_forces
         return self._forward(sparse_forces)
-        
-    
+
     def _forward(self, forces: torch.Tensor):
         f = forces
         f = upsample_with_holes(f, self.n_simulation_steps)
-        recording = self.network.forward(self.hf_filters, f, self.home_modifier)
-        recording = torch.einsum('abc,d->ac', recording, torch.softmax(self.layer_mix, dim=-1))[:, None, :]
+        recording = self.network.forward(
+            self.hf_filters, f, self.home_modifier)
+        recording = torch.einsum(
+            'abc,d->ac', recording, torch.softmax(self.layer_mix, dim=-1))[:, None, :]
         print(recording.shape)
         return recording
 
     def forward(self):
-        f = self.forces.view(self.n_masses, self.dimension, self.n_force_frames)
-        norms = torch.norm(f, dim=1, keepdim=True)
-        f = sparsify_vectors(f, attn=norms, n_to_keep=32)
-        return self._forward(self.forces)
+        f = self.forces.view(
+            1, self.n_masses * self.dimension, self.n_force_frames)
+        
+        f = sparsify(f, n_to_keep=64)
+        f = f.view(1, self.n_masses, self.dimension, self.n_force_frames)
+        
+        # norms = torch.norm(f, dim=1)
+        # print(f.shape, norms.shape)
+        
+        # f = sparsify_vectors(f, attn=norms, n_to_keep=16, dense=True, normalize=False)
+        # print(f.shape)
+        # f = f.view(1, self.n_masses, self.dimension, self.n_force_frames)
+        # print(f.shape)
+        return self._forward(f)
 
+
+# loss_model = SpikingModel(64, 64, 64, 64, 64).to(device)
 
 def loss_func(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    
+    # spiking_loss = loss_model.compute_multiband_loss(a, b, hard=True, normalize=True)
+    
     a = stft(a, 2048, 256, pad=True)
     b = stft(b, 2048, 256, pad=True)
-    return torch.abs(a - b).sum()
-
+    
+    
+    return torch.abs(a - b).sum() #+ spiking_loss
 
 
 def check_model():
     n_samples = 2 ** 16
     block_size = 32
-    
-    
+
     model = GooPerformance(
         dimension=2,
         n_masses=16,
         n_layers=2,
-        n_filters=64,   
+        n_filters=64,
         n_samples=n_samples,
         filter_size=128,
         simulation_block_size=block_size).to(device)
-    
+
     print(f'Operating at {22050 // block_size} hz')
-    
+
     def training_loop_hook(
-        iteration: int, 
-        loggers: List[conjure.Conjure], 
-        model: GooPerformance, 
-        optimizer: Optimizer):
-        
+            iteration: int,
+            loggers: List[conjure.Conjure],
+            model: GooPerformance,
+            optimizer: Optimizer):
+
         forces = loggers[0]
         with torch.no_grad():
             result = model.random()
             forces(max_norm(result, dim=-1).view(-1))
-            
 
     def add_loggers(collection: conjure.LmdbCollection) -> List[conjure.Conjure]:
         new_loggers = conjure.loggers(
-            ['forces'], 
+            ['forces'],
             conjure.SupportedContentType.Audio.value,
             encode_audio,
             collection
         )
         return new_loggers
 
-    
     overfit_model(
         n_samples=n_samples,
         model=model,
@@ -380,6 +409,7 @@ def check_model():
         collection_name='goo',
         learning_rate=1e-3,
         device=device,
+        port=9998
     )
 
 

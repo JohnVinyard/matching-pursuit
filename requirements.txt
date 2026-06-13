@@ -11,3 +11,5 @@ selenium==4.27.1
 jax
 jaxlib
 jax[cuda12]
+equinox
+optax

@@ -2,16 +2,18 @@ from typing import List, Optional, Tuple
 import conjure
 import torch
 from torch import nn
+from torch.optim import Optimizer
 from modules import stft
 from modules.decompose import fft_resample
 from modules.fft import randomize_phase
 from modules.normalization import max_norm, unit_norm
 from modules.sparse import sparsify
+from resonancemodel import l0_norm
 from spiking import SpikingModel
 from util import device
 
 from modules.hypernetwork import HyperNetworkLayer
-from modules.transfer import fft_convolve
+from modules.transfer import damped_harmonic_oscillator, fft_convolve
 from modules.upsample import ensure_last_axis_length, interpolate_last_axis
 from util.overfit import overfit_model
 from util.playable import encode_audio, listen_to_sound, playable
@@ -55,6 +57,73 @@ class Damping(nn.Module):
         damped = sequential(forces, damping)
         return damped
 
+
+class DampedHarmonicOscillatorBlock(nn.Module):
+    def __init__(
+            self,
+            n_samples: int,
+            n_oscillators: int,
+            n_resonances: int,
+            expressivity: int):
+        super().__init__()
+        self.n_samples = n_samples
+        self.n_oscillators = n_oscillators
+        self.n_resonances = n_resonances
+        self.expressivity = expressivity
+
+        self.damping = nn.Parameter(
+            torch.zeros(n_oscillators, n_resonances, expressivity) \
+                .uniform_(0.5, 1.5))
+
+        self.mass = nn.Parameter(
+            torch.zeros(n_oscillators, n_resonances, expressivity) \
+                .uniform_(-2, 2))
+
+        self.tension = nn.Parameter(
+            torch.zeros(n_oscillators, n_resonances, expressivity) \
+                .uniform_(4, 9))
+
+        self.initial_displacement = nn.Parameter(
+            torch.zeros(n_oscillators, n_resonances, expressivity) \
+                .uniform_(-1, 2))
+
+        self.amplitudes = nn.Parameter(
+            torch.zeros(n_oscillators, n_resonances, expressivity, 1) \
+                .uniform_(-1, 1))
+
+
+    def _materialize_resonances(self, device: torch.device, tension_modifier: torch.Tensor = None, scaling: torch.Tensor = None):
+        time = torch.linspace(0, 10, self.n_samples, device=device) \
+            .view(1, 1, 1, self.n_samples)
+
+        t = self.tension[..., None]
+
+        if tension_modifier is not None:
+            t = t + (tension_modifier[0] * scaling)
+
+        x = damped_harmonic_oscillator(
+            time=time,
+            mass=torch.sigmoid(self.mass[..., None]) * 2,
+            damping=torch.sigmoid(self.damping[..., None]) * 30,
+            tension=10 ** t,
+            initial_displacement=self.initial_displacement[..., None],
+            initial_velocity=0,
+            do_clamp=False
+        )
+
+        x = x.view(self.n_oscillators, self.n_resonances, self.expressivity, self.n_samples)
+        x = x * self.amplitudes
+
+
+        x = torch.sum(x, dim=0)
+        x = x.view(1, 1, self.n_resonances, self.expressivity, self.n_samples)
+
+        return x
+
+    def forward(self, tension_modifier: torch.Tensor = None, scaling: torch.Tensor = None) -> torch.Tensor:
+        x = self._materialize_resonances(self.damping.device, tension_modifier, scaling)
+        x = unit_norm(x)
+        return x
 
 
 class Performance(nn.Module):
@@ -100,15 +169,20 @@ class Performance(nn.Module):
         )
         return result
     
-    def forward(self) -> torch.Tensor:
-        ctl = sparsify(self.control - self.control.mean(), n_to_keep=128)
+    def forward(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        
+        ctl = torch.abs(self.control)
+        ctl = ctl - ctl.mean()
+        ctl = torch.relu(ctl)
+        
+        # ctl = sparsify(self.control - self.control.mean(), n_to_keep=128)
         
         # TODO: reinstate deformations and damping
         result = self.instr.forward(
             ctl, 
             torch.zeros_like(self.deformations), 
             torch.zeros_like(self.damping_mod))
-        return result
+        return ctl, result
 
 class Instrument(nn.Module):
     
@@ -190,7 +264,9 @@ class Layer(nn.Module):
         self.routing_modifier = HyperNetworkLayer(control_plane_dim, 16, control_plane_dim, n_resonances)
         self.deform = HyperNetworkLayer(control_plane_dim, 16, control_plane_dim, n_resonances)
         
-        self.filters = nn.Parameter(torch.zeros(1, self.n_resonances, self.filter_size).uniform_(-0.01, 0.01))
+        self.filters = DampedHarmonicOscillatorBlock(self.filter_size, 1, self.n_resonances, expressivity=1)
+        
+        # self.filters = nn.Parameter(torch.zeros(1, self.n_resonances, self.filter_size).uniform_(-0.01, 0.01))
         
         # self.to_control = nn.Parameter(torch.zeros(self.n_resonances, self.control_plane_dim).uniform_(-0.01, 0.01))
     
@@ -226,7 +302,9 @@ class Layer(nn.Module):
         noise = torch.zeros_like(upsampled).uniform_(-0.01, 0.01)
         energy = upsampled * noise
         
-        filters = randomize_phase(self.filters)
+        # filters = randomize_phase(self.filters)
+        
+        filters = self.filters._materialize_resonances(forces.device).view(-1, self.n_resonances, self.filter_size)
         filters = ensure_last_axis_length(filters, desired_size=self.n_samples)
         filters = unit_norm(filters, dim=-1)
         
@@ -234,20 +312,18 @@ class Layer(nn.Module):
         
         return to_control, with_resonance
 
-spiking = SpikingModel(64, 64, 64, 64, 64).to(device)
 
 def compute_loss(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    sl = spiking.compute_multiband_loss(a, b, hard=True)
     a = stft(a, 2048, 256, pad=True)
     b = stft(b, 2048, 256, pad=True)
     loss = torch.abs(a - b).sum()
-    return loss + (sl * 1e-5)
+    return loss
 
 if __name__ == '__main__':
     
     n_samples = 2 ** 16
     control_rate = 128
-    filter_size = 4096
+    filter_size = 8192
     
     control_plane_dim = 64
     n_resonances = 64
@@ -263,6 +339,20 @@ if __name__ == '__main__':
         filter_size=filter_size, 
         n_layers=3).to(device)
     
+    def loss_func(a: torch.Tensor, b: torch.Tensor, control_signal: torch.Tensor, model: nn.Module) -> torch.Tensor:
+        a = stft(a, 2048, 256, pad=True)
+        b = stft(b, 2048, 256, pad=True)
+        sparsity_loss = l0_norm(control_signal)
+        loss = torch.abs(a - b).sum() + sparsity_loss
+        return loss
+
+    
+    def model_eval(model: nn.Module, _, target: torch.Tensor):
+        control_signal, recon = model.forward()
+        loss = loss_func(target, recon, control_signal, model)
+        return recon, loss
+    
+    
     def add_loggers(collection: conjure.LmdbCollection):
         other_loggers = conjure.loggers(
             ['rnd'],
@@ -275,7 +365,8 @@ if __name__ == '__main__':
     def training_loop_hook(
         iteration: int, 
         loggers: List[conjure.Conjure], 
-        model: Performance):
+        model: Performance,
+        optim: Optimizer):
         
         # TODO: Again, these should be indexed by
         # name.  Relying on remembering the position
@@ -291,7 +382,8 @@ if __name__ == '__main__':
         model=instr,
         logger_factory=add_loggers,
         loss_func=compute_loss,
+        model_eval=model_eval,
         training_loop_hook=training_loop_hook,
         collection_name='interactive',
-        learning_rate=1e-3
+        learning_rate=1e-3,
     )
