@@ -1,15 +1,10 @@
 from dataclasses import dataclass
-from io import BytesIO
-from subprocess import Popen, PIPE
 from typing import Iterable, Tuple, Callable, List
 
 from conjure import SupportedContentType, NumpySerializer, NumpyDeserializer, IdentitySerializer, IdentityDeserializer
 from torch import nn
 
 import torch
-from matplotlib import pyplot as plt
-import numpy as np
-from soundfile import SoundFile
 from torch.nn import functional as F
 
 import conjure
@@ -17,6 +12,7 @@ from conjure.logger import encode_audio
 from torch.optim import Optimizer
 from config.dotenv import Config
 from modules import sparsify, interpolate_last_axis, max_norm
+from modules.anticausal import AntiCausalAnalysis
 from modules.normalization import unit_norm
 from modules.reverb import NeuralReverb
 from modules.transfer import fft_convolve
@@ -27,6 +23,7 @@ from util.overfit import overfit_model
 from matplotlib import pyplot as plt
 
 Solution = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
+
 
 @dataclass
 class HyperParameters:
@@ -73,7 +70,7 @@ class InstrumentDefinitionTensors:
     tension_router: torch.Tensor
     damping: torch.Tensor
     noise_mix: torch.Tensor
-    
+
     def display_shapes(self):
         print(f'''
             {self.mass.shape}
@@ -93,10 +90,31 @@ class ParameterGenerator(nn.Module):
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.ln1 = nn.Linear(in_channels, out_channels)
-    
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.ln1(x)
         return x
+
+
+class Analysis(nn.Module):
+    def __init__(self, n_samples: int, frame_size: int, channels: int):
+        super().__init__()
+        self.n_samples = n_samples
+        self.frame_size = frame_size
+        self.window_size = self.frame_size * 4
+        self.channels = channels
+        self.n_coeffs = self.window_size // 2 + 1
+
+        self.network = AntiCausalAnalysis(
+            self.n_coeffs, channels, kernel_size=2, dilations=[1, 2, 4, 8, 16, 32], do_norm=False, pos_encodings=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch = x.shape[0]
+        spec = stft(x, ws=self.window_size, step=self.frame_size, pad=True).view(
+            batch, -1, self.n_coeffs).permute(0, 2, 1)
+        x = self.network(spec)
+        return x
+
 
 class InstrumentHyperNetwork(nn.Module):
     def __init__(self, latent_dim: int, n_nodes: int, filter_size: int):
@@ -105,38 +123,35 @@ class InstrumentHyperNetwork(nn.Module):
         self.n_nodes = n_nodes
         self.router_size = self.n_nodes ** 2
         self.filter_size = filter_size
-        
+
         self.to_masses = ParameterGenerator(latent_dim, n_nodes)
         self.to_tension = ParameterGenerator(latent_dim, n_nodes)
         self.damping = ParameterGenerator(latent_dim, n_nodes)
-        
+
         self.filters = ParameterGenerator(latent_dim, n_nodes * filter_size)
         self.filters_mix = ParameterGenerator(latent_dim, n_nodes * 2)
-        
+
         self.force_router = ParameterGenerator(latent_dim, self.router_size)
         self.tension_router = ParameterGenerator(latent_dim, self.router_size)
-        
+
         self.noise_mix = ParameterGenerator(latent_dim, n_nodes * 2)
-          
-    
+
     def forward(self, latent: torch.Tensor) -> InstrumentDefinitionTensors:
         batch, latent_dim = latent.shape
-        
-        print(latent.shape)
-        
-        
+
         m = self.to_masses(latent).view(batch, self.n_nodes, 1)
         t = self.to_tension(latent).view(batch, self.n_nodes, 1)
         d = self.damping(latent).view(batch, self.n_nodes, 1)
-        
+
         filt = self.filters(latent).view(batch, self.n_nodes, self.filter_size)
         mx = self.filters_mix(latent).view(batch, self.n_nodes, 2)
-        
+
         fr = self.force_router(latent).view(batch, self.n_nodes, self.n_nodes)
-        tr = self.tension_router(latent).view(batch, self.n_nodes, self.n_nodes)
-        
+        tr = self.tension_router(latent).view(
+            batch, self.n_nodes, self.n_nodes)
+
         nm = self.noise_mix(latent).view(batch, self.n_nodes, 2)
-        
+
         return InstrumentDefinitionTensors(
             mass=m,
             tension=t,
@@ -147,6 +162,96 @@ class InstrumentHyperNetwork(nn.Module):
             tension_router=tr,
             noise_mix=nm
         )
+
+
+class ControlSignalCreator(nn.Module):
+    
+    def __init__(self, in_channels: int, control_channels: int, n_to_keep: int):
+        super().__init__()
+        self.in_channels = in_channels
+        self.control_channels = control_channels
+        self.n_to_keep = n_to_keep
+        self.network = nn.Conv1d(in_channels, control_channels, kernel_size=7, stride=1, padding=3)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.network(x)
+        x = sparsify(x, n_to_keep=self.n_to_keep, salience=torch.abs(x))
+        return x
+
+
+class InstrumentAutoencoder(nn.Module):
+    def __init__(self, n_samples: int, n_nodes: int, control_rate: int, n_layers: int, channels: int, filter_size: int):
+        super().__init__()
+        self.n_nodes = n_nodes
+        self.n_samples = n_samples
+        self.control_rate = control_rate
+        self.n_frames = n_samples // control_rate
+        self.n_layers = n_layers
+        self.channels = channels
+        self.n_nodes = n_nodes
+        self.filter_size = filter_size
+        
+        self.hyper_params = HyperParameters(
+            n_samples=n_samples,
+            n_frames=self.n_frames,
+            base_resonance=0.02,
+            resonance_diff=1 - 0.02,
+            mass_coeff=1
+        )
+        
+        d = torch.zeros(1, self.n_nodes, 1).fill_(1)
+        self.register_buffer('d', d)
+
+        _id = torch.zeros(1, self.n_nodes, 1).fill_(1)
+        self.register_buffer('_id', _id)
+
+        t = torch.linspace(0, 10, self.n_samples)
+        self.register_buffer('t', t)
+        
+        self.static = StaticTensors(
+            time=self.t,
+            damping=self.d,
+            initial_displacement=self._id
+        )
+        
+        self.analysis = Analysis(n_samples, control_rate, channels)
+        
+        self.hyper_networks = nn.ModuleList([
+            InstrumentHyperNetwork(channels, n_nodes, filter_size) for _ in range(n_layers)
+        ])
+        
+        self.control = ControlSignalCreator(channels, n_nodes, n_to_keep=64)
+        self.tension = ControlSignalCreator(channels, n_nodes, n_to_keep=16)
+        self.damp = ControlSignalCreator(channels, n_nodes, n_to_keep=16)
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.analysis(x)
+        
+        # for now, just choose the very first latent.  This could
+        # be an average
+        latents = x[:, :, 0]
+        
+        cs = self.control(x)
+        t = self.tension(x)
+        d = self.damp(x)
+        
+        tm = None
+        
+        for layer in self.hyper_networks:
+            
+            params = layer.forward(latents)
+            
+            tm = execute_parallel_layer(
+                instrument=params,
+                hyper=self.hyper_params,
+                static=self.static,
+                forces=cs,
+                damp_mod=d,
+                tension_mod=t,
+                tension_modifier=tm
+            )
+        
+        return tm
         
         
 
@@ -157,7 +262,9 @@ def execute_parallel_layer(
     forces: torch.Tensor,
     tension_modifier: torch.Tensor = None,
     damp_mod: torch.Tensor = None,
-        tension_mod: torch.Tensor = None) -> torch.Tensor:
+    tension_mod: torch.Tensor = None) -> torch.Tensor:
+    
+    print(instrument.display_shapes())
 
     forces = torch.einsum('abc,bd->adc', forces, instrument.force_router)
 
@@ -241,27 +348,6 @@ def stft(
     x = torch.abs(x)
     x = x[:, :, :frames, :]
     return x
-
-
-# TODO: It might be nice to move this into zounds
-def listen_to_sound(
-        samples: np.ndarray,
-        wait_for_user_input: bool = True) -> None:
-    bio = BytesIO()
-    with SoundFile(bio, mode='w', samplerate=22050, channels=1, format='WAV', subtype='PCM_16') as sf:
-        sf.write(samples.astype(np.float32))
-
-    bio.seek(0)
-    data = bio.read()
-
-    proc = Popen(f'aplay', shell=True, stdin=PIPE)
-
-    if proc.stdin is not None:
-        proc.stdin.write(data)
-        proc.communicate()
-
-    if wait_for_user_input:
-        input('Next')
 
 
 @torch.jit.script
@@ -353,23 +439,21 @@ def parallel(forces: torch.Tensor, damping: torch.Tensor) -> torch.Tensor:
     return p * s
 
 
-    
-
 class Layer(nn.Module):
     def __init__(
-            self, 
-            n_nodes: int, 
-            n_samples: int, 
-            control_rate: int, 
+            self,
+            n_nodes: int,
+            n_samples: int,
+            control_rate: int,
             filter_size: int):
-        
+
         super().__init__()
         self.n_nodes = n_nodes
         self.n_samples = n_samples
         self.control_rate = control_rate
         self.n_frames = n_samples // control_rate
         self.filter_size = filter_size
-        
+
         # static hyperparameter stuff
         self.mass_coeff = 1
         d = torch.zeros(1, self.n_nodes, 1).fill_(1)
@@ -377,10 +461,9 @@ class Layer(nn.Module):
 
         _id = torch.zeros(1, self.n_nodes, 1).fill_(1)
         self.register_buffer('_id', _id)
-        
+
         t = torch.linspace(0, 10, self.n_samples)
         self.register_buffer('t', t)
-        
 
         self.mass = nn.Parameter(torch.zeros(
             1, self.n_nodes, 1).uniform_(-6, 6))
@@ -389,11 +472,9 @@ class Layer(nn.Module):
         # springing back to a baseline value, just as the N-dim nodes do
         self.tension = nn.Parameter(torch.zeros(
             1, self.n_nodes, 1).uniform_(4, 9))
-        
-        
+
         self.damp = nn.Parameter(torch.zeros(
             1, self.n_nodes, 1).uniform_(1e-12, 0.9999))
-
 
         self.filt = nn.Parameter(torch.zeros(
             1, self.n_nodes, self.filter_size).uniform_(-0.01, 0.01))
@@ -455,7 +536,6 @@ class Layer(nn.Module):
             damping=self.damp,
             noise_mix=self.noise_mix
         )
-        
 
         x = execute_parallel_layer(
             hyper=hyper,
@@ -469,9 +549,6 @@ class Layer(nn.Module):
         return x
 
 
-
-
-
 class LayerController(nn.Module):
     def __init__(
             self,
@@ -480,8 +557,7 @@ class LayerController(nn.Module):
             n_samples: int,
             control_rate: int,
             n_to_keep: int = 1024,
-            filter_size: int = 32,
-            latent_dim: int = 64):
+            filter_size: int = 32):
 
         super().__init__()
         self.n_layers = n_layers
@@ -491,16 +567,12 @@ class LayerController(nn.Module):
         self.n_frames = n_samples // control_rate
         self.n_to_keep = n_to_keep
         self.filter_size = filter_size
-        self.latent_dim = latent_dim
-        
+
         self.verb = NeuralReverb.from_directory(
             Config.impulse_response_path(), samplerate=22050, n_samples=n_samples)
         self.room_mix = nn.Parameter(torch.zeros(
             1, self.verb.n_rooms).uniform_(-1, 1))
         self.wet_dry_mix = nn.Parameter(torch.zeros(2).uniform_(-0.01, 0.01))
-        
-        self.latents = nn.Parameter(torch.zeros(1, latent_dim).uniform_(-1, 1))
-        self.hypernetwork = InstrumentHyperNetwork(self.latent_dim, self.n_nodes, filter_size=self.filter_size)
 
         self.forces = nn.Parameter(torch.zeros(
             1, n_nodes, self.n_frames).uniform_(-0.01, 0.01))
@@ -511,7 +583,7 @@ class LayerController(nn.Module):
 
         self.layers: Iterable[Layer] = nn.ModuleList(
             [Layer(n_nodes, n_samples, control_rate, filter_size) for _ in range(self.n_layers)])
-        
+
         self.mix = nn.Parameter(torch.zeros(
             self.n_layers).uniform_(-0.01, 0.01))
 
@@ -585,11 +657,6 @@ class LayerController(nn.Module):
             sum_output: bool = True,
             forces: torch.Tensor = None,
             n_to_keep: int = None) -> Tuple[torch.Tensor, torch.Tensor]:
-        
-        
-        params = self.hypernetwork.forward(self.latents)
-        params.display_shapes()
-        
 
         if forces is not None:
             sparse_forces = self.materialize_forces(
@@ -599,26 +666,21 @@ class LayerController(nn.Module):
                 self.forces, n_to_keep=n_to_keep)
 
         dm = self.materialize_damping_mod()
-        tm = self.materialize_tension_mod()
+        tension_mod = self.materialize_tension_mod()
 
         tm = None
         outputs = []
         for i, layer in enumerate(self.layers):
+            
             tm = layer.forward(
                 forces=sparse_forces,
                 tension_modifier=tm,
                 damp_mod=dm,
-                tension_mod=tm
+                tension_mod=tension_mod
             )
             outputs.append(tm)
 
-        # DECISION: should all outputs be stacked and mixed, or only the last layer, exclusively?
-        # CONCLUSION: Stacking leads to bad results with too many high frequencies
-        # tm = torch.stack(outputs, dim=-1)
-        # tm = tm @ self.mix
-
         # DECISION: Does the conv reverb cause issues because it's outside the energy calculation?
-
         # apply conv reverb
         wet = self.verb.forward(tm, self.room_mix)
 
@@ -633,32 +695,40 @@ class LayerController(nn.Module):
         return tm, sparse_forces
 
 
-
-
 def loss_func(a: torch.Tensor, b: torch.Tensor, control: torch.Tensor, model: LayerController) -> torch.Tensor:
-    
+
     a = stft(a, 2048, 256, pad=False)
     b = stft(b, 2048, 256, pad=False)
-    
+
     # means = torch.mean(a, dim=-1, keepdim=True)
     # stds = torch.std(a, dim=-1, keepdim=True)
-    
+
     # a = (a - means) / (stds + 1e-12)
     # b = (b - means) / (stds + 1e-12)
-    
+
     base_loss = torch.abs(a - b).sum()
     return base_loss
 
 
 def overfit_osc(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int):
+    
+    control_rate = 512
+    
+    analysis_model = InstrumentAutoencoder(
+        n_samples=n_samples, 
+        n_nodes=n_nodes, 
+        control_rate=control_rate, 
+        n_layers=2, 
+        channels=64, 
+        filter_size=32).to(device)
+    
 
     controller = LayerController(
         n_layers=n_layers,
         n_nodes=n_nodes,
         n_samples=n_samples,
-        control_rate=512,
-        n_to_keep=n_to_keep,
-        latent_dim=32
+        control_rate=control_rate,
+        n_to_keep=n_to_keep
     ).to(device)
 
     def logger_factory(collection):
@@ -708,7 +778,15 @@ def overfit_osc(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int):
             frce_logger(f)
 
     def model_eval(model: LayerController, _, target: torch.Tensor):
+        
+        
+        
         recon, control_signal = model.forward()
+        
+        testing = analysis_model.forward(target)
+        print(testing.shape)
+
+
         # TODO: Should we normalize model output amplitude?
         loss = loss_func(target, recon, control_signal, model)
         return recon, loss
@@ -726,63 +804,9 @@ def overfit_osc(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int):
     )
 
 
-def display_osc(n_nodes: int, n_samples: int):
-    x = test_osc(n_nodes, n_samples)
-    print(x.max().item())
-    x = x / x.max()
-
-    spec = stft(x.view(1, 1, -1))
-    spec = spec.view(-1, spec.shape[-1])
-    spec = spec.data.cpu().numpy()
-
-    arr = x.data.cpu().numpy().reshape((-1,))
-    plt.plot(arr)
-    plt.show()
-
-    plt.matshow(spec)
-    plt.show()
-
-    listen_to_sound(arr, wait_for_user_input=True)
-
-
-def compare():
-    n_samples = 2 ** 15
-    frame_size = 1
-    n_frames = n_samples // frame_size
-
-    decay = 0.9
-    sr_dependent = torch.zeros(n_frames).fill_(decay)
-    forces = torch.zeros(n_frames).bernoulli_(p=1e-3) * \
-        torch.zeros(n_frames).uniform_(0, 1)
-
-    a = parallel(forces, sr_dependent)
-    # a = parallel_sr_independent(forces, sr_dependent, 1)
-
-    # a = interpolate_last_axis(a, n_samples)
-    # f = upsample_with_holes(forces, n_samples)
-
-    # print('NaN', torch.isnan(b).sum().item(), 'inf', torch.isinf(b).sum().item(), b.numel())
-    print(torch.isnan(a).sum() / n_samples)
-    # b = interpolate_last_axis(b, n_samples)
-
-    plt.plot(a)
-    plt.plot(forces)
-    # plt.plot(b)
-    plt.show()
-
-
-def harness(n_samples: int, *solutions: Solution):
-    f, d = generate_params(n_samples)
-    for solution in solutions:
-        x = solution(f, d)
-        plt.plot(x.data.cpu().numpy())
-
-    plt.show()
-    plt.show()
 
 
 if __name__ == '__main__':
-    # compare()
 
     # DECISION:  How many layers are appropriate/sufficient?
     overfit_osc(n_nodes=32, n_samples=2 ** 17, n_layers=2, n_to_keep=64)
