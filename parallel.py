@@ -264,9 +264,10 @@ def execute_parallel_layer(
     damp_mod: torch.Tensor = None,
     tension_mod: torch.Tensor = None) -> torch.Tensor:
     
-    print(instrument.display_shapes())
+    # print(instrument.display_shapes())
+    
 
-    forces = torch.einsum('abc,bd->adc', forces, instrument.force_router)
+    forces = torch.einsum('bct,bcd->bct', forces, instrument.force_router)
 
     d = instrument.damping.repeat(1, 1, hyper.n_frames)
     if damp_mod is not None:
@@ -286,13 +287,15 @@ def execute_parallel_layer(
     noisy_energy = torch.zeros_like(energy).uniform_(-1, 1)
     noisy_energy = noisy_energy * energy
     energy = torch.stack([energy, noisy_energy], dim=-1)
-    energy = torch.einsum('abcd,bd->abc', energy, instrument.noise_mix)
+    
+    energy = torch.einsum('bctm,bcm->bct', energy, instrument.noise_mix)
 
     tension = instrument.tension
 
     if tension_modifier is not None:
+        
         tension_modifier = torch.einsum(
-            'abc,bd->adc', tension_modifier, instrument.tension_router)
+            'bct,bcd->bct', tension_modifier, instrument.tension_router)
         tension = instrument.tension + tension_modifier
 
     if tension_mod is not None:
@@ -312,7 +315,7 @@ def execute_parallel_layer(
         unit_norm(instrument.filters), desired_size=hyper.n_samples))
     x = torch.stack([x, filt], dim=-1)
 
-    x = torch.einsum('abcd,bd->abc', x, instrument.filters_mix)
+    x = torch.einsum('bctm,bcm->bct', x, instrument.filters_mix)
 
     return x
 
@@ -439,6 +442,30 @@ def parallel(forces: torch.Tensor, damping: torch.Tensor) -> torch.Tensor:
     return p * s
 
 
+'''
+            torch.Size([1, 32, 1])
+            torch.Size([1, 32, 1])
+            torch.Size([1, 32, 32])
+            torch.Size([32, 2])
+            torch.Size([32, 32])
+            torch.Size([32, 32])
+            torch.Size([1, 32, 1])
+            torch.Size([32, 2])
+        
+None
+
+            torch.Size([1, 32, 1])
+            torch.Size([1, 32, 1])
+            torch.Size([1, 32, 32])
+            torch.Size([1, 32, 2])
+            torch.Size([1, 32, 32])
+            torch.Size([1, 32, 32])
+            torch.Size([1, 32, 1])
+            torch.Size([1, 32, 2])
+
+'''
+
+
 class Layer(nn.Module):
     def __init__(
             self,
@@ -479,17 +506,17 @@ class Layer(nn.Module):
         self.filt = nn.Parameter(torch.zeros(
             1, self.n_nodes, self.filter_size).uniform_(-0.01, 0.01))
         self.filt_mix = nn.Parameter(torch.zeros(
-            self.n_nodes, 2).uniform_(-0.01, 0.01))
+            1, self.n_nodes, 2).uniform_(-0.01, 0.01))
 
         # DECISION:  Should there be separate routing matrices for force and tension, or just one?
 
         self.force_router = nn.Parameter(torch.zeros(
-            self.n_nodes, self.n_nodes).uniform_(-0.01, 0.01) + torch.eye(self.n_nodes, self.n_nodes))
+            1, self.n_nodes, self.n_nodes).uniform_(-0.01, 0.01) + torch.eye(self.n_nodes, self.n_nodes))
         self.tension_router = nn.Parameter(torch.zeros(
-            self.n_nodes, self.n_nodes).uniform_(-0.01, 0.01) + torch.eye(self.n_nodes, self.n_nodes))
+            1, self.n_nodes, self.n_nodes).uniform_(-0.01, 0.01) + torch.eye(self.n_nodes, self.n_nodes))
 
         self.noise_mix = nn.Parameter(
-            torch.zeros(self.n_nodes, 2).uniform_(-1, 1))
+            torch.zeros(1, self.n_nodes, 2).uniform_(-1, 1))
 
         self.base_resonance = 0.02
         self.max_resonance = 0.999
@@ -714,13 +741,13 @@ def overfit_osc(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int):
     
     control_rate = 512
     
-    analysis_model = InstrumentAutoencoder(
-        n_samples=n_samples, 
-        n_nodes=n_nodes, 
-        control_rate=control_rate, 
-        n_layers=2, 
-        channels=64, 
-        filter_size=32).to(device)
+    # analysis_model = InstrumentAutoencoder(
+    #     n_samples=n_samples, 
+    #     n_nodes=n_nodes, 
+    #     control_rate=control_rate, 
+    #     n_layers=2, 
+    #     channels=64, 
+    #     filter_size=32).to(device)
     
 
     controller = LayerController(
@@ -779,13 +806,10 @@ def overfit_osc(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int):
 
     def model_eval(model: LayerController, _, target: torch.Tensor):
         
-        
-        
         recon, control_signal = model.forward()
         
-        testing = analysis_model.forward(target)
-        print(testing.shape)
-
+        # testing = analysis_model.forward(target)
+        # print(testing.shape)
 
         # TODO: Should we normalize model output amplitude?
         loss = loss_func(target, recon, control_signal, model)
