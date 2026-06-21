@@ -22,6 +22,8 @@ from util.overfit import overfit_model
 
 from matplotlib import pyplot as plt
 
+from util.weight_init import make_initializer
+
 Solution = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 
 
@@ -106,7 +108,7 @@ class Analysis(nn.Module):
         self.n_coeffs = self.window_size // 2 + 1
 
         self.network = AntiCausalAnalysis(
-            self.n_coeffs, channels, kernel_size=2, dilations=[1, 2, 4, 8, 16, 32], do_norm=False, pos_encodings=False)
+            self.n_coeffs, channels, kernel_size=2, dilations=[1, 2, 4, 8, 16, 32, 1], do_norm=False, pos_encodings=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch = x.shape[0]
@@ -179,8 +181,10 @@ class ControlSignalCreator(nn.Module):
         return x
 
 
+init_func = make_initializer(0.02)
+
 class InstrumentAutoencoder(nn.Module):
-    def __init__(self, n_samples: int, n_nodes: int, control_rate: int, n_layers: int, channels: int, filter_size: int):
+    def __init__(self, n_samples: int, n_nodes: int, control_rate: int, n_layers: int, channels: int, filter_size: int, n_to_keep: int):
         super().__init__()
         self.n_nodes = n_nodes
         self.n_samples = n_samples
@@ -190,6 +194,7 @@ class InstrumentAutoencoder(nn.Module):
         self.channels = channels
         self.n_nodes = n_nodes
         self.filter_size = filter_size
+        self.n_to_keep = n_to_keep
         
         self.hyper_params = HyperParameters(
             n_samples=n_samples,
@@ -208,11 +213,6 @@ class InstrumentAutoencoder(nn.Module):
         t = torch.linspace(0, 10, self.n_samples)
         self.register_buffer('t', t)
         
-        self.static = StaticTensors(
-            time=self.t,
-            damping=self.d,
-            initial_displacement=self._id
-        )
         
         self.analysis = Analysis(n_samples, control_rate, channels)
         
@@ -220,9 +220,12 @@ class InstrumentAutoencoder(nn.Module):
             InstrumentHyperNetwork(channels, n_nodes, filter_size) for _ in range(n_layers)
         ])
         
-        self.control = ControlSignalCreator(channels, n_nodes, n_to_keep=64)
+        self.control = ControlSignalCreator(channels, n_nodes, n_to_keep=n_to_keep)
         self.tension = ControlSignalCreator(channels, n_nodes, n_to_keep=16)
         self.damp = ControlSignalCreator(channels, n_nodes, n_to_keep=16)
+        
+        self.apply(init_func)
+        
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.analysis(x)
@@ -237,6 +240,12 @@ class InstrumentAutoencoder(nn.Module):
         
         tm = None
         
+        static = StaticTensors(
+            time=self.t,
+            damping=self.d,
+            initial_displacement=self._id
+        )
+        
         for layer in self.hyper_networks:
             
             params = layer.forward(latents)
@@ -244,13 +253,15 @@ class InstrumentAutoencoder(nn.Module):
             tm = execute_parallel_layer(
                 instrument=params,
                 hyper=self.hyper_params,
-                static=self.static,
+                static=static,
                 forces=cs,
                 damp_mod=d,
                 tension_mod=t,
                 tension_modifier=tm
             )
         
+        
+        tm = torch.sum(tm, dim=1, keepdim=True)
         return tm
         
         
@@ -722,32 +733,45 @@ class LayerController(nn.Module):
         return tm, sparse_forces
 
 
-def loss_func(a: torch.Tensor, b: torch.Tensor, control: torch.Tensor, model: LayerController) -> torch.Tensor:
-
+def loss_func(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     a = stft(a, 2048, 256, pad=False)
     b = stft(b, 2048, 256, pad=False)
-
-    # means = torch.mean(a, dim=-1, keepdim=True)
-    # stds = torch.std(a, dim=-1, keepdim=True)
-
-    # a = (a - means) / (stds + 1e-12)
-    # b = (b - means) / (stds + 1e-12)
 
     base_loss = torch.abs(a - b).sum()
     return base_loss
 
 
+def overfit_autoencoder(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int):
+    control_rate = 512
+    
+    analysis_model = InstrumentAutoencoder(
+        n_samples=n_samples, 
+        n_nodes=n_nodes, 
+        control_rate=control_rate, 
+        n_layers=n_layers, 
+        channels=64, 
+        filter_size=32,
+        n_to_keep=n_to_keep).to(device)
+    
+    def model_eval(model: InstrumentAutoencoder, _, target: torch.Tensor):
+        recon = model.forward(target)
+        # TODO: Should we normalize model output amplitude?
+        loss = loss_func(target, recon)
+        return recon, loss
+
+    overfit_model(
+        n_samples=n_samples,
+        model=analysis_model,
+        loss_func=loss_func,
+        model_eval=model_eval,
+        collection_name='parallel',
+        learning_rate=1e-4,
+        port=9998
+    )
+
 def overfit_osc(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int):
     
     control_rate = 512
-    
-    # analysis_model = InstrumentAutoencoder(
-    #     n_samples=n_samples, 
-    #     n_nodes=n_nodes, 
-    #     control_rate=control_rate, 
-    #     n_layers=2, 
-    #     channels=64, 
-    #     filter_size=32).to(device)
     
 
     controller = LayerController(
@@ -829,8 +853,8 @@ def overfit_osc(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int):
 
 
 
-
 if __name__ == '__main__':
 
     # DECISION:  How many layers are appropriate/sufficient?
-    overfit_osc(n_nodes=32, n_samples=2 ** 17, n_layers=2, n_to_keep=64)
+    # overfit_osc(n_nodes=32, n_samples=2 ** 17, n_layers=2, n_to_keep=64)
+    overfit_autoencoder(n_nodes=32, n_samples=2 ** 17, n_layers=2, n_to_keep=64)
