@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Iterable, Tuple, Callable, List
 
-from conjure import SupportedContentType, NumpySerializer, NumpyDeserializer, IdentitySerializer, IdentityDeserializer
+from conjure import LmdbCollection, SupportedContentType, NumpySerializer, NumpyDeserializer, IdentitySerializer, IdentityDeserializer, loggers, serve_conjure
 from torch import nn
 
 import torch
@@ -9,8 +9,9 @@ from torch.nn import functional as F
 
 import conjure
 from conjure.logger import encode_audio
-from torch.optim import Optimizer
+from torch.optim import Adam, Optimizer
 from config.dotenv import Config
+from data.audioiter import AudioIterator
 from modules import sparsify, interpolate_last_axis, max_norm
 from modules.anticausal import AntiCausalAnalysis
 from modules.normalization import unit_norm
@@ -108,7 +109,14 @@ class Analysis(nn.Module):
         self.n_coeffs = self.window_size // 2 + 1
 
         self.network = AntiCausalAnalysis(
-            self.n_coeffs, channels, kernel_size=2, dilations=[1, 2, 4, 8, 16, 32, 1], do_norm=False, pos_encodings=False)
+            self.n_coeffs, 
+            channels, 
+            kernel_size=2, 
+            dilations=[1, 2, 4, 8, 16, 32, 1], 
+            do_norm=False, 
+            pos_encodings=False, 
+            with_activation_norm=False
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch = x.shape[0]
@@ -137,6 +145,7 @@ class InstrumentHyperNetwork(nn.Module):
         self.tension_router = ParameterGenerator(latent_dim, self.router_size)
 
         self.noise_mix = ParameterGenerator(latent_dim, n_nodes * 2)
+        
 
     def forward(self, latent: torch.Tensor) -> InstrumentDefinitionTensors:
         batch, latent_dim = latent.shape
@@ -155,9 +164,9 @@ class InstrumentHyperNetwork(nn.Module):
         nm = self.noise_mix(latent).view(batch, self.n_nodes, 2)
 
         return InstrumentDefinitionTensors(
-            mass=m,
-            tension=t,
-            damping=d,
+            mass=m * 6,
+            tension=5 + (t * 5),
+            damping=d * 6,
             filters=filt,
             filters_mix=mx,
             force_router=fr,
@@ -173,18 +182,31 @@ class ControlSignalCreator(nn.Module):
         self.in_channels = in_channels
         self.control_channels = control_channels
         self.n_to_keep = n_to_keep
-        self.network = nn.Conv1d(in_channels, control_channels, kernel_size=7, stride=1, padding=3)
+        self.network = nn.Conv1d(in_channels, control_channels, kernel_size=8, stride=1, padding=0)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = F.pad(x, (0, 7))
         x = self.network(x)
-        x = sparsify(x, n_to_keep=self.n_to_keep, salience=torch.abs(x))
+        x = x - x.mean()
+        x = sparsify(x, n_to_keep=self.n_to_keep)
         return x
 
 
-init_func = make_initializer(0.02)
+init_func = make_initializer(0.01)
 
 class InstrumentAutoencoder(nn.Module):
-    def __init__(self, n_samples: int, n_nodes: int, control_rate: int, n_layers: int, channels: int, filter_size: int, n_to_keep: int):
+    
+    def __init__(
+            self, 
+            n_samples: int, 
+            n_nodes: int, 
+            control_rate: int, 
+            n_layers: int, 
+            channels: int, 
+            filter_size: int, 
+            n_to_keep: int):
+        
+        
         super().__init__()
         self.n_nodes = n_nodes
         self.n_samples = n_samples
@@ -232,7 +254,7 @@ class InstrumentAutoencoder(nn.Module):
         
         # for now, just choose the very first latent.  This could
         # be an average
-        latents = x[:, :, 0]
+        latents = torch.mean(x, dim=-1)
         
         cs = self.control(x)
         t = self.tension(x)
@@ -286,7 +308,7 @@ def execute_parallel_layer(
 
     # DECISION: Is it better to clamp or to use sigmoid?
     damp = hyper.base_resonance + \
-        (torch.clamp(d, 0, 1) * hyper.resonance_diff)
+        (torch.sigmoid(d) * hyper.resonance_diff)
 
     damp = interpolate_last_axis(damp, desired_size=hyper.n_samples)
 
@@ -295,7 +317,7 @@ def execute_parallel_layer(
     energy = sequential(forces / mass, d)
     energy = interpolate_last_axis(energy, desired_size=hyper.n_samples)
 
-    noisy_energy = torch.zeros_like(energy).uniform_(-1, 1)
+    noisy_energy = torch.zeros_like(energy).uniform_(-0.01, 0.01)
     noisy_energy = noisy_energy * energy
     energy = torch.stack([energy, noisy_energy], dim=-1)
     
@@ -451,30 +473,6 @@ def parallel(forces: torch.Tensor, damping: torch.Tensor) -> torch.Tensor:
 
     # o[i] = p[i] * s[i]
     return p * s
-
-
-'''
-            torch.Size([1, 32, 1])
-            torch.Size([1, 32, 1])
-            torch.Size([1, 32, 32])
-            torch.Size([32, 2])
-            torch.Size([32, 32])
-            torch.Size([32, 32])
-            torch.Size([1, 32, 1])
-            torch.Size([32, 2])
-        
-None
-
-            torch.Size([1, 32, 1])
-            torch.Size([1, 32, 1])
-            torch.Size([1, 32, 32])
-            torch.Size([1, 32, 2])
-            torch.Size([1, 32, 32])
-            torch.Size([1, 32, 32])
-            torch.Size([1, 32, 1])
-            torch.Size([1, 32, 2])
-
-'''
 
 
 class Layer(nn.Module):
@@ -741,6 +739,61 @@ def loss_func(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     return base_loss
 
 
+def train_ae(batch_size: int, n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int):
+    control_rate = 512
+    samplerate = 22050
+    
+    analysis_model = InstrumentAutoencoder(
+        n_samples=n_samples, 
+        n_nodes=n_nodes, 
+        control_rate=control_rate, 
+        n_layers=n_layers, 
+        channels=64, 
+        filter_size=32,
+        n_to_keep=n_to_keep).to(device)
+    
+    
+    stream = AudioIterator(
+        batch_size=batch_size,
+        n_samples=n_samples,
+        samplerate=samplerate,
+        normalize=True)
+    
+
+    collection = LmdbCollection(path='parallel')
+
+    recon_audio, orig_audio = loggers(
+        ['recon', 'orig'],
+        'audio/wav',
+        encode_audio,
+        collection)
+    
+    serve_conjure([
+        orig_audio,
+        recon_audio,
+    ], 
+        port=9998, 
+        n_workers=1,
+        web_components_version='0.0.101'
+    )
+    
+    optim = Adam(analysis_model.parameters(), lr=1e-4)
+    
+    for i, batch in enumerate(iter(stream)):
+        optim.zero_grad()
+        batch = batch.view(-1, 1, n_samples).to(device)
+        orig_audio(batch[0, ...])
+        recon = analysis_model.forward(batch)
+        recon_audio(max_norm(recon[0, ...]))
+        loss = loss_func(batch, recon)
+        loss.backward()
+        optim.step()
+        print(i, loss.item())
+        
+    
+    
+
+
 def overfit_autoencoder(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int):
     control_rate = 512
     
@@ -765,7 +818,7 @@ def overfit_autoencoder(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: 
         loss_func=loss_func,
         model_eval=model_eval,
         collection_name='parallel',
-        learning_rate=1e-4,
+        learning_rate=1e-3,
         port=9998
     )
 
@@ -847,7 +900,7 @@ def overfit_osc(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int):
         collection_name='parallel',
         logger_factory=logger_factory,
         training_loop_hook=training_loop_hook,
-        learning_rate=1e-3,
+        learning_rate=1e-4,
         port=9998
     )
 
@@ -857,4 +910,5 @@ if __name__ == '__main__':
 
     # DECISION:  How many layers are appropriate/sufficient?
     # overfit_osc(n_nodes=32, n_samples=2 ** 17, n_layers=2, n_to_keep=64)
-    overfit_autoencoder(n_nodes=32, n_samples=2 ** 17, n_layers=2, n_to_keep=64)
+    # overfit_autoencoder(n_nodes=32, n_samples=2 ** 17, n_layers=2, n_to_keep=64)
+    train_ae(batch_size=4, n_nodes=32, n_samples=2 ** 17, n_layers=2, n_to_keep=64)

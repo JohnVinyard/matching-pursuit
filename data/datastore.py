@@ -130,7 +130,6 @@ def batch_stream(
 
         for i in range(batch_size):
             path = choice(paths)
-            print('PATH CHOSEN', path)
             data = audio(path)
 
             # pad to ensure that the sample length is at least n_samples

@@ -380,6 +380,7 @@ def train_and_monitor(
         wipe_old_data: bool = True,
         fine_positioning: bool = False,
         save_and_load_weights: bool = False):
+    
     torch.backends.cudnn.benchmark = True
 
     stream = AudioIterator(
