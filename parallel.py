@@ -786,6 +786,14 @@ def train_ae(batch_size: int, n_nodes: int, n_samples: int, n_layers: int, n_to_
         recon = analysis_model.forward(batch)
         recon_audio(max_norm(recon[0, ...]))
         loss = loss_func(batch, recon)
+        
+        if torch.isnan(loss).any() or torch.isinf(loss).any():
+            print(f'Something wonky, skipping grad update')
+            optim.zero_grad()
+            torch.clear_autocast_cache()
+            torch.cuda.empty_cache()
+            continue
+        
         loss.backward()
         optim.step()
         print(i, loss.item())
