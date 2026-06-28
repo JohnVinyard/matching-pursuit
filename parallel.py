@@ -20,6 +20,7 @@ from modules.transfer import fft_convolve
 from modules.upsample import ensure_last_axis_length
 from util import device, count_parameters
 from util.overfit import overfit_model
+from torch.nn.utils.clip_grad import clip_grad_value_, clip_grad_norm_
 
 from matplotlib import pyplot as plt
 
@@ -109,12 +110,12 @@ class Analysis(nn.Module):
         self.n_coeffs = self.window_size // 2 + 1
 
         self.network = AntiCausalAnalysis(
-            self.n_coeffs, 
-            channels, 
-            kernel_size=2, 
-            dilations=[1, 2, 4, 8, 16, 32, 1], 
-            do_norm=False, 
-            pos_encodings=False, 
+            self.n_coeffs,
+            channels,
+            kernel_size=2,
+            dilations=[1, 2, 4, 8, 16, 32, 1],
+            do_norm=False,
+            pos_encodings=False,
             with_activation_norm=False
         )
 
@@ -145,7 +146,6 @@ class InstrumentHyperNetwork(nn.Module):
         self.tension_router = ParameterGenerator(latent_dim, self.router_size)
 
         self.noise_mix = ParameterGenerator(latent_dim, n_nodes * 2)
-        
 
     def forward(self, latent: torch.Tensor) -> InstrumentDefinitionTensors:
         batch, latent_dim = latent.shape
@@ -164,9 +164,9 @@ class InstrumentHyperNetwork(nn.Module):
         nm = self.noise_mix(latent).view(batch, self.n_nodes, 2)
 
         return InstrumentDefinitionTensors(
-            mass=m * 6,
-            tension=5 + (t * 5),
-            damping=d * 6,
+            mass=torch.abs(m) * 6,
+            tension=4 + (torch.abs(t) * 5),
+            damping=d,
             filters=filt,
             filters_mix=mx,
             force_router=fr,
@@ -176,14 +176,15 @@ class InstrumentHyperNetwork(nn.Module):
 
 
 class ControlSignalCreator(nn.Module):
-    
+
     def __init__(self, in_channels: int, control_channels: int, n_to_keep: int):
         super().__init__()
         self.in_channels = in_channels
         self.control_channels = control_channels
         self.n_to_keep = n_to_keep
-        self.network = nn.Conv1d(in_channels, control_channels, kernel_size=8, stride=1, padding=0)
-    
+        self.network = nn.Conv1d(
+            in_channels, control_channels, kernel_size=8, stride=1, padding=0)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = F.pad(x, (0, 7))
         x = self.network(x)
@@ -194,19 +195,19 @@ class ControlSignalCreator(nn.Module):
 
 init_func = make_initializer(0.01)
 
+
 class InstrumentAutoencoder(nn.Module):
-    
+
     def __init__(
-            self, 
-            n_samples: int, 
-            n_nodes: int, 
-            control_rate: int, 
-            n_layers: int, 
-            channels: int, 
-            filter_size: int, 
+            self,
+            n_samples: int,
+            n_nodes: int,
+            control_rate: int,
+            n_layers: int,
+            channels: int,
+            filter_size: int,
             n_to_keep: int):
-        
-        
+
         super().__init__()
         self.n_nodes = n_nodes
         self.n_samples = n_samples
@@ -217,7 +218,7 @@ class InstrumentAutoencoder(nn.Module):
         self.n_nodes = n_nodes
         self.filter_size = filter_size
         self.n_to_keep = n_to_keep
-        
+
         self.hyper_params = HyperParameters(
             n_samples=n_samples,
             n_frames=self.n_frames,
@@ -225,7 +226,7 @@ class InstrumentAutoencoder(nn.Module):
             resonance_diff=1 - 0.02,
             mass_coeff=1
         )
-        
+
         d = torch.zeros(1, self.n_nodes, 1).fill_(1)
         self.register_buffer('d', d)
 
@@ -234,44 +235,52 @@ class InstrumentAutoencoder(nn.Module):
 
         t = torch.linspace(0, 10, self.n_samples)
         self.register_buffer('t', t)
-        
-        
+
+        influence_decay = torch.linspace(1, 0, self.n_frames) ** 2
+        self.register_buffer('influence_decay', influence_decay)
+
         self.analysis = Analysis(n_samples, control_rate, channels)
-        
+
         self.hyper_networks = nn.ModuleList([
             InstrumentHyperNetwork(channels, n_nodes, filter_size) for _ in range(n_layers)
         ])
-        
-        self.control = ControlSignalCreator(channels, n_nodes, n_to_keep=n_to_keep)
+
+        self.control = ControlSignalCreator(
+            channels, n_nodes, n_to_keep=n_to_keep)
         self.tension = ControlSignalCreator(channels, n_nodes, n_to_keep=16)
         self.damp = ControlSignalCreator(channels, n_nodes, n_to_keep=16)
-        
+
+        self.verb = NeuralReverb.from_directory(
+            Config.impulse_response_path(), samplerate=22050, n_samples=n_samples)
+
+        self.room_mix = ParameterGenerator(channels, self.verb.n_rooms)
+        self.wet_dry = ParameterGenerator(channels, 2)
+
         self.apply(init_func)
-        
-        
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.analysis(x)
-        
+
         # for now, just choose the very first latent.  This could
         # be an average
-        latents = torch.mean(x, dim=-1)
-        
+        latents = torch.mean(x * self.influence_decay[None, None, :], dim=-1)
+
         cs = self.control(x)
         t = self.tension(x)
         d = self.damp(x)
-        
+
         tm = None
-        
+
         static = StaticTensors(
             time=self.t,
             damping=self.d,
             initial_displacement=self._id
         )
-        
+
         for layer in self.hyper_networks:
-            
+
             params = layer.forward(latents)
-            
+
             tm = execute_parallel_layer(
                 instrument=params,
                 hyper=self.hyper_params,
@@ -281,24 +290,31 @@ class InstrumentAutoencoder(nn.Module):
                 tension_mod=t,
                 tension_modifier=tm
             )
-        
-        
+
         tm = torch.sum(tm, dim=1, keepdim=True)
-        return tm
-        
-        
+
+        rooms = torch.relu(self.room_mix.forward(latents))
+        mx = torch.softmax(self.wet_dry.forward(latents), dim=-1)
+
+        wet = self.verb.forward(tm, rooms)
+
+        stacked = torch.stack([tm, wet], dim=-1)
+
+        mixed = torch.einsum('bctm,bm->bct', stacked, mx)
+
+        return mixed
+
 
 def execute_parallel_layer(
-    hyper: HyperParameters,
-    static: StaticTensors,
-    instrument: InstrumentDefinitionTensors,
-    forces: torch.Tensor,
-    tension_modifier: torch.Tensor = None,
-    damp_mod: torch.Tensor = None,
-    tension_mod: torch.Tensor = None) -> torch.Tensor:
-    
+        hyper: HyperParameters,
+        static: StaticTensors,
+        instrument: InstrumentDefinitionTensors,
+        forces: torch.Tensor,
+        tension_modifier: torch.Tensor = None,
+        damp_mod: torch.Tensor = None,
+        tension_mod: torch.Tensor = None) -> torch.Tensor:
+
     # print(instrument.display_shapes())
-    
 
     forces = torch.einsum('bct,bcd->bct', forces, instrument.force_router)
 
@@ -308,7 +324,7 @@ def execute_parallel_layer(
 
     # DECISION: Is it better to clamp or to use sigmoid?
     damp = hyper.base_resonance + \
-        (torch.sigmoid(d) * hyper.resonance_diff)
+        (torch.clamp(d, 1e-12, 1) * hyper.resonance_diff)
 
     damp = interpolate_last_axis(damp, desired_size=hyper.n_samples)
 
@@ -320,13 +336,13 @@ def execute_parallel_layer(
     noisy_energy = torch.zeros_like(energy).uniform_(-0.01, 0.01)
     noisy_energy = noisy_energy * energy
     energy = torch.stack([energy, noisy_energy], dim=-1)
-    
+
     energy = torch.einsum('bctm,bcm->bct', energy, instrument.noise_mix)
 
     tension = instrument.tension
 
     if tension_modifier is not None:
-        
+
         tension_modifier = torch.einsum(
             'bct,bcd->bct', tension_modifier, instrument.tension_router)
         tension = instrument.tension + tension_modifier
@@ -707,7 +723,7 @@ class LayerController(nn.Module):
         tm = None
         outputs = []
         for i, layer in enumerate(self.layers):
-            
+
             tm = layer.forward(
                 forces=sparse_forces,
                 tension_modifier=tm,
@@ -742,23 +758,21 @@ def loss_func(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 def train_ae(batch_size: int, n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int):
     control_rate = 512
     samplerate = 22050
-    
+
     analysis_model = InstrumentAutoencoder(
-        n_samples=n_samples, 
-        n_nodes=n_nodes, 
-        control_rate=control_rate, 
-        n_layers=n_layers, 
-        channels=64, 
+        n_samples=n_samples,
+        n_nodes=n_nodes,
+        control_rate=control_rate,
+        n_layers=n_layers,
+        channels=64,
         filter_size=32,
         n_to_keep=n_to_keep).to(device)
-    
-    
+
     stream = AudioIterator(
         batch_size=batch_size,
         n_samples=n_samples,
         samplerate=samplerate,
         normalize=True)
-    
 
     collection = LmdbCollection(path='parallel')
 
@@ -767,18 +781,18 @@ def train_ae(batch_size: int, n_nodes: int, n_samples: int, n_layers: int, n_to_
         'audio/wav',
         encode_audio,
         collection)
-    
+
     serve_conjure([
         orig_audio,
         recon_audio,
-    ], 
-        port=9998, 
+    ],
+        port=9998,
         n_workers=1,
         web_components_version='0.0.101'
     )
-    
+
     optim = Adam(analysis_model.parameters(), lr=1e-4)
-    
+
     for i, batch in enumerate(iter(stream)):
         optim.zero_grad()
         batch = batch.view(-1, 1, n_samples).to(device)
@@ -786,34 +800,34 @@ def train_ae(batch_size: int, n_nodes: int, n_samples: int, n_layers: int, n_to_
         recon = analysis_model.forward(batch)
         recon_audio(max_norm(recon[0, ...]))
         loss = loss_func(batch, recon)
-        
-        if torch.isnan(loss).any() or torch.isinf(loss).any():
-            print(f'Something wonky, skipping grad update')
-            optim.zero_grad()
-            torch.clear_autocast_cache()
-            torch.cuda.empty_cache()
-            continue
-        
+
+        # if torch.isnan(loss).any() or torch.isinf(loss).any():
+        #     print(f'Something wonky, skipping grad update')
+        #     optim.zero_grad()
+        #     torch.clear_autocast_cache()
+        #     torch.cuda.empty_cache()
+        #     continue
+
         loss.backward()
+
+        # clip_grad_norm_(analysis_model.parameters(), 0.1)
+
         optim.step()
         print(i, loss.item())
-        
-    
-    
 
 
 def overfit_autoencoder(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int):
     control_rate = 512
-    
+
     analysis_model = InstrumentAutoencoder(
-        n_samples=n_samples, 
-        n_nodes=n_nodes, 
-        control_rate=control_rate, 
-        n_layers=n_layers, 
-        channels=64, 
+        n_samples=n_samples,
+        n_nodes=n_nodes,
+        control_rate=control_rate,
+        n_layers=n_layers,
+        channels=64,
         filter_size=32,
         n_to_keep=n_to_keep).to(device)
-    
+
     def model_eval(model: InstrumentAutoencoder, _, target: torch.Tensor):
         recon = model.forward(target)
         # TODO: Should we normalize model output amplitude?
@@ -830,10 +844,10 @@ def overfit_autoencoder(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: 
         port=9998
     )
 
+
 def overfit_osc(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int):
-    
+
     control_rate = 512
-    
 
     controller = LayerController(
         n_layers=n_layers,
@@ -890,9 +904,9 @@ def overfit_osc(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int):
             frce_logger(f)
 
     def model_eval(model: LayerController, _, target: torch.Tensor):
-        
+
         recon, control_signal = model.forward()
-        
+
         # testing = analysis_model.forward(target)
         # print(testing.shape)
 
@@ -913,10 +927,10 @@ def overfit_osc(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int):
     )
 
 
-
 if __name__ == '__main__':
 
     # DECISION:  How many layers are appropriate/sufficient?
     # overfit_osc(n_nodes=32, n_samples=2 ** 17, n_layers=2, n_to_keep=64)
     # overfit_autoencoder(n_nodes=32, n_samples=2 ** 17, n_layers=2, n_to_keep=64)
-    train_ae(batch_size=4, n_nodes=32, n_samples=2 ** 17, n_layers=2, n_to_keep=64)
+    train_ae(batch_size=4, n_nodes=32, n_samples=2 **
+             17, n_layers=2, n_to_keep=64)
