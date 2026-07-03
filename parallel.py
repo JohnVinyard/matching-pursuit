@@ -13,6 +13,7 @@ from torch.optim import Adam, Optimizer
 from config.dotenv import Config
 from data.audioiter import AudioIterator
 from modules import sparsify, interpolate_last_axis, max_norm
+from modules.activation import unit_sine
 from modules.anticausal import AntiCausalAnalysis
 from modules.normalization import unit_norm
 from modules.reverb import NeuralReverb
@@ -74,6 +75,7 @@ class InstrumentDefinitionTensors:
     tension_router: torch.Tensor
     damping: torch.Tensor
     noise_mix: torch.Tensor
+    gains: torch.Tensor
 
     def display_shapes(self):
         print(f'''
@@ -139,6 +141,8 @@ class InstrumentHyperNetwork(nn.Module):
         self.to_tension = ParameterGenerator(latent_dim, n_nodes)
         self.damping = ParameterGenerator(latent_dim, n_nodes)
 
+        self.gain = ParameterGenerator(latent_dim, n_nodes)
+
         self.filters = ParameterGenerator(latent_dim, n_nodes * filter_size)
         self.filters_mix = ParameterGenerator(latent_dim, n_nodes * 2)
 
@@ -149,6 +153,8 @@ class InstrumentHyperNetwork(nn.Module):
 
     def forward(self, latent: torch.Tensor) -> InstrumentDefinitionTensors:
         batch, latent_dim = latent.shape
+
+        g = self.gain.forward(latent)
 
         m = self.to_masses(latent).view(batch, self.n_nodes, 1)
         t = self.to_tension(latent).view(batch, self.n_nodes, 1)
@@ -164,14 +170,15 @@ class InstrumentHyperNetwork(nn.Module):
         nm = self.noise_mix(latent).view(batch, self.n_nodes, 2)
 
         return InstrumentDefinitionTensors(
-            mass=torch.abs(m) * 6,
+            mass=torch.abs(m) * 10,
             tension=4 + (torch.abs(t) * 5),
-            damping=d,
+            damping=torch.abs(d),
             filters=filt,
             filters_mix=mx,
             force_router=fr,
             tension_router=tr,
-            noise_mix=nm
+            noise_mix=nm,
+            gains=g
         )
 
 
@@ -206,7 +213,8 @@ class InstrumentAutoencoder(nn.Module):
             n_layers: int,
             channels: int,
             filter_size: int,
-            n_to_keep: int):
+            n_to_keep: int,
+            base_resonance: float = 0.5):
 
         super().__init__()
         self.n_nodes = n_nodes
@@ -222,7 +230,7 @@ class InstrumentAutoencoder(nn.Module):
         self.hyper_params = HyperParameters(
             n_samples=n_samples,
             n_frames=self.n_frames,
-            base_resonance=0.02,
+            base_resonance=base_resonance,
             resonance_diff=1 - 0.02,
             mass_coeff=1
         )
@@ -237,7 +245,7 @@ class InstrumentAutoencoder(nn.Module):
         self.register_buffer('t', t)
 
         influence_decay = torch.linspace(1, 0, self.n_frames) ** 2
-        self.register_buffer('influence_decay', influence_decay)
+        self.influence_decay = nn.Parameter(influence_decay)
 
         self.analysis = Analysis(n_samples, control_rate, channels)
 
@@ -324,20 +332,19 @@ def execute_parallel_layer(
 
     # DECISION: Is it better to clamp or to use sigmoid?
     damp = hyper.base_resonance + \
-        (torch.clamp(d, 1e-12, 1) * hyper.resonance_diff)
+        (torch.clamp(d, 1e-12, 0.9999) * hyper.resonance_diff)
 
     damp = interpolate_last_axis(damp, desired_size=hyper.n_samples)
 
-    mass = torch.sigmoid(instrument.mass) * hyper.mass_coeff
+    mass = instrument.mass * hyper.mass_coeff
 
     energy = sequential(forces / mass, d)
     energy = interpolate_last_axis(energy, desired_size=hyper.n_samples)
 
-    noisy_energy = torch.zeros_like(energy).uniform_(-0.01, 0.01)
-    noisy_energy = noisy_energy * energy
-    energy = torch.stack([energy, noisy_energy], dim=-1)
-
-    energy = torch.einsum('bctm,bcm->bct', energy, instrument.noise_mix)
+    # noisy_energy = torch.zeros_like(energy).uniform_(-0.01, 0.01)
+    # noisy_energy = noisy_energy * energy
+    # energy = torch.stack([energy, noisy_energy], dim=-1)
+    # energy = torch.einsum('bctm,bcm->bct', energy, instrument.noise_mix)
 
     tension = instrument.tension
 
@@ -365,6 +372,8 @@ def execute_parallel_layer(
     x = torch.stack([x, filt], dim=-1)
 
     x = torch.einsum('bctm,bcm->bct', x, instrument.filters_mix)
+
+    x = torch.tanh(x * instrument.gains[..., None])
 
     return x
 
@@ -758,6 +767,7 @@ def loss_func(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 def train_ae(batch_size: int, n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int):
     control_rate = 512
     samplerate = 22050
+    base_resonance = 0.9
 
     analysis_model = InstrumentAutoencoder(
         n_samples=n_samples,
@@ -766,7 +776,8 @@ def train_ae(batch_size: int, n_nodes: int, n_samples: int, n_layers: int, n_to_
         n_layers=n_layers,
         channels=64,
         filter_size=32,
-        n_to_keep=n_to_keep).to(device)
+        n_to_keep=n_to_keep,
+        base_resonance=base_resonance).to(device)
 
     stream = AudioIterator(
         batch_size=batch_size,
