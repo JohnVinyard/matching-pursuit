@@ -55,8 +55,8 @@ class AntiCausalBlock(nn.Module):
             a = torch.tanh(self.conv(x) * self.tanh_weight)
             b = torch.sigmoid(self.gate(x) * self.sigmoid_weight)
         else:
-            a = torch.tanh(self.conv(x))
-            b = torch.sigmoid(self.gate(x))
+            a = self.conv(x)
+            b = torch.selu(self.gate(x))
 
         x = a * b
         x = x + skip

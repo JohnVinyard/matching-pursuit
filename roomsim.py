@@ -1,6 +1,8 @@
 from io import BytesIO
+import os
 from subprocess import PIPE, Popen
 from typing import Tuple, Union
+from matplotlib.animation import PillowWriter
 from torch.nn import functional as F
 import torch
 from matplotlib import pyplot as plt
@@ -8,6 +10,9 @@ from soundfile import SoundFile
 import numpy as np
 
 from goo import listen_to_sound
+from modules.normalization import unit_norm
+from modules.overlap_add import overlap_add
+from conjure.movie import FuncAnimation, tensor_movie
 
 
 def encode_audio(
@@ -48,11 +53,61 @@ def listen_to_sound(samples: bytes, wait_for_user_input: bool = True) -> None:
         input('Next')
 
 
+def tensor_movie(
+        filepath: os.PathLike,
+        arr: Union[np.ndarray, torch.Tensor],
+        fps: int=10):
+
+    if isinstance(arr, torch.Tensor):
+        arr = arr.data.cpu().numpy()
+
+    if len(arr.shape) != 3:
+        raise ValueError('make_movie expects a 3D array with shape (time, width, height)')
+
+    n_frames, width, height = arr.shape
+    
+    
+    
+    try:
+
+        data = []
+        for i in range(n_frames):
+            data.append(arr[i])
+
+        fig = plt.figure()
+        plt.axis('off')
+        plt.margins(0, 0)
+
+        plot = plt.imshow(data[0], cmap='gray')
+
+        def init():
+            plot.set_data(data[0])
+            return [plot]
+
+        def update(frame):
+            plot.set_data(data[frame])
+            return [plot]
+
+        frame_delay = int(1000 / fps)
+        ani = FuncAnimation(
+            fig,
+            update,
+            frames=np.arange(0, n_frames, 1),
+            init_func=init,
+            blit=True,
+            interval=frame_delay)
+        
+        ani.save(filepath, writer=PillowWriter(fps=fps))
+        plt.close()
+        
+    except Exception as e:
+        print(f'Could not write movie due to')
+   
+
 def roomsim(
         samplerate: int,
         blocksize: int,
         transfer: torch.Tensor,
-        mic_position: Tuple[int, int, int],
         n_frames: int,
         control_signal: torch.Tensor):
     """
@@ -108,64 +163,61 @@ def roomsim(
         height,  # height
         depth  # depth
     )
+    
+    frames = torch.zeros(n_frames, width, height)
 
     for i in range(n_frames):
-        # print(i, '========================================')
-        # apply transfer function to input control signal
-        # print('ROOM STATE', room_state.shape)
-        # print('CONTROL SIGNAL', control_signal[i: i + 1, ...].shape)
+        
+        room_state = room_state + control_signal[i: i + 1, ...]
+        
+        to_display = torch.norm(room_state[0, :, :, :, 4], dim=0)
+        frames[i] = to_display 
+        
 
-        print(room_state.shape)
-        # print(room_state.shape)
+        # apply transfer function in the frequency domain
+        t = transfer[None, ...]
+        cs = torch.fft.rfft(room_state, dim=1, norm='ortho')
+        
+        
+        with_transfer_func = t * cs
+
+        # return filtered control signal to time domain
+        room_state = torch.fft.irfft(with_transfer_func, dim=1, norm='ortho')
+        recorded_block = torch.sum(room_state[0: 1, ...], dim=(2, 3, 4))
+        
+        
         room_state = F.pad(room_state, [
             1, 1,
             1, 1,
             1, 1
         ], mode='reflect')
         
-        room_state = room_state.unfold(2, 3, 1).unfold(3, 3, 1).unfold(4, 3, 1)
-        print(room_state.shape)
-
-        # # print(i, room_state.shape)
-        # room_state = F.conv3d(room_state, kernel)
-        
+        neighborhood = room_state.unfold(2, 3, 1).unfold(3, 3, 1).unfold(4, 3, 1)
         room_state = torch.mean(room_state, dim=(-1, -2, -3))
-
-        print('BEFORE TRANSFER', i, torch.norm(control_signal[i: i + 1, ...]))
-
-        room_state = room_state + control_signal[i: i + 1, ...]
-
-        # apply transfer function in the frequency domain
-        t = transfer[None, :, None, None, None]
-        cs = torch.fft.rfft(room_state, dim=1, norm='ortho')
-        with_transfer_func = t * cs
-
-        # return filtered control signal to time domain
-        room_state = torch.fft.irfft(with_transfer_func, dim=1, norm='ortho')
-        print('AFTER TRANSFER', i, torch.norm(room_state))
-        # print('TIME DOMAIN', time_domain.shape)
-
-        # room_state = room_state + time_domain
-
-        # print('AFTER CONV', i, room_state.shape)
-
-        recorded_block = room_state[0: 1, :,
-                                    mic_position[0], mic_position[1], mic_position[2]]
-        print(i, 'RECORDED BLOCK', torch.norm(recorded_block))
+        
+        
         recording.append(recorded_block)
 
+    # overlap add wants batch, channels, frames, samples
+    
+    # recording = torch.stack(recording, dim=1)[:, None, :, :]
+    # recording = overlap_add(recording)    
     recording = torch.cat(recording, dim=0)
     # print('FINAL BLOCK SIZE', recording.shape)
     print(recording.shape)
+    
+    
+    tensor_movie('movie.gif', frames, fps=1)
+    
     return recording.view(-1)
 
 
 if __name__ == '__main__':
-    block_size = 32
-    n_frames = 128
-    width = 15
-    height = 15
-    depth = 15
+    block_size = 64
+    n_frames = 512
+    width = 5
+    height = 17
+    depth = 9
     samplerate = 22050
     n_fft_coeffs = block_size // 2 + 1
 
@@ -173,13 +225,27 @@ if __name__ == '__main__':
     control_signal = torch.zeros(n_frames, block_size, width, height, depth)
     # input energy at a particular time and location
     control_signal[0, :, 3, 3, 3] = torch.zeros(block_size).uniform_(-1, 1)
+    
+    
+    # first, generate 2d numbers on the unit sphere
+    # t = unit_norm(torch.zeros(width, height, depth, n_fft_coeffs, 2).uniform_(-1, 1))
+    # then, generate the magnitude of these points, bringing them off the surface and toward the center
+    # mag = torch.zeros(width, height, depth, n_fft_coeffs, 1, ).fill_(0.999999)
+    # t = (t * mag)
+    # transfer = torch.view_as_complex(t).permute(3, 0, 1, 2)
+    
+    transfer_shape = (n_fft_coeffs, width, height, depth)
+    
+    transfer = torch.zeros(*transfer_shape).uniform_(0.99, 0.9999) * torch.linspace(1, 0, n_fft_coeffs)[:, None, None, None] ** 0.5
+    transfer[0, ...] = 0
+
+    # transfer = torch.zeros(n_fft_coeffs, width, height, depth,  dtype=torch.complex64).uniform_(-2.8, 2.8) #* torch.zeros(n_fft_coeffs).bernoulli_(p=0.1)
 
     samples = roomsim(
         samplerate=samplerate,
         blocksize=block_size,
         # frequency-domain transfer function should always be less-than one
-        transfer=torch.zeros(n_fft_coeffs, dtype=torch.complex64).uniform_(-0.89, 0.89),
-        mic_position=(3, 3, 3),
+        transfer=transfer,
         n_frames=n_frames,
         control_signal=control_signal
     )

@@ -15,6 +15,7 @@ from data.audioiter import AudioIterator
 from modules import sparsify, interpolate_last_axis, max_norm
 from modules.activation import unit_sine
 from modules.anticausal import AntiCausalAnalysis
+from modules.multibanddict import flattened_multiband_spectrogram, multiband_spectrogram
 from modules.normalization import unit_norm
 from modules.reverb import NeuralReverb
 from modules.transfer import fft_convolve
@@ -22,6 +23,8 @@ from modules.upsample import ensure_last_axis_length
 from util import device, count_parameters
 from util.overfit import overfit_model
 from torch.nn.utils.clip_grad import clip_grad_value_, clip_grad_norm_
+from torch.nn.utils.weight_norm import weight_norm
+from argparse import ArgumentParser
 
 from matplotlib import pyplot as plt
 
@@ -43,7 +46,7 @@ class HyperParameters:
 class StaticTensors:
     """
     Tensors that are static and do not require any gradients throughout
-    the entire experiment.  
+    the entire experiment.
     """
     time: torch.Tensor
     damping: torch.Tensor
@@ -53,7 +56,7 @@ class StaticTensors:
 @dataclass
 class PerformanceTensors:
     """
-    Tensors that represent actions from something with agency, like a human 
+    Tensors that represent actions from something with agency, like a human
     performer
     """
     forces: torch.Tensor
@@ -95,11 +98,15 @@ class ParameterGenerator(nn.Module):
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
-        self.ln1 = nn.Linear(in_channels, out_channels)
+
+        self.scale = nn.Parameter(torch.zeros(1).fill_(1))
+
+        ln1 = weight_norm(nn.Linear(in_channels, out_channels))
+        self.ln1 = ln1
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.ln1(x)
-        return x
+        return x * self.scale
 
 
 class Analysis(nn.Module):
@@ -170,9 +177,9 @@ class InstrumentHyperNetwork(nn.Module):
         nm = self.noise_mix(latent).view(batch, self.n_nodes, 2)
 
         return InstrumentDefinitionTensors(
-            mass=torch.abs(m) * 10,
-            tension=4 + (torch.abs(t) * 5),
-            damping=torch.abs(d),
+            mass=m,
+            tension=t,
+            damping=d,
             filters=filt,
             filters_mix=mx,
             force_router=fr,
@@ -189,18 +196,24 @@ class ControlSignalCreator(nn.Module):
         self.in_channels = in_channels
         self.control_channels = control_channels
         self.n_to_keep = n_to_keep
-        self.network = nn.Conv1d(
-            in_channels, control_channels, kernel_size=8, stride=1, padding=0)
+
+        network = weight_norm(nn.Conv1d(
+            in_channels, control_channels, kernel_size=8, stride=1, padding=0))
+        self.network = network
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = F.pad(x, (0, 7))
         x = self.network(x)
+
+        x = torch.abs(x)
         x = x - x.mean()
-        x = sparsify(x, n_to_keep=self.n_to_keep)
+        x = torch.relu(x)
+
+        # x = sparsify(x, n_to_keep=self.n_to_keep)
         return x
 
 
-init_func = make_initializer(0.01)
+init_func = make_initializer(0.04)
 
 
 class InstrumentAutoencoder(nn.Module):
@@ -266,12 +279,13 @@ class InstrumentAutoencoder(nn.Module):
 
         self.apply(init_func)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         x = self.analysis(x)
 
         # for now, just choose the very first latent.  This could
         # be an average
         latents = torch.mean(x * self.influence_decay[None, None, :], dim=-1)
+        # latents = x[..., 0]
 
         cs = self.control(x)
         t = self.tension(x)
@@ -287,7 +301,7 @@ class InstrumentAutoencoder(nn.Module):
 
         for layer in self.hyper_networks:
 
-            params = layer.forward(latents)
+            params: InstrumentDefinitionTensors = layer.forward(latents)
 
             tm = execute_parallel_layer(
                 instrument=params,
@@ -310,7 +324,7 @@ class InstrumentAutoencoder(nn.Module):
 
         mixed = torch.einsum('bctm,bm->bct', stacked, mx)
 
-        return mixed
+        return cs, mixed
 
 
 def execute_parallel_layer(
@@ -330,9 +344,7 @@ def execute_parallel_layer(
     if damp_mod is not None:
         d = d + damp_mod
 
-    # DECISION: Is it better to clamp or to use sigmoid?
-    damp = hyper.base_resonance + \
-        (torch.clamp(d, 1e-12, 0.9999) * hyper.resonance_diff)
+    damp = torch.abs(d)
 
     damp = interpolate_last_axis(damp, desired_size=hyper.n_samples)
 
@@ -341,7 +353,9 @@ def execute_parallel_layer(
     energy = sequential(forces / mass, d)
     energy = interpolate_last_axis(energy, desired_size=hyper.n_samples)
 
-    # noisy_energy = torch.zeros_like(energy).uniform_(-0.01, 0.01)
+    # the problem with this idea is that the spectrum here is not
+    # variable over time
+    # noisy_energy = torch.zeros_like(energy).uniform_(-1, 1)
     # noisy_energy = noisy_energy * energy
     # energy = torch.stack([energy, noisy_energy], dim=-1)
     # energy = torch.einsum('bctm,bcm->bct', energy, instrument.noise_mix)
@@ -757,6 +771,10 @@ class LayerController(nn.Module):
 
 
 def loss_func(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+
+    # a = flattened_multiband_spectrogram(a, { 'xs': (64, 16 )}, smallest_band_size=512)
+    # b = flattened_multiband_spectrogram(b, { 'xs': (64, 16 )}, smallest_band_size=512)
+
     a = stft(a, 2048, 256, pad=False)
     b = stft(b, 2048, 256, pad=False)
 
@@ -767,7 +785,7 @@ def loss_func(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 def train_ae(batch_size: int, n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int):
     control_rate = 512
     samplerate = 22050
-    base_resonance = 0.9
+    base_resonance = 0.02
 
     analysis_model = InstrumentAutoencoder(
         n_samples=n_samples,
@@ -808,23 +826,33 @@ def train_ae(batch_size: int, n_nodes: int, n_samples: int, n_layers: int, n_to_
         optim.zero_grad()
         batch = batch.view(-1, 1, n_samples).to(device)
         orig_audio(batch[0, ...])
-        recon = analysis_model.forward(batch)
-        recon_audio(max_norm(recon[0, ...]))
-        loss = loss_func(batch, recon)
 
-        # if torch.isnan(loss).any() or torch.isinf(loss).any():
-        #     print(f'Something wonky, skipping grad update')
-        #     optim.zero_grad()
-        #     torch.clear_autocast_cache()
-        #     torch.cuda.empty_cache()
-        #     continue
+        control_signal, recon = analysis_model.forward(batch)
+
+        recon_audio(max_norm(recon[0, ...]))
+        loss = loss_func(batch, recon) + (l0_norm(control_signal) * 100)
+
+        sparsity = (control_signal > 0).sum() / control_signal.numel()
 
         loss.backward()
 
-        # clip_grad_norm_(analysis_model.parameters(), 0.1)
+        valid_gradients = all(
+            not (torch.isnan(p.grad).any() or torch.isinf(p.grad).any())
+            for p in analysis_model.parameters() if p.grad is not None
+            )
 
-        optim.step()
-        print(i, loss.item())
+        if valid_gradients:
+            torch.nn.utils.clip_grad_norm_(analysis_model.parameters(), max_norm=1.0)
+            optim.step()
+        else:
+            print("Warning: Detected NaN/Inf values in gradients. Skipping step.")
+
+       
+
+        # clip_grad_value_(analysis_model.parameters(), 0.1)
+
+        # optim.step()
+        print(i, loss.item(), sparsity.item())
 
 
 def overfit_autoencoder(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int):
@@ -840,9 +868,13 @@ def overfit_autoencoder(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: 
         n_to_keep=n_to_keep).to(device)
 
     def model_eval(model: InstrumentAutoencoder, _, target: torch.Tensor):
-        recon = model.forward(target)
+        control_signal, recon = model.forward(target)
+
+        sparsity = (control_signal > 0).sum() / control_signal.numel()
+        print(sparsity.item())
+
         # TODO: Should we normalize model output amplitude?
-        loss = loss_func(target, recon)
+        loss = loss_func(target, recon) + (l0_norm(control_signal) * 100)
         return recon, loss
 
     overfit_model(
@@ -851,7 +883,7 @@ def overfit_autoencoder(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: 
         loss_func=loss_func,
         model_eval=model_eval,
         collection_name='parallel',
-        learning_rate=1e-3,
+        learning_rate=1e-4,
         port=9998
     )
 
@@ -940,8 +972,17 @@ def overfit_osc(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int):
 
 if __name__ == '__main__':
 
-    # DECISION:  How many layers are appropriate/sufficient?
-    # overfit_osc(n_nodes=32, n_samples=2 ** 17, n_layers=2, n_to_keep=64)
-    # overfit_autoencoder(n_nodes=32, n_samples=2 ** 17, n_layers=2, n_to_keep=64)
-    train_ae(batch_size=4, n_nodes=32, n_samples=2 **
-             17, n_layers=2, n_to_keep=64)
+    parser = ArgumentParser()
+    parser.add_argument('--mode', choices=['train', 'overfit'], required=True)
+
+    args = parser.parse_args()
+
+    if args.mode == 'train':
+        train_ae(
+            batch_size=4,
+            n_nodes=32,
+            n_samples=2 ** 17,
+            n_layers=2,
+            n_to_keep=64)
+    elif args.mode == 'overfit':
+        overfit_autoencoder(n_nodes=32, n_samples=2 ** 17, n_layers=2, n_to_keep=64)
