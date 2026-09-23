@@ -5,6 +5,7 @@ from torch.nn import functional as F
 from torch.nn.utils.parametrizations import weight_norm
 
 from modules import pos_encoded
+from modules.normalization import unit_norm
 
 
 class AntiCausalConv(nn.Module):
@@ -55,14 +56,17 @@ class AntiCausalBlock(nn.Module):
             a = torch.tanh(self.conv(x) * self.tanh_weight)
             b = torch.sigmoid(self.gate(x) * self.sigmoid_weight)
         else:
-            a = self.conv(x)
-            b = torch.selu(self.gate(x))
+            a = torch.tanh(self.conv(x))
+            b = torch.sigmoid(self.gate(x))
 
         x = a * b
-        x = x + skip
+        # Consider Wavenet-style scaling
+        #  (x = skip + x * (1/2**0.5)
+        x = x + (skip * (1/2**0.5))
         
         if self.do_norm:
             x = self.norm(x)
+            # x = unit_norm(x, dim=-1)
         return x
 
 
@@ -92,7 +96,7 @@ class AntiCausalStack(nn.Module):
         for block in self.blocks:
             x = block.forward(x)
             output = output + x
-        output = self.ff(output)
+        output = self.ff(output / len(self.blocks))
         return output
 
 

@@ -1,3 +1,4 @@
+from builtins import enumerate
 from dataclasses import dataclass
 from typing import Iterable, Tuple, Callable, List
 
@@ -5,7 +6,7 @@ from conjure import LmdbCollection, SupportedContentType, NumpySerializer, Numpy
 from torch import nn
 
 import torch
-from torch.nn import functional as F
+from torch.nn import TransformerEncoder, TransformerEncoderLayer, functional as F
 
 import conjure
 from conjure.logger import encode_audio
@@ -20,6 +21,7 @@ from modules.normalization import unit_norm
 from modules.reverb import NeuralReverb
 from modules.transfer import fft_convolve
 from modules.upsample import ensure_last_axis_length
+from spiking import SpikingModel
 from util import device, count_parameters
 from util.overfit import overfit_model
 from torch.nn.utils.clip_grad import clip_grad_value_, clip_grad_norm_
@@ -32,13 +34,76 @@ from util.weight_init import make_initializer
 
 Solution = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 
+MASS_COEFF = 1
+BASE_RESONANCE = 0.02
+FORWARD_FORCE = False
+CHANNELS = 128
+
+# analysis arch
+USE_TRANSFORMER = False
+DO_NORM = False
+
+
+# sparse
+SPARSIFY = False
+SOFT_SPARSE = False
+N_TO_KEEP = 128
+
+
+
+def compute_tension(t: torch.Tensor) -> torch.Tensor:
+    return 10**t
+
+
+class UnnormalizedTransformerEncoderLayer(nn.Module):
+    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1, activation="relu", batch_first=False):
+        super().__init__()
+        self.self_attn = nn.MultiheadAttention(
+            d_model, nhead, dropout=dropout, batch_first=batch_first)
+
+        # Feed-forward network components
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.dropout = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
+
+        # Replace normalization with Identity
+        self.norm1 = nn.Identity()
+        self.norm2 = nn.Identity()
+
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+
+        # Activation function
+        if activation == "relu":
+            self.activation = nn.ReLU()
+        elif activation == "gelu":
+            self.activation = nn.GELU()
+        else:
+            raise NotImplementedError(
+                f"Activation {activation} not implemented")
+
+    def forward(self, src, src_mask=None, src_key_padding_mask=None, is_causal=False):
+        # Self-attention block with skipped/identity norm
+        x = src
+        # Pass is_causal or attn_mask depending on PyTorch version
+        attn_out, _ = self.self_attn(
+            x, x, x, attn_mask=src_mask, key_padding_mask=src_key_padding_mask)
+        x = x + self.dropout1(attn_out)
+        x = self.norm1(x)  # This is nn.Identity()
+
+        # Feed-forward block with skipped/identity norm
+        y = self.linear2(self.dropout(self.activation(self.linear1(x))))
+        x = x + self.dropout2(y)
+        x = self.norm2(x)  # This is nn.Identity()
+
+        return x
+
 
 @dataclass
 class HyperParameters:
     n_samples: int
     n_frames: int
     base_resonance: float
-    resonance_diff: float
     mass_coeff: float
 
 
@@ -96,6 +161,7 @@ class InstrumentDefinitionTensors:
 class ParameterGenerator(nn.Module):
     def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
+            
         self.in_channels = in_channels
         self.out_channels = out_channels
 
@@ -118,21 +184,38 @@ class Analysis(nn.Module):
         self.channels = channels
         self.n_coeffs = self.window_size // 2 + 1
 
-        self.network = AntiCausalAnalysis(
-            self.n_coeffs,
-            channels,
-            kernel_size=2,
-            dilations=[1, 2, 4, 8, 16, 32, 1],
-            do_norm=False,
-            pos_encodings=False,
-            with_activation_norm=False
-        )
+        if USE_TRANSFORMER:
+            self.embed = nn.Linear(self.n_coeffs, channels)
+
+            encoder_layer_class: TransformerEncoderLayer \
+                = TransformerEncoderLayer if DO_NORM else UnnormalizedTransformerEncoderLayer
+                
+            el = encoder_layer_class(
+                d_model=channels, nhead=4, dim_feedforward=channels, batch_first=True)
+            self.network = TransformerEncoder(encoder_layer=el, num_layers=3)
+        else:
+            self.network = AntiCausalAnalysis(
+                self.n_coeffs,
+                channels,
+                kernel_size=2,
+                dilations=[1, 2, 4, 8, 16, 32, 1],
+                do_norm=DO_NORM,
+                pos_encodings=False,
+                with_activation_norm=True
+            )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch = x.shape[0]
         spec = stft(x, ws=self.window_size, step=self.frame_size, pad=True).view(
             batch, -1, self.n_coeffs).permute(0, 2, 1)
-        x = self.network(spec)
+
+        if USE_TRANSFORMER:
+            spec = spec.permute(0, 2, 1)
+            x = self.embed(spec)
+            x = self.network(x)
+            x = x.permute(0, 2, 1)
+        else:
+            x = self.network(spec)
         return x
 
 
@@ -191,7 +274,7 @@ class InstrumentHyperNetwork(nn.Module):
 
 class ControlSignalCreator(nn.Module):
 
-    def __init__(self, in_channels: int, control_channels: int, n_to_keep: int):
+    def __init__(self, in_channels: int, control_channels: int, n_to_keep: int, sparsify: bool = True):
         super().__init__()
         self.in_channels = in_channels
         self.control_channels = control_channels
@@ -199,17 +282,20 @@ class ControlSignalCreator(nn.Module):
 
         network = weight_norm(nn.Conv1d(
             in_channels, control_channels, kernel_size=8, stride=1, padding=0))
-        self.network = network
+        self.network = network 
+        self.sparsify = sparsify
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = F.pad(x, (0, 7))
         x = self.network(x)
 
         x = torch.abs(x)
-        x = x - x.mean()
+        x = x - x.mean(dim=(1, 2), keepdim=True)
         x = torch.relu(x)
-
-        # x = sparsify(x, n_to_keep=self.n_to_keep)
+        
+        
+        if self.sparsify:
+            x = sparsify(x, n_to_keep=self.n_to_keep, soft=SOFT_SPARSE)
         return x
 
 
@@ -244,8 +330,7 @@ class InstrumentAutoencoder(nn.Module):
             n_samples=n_samples,
             n_frames=self.n_frames,
             base_resonance=base_resonance,
-            resonance_diff=1 - 0.02,
-            mass_coeff=1
+            mass_coeff=MASS_COEFF
         )
 
         d = torch.zeros(1, self.n_nodes, 1).fill_(1)
@@ -262,14 +347,26 @@ class InstrumentAutoencoder(nn.Module):
 
         self.analysis = Analysis(n_samples, control_rate, channels)
 
+        # self.to_inp_weights = ParameterGenerator(channels, channels**2)
+        # self.to_hidden_weights = ParameterGenerator(channels, channels**2)
+        # self.to_output_weights = ParameterGenerator(channels, channels**2)
+
         self.hyper_networks = nn.ModuleList([
             InstrumentHyperNetwork(channels, n_nodes, filter_size) for _ in range(n_layers)
         ])
 
+        self.latents = ControlSignalCreator(
+            channels, channels, n_to_keep=n_to_keep, sparsify=False)
+
+        self.latents_attn = ControlSignalCreator(
+            channels, channels, n_to_keep=n_to_keep, sparsify=False)
+
         self.control = ControlSignalCreator(
-            channels, n_nodes, n_to_keep=n_to_keep)
-        self.tension = ControlSignalCreator(channels, n_nodes, n_to_keep=16)
-        self.damp = ControlSignalCreator(channels, n_nodes, n_to_keep=16)
+            channels, n_nodes, n_to_keep=n_to_keep, sparsify=SPARSIFY)
+        self.tension = ControlSignalCreator(
+            channels, n_nodes, n_to_keep=16, sparsify=True)
+        self.damp = ControlSignalCreator(
+            channels, n_nodes, n_to_keep=16, sparsify=True)
 
         self.verb = NeuralReverb.from_directory(
             Config.impulse_response_path(), samplerate=22050, n_samples=n_samples)
@@ -282,12 +379,27 @@ class InstrumentAutoencoder(nn.Module):
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         x = self.analysis(x)
 
+        l = self.latents(x)
+        attn = self.latents_attn(x)
+
         # for now, just choose the very first latent.  This could
         # be an average
-        latents = torch.mean(x * self.influence_decay[None, None, :], dim=-1)
-        # latents = x[..., 0]
+        latents = torch.mean(l * attn, dim=-1)
+        # latents = l[:, :, 0]
 
         cs = self.control(x)
+
+        # print(l.shape, latents.shape, cs.shape)
+
+        # iw = self.to_hidden_weights(latents).view(-1, self.channels, self.channels)
+        # hw = self.to_hidden_weights(latents).view(-1, self.channels, self.channels)
+        # ow = self.to_hidden_weights(latents).view(-1, self.channels, self.channels)
+
+        # tm = execute_rnn(hw, iw, ow, cs)
+        # mixed = tm
+
+        # print(tm.shape)
+
         t = self.tension(x)
         d = self.damp(x)
 
@@ -302,16 +414,31 @@ class InstrumentAutoencoder(nn.Module):
         for layer in self.hyper_networks:
 
             params: InstrumentDefinitionTensors = layer.forward(latents)
+            diff = 1 - self.hyper_params.base_resonance
+            params.damping = self.hyper_params.base_resonance + (torch.sigmoid(params.damping) * diff)
+            # params.mass = 1e-5 + F.softplus(params.mass)
+            # params.mass = torch.abs(params.mass)
 
-            tm = execute_parallel_layer(
-                instrument=params,
-                hyper=self.hyper_params,
-                static=static,
-                forces=cs,
-                damp_mod=d,
-                tension_mod=t,
-                tension_modifier=tm
-            )
+            if FORWARD_FORCE:
+                tm, cs = execute_parallel_layer(
+                    instrument=params,
+                    hyper=self.hyper_params,
+                    static=static,
+                    forces=cs,
+                    damp_mod=d,
+                    tension_mod=t,
+                    tension_modifier=tm
+                )
+            else:
+                tm, _cs = execute_parallel_layer(
+                    instrument=params,
+                    hyper=self.hyper_params,
+                    static=static,
+                    forces=cs,
+                    damp_mod=d,
+                    tension_mod=t,
+                    tension_modifier=tm
+                )
 
         tm = torch.sum(tm, dim=1, keepdim=True)
 
@@ -334,21 +461,21 @@ def execute_parallel_layer(
         forces: torch.Tensor,
         tension_modifier: torch.Tensor = None,
         damp_mod: torch.Tensor = None,
-        tension_mod: torch.Tensor = None) -> torch.Tensor:
+        tension_mod: torch.Tensor = None) -> [torch.Tensor, torch.Tensor]:
 
     # print(instrument.display_shapes())
 
-    forces = torch.einsum('bct,bcd->bct', forces, instrument.force_router)
+    forces = torch.einsum('bct,bcd->bdt', forces, instrument.force_router)
 
     d = instrument.damping.repeat(1, 1, hyper.n_frames)
     if damp_mod is not None:
         d = d + damp_mod
 
-    damp = torch.abs(d)
+    # damp = torch.abs(d)
 
-    damp = interpolate_last_axis(damp, desired_size=hyper.n_samples)
+    # damp = interpolate_last_axis(damp, desired_size=hyper.n_samples)
 
-    mass = instrument.mass * hyper.mass_coeff
+    mass = instrument.mass * hyper.mass_coeff   
 
     energy = sequential(forces / mass, d)
     energy = interpolate_last_axis(energy, desired_size=hyper.n_samples)
@@ -363,9 +490,8 @@ def execute_parallel_layer(
     tension = instrument.tension
 
     if tension_modifier is not None:
-
         tension_modifier = torch.einsum(
-            'bct,bcd->bct', tension_modifier, instrument.tension_router)
+            'bct,bcd->bdt', tension_modifier, instrument.tension_router)
         tension = instrument.tension + tension_modifier
 
     if tension_mod is not None:
@@ -377,7 +503,7 @@ def execute_parallel_layer(
         time=static.time,
         mass=mass,
         damping=static.damping,
-        tension=10 ** tension,
+        tension=compute_tension(tension),
         initial_displacement=static.initial_displacement,
     )
 
@@ -389,7 +515,7 @@ def execute_parallel_layer(
 
     x = torch.tanh(x * instrument.gains[..., None])
 
-    return x
+    return x, forces
 
 
 def l0_norm(x: torch.Tensor):
@@ -514,6 +640,65 @@ def parallel(forces: torch.Tensor, damping: torch.Tensor) -> torch.Tensor:
     return p * s
 
 
+def chunked_parallel(
+        forces: torch.Tensor,
+        damping: torch.Tensor,
+        chunk_size: int = 2048) -> torch.Tensor:
+    """
+    Drop-in, numerically stable replacement for `parallel()`.
+
+    `parallel()`'s cumprod/cumsum trick is exact in infinite precision, but
+    in float32 it fails once cumprod(damping) decays into the subnormal
+    range: dividing by a subnormal `p` overflows to inf, poisoning every
+    later step via the running cumsum. This happens well before `p` reaches
+    exact zero (e.g. lambda=80 @ 44.1kHz starts producing non-finite output
+    around N=65536, long before cumprod itself underflows to 0).
+
+    The fix is the standard chunked/blocked parallel scan used in chunked
+    linear-attention/SSM implementations: run the cumprod/cumsum trick
+    independently within fixed-size chunks (small enough that `p` never
+    leaves the normal float32 range), then propagate the running state
+    across chunk boundaries with a short sequential loop over chunks
+    (cheap: n_samples / chunk_size steps, not n_samples steps).
+    """
+    orig_len = forces.shape[-1]
+    pad = (-orig_len) % chunk_size
+
+    if pad > 0:
+        forces = F.pad(forces, (0, pad))
+        damping = F.pad(damping, (0, pad), value=1.0)
+
+    batch_shape = forces.shape[:-1]
+    n_chunks = forces.shape[-1] // chunk_size
+
+    f = forces.reshape(*batch_shape, n_chunks, chunk_size)
+    d = damping.reshape(*batch_shape, n_chunks, chunk_size)
+
+    # within-chunk parallel scan (chunk_size is chosen small enough that
+    # `p` stays within the normal float32 range, so no epsilon is needed)
+    b = d * f
+    p = torch.cumprod(d, dim=-1)
+    s = torch.cumsum(b / p, dim=-1)
+    local_out = p * s
+
+    # state to carry from the end of one chunk into the next: total decay
+    # factor and final output value of each chunk
+    chunk_damp_total = p[..., -1]
+    chunk_final_local = local_out[..., -1]
+
+    # sequential scan *across chunks only* (n_chunks steps, not n_samples)
+    carry = torch.zeros_like(chunk_damp_total[..., 0])
+    carries = []
+    for c in range(n_chunks):
+        carries.append(carry)
+        carry = carry * chunk_damp_total[..., c] + chunk_final_local[..., c]
+    carry_in = torch.stack(carries, dim=-1)
+
+    out = local_out + carry_in[..., None] * p
+    out = out.reshape(*batch_shape, n_chunks * chunk_size)
+    return out[..., :orig_len]
+
+
 class Layer(nn.Module):
     def __init__(
             self,
@@ -591,7 +776,6 @@ class Layer(nn.Module):
             n_samples=self.n_samples,
             n_frames=self.n_frames,
             base_resonance=self.base_resonance,
-            resonance_diff=self.diff,
             mass_coeff=self.mass_coeff
         )
 
@@ -769,14 +953,19 @@ class LayerController(nn.Module):
 
         return tm, sparse_forces
 
+# spiking = SpikingModel(64, 64, 64, 64, 64).to(device)
 
 def loss_func(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    
+    # base_loss = spiking.compute_multiband_loss(a, b, hard=True)
 
-    # a = flattened_multiband_spectrogram(a, { 'xs': (64, 16 )}, smallest_band_size=512)
-    # b = flattened_multiband_spectrogram(b, { 'xs': (64, 16 )}, smallest_band_size=512)
+    a = flattened_multiband_spectrogram(
+        a, {'xs': (64, 16)}, smallest_band_size=512)
+    b = flattened_multiband_spectrogram(
+        b, {'xs': (64, 16)}, smallest_band_size=512)
 
-    a = stft(a, 2048, 256, pad=False)
-    b = stft(b, 2048, 256, pad=False)
+    # a = stft(a, 2048, 256, pad=False)
+    # b = stft(b, 2048, 256, pad=False)
 
     base_loss = torch.abs(a - b).sum()
     return base_loss
@@ -785,14 +974,14 @@ def loss_func(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 def train_ae(batch_size: int, n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int):
     control_rate = 512
     samplerate = 22050
-    base_resonance = 0.02
+    base_resonance = BASE_RESONANCE
 
     analysis_model = InstrumentAutoencoder(
         n_samples=n_samples,
         n_nodes=n_nodes,
         control_rate=control_rate,
         n_layers=n_layers,
-        channels=64,
+        channels=CHANNELS,
         filter_size=32,
         n_to_keep=n_to_keep,
         base_resonance=base_resonance).to(device)
@@ -830,7 +1019,10 @@ def train_ae(batch_size: int, n_nodes: int, n_samples: int, n_layers: int, n_to_
         control_signal, recon = analysis_model.forward(batch)
 
         recon_audio(max_norm(recon[0, ...]))
-        loss = loss_func(batch, recon) + (l0_norm(control_signal) * 100)
+        
+        # if we are "hard" sparsifying, then don't bother with sparsity loss        
+        sparsity_coeff = 0 if SPARSIFY else 1
+        loss = loss_func(batch, recon) + (l0_norm(control_signal) * 1 * sparsity_coeff)
 
         sparsity = (control_signal > 0).sum() / control_signal.numel()
 
@@ -839,19 +1031,18 @@ def train_ae(batch_size: int, n_nodes: int, n_samples: int, n_layers: int, n_to_
         valid_gradients = all(
             not (torch.isnan(p.grad).any() or torch.isinf(p.grad).any())
             for p in analysis_model.parameters() if p.grad is not None
-            )
+        )
 
         if valid_gradients:
-            torch.nn.utils.clip_grad_norm_(analysis_model.parameters(), max_norm=1.0)
+            # torch.nn.utils.clip_grad_norm_(analysis_model.parameters(), 0.1)
+            torch.nn.utils.clip_grad_value_(analysis_model.parameters(), 0.5)
             optim.step()
         else:
             print("Warning: Detected NaN/Inf values in gradients. Skipping step.")
-
-       
-
-        # clip_grad_value_(analysis_model.parameters(), 0.1)
+            continue
 
         # optim.step()
+
         print(i, loss.item(), sparsity.item())
 
 
@@ -863,7 +1054,7 @@ def overfit_autoencoder(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: 
         n_nodes=n_nodes,
         control_rate=control_rate,
         n_layers=n_layers,
-        channels=64,
+        channels=CHANNELS,
         filter_size=32,
         n_to_keep=n_to_keep).to(device)
 
@@ -873,8 +1064,9 @@ def overfit_autoencoder(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: 
         sparsity = (control_signal > 0).sum() / control_signal.numel()
         print(sparsity.item())
 
-        # TODO: Should we normalize model output amplitude?
-        loss = loss_func(target, recon) + (l0_norm(control_signal) * 100)
+        # if we are "hard" sparsifying, then don't bother with sparsity loss        
+        sparsity_coeff = 0 if SPARSIFY else 1
+        loss = loss_func(target, recon) + (l0_norm(control_signal) * 100 * sparsity_coeff)
         return recon, loss
 
     overfit_model(
@@ -965,17 +1157,59 @@ def overfit_osc(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int):
         collection_name='parallel',
         logger_factory=logger_factory,
         training_loop_hook=training_loop_hook,
-        learning_rate=1e-4,
+        learning_rate=1e-3,
         port=9998
     )
+
+
+@torch.jit.script
+def execute_rnn(
+        hidden_weights: torch.Tensor,
+        input_weights: torch.Tensor,
+        output_weights: torch.Tensor,
+        control_signal: torch.Tensor):
+
+    # print(hidden_weights.shape, input_weights.shape, output_weights.shape, control_signal.shape)
+
+    batch, input_dim, output_dim = hidden_weights.shape
+    batch, input_dim, output_dim = output_weights.shape
+    batch, input_dim, time = control_signal.shape
+
+    output = []
+    hidden = torch.zeros(batch, input_dim, 1, device=hidden_weights.device)
+
+    for i in range(time):
+        input_t = control_signal[:, :, i: i + 1]
+
+        # map input to the hidden state
+        inp = torch.einsum('bit,bio->bot', input_t, input_weights)
+
+        # transform the previous hidden state
+        h = torch.einsum('bit,bio->bot', hidden, hidden_weights)
+
+        # new hidden state inp + hidden mapping
+        hidden = torch.tanh(inp + h)
+
+        # finally, map hidden state to the output
+        o = torch.einsum('bit,bio->bot', hidden, output_weights)
+        o = torch.sin(o)
+
+        output.append(o)
+
+    output = torch.cat(output, dim=-1)
+    # return output
+    return output.permute(0, 2, 1).reshape(batch, 1, -1)
 
 
 if __name__ == '__main__':
 
     parser = ArgumentParser()
-    parser.add_argument('--mode', choices=['train', 'overfit'], required=True)
+    parser.add_argument(
+        '--mode', choices=['train', 'overfit', 'test'], required=True)
 
     args = parser.parse_args()
+    
+    n_to_keep = N_TO_KEEP
 
     if args.mode == 'train':
         train_ae(
@@ -983,6 +1217,22 @@ if __name__ == '__main__':
             n_nodes=32,
             n_samples=2 ** 17,
             n_layers=2,
-            n_to_keep=64)
+            n_to_keep=N_TO_KEEP)
     elif args.mode == 'overfit':
-        overfit_autoencoder(n_nodes=32, n_samples=2 ** 17, n_layers=2, n_to_keep=64)
+        overfit_autoencoder(
+            n_nodes=32,
+            n_samples=2 ** 17,
+            n_layers=2,
+            n_to_keep=N_TO_KEEP)
+    elif args.mode == 'test':
+        batch = 3
+        dim = 64
+        time_dim = 1024
+
+        control_signal = torch.zeros(3, dim, time_dim)
+        input_weights = torch.zeros(3, dim, dim)
+        hidden_weights = torch.zeros(3, dim, dim)
+        output_weights = torch.zeros(3, dim, dim)
+        o = execute_rnn(
+            hidden_weights, input_weights, output_weights, control_signal)
+        print(o.shape, dim*dim)
