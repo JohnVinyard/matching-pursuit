@@ -7,6 +7,7 @@ same (differentiable, jax.lax.scan-based) physics, and is trained purely on
 a mel-spectrogram loss between the two audios.
 """
 import argparse
+import itertools
 import math
 from typing import NamedTuple, Optional, Tuple
 
@@ -31,13 +32,18 @@ class PhysicalParams(NamedTuple):
     mass: jnp.ndarray        # (N,)
     anchor_k: jnp.ndarray    # (N,)
     damping: jnp.ndarray     # scalar in (0, 1)
+    radius: jnp.ndarray      # (N,) each node is confined to a sphere of this
+                              # radius around its rest position; hitting the
+                              # wall reflects velocity (a hard, nonlinear
+                              # waveshaper). Large enough, this is a no-op.
     forces: jnp.ndarray      # (T, N) external force, applied along axis 0
 
 
-def simulate(params: PhysicalParams, fixed_mask: Optional[jnp.ndarray] = None) -> jnp.ndarray:
+def simulate(params: PhysicalParams, fixed_mask: Optional[jnp.ndarray] = None, restitution: float = 0.5) -> jnp.ndarray:
     n_nodes, dim = params.positions.shape
     resting = params.positions[:, None, :] - params.positions[None, :, :]
     mass = params.mass[:, None]
+    radius = params.radius[:, None]
     if fixed_mask is None:
         fixed_mask = jnp.zeros((n_nodes,), dtype=bool)
     free = (~fixed_mask)[:, None]
@@ -52,6 +58,36 @@ def simulate(params: PhysicalParams, fixed_mask: Optional[jnp.ndarray] = None) -
         acc = (spring_force + anchor_force + external) / mass
         v = (v + acc) * params.damping * free
         x = x + v
+
+        # confine each node to a sphere around its rest position: clamp any
+        # excess displacement back onto the sphere's surface and reflect the
+        # outward-radial component of velocity. This is a hard nonlinearity
+        # by design, meant to introduce buzzing/waveshaping-style distortion,
+        # not physical realism. A perfectly elastic reflection (restitution
+        # = 1) only corresponds to a real bounce when a node's per-step
+        # velocity is small relative to the radius; when it's not (a fast
+        # node against a small sphere), clamping to the boundary using only
+        # the post-step position is a discretization artifact that actively
+        # injects energy every bounce instead of conserving it, producing
+        # runaway growth / undecaying sustain. Losing some energy on each
+        # bounce (restitution < 1) reliably counteracts this, even in the
+        # worst case (smallest radius, largest velocity kick) this file's
+        # parameter ranges can produce.
+        disp = x - params.positions
+        # jnp.linalg.norm has a NaN *gradient* at exactly-zero input (the
+        # d/dx sqrt(sum(x^2)) = x/norm(x) formula is 0/0 there), and fixed
+        # nodes (e.g. string endpoints) sit at disp == 0 for the entire
+        # rollout, which would otherwise poison the whole backward pass
+        # through this scan. Adding eps inside the sqrt keeps the gradient
+        # finite (0, appropriately) instead of just patching the forward
+        # value afterwards.
+        dist = jnp.sqrt(jnp.sum(disp ** 2, axis=-1, keepdims=True) + 1e-12)
+        normal = disp / dist
+        over = dist > radius
+        x = params.positions + jnp.where(over, normal * radius, disp)
+        v_radial = jnp.sum(v * normal, axis=-1, keepdims=True)
+        v = jnp.where(over & (v_radial > 0), v - (1 + restitution) * v_radial * normal, v)
+
         # mix all nodes' velocity rather than reading a single fixed
         # "pickup" node: some geometries (e.g. string endpoints) pin
         # particular nodes, whose velocity is always exactly zero, which
@@ -151,14 +187,23 @@ class PhysicsConfig(NamedTuple):
     min_impulses: int = 1
     max_impulses: int = 4
     force_scale: float = 1.0
+    # displacement magnitudes under the ranges above typically land in
+    # roughly [0.4, 2.0]; sampled log-uniformly so both "constantly
+    # colliding" and "effectively unconstrained" (radius >> typical
+    # displacement, a no-op) are well represented.
+    radius_range: Tuple[float, float] = (0.02, 5.0)
+
+
+def log_uniform_interval(u: jnp.ndarray, value_range: Tuple[float, float]) -> jnp.ndarray:
+    """Maps u in [0, 1] log-uniformly onto value_range."""
+    lo, hi = value_range
+    return jnp.exp(math.log(lo) + u * (math.log(hi) - math.log(lo)))
 
 
 def damping_from_unit_interval(u: jnp.ndarray, damping_range: Tuple[float, float]) -> jnp.ndarray:
     """Maps u in [0, 1] to a damping value, log-uniform over (1 - damping)."""
     lo, hi = damping_range
-    log_lo = math.log(1.0 - hi)
-    log_hi = math.log(1.0 - lo)
-    return 1.0 - jnp.exp(log_lo + u * (log_hi - log_lo))
+    return 1.0 - log_uniform_interval(u, (1.0 - hi, 1.0 - lo))
 
 
 def sample_true_example(
@@ -168,7 +213,7 @@ def sample_true_example(
         plate_geom: Geometry,
         flavor_names: Tuple[str, ...],
 ):
-    k_flavor, k_geo, k_stiff, k_mass, k_anchor, k_damp, k_fcount, k_fidx, k_fmag = jax.random.split(key, 9)
+    k_flavor, k_geo, k_stiff, k_mass, k_anchor, k_damp, k_radius, k_fcount, k_fidx, k_fmag = jax.random.split(key, 10)
 
     # every candidate geometry is computed unconditionally (cheap relative to
     # the physics rollout below), then blended by a per-example random pick,
@@ -199,6 +244,8 @@ def sample_true_example(
 
     damping = damping_from_unit_interval(jax.random.uniform(k_damp, ()), cfg.damping_range)
 
+    radius = log_uniform_interval(jax.random.uniform(k_radius, (cfg.n_nodes,)), cfg.radius_range)
+
     # a random `n_impulses` in [min_impulses, max_impulses], placed at random
     # (time, node) locations; `max_impulses` stays a static shape and unused
     # slots are masked out, so this remains vmap/jit friendly.
@@ -216,6 +263,7 @@ def sample_true_example(
         mass=mass,
         anchor_k=anchor_k,
         damping=damping,
+        radius=radius,
         forces=forces,
     )
     return params, geometry.fixed
@@ -278,6 +326,114 @@ def make_mel_fn(n_fft: int, hop_length: int, filterbank: jnp.ndarray):
 
 
 # ---------------------------------------------------------------------------
+# spiking loss: a JAX port of `spiking.py`'s `SpikingModel`, very roughly
+# inspired by the Auditory Image Model. Audio is passed through a gammatone
+# filterbank (cochlear filtering), half-wave rectified (auditory nerve only
+# fires on positive pressure), then an adaptive/onset stage subtracts each
+# channel's own recent short-term average so only *changes* in energy
+# survive (sustained tones adapt away, onsets don't). A non-maximum
+# suppression step then approximates a refractory period: only the locally
+# strongest candidate within a window survives, so nearby competing
+# candidates can't all fire. That signal is binarized to a 0/1 "spike" in
+# the forward pass, using a straight-through estimator (STE) so gradients
+# flow as if it were never binarized. A second
+# stage looks for periodicity within short windows of the spike train (an
+# FFT magnitude spectrum per window), keeps only the top-k strongest
+# periodicity bins (again via an STE), and that sparse representation is
+# what the loss compares between target and reconstruction.
+
+def build_gammatone_filterbank(
+        n_channels: int, filter_size: int, sample_rate: int,
+        start_hz: float = 20.0, stop_hz: Optional[float] = None) -> np.ndarray:
+    from scipy.signal import gammatone
+    stop_hz = stop_hz or sample_rate / 2 * 0.98
+    freqs = np.linspace(start_hz, stop_hz, n_channels)
+    bank = np.zeros((n_channels, filter_size), dtype=np.float32)
+    for i, freq in enumerate(freqs):
+        b, _ = gammatone(freq=freq, ftype='fir', order=4, numtaps=filter_size, fs=sample_rate)
+        bank[i] = b
+    return bank / (np.linalg.norm(bank, axis=-1, keepdims=True) + 1e-8)
+
+
+def build_adaptation_kernel(n_channels: int, memory_size: int) -> np.ndarray:
+    """Per-channel short-term-memory kernel: channels with a faster decay
+    (higher exponent) forget more quickly, giving a spread of adaptation
+    time constants across the filterbank."""
+    memory = np.linspace(0.0, 1.0, memory_size)[None, :]
+    decay = np.linspace(1.1, 10.0, n_channels)[:, None]
+    kernel = memory ** decay
+    return (kernel / kernel.sum(axis=-1, keepdims=True)).astype(np.float32)
+
+
+def fft_convolve(*args: jnp.ndarray) -> jnp.ndarray:
+    n_samples = args[0].shape[-1]
+    padded = [jnp.pad(x, [(0, 0)] * (x.ndim - 1) + [(0, n_samples)]) for x in args]
+    spec = jnp.fft.rfft(padded[0], axis=-1)
+    for x in padded[1:]:
+        spec = spec * jnp.fft.rfft(x, axis=-1)
+    return jnp.fft.irfft(spec, axis=-1)[..., :n_samples]
+
+
+def straight_through(soft: jnp.ndarray, hard: jnp.ndarray) -> jnp.ndarray:
+    """Forward pass takes the value of `hard`; backward pass acts as the
+    identity on `soft` (the standard straight-through estimator)."""
+    return soft + jax.lax.stop_gradient(hard - soft)
+
+
+def make_spiking_fn(
+        n_samples: int, sample_rate: int,
+        n_channels: int = 64, filter_size: int = 64,
+        memory_size: int = 64, periodicity_size: int = 64, topk: int = 8,
+        refractory_period: int = 64):
+    gammatone_bank = jnp.array(build_gammatone_filterbank(n_channels, filter_size, sample_rate))
+    gammatone_bank = jnp.pad(gammatone_bank, ((0, 0), (0, n_samples - filter_size)))
+    memory_kernel = jnp.array(build_adaptation_kernel(n_channels, memory_size))
+    memory_kernel = jnp.pad(memory_kernel, ((0, 0), (0, n_samples - memory_size)))
+
+    step = periodicity_size // 4
+    padded_len = n_samples + step
+    n_frames = 1 + (padded_len - periodicity_size) // step
+    frame_idx = jnp.arange(periodicity_size)[None, :] + step * jnp.arange(n_frames)[:, None]
+
+    nms_window = 2 * refractory_period + 1
+
+    def spiking_features(audio: jnp.ndarray) -> jnp.ndarray:
+        channels = jax.nn.relu(fft_convolve(audio[None, :], gammatone_bank))  # (n_channels, n_samples)
+
+        pooled = fft_convolve(memory_kernel, channels)
+        adapted = jax.nn.relu(channels - pooled)
+
+        # approximate refractory period: a candidate only survives if it's
+        # the (weakly) largest value in its own `refractory_period`-radius
+        # neighborhood, per channel. This is non-maximum suppression, not a
+        # true causal refractory counter (a real one would need a
+        # sequential scan), but it's feedforward/parallel and gives the
+        # same practical effect -- nearby competing candidates can't both
+        # survive, so spikes come out sparser and more event-like instead
+        # of firing on every sample that merely clears the onset threshold.
+        local_max = jax.lax.reduce_window(
+            adapted, -jnp.inf, jax.lax.max, (1, nms_window), (1, 1), 'SAME')
+        is_peak = adapted >= local_max
+        hard = ((adapted > 0) & is_peak).astype(jnp.float32)
+        spikes = straight_through(adapted, hard)
+
+        padded = jnp.pad(spikes, ((0, 0), (0, step)))
+        frames = padded[:, frame_idx]  # (n_channels, n_frames, periodicity_size)
+        periodicity = jnp.abs(jnp.fft.rfft(frames, axis=-1))
+
+        values, indices = jax.lax.top_k(periodicity, k=topk)
+        sparse = jnp.zeros_like(periodicity).at[
+            jnp.arange(n_channels)[:, None, None],
+            jnp.arange(n_frames)[None, :, None],
+            indices,
+        ].set(values)
+
+        return straight_through(periodicity, sparse)
+
+    return spiking_features
+
+
+# ---------------------------------------------------------------------------
 # model: hears a mel spectrogram, guesses a PhysicalParams configuration
 
 class ConvBlock(eqx.Module):
@@ -302,6 +458,7 @@ class PhysicsGuesser(eqx.Module):
     mass_range: Tuple[float, float] = eqx.field(static=True)
     anchor_range: Tuple[float, float] = eqx.field(static=True)
     damping_range: Tuple[float, float] = eqx.field(static=True)
+    radius_range: Tuple[float, float] = eqx.field(static=True)
 
     def __init__(self, n_mels, n_nodes, dim, n_samples, hop_length, hidden, n_layers, cfg, key):
         keys = jax.random.split(key, n_layers + 2)
@@ -309,7 +466,7 @@ class PhysicsGuesser(eqx.Module):
         self.blocks = [ConvBlock(channels[i], channels[i + 1], 5, keys[i]) for i in range(n_layers)]
 
         n_pairs = n_nodes * (n_nodes - 1) // 2
-        global_out = n_nodes * dim + n_pairs + n_nodes + n_nodes + 1
+        global_out = n_nodes * dim + n_pairs + n_nodes + n_nodes + n_nodes + 1
         self.global_head = eqx.nn.MLP(hidden, global_out, width_size=hidden, depth=2, key=keys[-2])
         self.force_head = eqx.nn.Conv1d(hidden, n_nodes, 1, key=keys[-1])
 
@@ -319,6 +476,7 @@ class PhysicsGuesser(eqx.Module):
         self.mass_range = cfg.mass_range
         self.anchor_range = cfg.anchor_range
         self.damping_range = cfg.damping_range
+        self.radius_range = cfg.radius_range
 
     def __call__(self, mel: jnp.ndarray) -> PhysicalParams:
         x = mel
@@ -341,7 +499,9 @@ class PhysicsGuesser(eqx.Module):
         lo, hi = self.anchor_range
         anchor_k = lo + jax.nn.sigmoid(g[i:i + n]) * (hi - lo); i += n
 
-        damping = damping_from_unit_interval(jax.nn.sigmoid(g[i]), self.damping_range)
+        damping = damping_from_unit_interval(jax.nn.sigmoid(g[i]), self.damping_range); i += 1
+
+        radius = log_uniform_interval(jax.nn.sigmoid(g[i:i + n]), self.radius_range); i += n
 
         stiffness = jnp.zeros((n, n))
         iu = jnp.triu_indices(n, k=1)
@@ -359,6 +519,7 @@ class PhysicsGuesser(eqx.Module):
             mass=mass,
             anchor_k=anchor_k,
             damping=damping,
+            radius=radius,
             forces=forces.T,
         )
 
@@ -370,13 +531,19 @@ def max_norm(audio: np.ndarray, epsilon: float = 1e-8) -> np.ndarray:
     return audio / (np.abs(audio).max() + epsilon)
 
 
-def make_loss_fn(model_apply, mel_fn):
+def make_loss_fn(model_apply, input_feature_fn, loss_feature_fns):
+    """`input_feature_fn` is what the network hears (always the mel
+    spectrogram); `loss_feature_fns` is a list of perceptual spaces the loss
+    is computed in and summed over (e.g. just the mel spectrogram, just the
+    spiking features, or both for a "hybrid" loss)."""
     def loss_fn(model, true_audio):
-        mel_true = jax.vmap(mel_fn)(true_audio)
+        mel_true = jax.vmap(input_feature_fn)(true_audio)
         pred_params = jax.vmap(model_apply, in_axes=(None, 0))(model, mel_true)
         pred_audio = jax.vmap(lambda p: simulate(p, fixed_mask=None))(pred_params)
-        mel_pred = jax.vmap(mel_fn)(pred_audio)
-        loss = jnp.mean(jnp.abs(mel_true - mel_pred))
+        loss = sum(
+            jnp.mean(jnp.abs(jax.vmap(fn)(true_audio) - jax.vmap(fn)(pred_audio)))
+            for fn in loss_feature_fns
+        )
         return loss, pred_audio
 
     return loss_fn
@@ -399,10 +566,14 @@ def main():
     parser.add_argument('--n-fft', type=int, default=512)
     parser.add_argument('--hop-length', type=int, default=128)
     parser.add_argument('--n-mels', type=int, default=64)
+    parser.add_argument('--loss', choices=['mel', 'spiking', 'hybrid'], default='mel',
+                         help="'spiking' compares a straight-through-estimator gammatone/onset/"
+                              "periodicity representation instead of a mel spectrogram; 'hybrid' "
+                              'sums both losses. The network\'s input is always the mel '
+                              'spectrogram regardless of this choice.')
     parser.add_argument('--hidden-channels', type=int, default=32)
     parser.add_argument('--n-conv-layers', type=int, default=3)
     parser.add_argument('--lr', type=float, default=1e-3)
-    parser.add_argument('--n-steps', type=int, default=2000)
     parser.add_argument('--log-every', type=int, default=25)
     parser.add_argument('--sample-every', type=int, default=1, help='log audio to conjure every N steps')
     parser.add_argument('--seed', type=int, default=0)
@@ -445,6 +616,13 @@ def main():
     filterbank = jnp.array(build_mel_filterbank(args.sample_rate, args.n_fft, args.n_mels))
     mel_fn = make_mel_fn(args.n_fft, args.hop_length, filterbank)
 
+    spiking_fn = make_spiking_fn(args.n_samples, args.sample_rate) if args.loss != 'mel' else None
+    loss_feature_fns = {
+        'mel': [mel_fn],
+        'spiking': [spiking_fn],
+        'hybrid': [mel_fn, spiking_fn],
+    }[args.loss]
+
     key = jax.random.key(args.seed)
     key, model_key = jax.random.split(key)
     model = PhysicsGuesser(
@@ -457,7 +635,7 @@ def main():
     optimizer = optax.adam(args.lr)
     opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
 
-    loss_fn = make_loss_fn(lambda m, mel: m(mel), mel_fn)
+    loss_fn = make_loss_fn(lambda m, mel: m(mel), mel_fn, loss_feature_fns)
 
     @eqx.filter_jit
     def train_step(model, opt_state, key):
@@ -470,7 +648,7 @@ def main():
     print(f'jax backend: {jax.default_backend()}, devices: {jax.devices()}')
     print(f'flavors={flavor_names} n_nodes={n_nodes} dim={args.dim}')
 
-    for step in range(1, args.n_steps + 1):
+    for step in itertools.count(1):
         key, step_key = jax.random.split(key)
         model, opt_state, loss, true_audio, pred_audio = train_step(model, opt_state, step_key)
 

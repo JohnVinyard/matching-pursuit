@@ -150,7 +150,7 @@ class Model(nn.Module):
             kernel_size=2,
             dilations=[1, 2, 4, 8, 16, 32, 64, 1],
             pos_encodings=False,
-            do_norm=False,
+            do_norm=True,
             with_activation_norm=with_activation_norm)
 
         self.to_event_vectors = nn.Conv1d(

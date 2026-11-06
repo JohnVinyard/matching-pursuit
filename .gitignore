@@ -22,6 +22,14 @@ venv/*
 model.dat
 sparse_model.dat
 
+# LMDB collections (conjure.LmdbCollection(path=...)) -- always just
+# data.mdb, plus lock.mdb when locking is enabled, inside a directory named
+# for the collection. Ignoring the files themselves, rather than each
+# collection's directory name, means a new experiment's collection never
+# needs its own entry added here.
+**/data.mdb
+**/lock.mdb
+
 band_512.dat
 band_1024.dat
 band_2048.dat
@@ -48,26 +56,6 @@ resonancemodel/*
 avenues/*.html
 
 .jekyll-cache
-
-instrumentmodel
-overfitresonance
-ssm
-ssmcompression
-iterativedecomposition
-freqdomain
-noise
-hierarchical
-mp
-spiking
-audiooperator
-texture
-funcsong
-songsplat
-dho
-simulation
-textural
-goo
-parallel
 
 rnn.dat
 
