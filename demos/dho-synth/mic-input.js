@@ -15,12 +15,6 @@
 
 const FFT_SIZE = 2048;
 
-// Empirical scale from the rectified, mean-subtracted projection output to
-// a weight comparable to the pointer-driven planes' STRIKE_PEAK (1.6) --
-// along with FFT_SIZE and the dB->[0,1] mapping below, a likely first
-// tuning target once this is actually tried against a real mic.
-const GAIN = 10;
-
 function randomProjectionMatrix(nOut, nIn) {
   const rows = [];
   for (let i = 0; i < nOut; i++) {
@@ -96,9 +90,14 @@ export async function startMicInput() {
     // becomes its own noise floor (so a quiet/constant room tone
     // self-cancels) while whatever stands out from it -- a tap, a vocal
     // sound -- comes through, with no fixed calibration threshold needed.
+    // The remaining scale from that rectified difference up to a weight
+    // comparable to the pointer-driven planes' STRIKE_PEAK (1.6) is
+    // state.micGain -- read live every frame, so micGainSlider (wired in
+    // main.js's wireMicInput()) adjusts sensitivity in real time.
+    const gain = bridge.state.micGain;
     const weights = new Array(n1);
     for (let j = 0; j < n1; j++) {
-      weights[j] = Math.max(0, Math.abs(projected[j]) - Math.abs(mean)) * GAIN;
+      weights[j] = Math.max(0, Math.abs(projected[j]) - Math.abs(mean)) * gain;
     }
 
     const workletNode = bridge.getWorkletNode();

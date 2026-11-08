@@ -38,14 +38,14 @@ from util.weight_init import make_initializer
 
 Solution = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 
-MASS_COEFF = 100
+MASS_COEFF = 1
 BASE_RESONANCE = 0.02
 FORWARD_FORCE = False
 CHANNELS = 128
 
 LEARNING_RATE = 1e-4
 
-TENSION_EXPONENT_RANGE = (1.0, 9.0)
+TENSION_EXPONENT_RANGE = (4.0, 9.0)
 
 # if True, mix together all layers' outputs (scaled by LAYER_MIX, a learned
 # per-layer weight) before reverb, instead of using only the last layer's
@@ -56,7 +56,7 @@ SUM_LAYER_OUTPUTS = False
 # make_tension_dictionary/compute_tension_from_dictionary); if False, tension
 # is produced directly as `compute_tension(raw_scalar)` (10 ** t), the way it
 # worked before the dictionary was introduced
-USE_TENSION_DICTIONARY = True
+USE_TENSION_DICTIONARY = False
 
 # if False, damp_mod and tension_mod are ignored in execute_parallel_layer
 # (as if neither were ever passed in), regardless of what any caller
@@ -76,7 +76,7 @@ USE_UNET_ENCODER = True
 N_NODES = 32
 
 # analysis arch
-DO_NORM = False
+DO_NORM = True
 
 
 # sparse
@@ -96,6 +96,15 @@ FILTER_SIZE = 256
 # matching how low-pass response dominates passive physical systems -- while
 # also cutting the number of parameters way down from FILTER_SIZE.
 N_FILTER_TAPS = 64
+
+# clamp the oscillator's angular frequency below Nyquist in
+# damped_harmonic_oscillator (ported from jax_ae.py's own version of this
+# function). Without it, tension (and so omega) is otherwise unbounded
+# above, and an oscillator running above Nyquist doesn't just sound
+# implausibly high-pitched -- it aliases, folding back down into the
+# audible range, which is a worse failure mode than simply capping the
+# frequency.
+CLAMP_OMEGA_TO_NYQUIST = True
 
 
 def compute_tension(t: torch.Tensor) -> torch.Tensor:
@@ -320,7 +329,7 @@ def compute_tension_from_dictionary(
     USE_TENSION_DICTIONARY for the alternative, direct-tension path (just
     `compute_tension` applied to a single raw per-node parameter).
     """
-    t_weights = torch.relu(t_logits)
+    t_weights = torch.softmax(t_logits, dim=-1)
     return torch.einsum('bnk,k->bn', t_weights, tension_dictionary).unsqueeze(-1)
 
 
@@ -756,6 +765,7 @@ def execute_parallel_layer(
         damping=static.damping,
         tension=tension,
         initial_displacement=static.initial_displacement,
+        clamp_to_nyquist=CLAMP_OMEGA_TO_NYQUIST,
     )
 
     filt = fft_convolve(x, ensure_last_axis_length(
@@ -812,25 +822,17 @@ def damped_harmonic_oscillator(
         mass: torch.Tensor,
         damping: torch.Tensor,
         tension: torch.Tensor,
-        initial_displacement: torch.Tensor
+        initial_displacement: torch.Tensor,
+        clamp_to_nyquist: bool
 ) -> torch.Tensor:
     x = (damping / (2 * mass))
 
     omega = torch.sqrt(torch.abs(tension - (x ** 2)))
 
-    # clamp the oscillator's angular frequency below Nyquist (ported from
-    # jax_ae.py's own version of this function). `tension` here is already
-    # real-space by this point regardless of which path produced it
-    # (compute_tension directly, or compute_tension_from_dictionary's
-    # combination when USE_TENSION_DICTIONARY), so this one clamp covers
-    # both variants uniformly. Without it, tension (and so omega) is
-    # otherwise unbounded above, and an oscillator running above Nyquist
-    # doesn't just sound implausibly high-pitched -- it aliases, folding
-    # back down into the audible range, which is a worse failure mode than
-    # simply capping the frequency.
-    dt = time[1] - time[0]
-    nyquist = 0.95 * math.pi / dt
-    omega = torch.minimum(omega, nyquist)
+    if clamp_to_nyquist:
+        dt = time[1] - time[0]
+        nyquist = 0.95 * math.pi / dt
+        omega = torch.minimum(omega, nyquist)
 
     phi = torch.atan2(
         (x * initial_displacement),
@@ -1264,13 +1266,13 @@ def loss_func(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     
     # base_loss = spiking.compute_multiband_loss(a, b, hard=True)
 
-    # a = flattened_multiband_spectrogram(
-    #     a, {'xs': (64, 16)}, smallest_band_size=512)
-    # b = flattened_multiband_spectrogram(
-    #     b, {'xs': (64, 16)}, smallest_band_size=512)
+    a = flattened_multiband_spectrogram(
+        a, {'xs': (64, 16)}, smallest_band_size=512)
+    b = flattened_multiband_spectrogram(
+        b, {'xs': (64, 16)}, smallest_band_size=512)
 
-    a = stft(a, 2048, 256, pad=False)
-    b = stft(b, 2048, 256, pad=False)
+    # a = stft(a, 2048, 256, pad=False)
+    # b = stft(b, 2048, 256, pad=False)
 
     base_loss = torch.abs(a - b).sum()
     return base_loss
@@ -1966,7 +1968,7 @@ if __name__ == '__main__':
 
     if args.mode == 'train':
         train_ae(
-            batch_size=4,
+            batch_size=2,
             n_nodes=N_NODES,
             n_samples=2 ** 17,
             n_layers=2,

@@ -14,6 +14,9 @@ const state = {
   excitationMode: 'sustained',
   pulseRate: 100,
   reverb: { file: null, mix: 0, loading: false },
+  // read live by mic-input.js each frame -- live-adjustable via micGainSlider
+  // (wireMicInput()) whether or not mic input is currently active
+  micGain: 3,
 };
 
 // A single-IR convolution reverb (rather than mixing many, as parallel.py's
@@ -922,8 +925,8 @@ function filterSparkline(taps) {
     })
     .join(' ');
   return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">
-    <line x1="0" y1="${h / 2}" x2="${w}" y2="${h / 2}" stroke="#232838" stroke-width="1" />
-    <polyline points="${points}" fill="none" stroke="#7fd3ff" stroke-width="1.2" />
+    <line x1="0" y1="${h / 2}" x2="${w}" y2="${h / 2}" stroke="#d3c4a3" stroke-width="1" />
+    <polyline points="${points}" fill="none" stroke="#3f8a7d" stroke-width="1.2" />
   </svg>`;
 }
 
@@ -944,7 +947,7 @@ function renderNodeTable(container, title, nodeParams, showFilter) {
         <td>${f0Hz(p.tensionExp).toFixed(1)}</td>
         <td>${p.dampLambda.toFixed(2)}</td>
         <td>${p.excitationGain.toFixed(2)}</td>
-        <td style="color: ${p.gain > 1 ? '#ffb37f' : 'inherit'}">${p.gain.toFixed(2)}</td>
+        <td style="color: ${p.gain > 1 ? '#8c6a1a' : 'inherit'}">${p.gain.toFixed(2)}</td>
         ${filterCells}
       </tr>`;
     })
@@ -965,8 +968,9 @@ function renderMatrix(container, title, matrix, lo, hi, decimals = 2) {
       <tr>${row
         .map((v) => {
           const t = (v - lo) / (hi - lo);
-          const hue = t * 200; // red (low) -> cyan (high)
-          return `<td style="background:hsl(${hue},60%,${18 + t * 20}%)">${v.toFixed(decimals)}</td>`;
+          const hue = 18 + t * 156; // rust (low) -> mustard -> teal (high)
+          // pale tints (high lightness), so --text (now dark ink) stays readable on top
+          return `<td style="background:hsl(${hue},45%,${82 - t * 14}%)">${v.toFixed(decimals)}</td>`;
         })
         .join('')}</tr>`)
     .join('');
@@ -991,7 +995,7 @@ function renderReverbInfo() {
   const status = loading
     ? ' <span style="color:var(--muted)">(loading...)</span>'
     : error
-      ? ' <span style="color:#ff8a8a">(failed to load -- dry only)</span>'
+      ? ' <span style="color:var(--error)">(failed to load -- dry only)</span>'
       : '';
   container.innerHTML = `
     <h3>Reverb</h3>
@@ -1022,7 +1026,7 @@ let scopeMode = 'waveform';
 function clearScope() {
   const canvas = document.getElementById('scope');
   const ctx = canvas.getContext('2d');
-  ctx.fillStyle = '#12141a';
+  ctx.fillStyle = '#e9dfcd';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 }
 
@@ -1038,11 +1042,11 @@ function setScopeMode(mode) {
 const SPECTROGRAM_MIN_FREQ = 20;
 
 function freqBinColor(value) {
-  // 0 -> panel background, 255 -> accent cyan; a single-hue intensity ramp
+  // 0 -> panel background, 255 -> accent teal; a single-hue intensity ramp
   const t = value / 255;
-  const r = Math.round(0x12 + t * (0x7f - 0x12));
-  const g = Math.round(0x14 + t * (0xd3 - 0x14));
-  const b = Math.round(0x1a + t * (0xff - 0x1a));
+  const r = Math.round(0xe9 + t * (0x3f - 0xe9));
+  const g = Math.round(0xdf + t * (0x8a - 0xdf));
+  const b = Math.round(0xcd + t * (0x7d - 0xcd));
   return `rgb(${r},${g},${b})`;
 }
 
@@ -1057,10 +1061,10 @@ function drawScope() {
 
   function drawWaveformFrame() {
     analyser.getFloatTimeDomainData(timeData);
-    canvasCtx.fillStyle = '#12141a';
+    canvasCtx.fillStyle = '#e9dfcd';
     canvasCtx.fillRect(0, 0, w, h);
     canvasCtx.lineWidth = 2;
-    canvasCtx.strokeStyle = '#7fd3ff';
+    canvasCtx.strokeStyle = '#3f8a7d';
     canvasCtx.beginPath();
     for (let i = 0; i < timeData.length; i++) {
       const x = (i / timeData.length) * w;
@@ -1077,12 +1081,12 @@ function drawScope() {
       if (f >= nyquist) continue;
       const t = (Math.log10(f) - logMin) / (logMax - logMin);
       const y = (1 - t) * (h - 1);
-      canvasCtx.strokeStyle = 'rgba(232,236,241,0.2)';
+      canvasCtx.strokeStyle = 'rgba(43,35,24,0.2)';
       canvasCtx.beginPath();
       canvasCtx.moveTo(0, y);
       canvasCtx.lineTo(w, y);
       canvasCtx.stroke();
-      canvasCtx.fillStyle = 'rgba(232,236,241,0.6)';
+      canvasCtx.fillStyle = 'rgba(43,35,24,0.6)';
       canvasCtx.fillText(f >= 1000 ? `${f / 1000}kHz` : `${f}Hz`, 4, y - 2);
     }
   }
@@ -1157,8 +1161,17 @@ function wireARMode() {
 // tension-mod planes keep working exactly as before, via the normal 2D UI.
 function wireMicInput() {
   const toggleBtn = document.getElementById('micInputBtn');
+  const gainSlider = document.getElementById('micGainSlider');
+  const gainLabel = document.getElementById('micGainLabel');
   let micModule = null;
   let active = false;
+
+  gainLabel.textContent = state.micGain.toFixed(1);
+  gainSlider.value = state.micGain;
+  gainSlider.addEventListener('input', () => {
+    state.micGain = parseFloat(gainSlider.value);
+    gainLabel.textContent = state.micGain.toFixed(1);
+  });
 
   toggleBtn.addEventListener('click', async () => {
     micModule = micModule || await import('./mic-input.js');

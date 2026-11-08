@@ -1129,13 +1129,32 @@ def entropy_deficit(spec: jnp.ndarray) -> jnp.ndarray:
     return 1. - entropy / np.log(a.size)
 
 
-def decompose(model: EventAutoencoder, target_audio: jnp.ndarray, n_steps: int, level_norm, key, context=None):
+def decompose(
+        model: EventAutoencoder,
+        target_audio: jnp.ndarray,
+        n_steps: int,
+        level_norm,
+        key,
+        context=None,
+        greedy_repr: str = 'spectrogram'):
     """
     Greedily remove `n_steps` events from `target_audio`.
 
     target_audio: (n_samples,)
     key: split into one key per step, for the generator's noise
     context: from `model.generator.prepare()`
+    greedy_repr: the representation the greedy (energy-removal) loss is
+        computed in -- 'spectrogram' (the default) reuses
+        model.spectrogram's single-resolution STFT magnitude, the same
+        representation driving event selection/encoding; 'multiband' uses
+        the flattened multiband spectrogram instead (see
+        `flattened_multiband_spectrogram`, and its use in `parallel.py`'s
+        own (commented-out) loss_func), computed from the actual
+        (time-domain) residual/event audio -- an exact subtraction, unlike
+        the STFT residual's magnitude-only approximation (phase is
+        discarded there).  Either way, event selection/encoding
+        (`model.encode`, in `step` below) and the information (entropy-
+        deficit) loss are untouched -- they still see model.spectrogram.
     returns: a dict of
         frames, fines, magnitudes: (n_steps,), the selected events
         events: (n_steps, event_dim), the selected event vectors
@@ -1149,16 +1168,11 @@ def decompose(model: EventAutoencoder, target_audio: jnp.ndarray, n_steps: int, 
     """
     target_spec = model.spectrogram(target_audio)
 
-    # the greedy (energy-removal) loss below is computed in a different
-    # representation than the one driving event selection: the flattened
-    # multiband spectrogram (see `flattened_multiband_spectrogram`, and its
-    # use in `parallel.py`'s own (commented-out) loss_func), rather than
-    # model.spectrogram's single-resolution STFT. Event selection/encoding
-    # (`model.encode`, in `step` below) and the information (entropy-
-    # deficit) loss are untouched -- they still see model.spectrogram, i.e.
-    # the same spectrogram passed to analysis as before.
-    total = jax.lax.stop_gradient(
-        level_norm(flattened_multiband_spectrogram(target_audio))) + 1e-8
+    if greedy_repr == 'multiband':
+        total = jax.lax.stop_gradient(
+            level_norm(flattened_multiband_spectrogram(target_audio))) + 1e-8
+    else:
+        total = jax.lax.stop_gradient(level_norm(target_spec)) + 1e-8
     # floored, so a target that's nearly noise already can't blow this up
     total_deficit = jnp.maximum(jax.lax.stop_gradient(entropy_deficit(target_spec)), 1e-2)
 
@@ -1168,14 +1182,12 @@ def decompose(model: EventAutoencoder, target_audio: jnp.ndarray, n_steps: int, 
         audio = model.render(frame, fine, magnitude, event, step_key, context)
         event_spec = model.spectrogram(audio)
 
-        # the greedy loss itself: flattened multiband spectrogram, computed
-        # from the actual (time-domain) residual/event audio -- an exact
-        # subtraction, unlike the STFT residual's magnitude-only
-        # approximation (phase is discarded there, so it's only ever
-        # threaded through for analysis, not for this loss)
-        residual_mb = flattened_multiband_spectrogram(audio_residual)
-        event_mb = flattened_multiband_spectrogram(audio)
-        loss = (level_norm(residual_mb - event_mb) - level_norm(residual_mb)) / total
+        if greedy_repr == 'multiband':
+            residual_mb = flattened_multiband_spectrogram(audio_residual)
+            event_mb = flattened_multiband_spectrogram(audio)
+            loss = (level_norm(residual_mb - event_mb) - level_norm(residual_mb)) / total
+        else:
+            loss = (level_norm(residual - event_spec) - level_norm(residual)) / total
 
         # likewise, negative when the residual moves toward uniform noise --
         # still STFT-domain, unaffected by the above
@@ -1317,7 +1329,8 @@ def make_compute_loss(args):
         # computed once
         context = model.generator.prepare()
         specs = jax.vmap(model.spectrogram)(batch)
-        real = jax.vmap(lambda a, kk: decompose(model, a, args.n_steps, level_norm, kk, context))(
+        real = jax.vmap(lambda a, kk: decompose(
+            model, a, args.n_steps, level_norm, kk, context, greedy_repr=args.greedy_loss_repr))(
             batch, jax.random.split(real_key, batch.shape[0]))
         # the per-step energy removal is always reported, even when it isn't
         # what's trained ('final')
@@ -1380,7 +1393,8 @@ def make_compute_loss(args):
             s_model = model if args.synthetic_decoder_grads else freeze_decoder(model)
             s_context = context if args.synthetic_decoder_grads else jax.lax.stop_gradient(context)
             synthetic_specs = jax.vmap(model.spectrogram)(synthetic)
-            fake = jax.vmap(lambda a, kk: decompose(s_model, a, k, level_norm, kk, s_context))(
+            fake = jax.vmap(lambda a, kk: decompose(
+                s_model, a, k, level_norm, kk, s_context, greedy_repr=args.greedy_loss_repr))(
                 synthetic, jax.random.split(fake_key, n))
             synthetic_greedy = fake['losses'].sum(axis=-1).mean()
             synthetic_information = fake['information_losses'].sum(axis=-1).mean()
@@ -1466,6 +1480,12 @@ def main():
                              "residual; 'final': no per-step energy loss, only the L1 error between the "
                              "target's spectrogram and the final reconstruction's.  Either way, it's "
                              "paired with the per-step information loss (--information-coeff)")
+    parser.add_argument('--greedy-loss-repr', choices=['spectrogram', 'multiband'], default='spectrogram',
+                        help="representation the greedy (energy-removal) loss is computed in: "
+                             "'spectrogram' (the default) reuses model.spectrogram's single-resolution "
+                             "STFT magnitude, the same representation driving event selection; "
+                             "'multiband' uses the flattened multiband spectrogram instead, computed "
+                             "from the actual time-domain residual/event audio")
     parser.add_argument('--loss-scales', choices=['single', 'blur'], default='single',
                         help="'single' measures energy removal on the spectrogram as-is; 'blur' also "
                              "on time/frequency blurs of it (as in scalar_jax.py)")

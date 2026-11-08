@@ -1,6 +1,6 @@
 """
 An audio autoencoder whose decoder is an implicit neural representation
-(in the style of NeRF/SIREN), with weights produced by a hyper-network.
+(in the style of NeRF), with weights produced by a hyper-network.
 
 Encoder ("classic"): log-magnitude STFT -> 1x1 projection -> a stack of
 strided (stride 2) 1D convolutions over time, halving the number of frames at
@@ -8,9 +8,9 @@ each layer until a single frame remains -> a linear layer to the latent
 vector.
 
 Decoder: rather than upsampling from the latent vector, a hyper-network maps
-the latent vector to the weights and biases of an N-layer SIREN, a
-per-sample MLP with sine activations, `sin(w0 * (x @ W + b))`, and a final
-linear layer producing one audio sample.  The SIREN's input, for each sample
+the latent vector to the weights and biases of an N-layer, per-sample MLP
+(`--activation`, GELU by default, after each hidden layer) with a final
+linear layer producing one audio sample.  The MLP's input, for each sample
 of the segment, is a *learned* positional encoding: a table of shape
 (n_samples, pe_dim), shared across all examples, initialized to sines and
 cosines at log-spaced frequencies (from about one cycle per segment up to
@@ -18,12 +18,12 @@ near Nyquist), and trained along with everything else.  So the positional
 encodings say "where", and are the same for every segment; the generated
 weights say "what", and are specific to each segment.
 
-The generated weights are scaled to match SIREN's initialization: the
+The generated weights are scaled to match a standard initialization: the
 hyper-network's per-layer heads produce values of roughly unit variance
 (the trunk's output is layer-normalized, the heads' weights have variance
-1 / fan_in), which are then multiplied by the std of SIREN's uniform init
-for that layer, so at initialization each generated network looks like a
-freshly initialized SIREN.
+1 / fan_in), which are then multiplied by sqrt(2 / fan_in) (He init) for
+hidden layers and sqrt(1 / fan_in) for the output layer, so at
+initialization each generated network looks like a freshly initialized MLP.
 
 The loss is the mean absolute error between log-mel spectrograms of the
 target and the reconstruction.
@@ -93,7 +93,14 @@ class Encoder(eqx.Module):
 
 
 # ---------------------------------------------------------------------------
-# hyper-network and SIREN
+# hyper-network and the generated MLP
+
+ACTIVATIONS = {
+    'gelu': jax.nn.gelu,
+    'silu': jax.nn.silu,
+    'relu': jax.nn.relu,
+    'leaky_relu': lambda x: jax.nn.leaky_relu(x, 0.2),
+}
 
 def sinusoidal_table(n_samples: int, pe_dim: int) -> jnp.ndarray:
     """
@@ -108,14 +115,12 @@ def sinusoidal_table(n_samples: int, pe_dim: int) -> jnp.ndarray:
     return jnp.concatenate([jnp.sin(angles), jnp.cos(angles)], axis=-1)
 
 
-def siren_std(fan_in: int, w0: float, first: bool) -> float:
+def init_std(fan_in: int, output: bool) -> float:
     """
-    The std of SIREN's uniform weight initialization: U(-1/fan_in, 1/fan_in)
-    for the first layer, U(-sqrt(6/fan_in)/w0, sqrt(6/fan_in)/w0) after.
-    U(-a, a) has std a / sqrt(3).
+    He init for hidden layers (followed by a ReLU-like activation), LeCun
+    init for the linear output layer.
     """
-    bound = 1. / fan_in if first else np.sqrt(6. / fan_in) / w0
-    return float(bound / np.sqrt(3.))
+    return float(np.sqrt((1. if output else 2.) / fan_in))
 
 
 class LayerShape(eqx.Module):
@@ -126,7 +131,7 @@ class LayerShape(eqx.Module):
 
 class HyperNetwork(eqx.Module):
     """
-    latent -> (W, b) for each layer of a SIREN, i.e., `n_layers` sine layers
+    latent -> (W, b) for each layer of an MLP, i.e., `n_layers` hidden layers
     (pe_dim -> hidden, then hidden -> hidden) followed by a linear output
     layer (hidden -> 1).
     """
@@ -142,8 +147,6 @@ class HyperNetwork(eqx.Module):
             pe_dim: int,
             hidden: int,
             n_layers: int,
-            w0: float,
-            w0_first: float,
             key):
 
         trunk_key, *head_keys = jax.random.split(key, n_layers + 2)
@@ -159,11 +162,7 @@ class HyperNetwork(eqx.Module):
         fan_outs = [hidden] * n_layers + [1]
         shapes = []
         for i, (fi, fo) in enumerate(zip(fan_ins, fan_outs)):
-            if i == 0:
-                scale = siren_std(fi, w0_first, first=True)
-            else:
-                scale = siren_std(fi, w0, first=False)
-            shapes.append(LayerShape(fi, fo, scale))
+            shapes.append(LayerShape(fi, fo, init_std(fi, output=i == n_layers)))
         self.shapes = tuple(shapes)
 
         # heads: unit-variance outputs from the unit-variance trunk output
@@ -196,7 +195,7 @@ class HyperNetwork(eqx.Module):
         return params
 
 
-def siren(params: List[Tuple[jnp.ndarray, jnp.ndarray]], pe: jnp.ndarray, w0: float, w0_first: float) -> jnp.ndarray:
+def generated_mlp(params: List[Tuple[jnp.ndarray, jnp.ndarray]], pe: jnp.ndarray, activation: str) -> jnp.ndarray:
     """
     params: the hyper-network's output
     pe: (n_samples, pe_dim)
@@ -204,8 +203,9 @@ def siren(params: List[Tuple[jnp.ndarray, jnp.ndarray]], pe: jnp.ndarray, w0: fl
     """
     x = pe
     *hidden, (w_out, b_out) = params
-    for i, (w, b) in enumerate(hidden):
-        x = jnp.sin((w0_first if i == 0 else w0) * (x @ w + b))
+    act = ACTIVATIONS[activation]
+    for w, b in hidden:
+        x = act(x @ w + b)
     return (x @ w_out + b_out)[:, 0]
 
 
@@ -218,8 +218,7 @@ class HyperNerf(eqx.Module):
     hyper: HyperNetwork
     pe: jnp.ndarray
 
-    w0: float = eqx.field(static=True)
-    w0_first: float = eqx.field(static=True)
+    activation: str = eqx.field(static=True)
 
     def __init__(
             self,
@@ -232,16 +231,14 @@ class HyperNerf(eqx.Module):
             pe_dim: int,
             hidden: int,
             n_layers: int,
-            w0: float,
-            w0_first: float,
+            activation: str,
             key):
-        self.w0 = w0
-        self.w0_first = w0_first
+        self.activation = activation
 
         enc_key, hyper_key = jax.random.split(key)
         self.encoder = Encoder(n_samples, window, hop, channels, latent_dim, key=enc_key)
         self.latent_norm = eqx.nn.LayerNorm(latent_dim)
-        self.hyper = HyperNetwork(latent_dim, trunk_dim, pe_dim, hidden, n_layers, w0, w0_first, key=hyper_key)
+        self.hyper = HyperNetwork(latent_dim, trunk_dim, pe_dim, hidden, n_layers, key=hyper_key)
         self.pe = sinusoidal_table(n_samples, pe_dim)
 
     def encode(self, audio: jnp.ndarray) -> jnp.ndarray:
@@ -250,7 +247,7 @@ class HyperNerf(eqx.Module):
 
     def decode(self, latent: jnp.ndarray) -> jnp.ndarray:
         """(latent_dim,) -> (n_samples,)"""
-        return siren(self.hyper(latent), self.pe, self.w0, self.w0_first)
+        return generated_mlp(self.hyper(latent), self.pe, self.activation)
 
     def __call__(self, audio: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
         latent = self.encode(audio)
@@ -290,10 +287,10 @@ def main():
     parser.add_argument('--latent-dim', type=int, default=128)
     parser.add_argument('--trunk-dim', type=int, default=256, help="hyper-network trunk's width")
     parser.add_argument('--pe-dim', type=int, default=64, help='learned positional encoding size')
-    parser.add_argument('--hidden', type=int, default=64, help="generated SIREN's width")
-    parser.add_argument('--n-layers', type=int, default=4, help="generated SIREN's sine layers")
-    parser.add_argument('--w0', type=float, default=30., help='SIREN frequency scale, hidden layers')
-    parser.add_argument('--w0-first', type=float, default=30., help='SIREN frequency scale, first layer')
+    parser.add_argument('--hidden', type=int, default=64, help="generated MLP's width")
+    parser.add_argument('--n-layers', type=int, default=4, help="generated MLP's hidden layers")
+    parser.add_argument('--activation', choices=sorted(ACTIVATIONS), default='gelu',
+                        help="generated MLP's nonlinearity")
     parser.add_argument('--loss-window', type=int, default=2048)
     parser.add_argument('--loss-hop', type=int, default=256)
     parser.add_argument('--n-mels', type=int, default=128)
@@ -342,8 +339,7 @@ def main():
         pe_dim=args.pe_dim,
         hidden=args.hidden,
         n_layers=args.n_layers,
-        w0=args.w0,
-        w0_first=args.w0_first,
+        activation=args.activation,
         key=model_key)
 
     optimizer = optax.apply_if_finite(
