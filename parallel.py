@@ -65,6 +65,23 @@ USE_TENSION_DICTIONARY = False
 # of them. Does not affect tension_modifier, the layer-to-layer FM routing.
 APPLY_DAMP_AND_TENSION_MOD = True
 
+# InstrumentAutoencoder's self.tension/self.damp heads (ControlSignalCreator
+# instances) produce raw, unscaled (post-relu, hard-sparsified) activations
+# with no inherent bound -- unlike LayerController.materialize_tension_mod/
+# materialize_damping_mod and random_synthetic_control_signals's known
+# tension_mod/damp_mod, which both already scale down to 0.001 before use.
+# Applying that same, already-established scale here means: (1) the
+# estimated tension_mod/damp_mod self_supervised/self_supervised_only
+# compare against known_tension_mod/known_damp_mod (via instrument_param_loss)
+# land in the same regime those known values do, instead of being off by
+# ~1000x; and (2) execute_parallel_layer's
+# `tension = tension * compute_tension(log_modifier)` sees a small,
+# physically-reasonable per-step nudge, rather than an unscaled, order-1
+# log_modifier that compute_tension's live `10 ** x` would turn into a full
+# order-of-magnitude (or worse) multiplicative shock each step.
+TENSION_MOD_SCALE = 0.001
+DAMP_MOD_SCALE = 0.001
+
 # if True, use UNetAnalysis instead of Analysis as the encoder: the
 # instrument latent comes from the U-Net's pooled bottleneck (replacing the
 # separate latents/latents_attn attention-pooling heads), and cs/tension_mod/
@@ -570,6 +587,22 @@ class InstrumentAutoencoder(nn.Module):
 
         self.apply(init_func)
 
+        if not USE_TENSION_DICTIONARY:
+            # init_func (above) just zeroed every head's bias, including
+            # to_tension's -- re-spread each node's starting tension across
+            # the full physically-plausible range (matching Layer's direct
+            # t_raw init and random_synthetic_instrument's known-tension
+            # generation) instead of leaving every node at bias=0, i.e.
+            # tension=compute_tension(0)=1, many orders of magnitude below
+            # where the self-supervised task needs it to end up. Note this
+            # sets the *bias* of to_tension's underlying linear layer, so
+            # the actual initial tension per node is this plus a
+            # latent-dependent term (weight @ latent); it isn't a hard
+            # guarantee the way the dictionary path's softmax combination is
+            for hyper in self.hyper_networks:
+                with torch.no_grad():
+                    hyper.to_tension.ln1.bias.uniform_(*tension_exponent_range)
+
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         if USE_UNET_ENCODER:
             latents, x = self.analysis(x)
@@ -597,8 +630,8 @@ class InstrumentAutoencoder(nn.Module):
 
         # print(tm.shape)
 
-        t = self.tension(x)
-        d = self.damp(x)
+        t = self.tension(x) * TENSION_MOD_SCALE
+        d = self.damp(x) * DAMP_MOD_SCALE
 
         tm = None
         layer_outputs = []
@@ -682,8 +715,8 @@ class InstrumentAutoencoder(nn.Module):
             latents = torch.mean(l * attn, dim=-1)
 
         cs = self.control(x)
-        t = self.tension(x)
-        d = self.damp(x)
+        t = self.tension(x) * TENSION_MOD_SCALE
+        d = self.damp(x) * DAMP_MOD_SCALE
 
         params_list = []
         for layer in self.hyper_networks:
@@ -1013,7 +1046,15 @@ class Layer(nn.Module):
             self.t_logits = nn.Parameter(torch.zeros(
                 1, self.n_nodes, tension_dict_size).uniform_(-1, 1))
         else:
-            self.t_raw = nn.Parameter(torch.zeros(1, self.n_nodes, 1).uniform_(-1, 1))
+            # init directly into the physically-plausible tension range
+            # (matching random_synthetic_instrument's known-tension
+            # generation), rather than near t_raw=0 i.e. tension=1 -- compute_
+            # tension's live `10 ** t` has a self-amplifying gradient, so
+            # starting every node 4-9 orders of magnitude below where it
+            # needs to end up means training has to climb out of that
+            # regime before it can even begin to fit a real tension value
+            self.t_raw = nn.Parameter(torch.zeros(
+                1, self.n_nodes, 1).uniform_(*tension_exponent_range))
 
         self.m_raw = nn.Parameter(torch.zeros(
             1, self.n_nodes, 1).uniform_(-1, 1))
