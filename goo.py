@@ -384,7 +384,8 @@ def check_model():
             iteration: int,
             loggers: List[conjure.Conjure],
             model: GooPerformance,
-            optimizer: Optimizer):
+            optimizer: Optimizer,
+            target: torch.Tensor):
 
         forces = loggers[0]
         with torch.no_grad():

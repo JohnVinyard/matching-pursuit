@@ -1,25 +1,55 @@
 // Microphone-driven energy injection.
 //
 // Projects a live microphone's spectrogram down onto the energy plane's n1
-// per-node excitation weights via a fixed random projection matrix -- this
-// user's own `web-components/components/convinstrument.ts` uses the exact
-// same idea (a random matrix projecting hand-landmark deltas down to an RNN
-// input), just applied here to audio instead of hand position. Lets a tap
-// on a table, a vocal sound, etc. drive energy injection directly, while the
-// damping and tension-mod planes keep working exactly as before through the
-// existing 2D UI (unaffected -- this module only ever touches the energy
-// plane's messages).
+// per-node excitation weights via a fixed bank of overlapping Hann-shaped
+// frequency bands -- node 0 always picks up the lowest frequencies, node
+// n1-1 the highest, with each node's band crossfading smoothly into its
+// neighbors' (see frequencyBandProjectionMatrix below), rather than a fully
+// random projection. The control plane (which bins are currently loud) is
+// still effectively unpredictable moment to moment, but *where* on the
+// energy plane low vs. high frequencies land is now fixed and consistent
+// across randomizations, so it's something a user can actually learn over
+// time. Lets a tap on a table, a vocal sound, etc. drive energy injection
+// directly, while the damping and tension-mod planes keep working exactly
+// as before through the existing 2D UI (unaffected -- this module only ever
+// touches the energy plane's messages).
 //
 // A loaded ES module (for consistency with ar-mode.js's lazy-import
 // pattern), though it only uses plain Web Audio APIs internally.
 
-const FFT_SIZE = 2048;
+// Smaller than a typical spectral-analysis window, trading frequency
+// resolution for responsiveness -- the window itself only costs
+// FFT_SIZE / sampleRate (~11.6ms at 44.1kHz) of latency, and
+// frequencyBandProjectionMatrix's bands scale with however many bins this
+// leaves (frequencyBinCount = FFT_SIZE / 2), so they stay well-formed at
+// any reasonable n1.
+const FFT_SIZE = 512;
 
-function randomProjectionMatrix(nOut, nIn) {
+// AnalyserNode smooths each new FFT frame toward the previous one by this
+// much by default (0.8), which is a far bigger latency cost than the window
+// above -- at 0.8 and ~60fps polling, a transient takes ~10 frames
+// (~170ms) to mostly settle. Lowered here for a much snappier response;
+// still > 0 so the mic-driven excitation isn't jumping around on every
+// single frame.
+const SMOOTHING_TIME_CONSTANT = 0.2;
+
+// Builds an (nOut x nIn) matrix of overlapping Hann-shaped frequency bands,
+// ordered low to high: band i is centered at bin (i + 0.5) * nIn / nOut,
+// with a half-width equal to the spacing between centers, so each band's
+// raised-cosine falls to zero exactly at its neighbors' centers -- adjacent
+// bands crossfade smoothly (like overlap-add windows) rather than leaving
+// gaps or hard edges, and every bin still gets picked up by at least one
+// band.
+function frequencyBandProjectionMatrix(nOut, nIn) {
+  const bandWidth = nIn / nOut;
   const rows = [];
   for (let i = 0; i < nOut; i++) {
+    const center = (i + 0.5) * bandWidth;
     const row = new Float32Array(nIn);
-    for (let j = 0; j < nIn; j++) row[j] = Math.random() * 2 - 1;
+    for (let j = 0; j < nIn; j++) {
+      const dist = Math.abs(j - center);
+      row[j] = dist < bandWidth ? 0.5 * (1 + Math.cos((Math.PI * dist) / bandWidth)) : 0;
+    }
     rows.push(row);
   }
   return rows;
@@ -54,6 +84,7 @@ export async function startMicInput() {
   const source = audioCtx.createMediaStreamSource(stream);
   const analyser = audioCtx.createAnalyser();
   analyser.fftSize = FFT_SIZE;
+  analyser.smoothingTimeConstant = SMOOTHING_TIME_CONSTANT;
   source.connect(analyser);
   // deliberately never connected onward to destination -- we only ever read
   // its frequency data, the mic is never actually played back
@@ -61,7 +92,7 @@ export async function startMicInput() {
   const freqData = new Float32Array(analyser.frequencyBinCount);
 
   let n1 = bridge.state.n1;
-  let matrix = randomProjectionMatrix(n1, freqData.length);
+  let matrix = frequencyBandProjectionMatrix(n1, freqData.length);
 
   let rafHandle = null;
   function frame() {
@@ -69,7 +100,7 @@ export async function startMicInput() {
 
     if (bridge.state.n1 !== n1) {
       n1 = bridge.state.n1;
-      matrix = randomProjectionMatrix(n1, freqData.length);
+      matrix = frequencyBandProjectionMatrix(n1, freqData.length);
     }
 
     analyser.getFloatFrequencyData(freqData); // dB, roughly [-100, -30]/quiet-to-loud by default

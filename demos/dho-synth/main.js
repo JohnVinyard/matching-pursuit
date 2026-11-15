@@ -17,6 +17,12 @@ const state = {
   // read live by mic-input.js each frame -- live-adjustable via micGainSlider
   // (wireMicInput()) whether or not mic input is currently active
   micGain: 3,
+  // meta control over skewedDampLambda's sampling range (see
+  // effectiveDampLambdaRange below) -- only affects future randomization,
+  // not whatever's currently playing. 0 = DAMP_LAMBDA_RANGE/DAMP_SKEW's own
+  // defaults; -1 shifts the whole range toward longer sustains, +1 toward
+  // shorter, more percussive decays.
+  dampBias: 0,
 };
 
 // A single-IR convolution reverb (rather than mixing many, as parallel.py's
@@ -127,6 +133,21 @@ function skewedDampLambda([lo, hi], skew) {
   return Math.pow(10, logHi - t * (logHi - logLo));
 }
 
+// How far (in decades of decay rate) the "Decay bias" meta-control (state.
+// dampBias, -1..1) can shift DAMP_LAMBDA_RANGE at its extremes -- a "meta"
+// control over randomization itself, rather than a per-node parameter:
+// every node's dampLambda in the *next* randomize() still gets its own
+// independent draw from skewedDampLambda (so decay times keep varying node
+// to node), but the range that draw comes from is shifted up or down as a
+// whole. Even very long tails are still reachable at dampBias=+1 (and vice
+// versa at -1) -- this biases the odds, it doesn't hard-clip them.
+const DAMP_BIAS_DECADES = 1.5;
+
+function effectiveDampLambdaRange() {
+  const factor = Math.pow(10, state.dampBias * DAMP_BIAS_DECADES);
+  return [DAMP_LAMBDA_RANGE[0] * factor, DAMP_LAMBDA_RANGE[1] * factor];
+}
+
 // `gain` feeds each layer-2 node's own tanh saturation (see the processor's
 // per-node `Math.tanh(z2 * node.gain)`), matching parallel.py's
 // `instrument.gains`. It's randomized across a range that spans clean
@@ -136,13 +157,73 @@ function skewedDampLambda([lo, hi], skew) {
 // processor's final mix, so this doesn't need a 1/n compensation term.
 const FILTER_TAPS = 32;
 
-// A random, unit-normalized 32-tap FIR kernel per node (matching
-// `unit_norm(instrument.filters)` in parallel.py) -- iid random taps give a
-// broadband, noisy coloration rather than a narrow resonant peak, i.e. a
-// "wide-band" filter. filterMix is the unconstrained [dry, filtered] blend
-// weight (`instrument.filters_mix`), applied before the node's gain/tanh.
+// Rather than drawing all FILTER_TAPS taps directly (iid random taps give a
+// flat, "wide-band" spectrum on average), only FILTER_TAPS_LOW taps are ever
+// drawn at random; the full FILTER_TAPS-length kernel is reached by zero-
+// padding *in the frequency domain* and transforming back, exactly as
+// `compute_filters`/`fft_resample(is_lowest_band=True)` do in parallel.py.
+// The forward real-FFT of FILTER_TAPS_LOW random taps only ever populates
+// the lowest floor(FILTER_TAPS_LOW/2)+1 bins of the full kernel's spectrum;
+// every bin above that is carried over as a *structural* zero, not just a
+// small value, so the resulting kernel is guaranteed low-pass regardless of
+// how the low taps are drawn -- a node's filter can vary in cutoff/shape,
+// but never in which regime (low-pass) it's in.
+const FILTER_TAPS_LOW = 8;
+
+// A minimal real FFT/inverse-FFT pair (orthonormal-scaled, matching
+// torch.fft.rfft/irfft(norm='ortho')), sized only for the tiny arrays
+// involved here (at most FILTER_TAPS long) -- a plain O(n*k) double loop is
+// plenty fast at this size, so there's no need for a real FFT library.
+function realFFT(x) {
+  const n = x.length;
+  const nCoeffs = Math.floor(n / 2) + 1;
+  const re = new Float64Array(nCoeffs);
+  const im = new Float64Array(nCoeffs);
+  const scale = 1 / Math.sqrt(n);
+  for (let k = 0; k < nCoeffs; k++) {
+    let sumRe = 0;
+    let sumIm = 0;
+    for (let t = 0; t < n; t++) {
+      const theta = (-2 * Math.PI * k * t) / n;
+      sumRe += x[t] * Math.cos(theta);
+      sumIm += x[t] * Math.sin(theta);
+    }
+    re[k] = sumRe * scale;
+    im[k] = sumIm * scale;
+  }
+  return { re, im };
+}
+
+// Inverse of realFFT, for an even target length `n`: `re`/`im` hold only the
+// lowest `re.length` bins of the desired n-length real signal's spectrum --
+// every bin from `re.length` up to the new Nyquist bin (n/2) is treated as
+// implicitly zero (the zero-padding step), rather than actually allocating
+// and zero-filling a full-size spectrum array.
+function realIFFTEvenZeroPadded(re, im, n) {
+  const nyquist = n / 2;
+  const scale = 1 / Math.sqrt(n);
+  const out = new Float64Array(n);
+  const kMax = Math.min(nyquist, re.length);
+  for (let t = 0; t < n; t++) {
+    let sum = re[0];
+    if (nyquist < re.length) {
+      sum += re[nyquist] * Math.cos(Math.PI * t);
+    }
+    for (let k = 1; k < kMax; k++) {
+      const theta = (2 * Math.PI * k * t) / n;
+      sum += 2 * (re[k] * Math.cos(theta) - im[k] * Math.sin(theta));
+    }
+    out[t] = sum * scale;
+  }
+  return out;
+}
+
+// filterMix is the unconstrained [dry, filtered] blend weight
+// (`instrument.filters_mix`), applied before the node's gain/tanh.
 function randomFilter() {
-  const taps = Array.from({ length: FILTER_TAPS }, () => uniform(-1, 1));
+  const lowTaps = Array.from({ length: FILTER_TAPS_LOW }, () => uniform(-1, 1));
+  const { re, im } = realFFT(lowTaps);
+  const taps = Array.from(realIFFTEvenZeroPadded(re, im, FILTER_TAPS));
   const norm = Math.sqrt(taps.reduce((acc, v) => acc + v * v, 0)) || 1;
   return {
     filterTaps: taps.map((v) => v / norm),
@@ -157,7 +238,7 @@ function randomNodeParams(n, isModulatorLayer) {
       mass: uniform(0.3, 3),
       tensionExp: uniform(4, isModulatorLayer ? 7 : 8),
       tensionMod: 0,
-      dampLambda: skewedDampLambda(DAMP_LAMBDA_RANGE, DAMP_SKEW),
+      dampLambda: skewedDampLambda(effectiveDampLambdaRange(), DAMP_SKEW),
       dampMod: 0,
       excitationGain: uniform(0.5, 1.5),
       gain: uniform(0.5, 3),
@@ -252,7 +333,7 @@ function physicalLayerParams(n, isModulatorLayer) {
     ? PHYSICAL_TENSION_EXP_RANGE.modulator
     : PHYSICAL_TENSION_EXP_RANGE.carrier;
   const minFreq = f0Hz(minExp);
-  const baseDampLambda = skewedDampLambda(DAMP_LAMBDA_RANGE, DAMP_SKEW);
+  const baseDampLambda = skewedDampLambda(effectiveDampLambdaRange(), DAMP_SKEW);
   const params = [];
   for (let i = 0; i < n; i++) {
     const tensionExp = uniform(minExp, maxExp);
@@ -1153,6 +1234,28 @@ function wireARMode() {
   });
 }
 
+// Full-screen touch mode (fullscreen-mode.js) is a separate ES module,
+// loaded lazily via dynamic import only when actually opened, same pattern
+// as AR mode. It drives the existing plane objects' setPointer/
+// clearPointer entry points (via window.DHOSynth) exactly as real pointer
+// events and AR mode do -- it never touches worklet messages directly.
+function wireFullscreenMode() {
+  const enterBtn = document.getElementById('enterFullscreenBtn');
+  const overlay = document.getElementById('fullscreen-overlay');
+  const exitBtn = document.getElementById('fullscreen-exit');
+  let fullscreenModule = null;
+
+  enterBtn.addEventListener('click', async () => {
+    overlay.hidden = false;
+    fullscreenModule = fullscreenModule || await import('./fullscreen-mode.js');
+    await fullscreenModule.startFullscreen(overlay);
+  });
+  exitBtn.addEventListener('click', () => {
+    fullscreenModule?.stopFullscreen();
+    overlay.hidden = true;
+  });
+}
+
 // Mic input (mic-input.js) is a separate module, loaded lazily via dynamic
 // import only when actually enabled, following the same pattern as AR mode.
 // Unlike AR mode it's not a full-screen takeover: it's a toggle that hands
@@ -1190,6 +1293,7 @@ function wireControls() {
   wireTabs();
   wireARMode();
   wireMicInput();
+  wireFullscreenMode();
 
   const startBtn = document.getElementById('startBtn');
   const randomizeBtn = document.getElementById('randomizeBtn');
@@ -1202,6 +1306,8 @@ function wireControls() {
   const sparsityLabel = document.getElementById('sparsityLabel');
   const modDepthSlider = document.getElementById('modDepthSlider');
   const modDepthLabel = document.getElementById('modDepthLabel');
+  const dampBiasSlider = document.getElementById('dampBiasSlider');
+  const dampBiasLabel = document.getElementById('dampBiasLabel');
   const reverbMixSlider = document.getElementById('reverbMixSlider');
   const scopeModeBtn = document.getElementById('scopeModeBtn');
   const strategySelect = document.getElementById('strategySelect');
@@ -1323,6 +1429,14 @@ function wireControls() {
     if (workletNode) {
       workletNode.parameters.get('modDepth').setValueAtTime(depth, audioCtx.currentTime);
     }
+  });
+
+  // Purely a bias on the *next* randomize() -- nothing currently playing is
+  // touched, so there's no workletNode/live-parameter update here, unlike
+  // sparsity (regenerateRouters) and mod depth (a live AudioParam) above.
+  dampBiasSlider.addEventListener('input', () => {
+    state.dampBias = parseFloat(dampBiasSlider.value);
+    dampBiasLabel.textContent = state.dampBias.toFixed(2);
   });
 
   reverbMixSlider.addEventListener('input', () => {

@@ -27,7 +27,13 @@ At each of a fixed number of steps:
        dictionary of raw-sample atoms.  Or (`--generator parallel`, see
        `ParallelGenerator`) `parallel.py`'s whole pipeline: hard-sparse
        control signals driving layers of routed, modified damped harmonic
-       oscillators, then a room.  The result is normalized to unit
+       oscillators, then a room.  Or (`--generator multires`, see
+       `MultiResolutionGenerator`) a router's (straight-through) choice of
+       one of several octave bands, whose expert generates that band's
+       complex FFT coefficients and a gamma envelope, then a room; these
+       events are half the segment long.  Or (`--generator multires-full`,
+       see `MultiResolutionFullGenerator`) every band at once, in a
+       constant-Q time/frequency tiling, then a room.  The result is normalized to unit
        (L2) norm, so the event vector describes only the event's character,
        then scaled by the magnitude, circularly FFT-shifted by `fine * hop`
        samples (fine position; the buffer has a hop of zero padding, so
@@ -63,6 +69,15 @@ left.  Over-subtraction is clipped to zero before measuring, so it digs holes
 (structure) rather than counting as added noise.  White noise's spectrogram
 is about 1% short of the maximum entropy, real segments 13-23% short.
 
+By default (`--information-scope patches`), that measurement isn't made on
+the whole spectrogram but on half-overlapping patches of it, in two shapes:
+"tall" (`--tall-patch`, short and spanning many bins) and "wide"
+(`--wide-patch`, long and spanning few bins).  Each patch is normalized to
+sum to one on its own, so a quiet region's structure counts as much as a
+loud one's (the energy loss handles level).  Each shape's summed patch
+deficits are normalized by the target's, and the two shapes are averaged.
+`--information-scope global` restores the whole-spectrogram version.
+
 An auxiliary, self-supervised loss: synthetic targets are built from a few
 known events, with random frames and fine offsets, random magnitudes
 (log-uniform over the magnitude head's range) and random event vectors
@@ -87,7 +102,9 @@ import optax
 from conjure import LmdbCollection, SupportedContentType, NumpySerializer, NumpyDeserializer, loggers, serve_conjure
 from conjure.logger import encode_audio
 
-from hyper_rnn import AntiCausalBlock, batch_stream, fft_shift, flattened_multiband_spectrogram, max_norm, stft
+from hyper_rnn import (
+    AntiCausalBlock, batch_stream, fft_shift, flattened_multiband_spectrogram, leaky_integrator, max_norm,
+    modified_damped_harmonic_oscillator, stft)
 from scalar_jax import gaussian_blur
 
 
@@ -587,13 +604,6 @@ class ResonanceGenerator(eqx.Module):
         return p['room_mix'][0] * dry + p['room_mix'][1] * wet
 
 
-# `parallel.py`'s time convention: its DHO's time runs over linspace(0, 10,
-# 2 ** 17), so, as with DHO_DT, a fixed time step, rather than one tied to
-# --n-samples.  The Nyquist frequency is omega = pi / PARALLEL_DT, ~41175,
-# i.e., tension ~10 ** 9.2.
-PARALLEL_DT = 10. / 2 ** 17
-
-
 def sparse_control(x: jnp.ndarray, n_to_keep: int) -> jnp.ndarray:
     """
     `parallel.py`'s `ControlSignalCreator`, followed by its hard `sparsify`:
@@ -606,21 +616,6 @@ def sparse_control(x: jnp.ndarray, n_to_keep: int) -> jnp.ndarray:
     flat = x.reshape(-1)
     _, indices = jax.lax.top_k(flat, n_to_keep)
     return jnp.zeros_like(flat).at[indices].set(flat[indices]).reshape(x.shape)
-
-
-def leaky_integrator(forces: jnp.ndarray, damping: jnp.ndarray) -> jnp.ndarray:
-    """
-    `parallel.py`'s `sequential`: out[i] = (forces[i] + out[i - 1]) *
-    damping[i], along the last axis, as a parallel (associative) scan, which
-    is exact and, unlike `parallel.py`'s cumprod/cumsum trick, stable.
-    """
-    def combine(left, right):
-        a1, b1 = left
-        a2, b2 = right
-        return a1 * a2, a2 * b1 + b2
-
-    _, out = jax.lax.associative_scan(combine, (damping, damping * forces), axis=-1)
-    return out
 
 
 class ParallelLayerHeads(eqx.Module):
@@ -857,14 +852,9 @@ class ParallelGenerator(eqx.Module):
         if previous is not None:
             log_tension = log_tension + p['tension_router'].T @ previous
 
-        # the (modified) damped harmonic oscillator, with unit damping and
-        # initial displacement: the energy envelope replaces the decay
-        x = 1. / (2 * mass)
-        omega = jnp.sqrt(jnp.abs(10. ** log_tension - x ** 2))
-        omega = jnp.minimum(omega, 0.95 * np.pi / PARALLEL_DT)
-        phi = jnp.arctan2(x, omega)
-        time = jnp.arange(self.n_samples) * PARALLEL_DT
-        z = energy * jnp.cos(omega * time - phi) / jnp.cos(phi)
+        # the (modified) damped harmonic oscillator: the energy envelope
+        # replaces the decay
+        z = modified_damped_harmonic_oscillator(energy, log_tension, mass)
 
         # each node's own low-pass filter (`parallel.py`'s `compute_filters`:
         # taps upsampled in the frequency domain, so nothing above their own
@@ -889,6 +879,374 @@ class ParallelGenerator(eqx.Module):
         room = room / (jnp.linalg.norm(room) + 1e-8)
         wet = fft_convolve(dry, room, self.n_samples)
         return p['room_mix'][0] * dry + p['room_mix'][1] * wet
+
+
+def gamma_envelope(
+        params: jnp.ndarray,
+        n_samples: int,
+        shape_range: Tuple[float, float],
+        duration_range: Tuple[float, float]) -> jnp.ndarray:
+    """
+    params: (2,) raw shape and mean duration
+    returns: (n_samples,), a gamma-distribution-shaped envelope, peak 1:
+        t ** (k - 1) * exp(-t / theta), with shape k in `shape_range` and
+        mean duration k * theta log-scaled in `duration_range` samples
+    """
+    k_lo, k_hi = shape_range
+    shape = k_lo + jax.nn.sigmoid(params[0]) * (k_hi - k_lo)
+    log_lo, log_hi = np.log(duration_range[0]), np.log(duration_range[1])
+    theta = jnp.exp(log_lo + jax.nn.sigmoid(params[1]) * (log_hi - log_lo)) / shape
+
+    t = jnp.arange(n_samples) + 1.
+    log_env = (shape - 1) * jnp.log(t) - t / theta
+    return jnp.exp(log_env - log_env.max())
+
+
+def apply_room(dry: jnp.ndarray, room_logits: jnp.ndarray, rooms: jnp.ndarray) -> jnp.ndarray:
+    """
+    As in `ResonanceGenerator`: a softmax over the fixed impulse responses
+    (renormalized), convolved with `dry`, then a softmax dry/wet mix.
+
+    dry: (n_samples,)
+    room_logits: (n_rooms + 2,), the room mixture's logits, then the dry/wet
+        mix's two
+    rooms: (n_rooms, n_samples), never trained
+    """
+    room = jax.nn.softmax(room_logits[:-2]) @ jax.lax.stop_gradient(rooms)
+    room = room / (jnp.linalg.norm(room) + 1e-8)
+    wet = fft_convolve(dry, room, dry.shape[-1])
+    room_mix = jax.nn.softmax(room_logits[-2:])
+    return room_mix[0] * dry + room_mix[1] * wet
+
+
+def hann_bump_basis(n_values: int, n_bins: int) -> np.ndarray:
+    """
+    (n_values, n_bins): `n_values` smooth, 50%-overlapping raised-cosine
+    bumps evenly spaced across `n_bins` bins, normalized so that every bin's
+    weights sum to one (a partition of unity, so a flat set of values
+    upsamples to a flat curve, edges included).
+    """
+    width = n_bins / n_values
+    centers = (np.arange(n_values) + 0.5) * width
+    distance = (np.arange(n_bins)[None, :] + 0.5 - centers[:, None]) / width
+    bumps = np.where(np.abs(distance) < 1, 0.5 + 0.5 * np.cos(np.pi * distance), 0.)
+    return (bumps / bumps.sum(axis=0, keepdims=True)).astype(np.float32)
+
+
+def straight_through_one_hot(logits: jnp.ndarray) -> jnp.ndarray:
+    """
+    The argmax of `logits`, one-hot, in the forward pass; the gradient of
+    softmax(logits) in the backward pass.
+    """
+    p = jax.nn.softmax(logits)
+    hard = jax.nn.one_hot(jnp.argmax(logits), logits.shape[-1], dtype=p.dtype)
+    return hard + p - jax.lax.stop_gradient(p)
+
+
+class MultiResolutionGenerator(eqx.Module):
+    """
+    `--generator multires`: an event made from one octave band (resolution),
+    chosen by a router, as in a mixture of experts.  Events are `n_samples`
+    long, which the caller sets to half the segment.
+
+    The bands follow `fft_frequency_decompose`/`fft_frequency_recompose`:
+    `n_levels` band sizes, n_samples / 2 ** (n_levels - 1), ..., n_samples.
+    Every band spans the whole event, at its own sample rate.  The smallest
+    band owns rfft bins [0, N // 2) and each larger band of size N owns the
+    octave [N // 4, N // 2); the largest band also owns the Nyquist bin.  A
+    band of size N is upsampled to n_samples by zero-padding its spectrum,
+    so its bin i is the full-rate spectrum's bin i.  Each band therefore
+    writes its coefficients straight into the event's (n_samples // 2 + 1)-
+    bin spectrum, which is the same as `fft_frequency_recompose`.  The
+    masked-out bins below the octave are never generated.
+
+    1. The router (an MLP) maps the event vector to one logit per band.
+    2. Each band's expert (an MLP) maps the event vector to its octave's
+       complex coefficients and to the two parameters of a gamma-
+       distribution envelope, t ** (k - 1) * exp(-t / theta), defined over
+       the event's normalized time and peak-normalized.  The shape k is in
+       `shape_range`, and the mean duration k * theta is log-scaled in
+       `duration_range` samples.
+    3. Each band's signal is the irfft of its coefficients times its
+       envelope, normalized to unit norm.
+    4. Routing is straight-through: the forward pass is the argmax band's
+       signal alone.  The backward pass gives the router softmax(logits)'s
+       gradient through the mixture sum_k p_k * signal_k.  Every expert is
+       evaluated (n_levels irffts per event) so that every band's logit
+       gets a gradient.  A routing scale on the single chosen signal would
+       be cancelled when `render` normalizes the event to unit norm.  Only
+       the chosen expert's coefficient and envelope heads get gradients.
+    5. A room, as in `ResonanceGenerator`: a softmax over the fixed impulse
+       responses (cropped to the event's length), renormalized, then a
+       softmax dry/wet mix.  A separate head (an MLP of the event vector)
+       chooses both.
+    """
+    router: eqx.nn.MLP
+    experts: list
+    to_room: eqx.nn.MLP
+    rooms: jnp.ndarray
+
+    n_samples: int = eqx.field(static=True)
+    n_levels: int = eqx.field(static=True)
+    bins: Tuple[Tuple[int, int], ...] = eqx.field(static=True)
+    shape_range: Tuple[float, float] = eqx.field(static=True)
+    duration_range: Tuple[float, float] = eqx.field(static=True)
+
+    def __init__(
+            self,
+            event_dim: int,
+            n_samples: int,
+            n_levels: int,
+            rooms: np.ndarray,
+            key,
+            width: int = 256,
+            shape_range: Tuple[float, float] = (1., 4.),
+            duration_range: Optional[Tuple[float, float]] = None):
+        """
+        n_samples: the event's length (half the segment)
+        rooms: (n_rooms, n_samples)
+        duration_range: the envelope's mean duration, in samples; by
+            default 256 to n_samples
+        """
+        smallest = n_samples >> (n_levels - 1)
+        if smallest << (n_levels - 1) != n_samples or smallest < 4:
+            raise ValueError(
+                f'the event length ({n_samples}) must be divisible by 2 ** (n_levels - 1) '
+                f'= {2 ** (n_levels - 1)}, with a smallest band of at least 4 samples')
+
+        self.n_samples = n_samples
+        self.n_levels = n_levels
+        self.shape_range = shape_range
+        self.duration_range = duration_range or (256., float(n_samples))
+
+        bins = []
+        for level in range(n_levels):
+            size = smallest << level
+            lo = 0 if level == 0 else size // 4
+            hi = size // 2 + (1 if level == n_levels - 1 else 0)
+            bins.append((lo, hi))
+        self.bins = tuple(bins)
+
+        router_key, room_key, *expert_keys = jax.random.split(key, n_levels + 2)
+        self.router = eqx.nn.MLP(event_dim, n_levels, width_size=width, depth=2, key=router_key)
+        # the room mixture's logits, then the dry/wet mix's two
+        self.to_room = eqx.nn.MLP(event_dim, rooms.shape[0] + 2, width_size=width, depth=2, key=room_key)
+        self.rooms = jnp.asarray(rooms)
+        # each expert: (real, imag) per owned bin, then the envelope's 2 params
+        self.experts = [
+            eqx.nn.MLP(event_dim, 2 * (hi - lo) + 2, width_size=width, depth=2, key=k)
+            for (lo, hi), k in zip(self.bins, expert_keys)]
+
+    @property
+    def size(self) -> int:
+        return self.n_samples
+
+    @property
+    def band_sizes(self) -> Tuple[int, ...]:
+        return tuple((self.n_samples >> (self.n_levels - 1)) << level for level in range(self.n_levels))
+
+    def prepare(self):
+        """Nothing shared between events to precompute."""
+        return None
+
+    def route(self, event: jnp.ndarray) -> jnp.ndarray:
+        """(n_levels,) router logits"""
+        return self.router(event)
+
+    def envelope(self, params: jnp.ndarray) -> jnp.ndarray:
+        """(n_samples,), see `gamma_envelope`"""
+        return gamma_envelope(params, self.n_samples, self.shape_range, self.duration_range)
+
+    def band_signal(self, level: int, event: jnp.ndarray) -> jnp.ndarray:
+        """
+        The `level`th expert's event: its octave's coefficients, at full rate,
+        under its envelope, at unit norm.  (n_samples,)
+        """
+        lo, hi = self.bins[level]
+        out = self.experts[level](event)
+        n_bins = hi - lo
+        coeffs = out[:n_bins] + 1j * out[n_bins:2 * n_bins]
+        spec = jnp.zeros(self.n_samples // 2 + 1, dtype=coeffs.dtype).at[lo:hi].set(coeffs)
+        signal = jnp.fft.irfft(spec, n=self.n_samples, norm='ortho') * self.envelope(out[2 * n_bins:])
+        return signal / (jnp.linalg.norm(signal) + 1e-8)
+
+    def __call__(self, event: jnp.ndarray, key=None, context=None) -> jnp.ndarray:
+        weights = straight_through_one_hot(self.route(event))
+        signals = jnp.stack([self.band_signal(level, event) for level in range(self.n_levels)])
+        dry = weights @ signals
+
+        # the room (convolution is linear, so applying it to the straight-
+        # through mixture is the same as applying it to each band's signal)
+        return apply_room(dry, self.to_room(event), self.rooms)
+
+
+class MultiResolutionFullGenerator(eqx.Module):
+    """
+    `--generator multires-full`: every event sounds in every one of
+    `n_levels` octave bands (the same bands as `MultiResolutionGenerator`,
+    with no router), and every band spends the same budget of `n` values,
+    where n is the lowest band's coefficient count (its size // 2).  Going up
+    an octave halves the frequency resolution and doubles the time
+    resolution, i.e., a constant-Q tiling of the time/frequency plane:
+
+        band 0 (lowest): 1 frame of n complex coefficients, exact, over the
+            whole event (rfft bins [0, n), as in `MultiResolutionGenerator`)
+        band k >= 1: 2 ** k frames (grains) of n / 2 ** k values each
+
+    Band k >= 1 is overlap-added from 2 ** k grains, each 2 * hop long
+    (hop = n_samples / 2 ** k) under a periodic Hann window (50% overlap, so
+    the windows sum to one).  The band's octave is grain bins [n, 2 * n) in
+    every band (the grain gets shorter exactly as the octave gets higher).
+    Each grain's n / 2 ** k values are upsampled to those n bins with fixed,
+    50%-overlapping Hann bumps (`hann_bump_basis`), each spanning 2 ** k
+    grain bins.  The values are magnitudes (softplus) multiplying white
+    noise's spectrum, so the band is noise filtered by a time-varying
+    spectral envelope: the phase, which matters less and less as frequency
+    goes up, is given up for time resolution.  Bands below `complex_levels`
+    (just band 0, by default) instead generate complex values and use them
+    as the grains' spectra directly, with no noise.
+
+    Each band also has its own gamma envelope over the whole event (see
+    `gamma_envelope`, which band 0 needs for any shape in time) and a gain
+    logit; the band's signal is enveloped, normalized to unit norm and
+    weighted by the softmax of the gain logits over bands, so the gains set
+    the bands' relative levels, and the values only the shape within each
+    band.  Then the bands are summed and a room applied (`apply_room`).
+
+    Every band has its own expert, an MLP of the event vector producing its
+    values (2 * n for complex bands, n otherwise), its 2 envelope parameters
+    and its gain logit.
+    """
+    experts: list
+    to_room: eqx.nn.MLP
+    rooms: jnp.ndarray
+
+    n_samples: int = eqx.field(static=True)
+    n_levels: int = eqx.field(static=True)
+    complex_levels: int = eqx.field(static=True)
+    shape_range: Tuple[float, float] = eqx.field(static=True)
+    duration_range: Tuple[float, float] = eqx.field(static=True)
+
+    def __init__(
+            self,
+            event_dim: int,
+            n_samples: int,
+            n_levels: int,
+            rooms: np.ndarray,
+            key,
+            complex_levels: int = 1,
+            width: int = 256,
+            shape_range: Tuple[float, float] = (1., 4.),
+            duration_range: Optional[Tuple[float, float]] = None):
+        """
+        n_samples: the event's length (half the segment)
+        rooms: (n_rooms, n_samples)
+        complex_levels: how many of the lowest bands generate complex values
+            (with their own phase), rather than magnitudes over noise; >= 1
+        duration_range: the envelopes' mean duration, in samples; by
+            default 256 to n_samples
+        """
+        smallest = n_samples >> (n_levels - 1)
+        if smallest << (n_levels - 1) != n_samples:
+            raise ValueError(
+                f'the event length ({n_samples}) must be divisible by 2 ** (n_levels - 1) '
+                f'= {2 ** (n_levels - 1)}')
+        if (smallest // 2) % (2 ** (n_levels - 1)) != 0:
+            raise ValueError(
+                f"the lowest band's {smallest // 2} coefficients must be divisible by 2 ** (n_levels - 1) "
+                f'= {2 ** (n_levels - 1)}, so the top band has at least one value per frame; '
+                f'use fewer levels or a longer segment')
+        if not 1 <= complex_levels <= n_levels:
+            raise ValueError('complex_levels must be in [1, n_levels]')
+
+        self.n_samples = n_samples
+        self.n_levels = n_levels
+        self.complex_levels = complex_levels
+        self.shape_range = shape_range
+        self.duration_range = duration_range or (256., float(n_samples))
+
+        room_key, *expert_keys = jax.random.split(key, n_levels + 1)
+        self.experts = [
+            eqx.nn.MLP(event_dim, self.n_values(level) + 3, width_size=width, depth=2, key=k)
+            for level, k in enumerate(expert_keys)]
+        self.to_room = eqx.nn.MLP(event_dim, rooms.shape[0] + 2, width_size=width, depth=2, key=room_key)
+        self.rooms = jnp.asarray(rooms)
+
+    @property
+    def size(self) -> int:
+        return self.n_samples
+
+    @property
+    def n(self) -> int:
+        """the values every band spends: the lowest band's coefficient count"""
+        return (self.n_samples >> (self.n_levels - 1)) // 2
+
+    def n_values(self, level: int) -> int:
+        """the expert's (real) outputs for its band's values"""
+        return 2 * self.n if level < self.complex_levels else self.n
+
+    def prepare(self):
+        """Nothing shared between events to precompute."""
+        return None
+
+    def gain_logits(self, event: jnp.ndarray) -> jnp.ndarray:
+        """(n_levels,), whose softmax is the bands' relative levels"""
+        return jnp.stack([expert(event)[-1] for expert in self.experts])
+
+    def lowest_band(self, values: jnp.ndarray) -> jnp.ndarray:
+        """band 0: n complex coefficients, exact, over the whole event"""
+        coeffs = values[:self.n] + 1j * values[self.n:]
+        spec = jnp.zeros(self.n_samples // 2 + 1, dtype=coeffs.dtype).at[:self.n].set(coeffs)
+        return jnp.fft.irfft(spec, n=self.n_samples, norm='ortho')
+
+    def grain_band(self, level: int, values: jnp.ndarray, key) -> jnp.ndarray:
+        """
+        band `level` >= 1: 2 ** level overlap-added grains, each with
+        n / 2 ** level values upsampled to the octave's n grain bins
+        """
+        n_frames = 2 ** level
+        n_per_frame = self.n // n_frames
+        hop = self.n_samples // n_frames
+        basis = jnp.asarray(hann_bump_basis(n_per_frame, self.n))
+
+        if level < self.complex_levels:
+            values = values[:self.n] + 1j * values[self.n:]
+            band = values.reshape(n_frames, n_per_frame) @ basis
+        else:
+            magnitudes = jax.nn.softplus(values).reshape(n_frames, n_per_frame) @ basis
+            noise = jax.random.normal(key, (2, n_frames, self.n))
+            band = magnitudes * (noise[0] + 1j * noise[1])
+
+        # the octave is grain bins [n, 2n) at every level
+        spec = jnp.zeros((n_frames, hop + 1), dtype=band.dtype).at[:, self.n:2 * self.n].set(band)
+        window = 0.5 - 0.5 * jnp.cos(2 * jnp.pi * jnp.arange(2 * hop) / (2 * hop))
+        grains = jnp.fft.irfft(spec, n=2 * hop, axis=-1) * window
+
+        # overlap-add, grain t covering [t * hop, (t + 2) * hop), then shifted
+        # back by half a hop, so grain t is centered on frame t's center
+        first = jnp.pad(grains[:, :hop], ((0, 1), (0, 0)))
+        second = jnp.pad(grains[:, hop:], ((1, 0), (0, 0)))
+        canvas = (first + second).reshape(-1)
+        return canvas[hop // 2:hop // 2 + self.n_samples]
+
+    def __call__(self, event: jnp.ndarray, key, context=None) -> jnp.ndarray:
+        gains = jax.nn.softmax(self.gain_logits(event))
+        keys = jax.random.split(key, self.n_levels)
+
+        dry = jnp.zeros(self.n_samples)
+        for level, expert in enumerate(self.experts):
+            out = expert(event)
+            n_values = self.n_values(level)
+            values, envelope_params = out[:n_values], out[n_values:n_values + 2]
+            if level == 0:
+                signal = self.lowest_band(values)
+            else:
+                signal = self.grain_band(level, values, keys[level])
+            signal = signal * gamma_envelope(
+                envelope_params, self.n_samples, self.shape_range, self.duration_range)
+            dry = dry + gains[level] * signal / (jnp.linalg.norm(signal) + 1e-8)
+
+        return apply_room(dry, self.to_room(event), self.rooms)
 
 
 # ---------------------------------------------------------------------------
@@ -1129,6 +1487,55 @@ def entropy_deficit(spec: jnp.ndarray) -> jnp.ndarray:
     return 1. - entropy / np.log(a.size)
 
 
+def spectrogram_patches(spec: jnp.ndarray, size: Tuple[int, int]) -> jnp.ndarray:
+    """
+    Half-overlapping (stride size // 2 along each axis) patches of a
+    spectrogram, zero-padded at the end of each axis so every cell is
+    covered.
+
+    spec: (n_frames, n_coeffs)
+    size: (frames, bins), both even
+    returns: (n_patches, frames * bins)
+    """
+    def windows(n: int, length: int) -> np.ndarray:
+        stride = length // 2
+        count = max(1, -(-(n - length) // stride) + 1)
+        return np.arange(count)[:, None] * stride + np.arange(length)[None, :]
+
+    frames, bins = size
+    t_idx, f_idx = windows(spec.shape[0], frames), windows(spec.shape[1], bins)
+    padded = jnp.pad(spec, ((0, t_idx.max() + 1 - spec.shape[0]), (0, f_idx.max() + 1 - spec.shape[1])))
+    patches = padded[t_idx][:, :, f_idx]  # (n_t, frames, n_f, bins)
+    return patches.transpose(0, 2, 1, 3).reshape(-1, frames * bins)
+
+
+def patch_entropy_deficit(spec: jnp.ndarray, size: Tuple[int, int]) -> jnp.ndarray:
+    """
+    The sum, over `spectrogram_patches(spec, size)`, of each patch's
+    `entropy_deficit`: each patch is normalized to sum to one on its own, so
+    a quiet patch's structure counts as much as a loud one's.
+    """
+    a = jnp.maximum(spectrogram_patches(spec, size), 0.)
+    p = a / (a.sum(axis=-1, keepdims=True) + 1e-12)
+    entropy = -(p * jnp.log(p + 1e-12)).sum(axis=-1)
+    return (1. - entropy / np.log(a.shape[-1])).sum()
+
+
+def make_information_deficit(scope: str, patch_sizes: Tuple[Tuple[int, int], ...]):
+    """
+    Returns `information_deficit(spec)`, (n_scopes,): how far the
+    spectrogram is from structureless noise, regardless of scale, measured
+    once per scope.  The information loss divides each scope's change by
+    the target's value and averages over the scopes.
+
+    'global': one value, `entropy_deficit` of the whole spectrogram
+    'patches': one value per patch size, `patch_entropy_deficit`
+    """
+    if scope == 'global':
+        return lambda spec: entropy_deficit(spec)[None]
+    return lambda spec: jnp.stack([patch_entropy_deficit(spec, size) for size in patch_sizes])
+
+
 def decompose(
         model: EventAutoencoder,
         target_audio: jnp.ndarray,
@@ -1136,7 +1543,8 @@ def decompose(
         level_norm,
         key,
         context=None,
-        greedy_repr: str = 'spectrogram'):
+        greedy_repr: str = 'spectrogram',
+        information_deficit=None):
     """
     Greedily remove `n_steps` events from `target_audio`.
 
@@ -1173,8 +1581,10 @@ def decompose(
             level_norm(flattened_multiband_spectrogram(target_audio))) + 1e-8
     else:
         total = jax.lax.stop_gradient(level_norm(target_spec)) + 1e-8
+    # see `make_information_deficit`; the whole spectrogram by default
+    information_deficit = information_deficit or make_information_deficit('global', ())
     # floored, so a target that's nearly noise already can't blow this up
-    total_deficit = jnp.maximum(jax.lax.stop_gradient(entropy_deficit(target_spec)), 1e-2)
+    total_deficit = jnp.maximum(jax.lax.stop_gradient(information_deficit(target_spec)), 1e-2)
 
     def step(carry, step_key):
         residual, audio_residual = carry
@@ -1191,8 +1601,8 @@ def decompose(
 
         # likewise, negative when the residual moves toward uniform noise --
         # still STFT-domain, unaffected by the above
-        information_loss = (
-            entropy_deficit(residual - event_spec) - entropy_deficit(residual)) / total_deficit
+        information_loss = jnp.mean(
+            (information_deficit(residual - event_spec) - information_deficit(residual)) / total_deficit)
 
         residual = jax.lax.stop_gradient(residual - event_spec)
         audio_residual = jax.lax.stop_gradient(audio_residual - audio)
@@ -1302,6 +1712,8 @@ def make_compute_loss(args):
     the parsed command-line `args`.
     """
     level_norm = make_level_norm(args.loss_scales, args.loss_blur_levels)
+    information_deficit = make_information_deficit(
+        args.information_scope, (args.tall_patch, args.wide_patch))
 
     def final_error(model: EventAutoencoder, decomposition: dict, target_specs: jnp.ndarray) -> jnp.ndarray:
         """
@@ -1330,7 +1742,8 @@ def make_compute_loss(args):
         context = model.generator.prepare()
         specs = jax.vmap(model.spectrogram)(batch)
         real = jax.vmap(lambda a, kk: decompose(
-            model, a, args.n_steps, level_norm, kk, context, greedy_repr=args.greedy_loss_repr))(
+            model, a, args.n_steps, level_norm, kk, context, greedy_repr=args.greedy_loss_repr,
+            information_deficit=information_deficit))(
             batch, jax.random.split(real_key, batch.shape[0]))
         # the per-step energy removal is always reported, even when it isn't
         # what's trained ('final')
@@ -1346,6 +1759,7 @@ def make_compute_loss(args):
             recon=real['audio'].sum(axis=1),
             residual=real['residual'],
             frames=real['frames'],
+            events=real['events'],
             synthetic_greedy=jnp.zeros(()),
             fine_error=jnp.zeros(()),
             magnitude_error=jnp.zeros(()),
@@ -1394,7 +1808,8 @@ def make_compute_loss(args):
             s_context = context if args.synthetic_decoder_grads else jax.lax.stop_gradient(context)
             synthetic_specs = jax.vmap(model.spectrogram)(synthetic)
             fake = jax.vmap(lambda a, kk: decompose(
-                s_model, a, k, level_norm, kk, s_context, greedy_repr=args.greedy_loss_repr))(
+                s_model, a, k, level_norm, kk, s_context, greedy_repr=args.greedy_loss_repr,
+                information_deficit=information_deficit))(
                 synthetic, jax.random.split(fake_key, n))
             synthetic_greedy = fake['losses'].sum(axis=-1).mean()
             synthetic_information = fake['information_losses'].sum(axis=-1).mean()
@@ -1438,13 +1853,26 @@ def main():
     parser.add_argument('--channels', type=int, default=128, help='encoder channels')
     parser.add_argument('--pe-freqs', type=int, default=16, help='positional encoding frequencies')
     parser.add_argument('--event-dim', type=int, default=16)
-    parser.add_argument('--generator', choices=['resonance', 'atoms', 'parallel'], default='resonance',
+    parser.add_argument('--generator', choices=['resonance', 'atoms', 'parallel', 'multires', 'multires-full'], default='resonance',
                         help="'resonance': enveloped noise -> damped harmonic oscillator resonance -> "
                              "dry/filtered mix -> room -> dry/wet mix; events are --n-samples long. "
                              "'atoms': a sparse sum of dictionary atoms, --atom-size long. "
                              "'parallel': parallel.py's whole pipeline (sparse control signals driving "
                              "layers of routed, modified damped harmonic oscillators, then a room), "
-                             "configured by ParallelGenerator's constructor defaults; --n-samples long")
+                             "configured by ParallelGenerator's constructor defaults; --n-samples long. "
+                             "'multires': a router picks one of --n-levels octave bands (straight-through), "
+                             "whose expert generates its complex FFT coefficients and a gamma envelope, "
+                             "then a room -> dry/wet mix; --n-samples // 2 long. "
+                             "'multires-full': every event uses all --n-levels bands, each with the same "
+                             "budget of values in a constant-Q time/frequency tiling (magnitudes over noise "
+                             "above --complex-levels), its own gamma envelope and a relative gain, then a "
+                             "room; --n-samples // 2 long")
+    parser.add_argument('--n-levels', type=int, default=6,
+                        help="'multires' only: resolutions (octave bands) the router chooses between; "
+                             "the smallest band is (--n-samples // 2) / 2 ** (n_levels - 1) samples")
+    parser.add_argument('--complex-levels', type=int, default=1,
+                        help="'multires-full' only: how many of the lowest bands generate complex values "
+                             "(their own phase), rather than magnitudes over noise")
     parser.add_argument('--n-atoms', type=int, default=2048, help="'atoms' only: dictionary size")
     parser.add_argument('--atom-size', type=int, default=4096, help="'atoms' only: the event's length")
     parser.add_argument('--n-active-atoms', type=int, default=16,
@@ -1453,7 +1881,7 @@ def main():
                         help="'resonance' only: resonances in the shared, learned bank each event mixes")
     parser.add_argument('--n-oscillators', type=int, default=2,
                         help="'resonance' only: damped harmonic oscillators summed per resonance, per layer")
-    parser.add_argument('--dho-layers', type=int, default=3,
+    parser.add_argument('--dho-layers', type=int, default=2,
                         help="'resonance' only: stacked oscillator blocks, each modulating the next's "
                              "tension, mixed (as in songsplat)")
     parser.add_argument('--envelope-frames', type=int, default=128,
@@ -1467,7 +1895,7 @@ def main():
                              "duration 2 to --envelope-frames/4 frames); 'random': default init, "
                              "near-flat envelopes")
     parser.add_argument('--rooms-path', type=str, default=None,
-                        help="'resonance' and 'parallel' only: a directory of .wav impulse responses; defaults to "
+                        help="'resonance', 'parallel', 'multires' and 'multires-full' only: a directory of .wav impulse responses; defaults to "
                              "IMPULSE_RESPONSE_PATH from .env")
     parser.add_argument('--min-magnitude', type=float, default=0.01,
                         help="smallest event magnitude (L2 norm); the magnitude head's lower bound")
@@ -1492,6 +1920,23 @@ def main():
     parser.add_argument('--loss-blur-levels', type=int, default=8,
                         help="'blur' only; std up to 2 ** (levels - 1) frames, a quarter of the "
                              "segment by default")
+    def patch_size(text):
+        frames, bins = (int(v) for v in text.split(','))
+        if frames < 2 or bins < 2 or frames % 2 or bins % 2:
+            raise argparse.ArgumentTypeError('patch sizes are FRAMES,BINS, both even and >= 2')
+        return frames, bins
+
+    parser.add_argument('--information-scope', choices=['patches', 'global'], default='patches',
+                        help="'patches': the information loss is measured on half-overlapping spectrogram "
+                             "patches of two shapes (--tall-patch, --wide-patch), each patch normalized on "
+                             "its own, so only its structure counts, not its level; 'global': on the whole "
+                             "spectrogram at once")
+    parser.add_argument('--tall-patch', type=patch_size, default=(8, 256),
+                        help="'patches' only: FRAMES,BINS of the short-duration, wide-frequency patches "
+                             "(default 8,256: ~93ms x ~2.8kHz at the default window, hop and samplerate)")
+    parser.add_argument('--wide-patch', type=patch_size, default=(64, 32),
+                        help="'patches' only: FRAMES,BINS of the long-duration, narrow-frequency patches "
+                             "(default 64,32: ~0.74s x ~340Hz)")
     parser.add_argument('--information-coeff', type=float, default=1.,
                         help='weight of the information-removal loss (each step pushing the residual '
                              'spectrogram toward flat, uniform noise, regardless of scale), alongside '
@@ -1578,15 +2023,32 @@ def main():
 
     model_key, generator_key, random_key = jax.random.split(jax.random.key(args.seed), 3)
 
-    if args.generator in ('resonance', 'parallel'):
+    if args.generator in ('resonance', 'parallel', 'multires', 'multires-full'):
         from config.dotenv import Config
-        rooms = load_rooms(args.rooms_path or Config.impulse_response_path(), args.samplerate, args.n_samples)
+        # multires events are half the segment long, and so are its rooms
+        room_size = args.n_samples // 2 if args.generator.startswith('multires') else args.n_samples
+        rooms = load_rooms(args.rooms_path or Config.impulse_response_path(), args.samplerate, room_size)
 
     if args.generator == 'parallel':
         generator = ParallelGenerator(
             event_dim=args.event_dim,
             n_samples=args.n_samples,
             rooms=rooms,
+            key=generator_key)
+    elif args.generator == 'multires':
+        generator = MultiResolutionGenerator(
+            event_dim=args.event_dim,
+            n_samples=args.n_samples // 2,
+            n_levels=args.n_levels,
+            rooms=rooms,
+            key=generator_key)
+    elif args.generator == 'multires-full':
+        generator = MultiResolutionFullGenerator(
+            event_dim=args.event_dim,
+            n_samples=args.n_samples // 2,
+            n_levels=args.n_levels,
+            rooms=rooms,
+            complex_levels=args.complex_levels,
             key=generator_key)
     elif args.generator == 'resonance':
         generator = ResonanceGenerator(
@@ -1679,6 +2141,17 @@ def main():
             f'  info removed {-float(aux["information"]):.3f}'
             + (f'  final error {float(aux["final_error"]):.3f}' if args.energy_loss == 'final' else '')
             + f'  distinct frames {distinct}/{args.n_steps}')
+
+        if args.generator == 'multires':
+            # how many of the real decomposition's events chose each band,
+            # smallest (lowest-frequency) first
+            bands = np.asarray(jnp.argmax(jax.vmap(model.generator.route)(aux['events'][0]), axis=-1))
+            line += f'  bands {np.bincount(bands, minlength=args.n_levels).tolist()}'
+        elif args.generator == 'multires-full':
+            # the real decomposition's mean relative level of each band,
+            # smallest (lowest-frequency) first
+            gains = jax.nn.softmax(jax.vmap(model.generator.gain_logits)(aux['events'][0]), axis=-1)
+            line += f'  band gains {np.round(np.asarray(gains.mean(axis=0)), 2).tolist()}'
 
         if args.synthetic:
             synthetic_audio(max_norm(np.asarray(aux['synthetic'][0])))

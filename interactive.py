@@ -363,10 +363,11 @@ if __name__ == '__main__':
         return other_loggers
     
     def training_loop_hook(
-        iteration: int, 
-        loggers: List[conjure.Conjure], 
+        iteration: int,
+        loggers: List[conjure.Conjure],
         model: Performance,
-        optim: Optimizer):
+        optim: Optimizer,
+        target: torch.Tensor):
         
         # TODO: Again, these should be indexed by
         # name.  Relying on remembering the position

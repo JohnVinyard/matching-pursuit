@@ -133,7 +133,7 @@ if __name__ == '__main__':
         n_oscillators=n_oscillators
     )
 
-    def training_loop_hook(iteration: int, loggers: List[conjure.Conjure], model: nn.Module, optim):
+    def training_loop_hook(iteration: int, loggers: List[conjure.Conjure], model: nn.Module, optim, target: torch.Tensor):
         t, = loggers
         # TODO: unable to tell if time is moving forward or backward here
         times = max_norm(model.times.view(n_oscillators, -1))

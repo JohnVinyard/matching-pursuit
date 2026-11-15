@@ -1,4 +1,6 @@
+import base64
 import math
+import struct
 from builtins import enumerate
 from dataclasses import dataclass
 from typing import Iterable, Tuple, Callable, List
@@ -93,14 +95,32 @@ USE_UNET_ENCODER = True
 N_NODES = 32
 
 # analysis arch
-DO_NORM = True
+DO_NORM = False
 
 
 # sparse
-SPARSIFY = False
+SPARSIFY = True
 SOFT_SPARSE = False
 SPARSITY_LOSS_COEFF = 1
 N_TO_KEEP = 128
+
+# diagnostic-only, imperfect by design: when True, max_norm is applied to
+# recon/synth/synth_recon (but not the real/synthetic *targets* they're
+# compared against for the loss, apart from synthetic_audio itself, which
+# also gets max_norm'd here since -- unlike the real AudioIterator batch,
+# which already comes in max_norm'd -- it's never normalized at
+# synthesis time) immediately before computing loss_func, so the
+# reconstruction loss only ever sees peak-normalized signals on both sides.
+# If this noticeably shrinks the loss (or stabilizes/improves training),
+# that's a sign the model was mostly struggling to match overall loudness,
+# rather than shape/structure.
+MAX_NORM_BEFORE_LOSS = False
+
+# weight on the auxiliary "information" loss (see information_loss/
+# entropy_deficit), which pushes the target/recon spectrogram residual
+# toward unstructured, uniform noise, regardless of its scale -- ported
+# from jax_ae.py's --information-coeff. 0 disables it entirely.
+INFORMATION_COEFF = 1
 
 FILTER_SIZE = 256
 
@@ -475,9 +495,9 @@ class ControlSignalCreator(nn.Module):
         x = F.pad(x, (0, 7))
         x = self.network(x)
 
-        x = torch.abs(x)
-        x = x - x.mean(dim=(1, 2), keepdim=True)
-        x = torch.relu(x)
+        # x = torch.abs(x)
+        # x = x - x.mean(dim=(1, 2), keepdim=True)
+        # x = torch.relu(x)
         
         
         if self.sparsify:
@@ -584,6 +604,13 @@ class InstrumentAutoencoder(nn.Module):
         # own output into the final signal, instead of using only the last
         # layer's output
         self.layer_mix = nn.Parameter(torch.zeros(n_layers).uniform_(-0.01, 0.01))
+
+        # a single scalar gain, shared across every hyper_networks layer
+        # instance (unlike each InstrumentDefinitionTensors.output_gain,
+        # applied node-wise inside execute_parallel_layer before the layers
+        # are mixed/summed), applied once as the very last step before the
+        # final audio is returned
+        self.final_gain = nn.Parameter(torch.zeros(1).uniform_(0.5, 1.5))
 
         self.apply(init_func)
 
@@ -692,6 +719,8 @@ class InstrumentAutoencoder(nn.Module):
 
         mixed = torch.einsum('bctm,bm->bct', stacked, mx)
 
+        mixed = mixed * self.final_gain
+
         return cs, mixed
 
     def estimate_params(
@@ -729,6 +758,55 @@ class InstrumentAutoencoder(nn.Module):
         mx = self.wet_dry.forward(latents)
 
         return cs, t, d, params_list, rooms, mx
+
+    def random_forward(self, x: torch.Tensor, n_to_keep: int = None) -> torch.Tensor:
+        """
+        Mirrors LayerController.random_forward: holds the current (estimated
+        from x) instrument definition/tension/damping/rooms/wet-dry mix
+        fixed, but drives it with a fresh, highly-sparse random control
+        signal instead of the encoder-derived one -- a sanity check on
+        whether the learned instrument sounds plausible independent of the
+        specific input it was estimated from.
+        """
+        cs, t, d, params_list, rooms, mx = self.estimate_params(x)
+
+        forces = torch.zeros_like(cs).uniform_(0, 1)
+        forces = sparsify(forces, n_to_keep=n_to_keep)
+
+        static = StaticTensors(
+            time=self.t,
+            damping=self.d,
+            initial_displacement=self._id
+        )
+
+        tm = None
+        layer_outputs = []
+        for params in params_list:
+            tm, _ = execute_parallel_layer(
+                instrument=params,
+                hyper=self.hyper_params,
+                static=static,
+                forces=forces,
+                damp_mod=d,
+                tension_mod=t,
+                tension_modifier=tm
+            )
+            layer_outputs.append(tm)
+
+        if SUM_LAYER_OUTPUTS:
+            stacked = torch.stack(layer_outputs, dim=-1)
+            tm = torch.einsum('bctl,l->bct', stacked, self.layer_mix)
+        else:
+            tm = layer_outputs[-1]
+
+        tm = torch.sum(tm, dim=1, keepdim=True)
+
+        wet = self.verb.forward(tm, rooms)
+        stacked = torch.stack([tm, wet], dim=-1)
+        mixed = torch.einsum('bctm,bm->bct', stacked, mx)
+        mixed = mixed * self.final_gain
+
+        return mixed
 
 
 def execute_parallel_layer(
@@ -828,6 +906,25 @@ def l0_norm(x: torch.Tensor):
 
 def l1_norm(x: torch.Tensor) -> torch.Tensor:
     return torch.abs(x).sum()
+
+
+def avg_norm(x: torch.Tensor) -> torch.Tensor:
+    """
+    The L2 norm along the time (last) dimension, averaged over all
+    remaining (batch/channel) dimensions -- a single scalar summarizing a
+    batch of audio clips' overall amplitude, for comparing real vs.
+    reconstructed (or synthetic vs. its reconstruction) signal scale.
+    Logged alongside the losses to help diagnose amplitude mismatches, e.g.
+    when changing MASS_COEFF.
+    """
+    return torch.norm(x, dim=-1).mean()
+
+
+def maybe_max_norm(x: torch.Tensor) -> torch.Tensor:
+    """
+    See MAX_NORM_BEFORE_LOSS.
+    """
+    return max_norm(x) if MAX_NORM_BEFORE_LOSS else x
 
 
 def stft(
@@ -1194,6 +1291,12 @@ class LayerController(nn.Module):
         self.mix = nn.Parameter(torch.zeros(
             self.n_layers).uniform_(-0.01, 0.01))
 
+        # a single scalar gain, shared across every layer instance (unlike
+        # each Layer's own per-layer output_gain, applied node-wise inside
+        # execute_parallel_layer before the layers are mixed/summed), applied
+        # once as the very last step before the final audio is returned
+        self.final_gain = nn.Parameter(torch.zeros(1).uniform_(0.5, 1.5))
+
     @property
     def total_params(self):
         return \
@@ -1299,6 +1402,8 @@ class LayerController(nn.Module):
         if sum_output:
             tm = torch.sum(tm, dim=1, keepdim=True)
 
+        tm = tm * self.final_gain
+
         return tm, sparse_forces
 
 # spiking = SpikingModel(64, 64, 64, 64, 64).to(device)
@@ -1307,16 +1412,48 @@ def loss_func(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     
     # base_loss = spiking.compute_multiband_loss(a, b, hard=True)
 
-    a = flattened_multiband_spectrogram(
-        a, {'xs': (64, 16)}, smallest_band_size=512)
-    b = flattened_multiband_spectrogram(
-        b, {'xs': (64, 16)}, smallest_band_size=512)
+    # a = flattened_multiband_spectrogram(
+    #     a, {'xs': (64, 16)}, smallest_band_size=512)
+    # b = flattened_multiband_spectrogram(
+    #     b, {'xs': (64, 16)}, smallest_band_size=512)
 
-    # a = stft(a, 2048, 256, pad=False)
-    # b = stft(b, 2048, 256, pad=False)
+    a = stft(a, 2048, 256, pad=False)
+    b = stft(b, 2048, 256, pad=False)
 
     base_loss = torch.abs(a - b).sum()
     return base_loss
+
+
+def entropy_deficit(spec: torch.Tensor) -> torch.Tensor:
+    """
+    How far a (magnitude) spectrogram is from flat, i.e., from uniform
+    noise, regardless of its overall scale: 1 - (entropy of the
+    spectrogram, normalized to sum to one) / (the maximum possible entropy,
+    log of the number of cells). 0 when already flat/noise-like, 1 when all
+    energy sits in a single cell. Negative values are clipped to zero
+    first, so an over-subtracted residual counts as a hole, not energy.
+    Ported from jax_ae.py's entropy_deficit.
+    """
+    a = torch.clamp(spec, min=0).reshape(-1)
+    p = a / (a.sum() + 1e-12)
+    entropy = -(p * torch.log(p + 1e-12)).sum()
+    return 1. - entropy / math.log(a.numel())
+
+
+def information_loss(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """
+    The auxiliary "information" loss from jax_ae.py, adapted to parallel.py's
+    single-shot (non-greedy) reconstruction: the entropy deficit of the
+    *spectrogram* residual (a's magnitude spectrogram minus b's, clipped to
+    >= 0) between a real/synthetic target `a` and its reconstruction `b`.
+    Pushing this toward zero asks the residual to look like unstructured,
+    uniform noise -- regardless of scale -- rather than asking it to be
+    small (that's loss_func's job).
+    """
+    a = stft(a, 2048, 256, pad=False)
+    b = stft(b, 2048, 256, pad=False)
+    residual = torch.clamp(a - b, min=0)
+    return entropy_deficit(residual)
 
 
 def random_synthetic_instrument(
@@ -1591,9 +1728,12 @@ def train_ae(batch_size: int, n_nodes: int, n_samples: int, n_layers: int, n_to_
 
         recon_audio(max_norm(recon[0, ...]))
         
-        # if we are "hard" sparsifying, then don't bother with sparsity loss        
+        # if we are "hard" sparsifying, then don't bother with sparsity loss
         sparsity_coeff = 0 if SPARSIFY else 1
-        loss = loss_func(batch, recon) + (l0_norm(control_signal) * SPARSITY_LOSS_COEFF * sparsity_coeff)
+        info_loss = information_loss(batch, maybe_max_norm(recon))
+        loss = loss_func(batch, maybe_max_norm(recon)) \
+            + (l0_norm(control_signal) * SPARSITY_LOSS_COEFF * sparsity_coeff) \
+            + (info_loss * INFORMATION_COEFF)
 
         sparsity = (control_signal > 0).sum() / control_signal.numel()
 
@@ -1614,7 +1754,11 @@ def train_ae(batch_size: int, n_nodes: int, n_samples: int, n_layers: int, n_to_
 
         # optim.step()
 
-        print(i, loss.item(), sparsity.item())
+        print(
+            i, loss.item(), sparsity.item(),
+            'info', info_loss.item(),
+            'real_norm', avg_norm(batch).item(),
+            'recon_norm', avg_norm(recon).item())
 
 
 def self_supervised(batch_size: int, n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int):
@@ -1682,7 +1826,10 @@ def self_supervised(batch_size: int, n_nodes: int, n_samples: int, n_layers: int
         recon_audio(max_norm(recon[0, ...]))
 
         sparsity_coeff = 0 if SPARSIFY else 1
-        real_loss = loss_func(batch, recon) + (l0_norm(control_signal) * SPARSITY_LOSS_COEFF * sparsity_coeff)
+        real_info_loss = information_loss(batch, maybe_max_norm(recon))
+        real_loss = loss_func(batch, maybe_max_norm(recon)) \
+            + (l0_norm(control_signal) * SPARSITY_LOSS_COEFF * sparsity_coeff) \
+            + (real_info_loss * INFORMATION_COEFF)
         sparsity = (control_signal > 0).sum() / control_signal.numel()
 
         # --- synthetic example: known params/control signals -> known audio ---
@@ -1708,7 +1855,9 @@ def self_supervised(batch_size: int, n_nodes: int, n_samples: int, n_layers: int
 
         synth_control_signal, synth_recon = analysis_model.forward(synthetic_audio)
         synth_recon_audio(max_norm(synth_recon[0, ...]))
-        synth_recon_loss = loss_func(synthetic_audio, synth_recon)
+        synth_info_loss = information_loss(maybe_max_norm(synthetic_audio), maybe_max_norm(synth_recon))
+        synth_recon_loss = loss_func(maybe_max_norm(synthetic_audio), maybe_max_norm(synth_recon)) \
+            + (synth_info_loss * INFORMATION_COEFF)
 
         est_cs, est_tension_mod, est_damp_mod, est_params, est_rooms, est_wet_dry = \
             analysis_model.estimate_params(synthetic_audio)
@@ -1737,7 +1886,13 @@ def self_supervised(batch_size: int, n_nodes: int, n_samples: int, n_layers: int
             'real', real_loss.item(),
             'synth_recon', synth_recon_loss.item(),
             'param', param_loss.item(),
-            'sparsity', sparsity.item())
+            'sparsity', sparsity.item(),
+            'real_info', real_info_loss.item(),
+            'synth_info', synth_info_loss.item(),
+            'real_norm', avg_norm(batch).item(),
+            'recon_norm', avg_norm(recon).item(),
+            'synth_norm', avg_norm(synthetic_audio).item(),
+            'synth_recon_norm', avg_norm(synth_recon).item())
 
 
 def self_supervised_only(batch_size: int, n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int):
@@ -1810,7 +1965,9 @@ def self_supervised_only(batch_size: int, n_nodes: int, n_samples: int, n_layers
 
         synth_control_signal, synth_recon = analysis_model.forward(synthetic_audio)
         synth_recon_audio(max_norm(synth_recon[0, ...]))
-        synth_recon_loss = loss_func(synthetic_audio, synth_recon)
+        synth_info_loss = information_loss(maybe_max_norm(synthetic_audio), maybe_max_norm(synth_recon))
+        synth_recon_loss = loss_func(maybe_max_norm(synthetic_audio), maybe_max_norm(synth_recon)) \
+            + (synth_info_loss * INFORMATION_COEFF)
 
         est_cs, est_tension_mod, est_damp_mod, est_params, est_rooms, est_wet_dry = \
             analysis_model.estimate_params(synthetic_audio)
@@ -1838,7 +1995,10 @@ def self_supervised_only(batch_size: int, n_nodes: int, n_samples: int, n_layers
         print(
             i,
             'synth_recon', synth_recon_loss.item(),
-            'param', param_loss.item())
+            'param', param_loss.item(),
+            'synth_info', synth_info_loss.item(),
+            'synth_norm', avg_norm(synthetic_audio).item(),
+            'synth_recon_norm', avg_norm(synth_recon).item())
 
         i += 1
 
@@ -1856,26 +2016,295 @@ def overfit_autoencoder(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: 
         n_to_keep=n_to_keep,
         tension_dict_seed=randint(0, int(1e5))).to(device)
 
+    def logger_factory(collection):
+        rnd, = conjure.loggers(
+            ['random'],
+            SupportedContentType.Audio.value,
+            encode_audio,
+            collection,
+            IdentitySerializer(),
+            IdentityDeserializer())
+
+        return [rnd]
+
+    def training_loop_hook(
+            iteration: int,
+            loggers: List[conjure.Conjure],
+            model: InstrumentAutoencoder,
+            optim: Optimizer,
+            target: torch.Tensor):
+
+        rnd_logger = loggers[-1]
+
+        with torch.no_grad():
+            # highly-sparse (4-16 events) random control signal, to sanity
+            # check that the current estimated instrument sounds plausible
+            # when driven by something other than the encoder's own forces
+            rnd = model.random_forward(target, n_to_keep=randint(4, 16))
+            rnd_logger(max_norm(rnd))
+
     def model_eval(model: InstrumentAutoencoder, _, target: torch.Tensor):
         control_signal, recon = model.forward(target)
 
         sparsity = (control_signal > 0).sum() / control_signal.numel()
-        print(sparsity.item())
+        info_loss = information_loss(target, recon)
+        print(sparsity.item(), 'info', info_loss.item())
 
-        # if we are "hard" sparsifying, then don't bother with sparsity loss        
+        # if we are "hard" sparsifying, then don't bother with sparsity loss
         sparsity_coeff = 0 if SPARSIFY else 1
-        loss = loss_func(target, recon) + (l0_norm(control_signal) * SPARSITY_LOSS_COEFF * sparsity_coeff)
+        loss = loss_func(target, recon) \
+            + (l0_norm(control_signal) * SPARSITY_LOSS_COEFF * sparsity_coeff) \
+            + (info_loss * INFORMATION_COEFF)
         return recon, loss
 
     overfit_model(
         n_samples=n_samples,
         model=analysis_model,
         loss_func=loss_func,
+        logger_factory=logger_factory,
+        training_loop_hook=training_loop_hook,
         model_eval=model_eval,
         collection_name='parallel',
         learning_rate=LEARNING_RATE,
         port=9998
     )
+
+
+# --- web demo share-link export ---------------------------------------------
+#
+# Hand-ports demos/dho-synth/main.js's encodeShareState binary format, so a
+# training run can periodically emit a share URL for the *instrument* (per-
+# node physics params + layer-2 routing matrices) overfit_osc is currently
+# fitting -- not the performance (LayerController.forces, the fitted sparse
+# excitation events), which has no slot in that format. The point is to let
+# you play a *new* performance on whatever instrument the model has
+# converged on, not to replay its fit.
+#
+# This assumes the web demo's layer1/layer2 topology, which was built to
+# mirror this exact Layer/LayerController pair, but a few things still need
+# converting rather than copying -- see each helper's docstring below. There
+# is no shared source of truth between this and main.js, so keep the two in
+# lockstep by hand if either format changes.
+SHARE_VERSION_WEB = 1
+SHARE_FILTER_TAPS = 32  # must match demos/dho-synth/main.js's FILTER_TAPS
+SHARE_ROUTER_QUANT_RANGE = 32  # must match main.js's ROUTER_QUANT_RANGE
+SHARE_EXCITATION_MODE_IDS = ['sustained', 'impulse', 'pulse', 'noise']
+
+
+def _share_quantize_u8(v: float, lo: float, hi: float) -> int:
+    return max(0, min(255, round(((v - lo) / (hi - lo)) * 255)))
+
+
+def _share_quantize_log_u8(v: float, lo: float, hi: float) -> int:
+    return _share_quantize_u8(math.log10(v), math.log10(lo), math.log10(hi))
+
+
+def _share_quantize_i8(v: float) -> int:
+    return max(-127, min(127, round(v * 127)))
+
+
+def _share_quantize_i16(v: float, rng: float) -> int:
+    return max(-32767, min(32767, round((v / rng) * 32767)))
+
+
+def _share_encode_node(
+        mass: float,
+        tensionExp: float,
+        dampLambda: float,
+        excitationGain: float,
+        gain: float,
+        filterTaps: List[float],
+        filterMix: List[float]) -> bytes:
+    header = struct.pack('<5f', mass, tensionExp, dampLambda, excitationGain, gain)
+    taps = struct.pack(
+        f'<{SHARE_FILTER_TAPS}b', *[_share_quantize_i8(v) for v in filterTaps])
+    mix = struct.pack('<2b', _share_quantize_i8(filterMix[0]), _share_quantize_i8(filterMix[1]))
+    return header + taps + mix
+
+
+def _layer_web_nodes(
+        layer: 'Layer',
+        tension_offset: float,
+        control_rate: int,
+        samplerate: int,
+        is_output_layer: bool) -> List[dict]:
+    """
+    Extracts one Layer's per-node params into the shape/units
+    demos/dho-synth/main.js's Node class expects:
+
+    - mass/tensionExp/filters/filterMix/gain already use the exact same
+      formulas/conventions on both sides (compute_mass, 10**tensionExp,
+      fft_resample(is_lowest_band=True) from n_filter_taps=8 up to
+      filter_size=32, unconstrained linear filter/gain blends) -- just
+      unwrapped from their (1, n_nodes, ...) tensor shapes.
+    - tensionExp gets `tension_offset` added: parallel.py's oscillator phase
+      runs on a `t = linspace(0, 10, n_samples)` clock, not the real
+      samplerate, so its physics clock runs faster than real/wall-clock time
+      by a fixed, derivable ratio; see encode_share_state_url.
+    - dampLambda converts parallel.py's raw per-control-frame multiplicative
+      decay (`layer.damp`, applied once per control_rate-sample frame, then
+      linearly upsampled) into the web's continuous per-sample exponential
+      rate, by matching the decay over one frame's worth of real time. This
+      reproduces the overall decay slope, not parallel.py's own (coarser,
+      linearly-interpolated) envelope shape.
+    - excitationGain has no analog in parallel.py (force_router's entries
+      already *are* the per-node gain, with no separate scalar on top). For
+      the web's layer 1, which has no self-routing matrix of its own, this
+      approximates `force_router`'s diagonal (how much a node's own incoming
+      force drives itself) as excitationGain, and drops the off-diagonal
+      cross-node terms entirely -- lost in translation, no destination slot
+      for them. For layer 2, whose full force_router is instead exported
+      as-is (see encode_share_state_url's force_router2), excitationGain is
+      just left at the web's own identity default (1.0) to avoid double-
+      applying gain.
+    """
+    n = layer.n_nodes
+    with torch.no_grad():
+        mass = compute_mass(layer.m_raw).reshape(n).cpu().numpy()
+        tension_exp = layer.t_raw.reshape(n).cpu().numpy() + tension_offset
+
+        damp_raw = np.clip(layer.damp.reshape(n).cpu().numpy(), 1e-6, 0.999999)
+        damp_lambda = -np.log(damp_raw) * samplerate / control_rate
+
+        gain = layer.gain.reshape(n).cpu().numpy()
+
+        filt = unit_norm(compute_filters(layer.filt_taps, layer.filter_size), dim=-1)
+        filt = filt.reshape(n, -1).cpu().numpy()
+        filt_mix = layer.filt_mix.reshape(n, 2).cpu().numpy()
+
+        if is_output_layer:
+            excitation_gain = np.ones(n)
+        else:
+            excitation_gain = layer.force_router.reshape(n, n).diagonal().cpu().numpy()
+
+    return [
+        dict(
+            mass=float(mass[j]),
+            tensionExp=float(tension_exp[j]),
+            dampLambda=float(damp_lambda[j]),
+            excitationGain=float(excitation_gain[j]),
+            gain=float(gain[j]),
+            filterTaps=filt[j].tolist(),
+            filterMix=filt_mix[j].tolist(),
+        )
+        for j in range(n)
+    ]
+
+
+def encode_share_state_url(controller: 'LayerController', samplerate: int = 22050) -> str:
+    """
+    Builds a `?p=...` query string (the fragment main.js's buildShareUrl
+    appends to the page URL) encoding `controller`'s current instrument, in
+    the exact binary layout main.js's encodeShareState produces. Assumes
+    exactly 2 layers (layer 1 = FM modulator, layer 2 = the only audible
+    one), matching the web demo's topology, and the direct (non-dictionary)
+    tension path (USE_TENSION_DICTIONARY=False).
+
+    Deliberately does not touch reverb (reverb file index 255 = "none"; the
+    web leaves whatever IR is currently loaded alone in that case) and
+    leaves sparsity/pulseRate/volume/modDepth at harmless defaults -- none of
+    those describe the instrument itself, only UI/performance state that a
+    share link can't usefully carry anyway (see this section's docstring re:
+    LayerController.forces).
+    """
+    assert not USE_TENSION_DICTIONARY, \
+        'share export assumes the direct (non-dictionary) tension path'
+    assert controller.n_layers == 2, \
+        'share export assumes exactly 2 layers, matching the web demo (layer1=modulator, layer2=audible)'
+
+    layer1, layer2 = controller.layers[0], controller.layers[1]
+    n = controller.n_nodes
+
+    # parallel.py's oscillator phase runs on a `linspace(0, 10, n_samples)`
+    # clock, independent of `samplerate` -- i.e. its physics clock advances
+    # `ratio` physics-seconds per real second. The web's clock always tracks
+    # real time 1:1, so matching omega = sqrt(tension - ...) requires scaling
+    # tension (and hence tensionExp, in log space) by ratio**2.
+    ratio = (10.0 * samplerate) / controller.n_samples
+    tension_offset = 2 * math.log10(ratio)
+
+    nodes1 = _layer_web_nodes(
+        layer1, tension_offset, controller.control_rate, samplerate, is_output_layer=False)
+    nodes2 = _layer_web_nodes(
+        layer2, tension_offset, controller.control_rate, samplerate, is_output_layer=True)
+
+    with torch.no_grad():
+        # the web's tensionRouter multiplies layer 1's *pre*-gain/tanh output;
+        # parallel.py's tension_modifier is layer 1's *fully processed*
+        # output (post filter-mix, tanh(gain), output_gain). Scaling by
+        # layer1's own output_gain roughly compensates for that extra
+        # squashing stage so the ported FM depth is in the right ballpark.
+        fm_scale = layer1.output_gain.reshape(-1)[0].item()
+        force_router2 = layer2.force_router.reshape(n, n).cpu().numpy()
+        tension_router = layer2.tension_router.reshape(n, n).cpu().numpy() * fm_scale
+
+    header = struct.pack(
+        '<BBBBBBBBBBB',
+        SHARE_VERSION_WEB,
+        n, n,
+        0,  # strategy: 'random' -- only affects future Randomize clicks, not this instrument
+        SHARE_EXCITATION_MODE_IDS.index('sustained'),
+        255,  # reverb file index: none selected -- see docstring above
+        _share_quantize_u8(0.5, 0, 0.95),  # sparsity: unused once an explicit instrument is loaded
+        _share_quantize_u8(100, 20, 400),  # pulseRate: unused unless excitationMode='pulse'
+        _share_quantize_u8(0.6, 0, 10),  # volume: a reasonable default master gain
+        _share_quantize_log_u8(1.0, 0.1, 10),  # modDepth: neutral default
+        _share_quantize_u8(0.0, 0, 1),  # reverbMix: harmless with no reverb file selected
+    )
+
+    body = bytearray(header)
+    for node in nodes1 + nodes2:
+        body += _share_encode_node(**node)
+
+    n_clipped = 0
+
+    def encode_router_row(row) -> bytes:
+        nonlocal n_clipped
+        packed = bytearray()
+        for v in row:
+            if abs(v) > SHARE_ROUTER_QUANT_RANGE:
+                n_clipped += 1
+            packed += struct.pack('<h', _share_quantize_i16(v, SHARE_ROUTER_QUANT_RANGE))
+        return packed
+
+    for row in tension_router:
+        body += encode_router_row(row)
+    for row in force_router2:
+        body += encode_router_row(row)
+
+    if n_clipped:
+        print(f'[share] warning: {n_clipped} routing weight(s) exceeded the quantization '
+              f'range (+/-{SHARE_ROUTER_QUANT_RANGE}) and were clipped')
+
+    encoded = base64.urlsafe_b64encode(bytes(body)).decode('ascii').rstrip('=')
+    return f'?p={encoded}'
+
+
+def _copy_to_clipboard(text: str) -> bool:
+    """
+    Best-effort clipboard copy via a hidden Tk window -- no extra dependency
+    beyond the stdlib, since neither pyperclip nor xclip/xsel is installed
+    here. Silently (but audibly, via a printed warning) does nothing useful
+    if no display is available, e.g. a headless/SSH training box -- the
+    console printout in training_loop_hook is always the reliable fallback.
+    """
+    try:
+        import tkinter as tk
+        root = tk.Tk()
+        root.withdraw()
+        root.clipboard_clear()
+        root.clipboard_append(text)
+        root.update()
+        root.destroy()
+        return True
+    except Exception as e:
+        print(f'[share] could not copy to clipboard: {e}')
+        return False
+
+
+# how often (in iterations) overfit_osc emits a share link for the
+# instrument it's currently fitting; see encode_share_state_url
+SHARE_EXPORT_EVERY = 5000
 
 
 def overfit_osc(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int):
@@ -1915,7 +2344,8 @@ def overfit_osc(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int):
             iteration: int,
             loggers: List[conjure.Conjure],
             model: LayerController,
-            optim: Optimizer):
+            optim: Optimizer,
+            target: torch.Tensor):
 
         # params_count = count_parameters(model)
         print('N PARAMS', model.total_params)
@@ -1930,19 +2360,34 @@ def overfit_osc(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int):
         frce_logger = loggers[-2]
 
         with torch.no_grad():
-            rnd, _ = model.random_forward(n_to_keep=4)
+            # highly-sparse (4-16 events) random control signal, to sanity
+            # check that the learned instrument sounds plausible when driven
+            # by something other than its own optimized forces
+            rnd, _ = model.random_forward(n_to_keep=randint(4, 16))
             rnd_logger(max_norm(rnd))
             f = model.materialize_forces(do_upsample=False)
             f = f / (f.max() + 1e-12)
             frce_logger(f)
 
+        if iteration > 0 and iteration % SHARE_EXPORT_EVERY == 0:
+            try:
+                query = encode_share_state_url(model)
+                print(f'[share] iteration {iteration}: {query}')
+                _copy_to_clipboard(query)
+            except Exception as e:
+                print(f'[share] failed to export share link at iteration {iteration}: {e}')
+
     def model_eval(model: LayerController, _, target: torch.Tensor):
 
         recon, control_signal = model.forward()
-        
+
         # if we are "hard" sparsifying, then don't bother with sparsity loss
         sparsity_coeff = 0 if SPARSIFY else 1
-        loss = loss_func(target, recon) + (l0_norm(control_signal) * SPARSITY_LOSS_COEFF * sparsity_coeff)
+        info_loss = information_loss(target, recon)
+        print('info', info_loss.item())
+        loss = loss_func(target, recon) \
+            + (l0_norm(control_signal) * SPARSITY_LOSS_COEFF * sparsity_coeff) \
+            + (info_loss * INFORMATION_COEFF)
         return recon, loss
 
     overfit_model(

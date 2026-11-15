@@ -8,6 +8,7 @@
 # --rnn tanh --output-mode noise-shift                                 notes: gritty, poor recon.  Lots of synthetic buzz
 # --rnn tanh --output-mode time-noise --noise-envelope smooth          notes:
 # --rnn tanh --output-mode time-noise --noise-envelope frame           notes:
+# --rnn tanh --output-mode dho                                         notes:
 # --rnn complex --output-mode complex --complex-nonlinearity none      notes: poor recon, lots of buzz
 # --rnn complex --output-mode complex --complex-nonlinearity modtanh   notes:
 
@@ -324,6 +325,60 @@ class ParameterGenerator(eqx.Module):
 
 
 # ---------------------------------------------------------------------------
+# `parallel.py`'s modified damped harmonic oscillator, shared with
+# `jax_ae.py`'s `ParallelGenerator`
+
+# `parallel.py`'s time convention: its DHO's time runs over linspace(0, 10,
+# 2 ** 17), so, a fixed time step, rather than one tied to the segment's
+# length.  The Nyquist frequency is omega = pi / PARALLEL_DT, ~41175, i.e.,
+# tension ~10 ** 9.2; at 22050Hz, a frequency in Hz is ~0.268 * omega.
+PARALLEL_DT = 10. / 2 ** 17
+
+
+def leaky_integrator(forces: jnp.ndarray, damping: jnp.ndarray) -> jnp.ndarray:
+    """
+    `parallel.py`'s `sequential`: out[i] = (forces[i] + out[i - 1]) *
+    damping[i], along the last axis, as a parallel (associative) scan, which
+    is exact and, unlike `parallel.py`'s cumprod/cumsum trick, stable.
+    `damping` broadcasts against `forces`.
+    """
+    def combine(left, right):
+        a1, b1 = left
+        a2, b2 = right
+        return a1 * a2, a2 * b1 + b2
+
+    damping = jnp.broadcast_to(damping, forces.shape)
+    _, out = jax.lax.associative_scan(combine, (damping, damping * forces), axis=-1)
+    return out
+
+
+def modified_damped_harmonic_oscillator(
+        energy: jnp.ndarray,
+        log_tension: jnp.ndarray,
+        mass: jnp.ndarray) -> jnp.ndarray:
+    """
+    `parallel.py`'s `damped_harmonic_oscillator`, with unit damping and
+    initial displacement: the closed-form oscillator, but with its
+    exponential decay replaced by an energy envelope (from
+    `leaky_integrator`, upsampled to audio rate), so the decay is the
+    integrator's, and can be re-excited.  The oscillator's frequency is
+    clipped just below Nyquist.
+
+    energy: (..., n_samples)
+    log_tension: log10 of the tension; broadcasts against `energy`, so it
+        may vary over time (frequency modulation)
+    mass: broadcasts against `energy`
+    returns: (..., n_samples)
+    """
+    x = 1. / (2 * mass)
+    omega = jnp.sqrt(jnp.abs(10. ** log_tension - x ** 2))
+    omega = jnp.minimum(omega, 0.95 * np.pi / PARALLEL_DT)
+    phi = jnp.arctan2(x, omega)
+    time = jnp.arange(energy.shape[-1]) * PARALLEL_DT
+    return energy * jnp.cos(omega * time - phi) / jnp.cos(phi)
+
+
+# ---------------------------------------------------------------------------
 # the generated instrument: a single-layer tanh RNN
 
 # Output modes: how each RNN step's output vector becomes a block of
@@ -357,6 +412,19 @@ class OutputMode:
         """
         return jax.vmap(self.block, in_axes=(0, None if noise is None else 0, None))(
             outs, noise, block_size)
+
+    def render(self, outs: jnp.ndarray, noise: jnp.ndarray, weights: 'RNNWeights') -> jnp.ndarray:
+        """
+        outs: (n_steps, output_size), every step's output
+        noise: (n_steps, 2 * step_size), or None
+        returns: (n_steps * step_size,)
+
+        By default, the windowed, overlap-added blocks.  A mode that doesn't
+        work in blocks at all (`DHOOutput`) overrides this instead.
+        """
+        block_size = weights.step_size * 2
+        blocks = self.blocks(outs, noise, block_size) * self.window(block_size)
+        return overlap_add(blocks, weights.step_size)
 
 
 class TimeDomainOutput(OutputMode):
@@ -555,6 +623,166 @@ class MagnitudePhaseOutput(OutputMode):
         return jnp.fft.irfft(spec, n=block_size, norm='ortho', axis=-1)
 
 
+class DHOParams(eqx.Module):
+    """
+    The generated instrument's `DHOOutput` half: for each of `n_layers`
+    stacked layers, one modified damped harmonic oscillator per RNN output
+    channel.  All (n_layers, n_channels), except as noted.
+    """
+    mass: jnp.ndarray         # already scaled by `DHOOutput.mass_coeff`
+    log_tension: jnp.ndarray  # log10
+    decay: jnp.ndarray        # the energy integrator's damping, per RNN step, in (0, 1)
+    gain: jnp.ndarray         # pre-tanh gain
+    fm_depth: jnp.ndarray     # (n_layers - 1, n_channels): log10 tension per unit of the layer below's output
+    output_gain: jnp.ndarray  # (n_channels,): the last layer's mix
+
+
+class DHOOutput(OutputMode):
+    """
+    `parallel.py`'s instrument, driven by the RNN: each of the RNN's
+    `n_channels` outputs is (rectified) force flowing into its own stack of
+    `n_layers` modified damped harmonic oscillators.  Nothing is windowed or
+    overlap-added; once the RNN has run:
+
+        1. each channel's forces, divided by each layer's mass, are
+           accumulated by a leaky integrator at the RNN's step rate
+           (`leaky_integrator`, with the layer's per-step decay), and the
+           resulting energy is linearly interpolated up to audio rate,
+        2. which scales that layer's oscillator
+           (`modified_damped_harmonic_oscillator`, in place of its
+           exponential decay), soft-clipped: tanh(oscillator * gain),
+        3. each layer above the first has its (log10) tension modulated by
+           the same channel's output from the layer below (FM),
+        4. and the channels' last-layer outputs are mixed with a signed
+           gain each.
+
+    Masses, tensions, decays, gains, FM depths and the output mix come from
+    the hypernetwork (see `params`), along with the RNN's weights.  As in
+    `parallel.py`, every layer of a channel is driven by that channel's
+    forces, and only the last layer is heard.
+
+    Departures from `parallel.py`: the decay is parameterized as a T60
+    (log-uniform in [min_t60, max_t60] seconds), so it doesn't depend on
+    --step-size; tension is bounded, 10 ** (lo + sigmoid * (hi - lo)), with
+    a range (~30Hz to ~4kHz at 22050Hz) chosen for audible pitches; mass is
+    log-scaled within a decade of `mass_coeff` (`parallel.py`'s 1e-5 +
+    |raw| lets a near-zero raw value send the frequency, through the
+    oscillator's damping term 1 / (2 * mass), straight to Nyquist); the
+    pre-tanh gain is log-scaled; there are no per-node filters or cross-
+    channel routing.
+    """
+
+    def __init__(
+            self,
+            n_channels: int = 16,
+            n_layers: int = 2,
+            samplerate: int = 22050,
+            min_t60: float = 0.05,
+            max_t60: float = 4.,
+            tension_range: Tuple[float, float] = (4., 8.5),
+            mass_coeff: float = 0.01,
+            gain_offset: float = -2.,
+            initial_mix: float = 0.025):
+        """
+        initial_mix: each channel's initial output gain.  The oscillator
+            stack amplifies a lot (forces / mass, accumulated by the
+            integrator), so this starts the output at roughly the level the
+            other output modes start at (RMS ~0.04 at init, rather than
+            ~0.35 at 1 / sqrt(n_channels)), where the conservation of energy
+            loss doesn't swamp the reconstruction loss.
+        """
+        self.n_channels = n_channels
+        self.n_layers = n_layers
+        self.samplerate = samplerate
+        self.min_t60 = min_t60
+        self.max_t60 = max_t60
+        self.tension_range = tension_range
+        self.mass_coeff = mass_coeff
+        self.gain_offset = gain_offset
+        self.initial_mix = initial_mix
+
+    def output_size(self, step_size: int) -> int:
+        return self.n_channels
+
+    @property
+    def n_params(self) -> int:
+        """size of the raw (hypernetwork) vector that `params` takes"""
+        layers, channels = self.n_layers, self.n_channels
+        return layers * channels * 4 + (layers - 1) * channels + channels
+
+    def split(self, raw: jnp.ndarray):
+        layers, channels = self.n_layers, self.n_channels
+        n = layers * channels
+        per_layer = raw[:n * 4].reshape(4, layers, channels)
+        fm = raw[n * 4:n * 4 + (layers - 1) * channels].reshape(layers - 1, channels)
+        return per_layer, fm, raw[-channels:]
+
+    def params(self, raw: jnp.ndarray, step_size: int) -> DHOParams:
+        """raw: (n_params,), e.g., from the hypernetwork"""
+        (mass, tension, decay, gain), fm, output_gain = self.split(raw)
+        lo, hi = self.tension_range
+        steps_per_second = self.samplerate / step_size
+        log_min, log_max = np.log10(self.min_t60), np.log10(self.max_t60)
+        t60 = 10. ** (log_min + jax.nn.sigmoid(decay) * (log_max - log_min))
+        return DHOParams(
+            mass=self.mass_coeff * 10. ** jnp.tanh(mass),
+            log_tension=lo + jax.nn.sigmoid(tension) * (hi - lo),
+            decay=10. ** (-3. / (t60 * steps_per_second)),
+            gain=10. ** (self.gain_offset + gain),
+            fm_depth=fm * 0.1,
+            output_gain=output_gain)
+
+    def spread(self, key) -> jnp.ndarray:
+        """
+        (n_params,): raw values that spread each oscillator's tension and
+        decay over their whole ranges (sigmoid of U(-3, 3)), with every other
+        raw value at zero (`mass_coeff` masses, 10 ** gain_offset gains, no
+        FM), except the output mix, which starts at `initial_mix`.  Used as the hypernetwork head's initial bias, so each
+        channel starts with its own pitch and decay.
+        """
+        layers, channels = self.n_layers, self.n_channels
+        k_tension, k_decay = jax.random.split(key)
+        per_layer = jnp.stack([
+            jnp.zeros((layers, channels)),
+            jax.random.uniform(k_tension, (layers, channels), minval=-3., maxval=3.),
+            jax.random.uniform(k_decay, (layers, channels), minval=-3., maxval=3.),
+            jnp.zeros((layers, channels)),
+        ])
+        return jnp.concatenate([
+            per_layer.reshape(-1),
+            jnp.zeros((layers - 1) * channels),
+            jnp.full(channels, self.initial_mix)])
+
+    def random_params(self, key, step_size: int) -> DHOParams:
+        """a random instrument's oscillators (`random_instrument`)"""
+        k_spread, k_noise, k_mix = jax.random.split(key, 3)
+        raw = self.spread(k_spread) + jax.random.normal(k_noise, (self.n_params,)) * 0.5
+        raw = raw.at[-self.n_channels:].set(
+            jax.random.normal(k_mix, (self.n_channels,)) / np.sqrt(self.n_channels))
+        return self.params(raw, step_size)
+
+    def render(self, outs, noise, weights):
+        p = weights.dho
+        n_steps = outs.shape[0]
+        n_samples = n_steps * weights.step_size
+        forces = jax.nn.relu(outs).T
+
+        def upsample(x):
+            return jax.image.resize(x, (x.shape[0], n_samples), method='linear')
+
+        out = None
+        for layer in range(self.n_layers):
+            mass = p.mass[layer][:, None]
+            energy = upsample(leaky_integrator(forces / mass, p.decay[layer][:, None]))
+            log_tension = p.log_tension[layer][:, None]
+            if out is not None:
+                log_tension = log_tension + p.fm_depth[layer - 1][:, None] * out
+            z = modified_damped_harmonic_oscillator(energy, log_tension, mass)
+            out = jnp.tanh(z * p.gain[layer][:, None])
+
+        return p.output_gain @ out
+
+
 OUTPUT_MODES = {
     'complex': ComplexOutput(),
     'mag-phase': MagnitudePhaseOutput(),
@@ -565,6 +793,9 @@ OUTPUT_MODES = {
     # configured from the command line in `main` (--noise-envelope,
     # --noise-cutoff-hz, --samplerate)
     'time-noise': TimeNoiseOutput(),
+    # configured from the command line in `main` (--samplerate); everything
+    # else is `DHOOutput`'s defaults
+    'dho': DHOOutput(),
 }
 
 
@@ -575,6 +806,7 @@ class RNNWeights(eqx.Module):
     w_out: jnp.ndarray  # (hidden, OUTPUT_MODES[output_mode].output_size(step_size))
     output_mode: str = eqx.field(static=True)
     step_size: int = eqx.field(static=True)
+    dho: Optional[DHOParams] = None  # 'dho' output mode only
 
 
 def execute_rnn(weights: Union[RNNWeights, 'ComplexRNNWeights'], control: jnp.ndarray, key=None) -> jnp.ndarray:
@@ -595,9 +827,7 @@ def execute_rnn(weights: Union[RNNWeights, 'ComplexRNNWeights'], control: jnp.nd
     mode = OUTPUT_MODES[weights.output_mode]
     hidden_dim = weights.w_hh.shape[0]
     n_steps = control.shape[-1]
-    step_size = weights.step_size
-    block_size = step_size * 2
-    window = mode.window(block_size)
+    block_size = weights.step_size * 2
 
     if mode.needs_noise:
         if key is None:
@@ -611,10 +841,9 @@ def execute_rnn(weights: Union[RNNWeights, 'ComplexRNNWeights'], control: jnp.nd
         return hidden, hidden @ weights.w_out
 
     # the scan collects every step's raw output, and the output mode turns the
-    # whole sequence into blocks, so a mode can accumulate over time
+    # whole sequence into audio, so a mode can accumulate over time
     _, outs = jax.lax.scan(step, jnp.zeros(hidden_dim), control.T)
-    blocks = mode.blocks(outs, noise, block_size) * window
-    return overlap_add(blocks, step_size)
+    return mode.render(outs, noise, weights)
 
 
 def overlap_add(blocks: jnp.ndarray, step_size: int) -> jnp.ndarray:
@@ -703,6 +932,7 @@ class HyperRNN(eqx.Module):
     to_radius: Optional[ParameterGenerator]  # 'tanh' RNN only
     to_bias: Optional[ParameterGenerator]    # 'tanh' RNN only
     to_w_out: ParameterGenerator
+    to_dho: Optional[ParameterGenerator]     # 'dho' output mode only
 
     hidden_dim: int = eqx.field(static=True)
     control_channels: int = eqx.field(static=True)
@@ -773,6 +1003,16 @@ class HyperRNN(eqx.Module):
         # and imaginary parts of each unit's contribution to each STFT bin
         self.to_w_out = ParameterGenerator(channels, hidden_dim * self.output_size, keys[8])
 
+        # the oscillators' masses, tensions, decays, etc.; the head's bias
+        # starts each channel at its own pitch and decay
+        if output_mode == 'dho':
+            mode = OUTPUT_MODES['dho']
+            dho_key, spread_key = jax.random.split(jax.random.fold_in(key, 1))
+            self.to_dho = ParameterGenerator(channels, mode.n_params, dho_key)
+            self.to_dho = eqx.tree_at(lambda g: g.linear.bias, self.to_dho, mode.spread(spread_key))
+        else:
+            self.to_dho = None
+
     @property
     def output_size(self) -> int:
         """Size of each RNN step's output, see `RNNWeights.w_out`"""
@@ -812,6 +1052,7 @@ class HyperRNN(eqx.Module):
             w_out=self.to_w_out(latent).reshape(h, self.output_size),
             output_mode=self.output_mode,
             step_size=self.step_size,
+            dho=None if self.to_dho is None else OUTPUT_MODES['dho'].params(self.to_dho(latent), self.step_size),
         )
 
     def factor(self, audio: jnp.ndarray) -> Tuple[Union[RNNWeights, ComplexRNNWeights], jnp.ndarray]:
@@ -970,6 +1211,10 @@ def random_instrument(
     q = q * jnp.sign(jnp.diag(upper))
 
     output_size = OUTPUT_MODES[output_mode].output_size(step_size)
+    # 'dho': random oscillators, too (from a key of their own, so other modes'
+    # random instruments are unchanged)
+    dho = OUTPUT_MODES['dho'].random_params(jax.random.fold_in(key, 1), step_size) \
+        if output_mode == 'dho' else None
     return RNNWeights(
         w_in=jax.random.normal(k_in, (control_channels, hidden_dim)) * input_scale,
         w_hh=q @ b @ q.T,
@@ -977,6 +1222,7 @@ def random_instrument(
         w_out=jax.random.normal(k_out, (hidden_dim, output_size)) / jnp.sqrt(hidden_dim),
         output_mode=output_mode,
         step_size=step_size,
+        dho=dho,
     )
 
 
@@ -1111,7 +1357,10 @@ def main():
                              "per-bin magnitudes and per-bin fractional deviations from each bin's "
                              "expected phase advance, accumulated over time into phase, then "
                              "materialized via an inverse STFT; 'time-noise' is the sum of 'time' "
-                             "and 'noise' (see --noise-envelope)")
+                             "and 'noise' (see --noise-envelope); 'dho' outputs one force per "
+                             "channel, each driving its own stack of parallel.py's modified damped "
+                             "harmonic oscillators (energy integrator, linear upsampling, FM between "
+                             "layers), configured by DHOOutput's defaults")
     parser.add_argument('--noise-envelope', choices=['smooth', 'frame'], default='smooth',
                         help="'time-noise' only: 'smooth' low-passes the noise level along time "
                              "(see --noise-cutoff-hz), so it can't flutter at the step rate; "
@@ -1185,6 +1434,7 @@ def main():
 
     OUTPUT_MODES['time-noise'] = TimeNoiseOutput(
         envelope=args.noise_envelope, cutoff_hz=args.noise_cutoff_hz, samplerate=args.samplerate)
+    OUTPUT_MODES['dho'] = DHOOutput(samplerate=args.samplerate)
 
     collection = LmdbCollection(path=args.collection)
 
