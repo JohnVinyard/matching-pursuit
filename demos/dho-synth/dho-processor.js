@@ -1,7 +1,12 @@
 // AudioWorkletProcessor implementing a two-layer bank of damped harmonic
 // oscillators (DHOs), where layer 1's raw output modulates layer 2's tension
 // through a learned-style routing matrix -- a lightweight, pseudo-physics
-// stand-in for spring-mass FM synthesis.
+// stand-in for spring-mass FM synthesis. The raw control-plane weights that
+// drive excitation are themselves routed through a per-layer n x n matrix
+// before reaching each layer's nodes (forceRouter1 for layer 1, forceRouter2
+// for layer 2's cross-layer excitation) -- mirroring parallel.py, where
+// every layer (not just the last) routes the shared control signal through
+// its own force_router, rather than layer 1 getting a direct, unrouted pass.
 //
 // Per-node recurrence (mirrors `damped_harmonic_oscillator` /
 // `execute_parallel_layer` in parallel.py), adapted for real-time use:
@@ -66,6 +71,21 @@ function makeNodes(n) {
   const nodes = [];
   for (let i = 0; i < n; i++) nodes.push(new Node());
   return nodes;
+}
+
+// Converts a router sent from the main thread (array-of-arrays, row k =
+// target node k's weights over source nodes j) into a flat, row-major
+// Float32Array -- avoids the extra indirection/bounds-check layer V8 pays on
+// nested arrays, and matches the layout process() indexes into.
+function flattenRouter(rows, nRows, nCols) {
+  const flat = new Float32Array(nRows * nCols);
+  if (!rows) return flat;
+  for (let k = 0; k < nRows; k++) {
+    const row = rows[k];
+    if (!row) continue;
+    for (let j = 0; j < nCols; j++) flat[k * nCols + j] = row[j] || 0;
+  }
+  return flat;
 }
 
 // Guard against the phi -> +-90deg singularity (1/cos(phi) blowing up) that
@@ -152,13 +172,36 @@ class DHOProcessor extends AudioWorkletProcessor {
     this.n2 = 8;
     this.layer1 = makeNodes(this.n1);
     this.layer2 = makeNodes(this.n2);
-    // tensionRouter[k][j]: influence of layer1 node j's output on layer2 node k's tension
-    this.tensionRouter = this.layer2.map(() => this.layer1.map(() => 0));
-    // forceRouter2[k][j]: how much pressing/targeting layer1 node j drives layer2 node k's excitation
-    this.forceRouter2 = this.layer2.map(() => this.layer1.map(() => 0));
+    // Routing matrices are flat, row-major Float32Arrays (row k = target
+    // node k's weights over source nodes j, i.e. router[k * nCols + j])
+    // rather than arrays-of-arrays -- see flattenRouter.
+    // tensionRouter: influence of layer1 node j's output on layer2 node k's tension
+    this.tensionRouter = new Float32Array(this.n2 * this.n1);
+    // forceRouter1: layer 1's own self-routing -- how much raw control
+    // weight j (the same weight every layer routes from) drives layer-1
+    // node k's own excitation. Mirrors parallel.py, where *every* layer
+    // (not just the last) routes the shared control signal through its own
+    // n x n force_router.
+    this.forceRouter1 = new Float32Array(this.n1 * this.n1);
+    // forceRouter2: how much pressing/targeting layer1 node j drives layer2 node k's excitation
+    this.forceRouter2 = new Float32Array(this.n2 * this.n1);
 
     this.targetWeights = new Float32Array(this.n1);
-    this.currentWeights = new Float32Array(this.n1);
+    // routedForce1/routedForce2 are forceRouter1 @ targetWeights and
+    // forceRouter2 @ targetWeights, smoothed every sample with the same
+    // one-pole filter that used to be applied to the raw weights before
+    // routing. This is valid because the routing matrix and the smoothing
+    // recurrence are both linear, so they commute: smoothing the routed
+    // output converges to the same place, sample-for-sample, as routing the
+    // smoothed input would. That lets the O(n^2) matvec itself
+    // (recomputeRoutedForce) run only when targetWeights or the router
+    // matrices change -- i.e. at UI-event rate -- instead of 48000+ times/sec
+    // in process() while the target sits unchanged (the common case of
+    // holding a note rather than actively dragging).
+    this.routedForce1Target = new Float32Array(this.n1);
+    this.routedForce1 = new Float32Array(this.n1);
+    this.routedForce2Target = new Float32Array(this.n2);
+    this.routedForce2 = new Float32Array(this.n2);
     this.targetDampWeights = new Float32Array(this.n1);
     this.currentDampWeights = new Float32Array(this.n1);
     // a second, independent damping-boost strip targeting layer 2 directly
@@ -185,10 +228,14 @@ class DHOProcessor extends AudioWorkletProcessor {
       this.n2 = msg.n2;
       this.layer1 = makeNodes(this.n1);
       this.layer2 = makeNodes(this.n2);
-      this.tensionRouter = this.layer2.map(() => this.layer1.map(() => 0));
-      this.forceRouter2 = this.layer2.map(() => this.layer1.map(() => 0));
+      this.tensionRouter = new Float32Array(this.n2 * this.n1);
+      this.forceRouter1 = new Float32Array(this.n1 * this.n1);
+      this.forceRouter2 = new Float32Array(this.n2 * this.n1);
       this.targetWeights = new Float32Array(this.n1);
-      this.currentWeights = new Float32Array(this.n1);
+      this.routedForce1Target = new Float32Array(this.n1);
+      this.routedForce1 = new Float32Array(this.n1);
+      this.routedForce2Target = new Float32Array(this.n2);
+      this.routedForce2 = new Float32Array(this.n2);
       this.targetDampWeights = new Float32Array(this.n1);
       this.currentDampWeights = new Float32Array(this.n1);
       this.targetDampWeights2 = new Float32Array(this.n2);
@@ -201,12 +248,15 @@ class DHOProcessor extends AudioWorkletProcessor {
       const p = msg.params;
       this.applyNodeParams(this.layer1, p.layer1);
       this.applyNodeParams(this.layer2, p.layer2);
-      if (p.tensionRouter) this.tensionRouter = p.tensionRouter;
-      if (p.forceRouter2) this.forceRouter2 = p.forceRouter2;
+      if (p.tensionRouter) this.tensionRouter = flattenRouter(p.tensionRouter, this.n2, this.n1);
+      if (p.forceRouter1) this.forceRouter1 = flattenRouter(p.forceRouter1, this.n1, this.n1);
+      if (p.forceRouter2) this.forceRouter2 = flattenRouter(p.forceRouter2, this.n2, this.n1);
+      this.recomputeRoutedForce();
     } else if (msg.type === 'excite') {
       for (let j = 0; j < this.n1 && j < msg.weights.length; j++) {
         this.targetWeights[j] = msg.weights[j];
       }
+      this.recomputeRoutedForce();
     } else if (msg.type === 'dampen') {
       const target = msg.layer === 2 ? this.targetDampWeights2 : this.targetDampWeights;
       const n = msg.layer === 2 ? this.n2 : this.n1;
@@ -223,8 +273,16 @@ class DHOProcessor extends AudioWorkletProcessor {
       // one-shot energy bump for 'impulse' mode -- applied immediately
       // (handleMessage runs on the audio thread between process() calls),
       // not stored as a continuous target the way 'excite' weights are.
-      for (let j = 0; j < this.n1 && j < msg.weights.length; j++) {
-        this.layer1[j].energy += msg.weights[j] * STRIKE_ENERGY_SCALE;
+      // Routed through forceRouter1 like every other layer-1 excitation
+      // pathway (see process()'s layer-1 loop), so a strike on node j can
+      // also land on whichever nodes forceRouter1 couples it to.
+      for (let k = 0; k < this.n1; k++) {
+        let routed = 0;
+        const base = k * this.n1;
+        for (let j = 0; j < this.n1 && j < msg.weights.length; j++) {
+          routed += this.forceRouter1[base + j] * msg.weights[j];
+        }
+        this.layer1[k].energy += routed * STRIKE_ENERGY_SCALE;
       }
     } else if (msg.type === 'setExcitationMode') {
       this.excitationMode = msg.mode;
@@ -248,6 +306,27 @@ class DHOProcessor extends AudioWorkletProcessor {
       if (src.gain !== undefined) n.gain = src.gain;
       if (src.filterTaps !== undefined) n.filterTaps = Float32Array.from(src.filterTaps);
       if (src.filterMix !== undefined) n.filterMix = src.filterMix;
+    }
+  }
+
+  // Recomputes the O(n^2) routed-force targets from the current (raw) target
+  // weights and router matrices. Called on 'excite'/'setParams' -- i.e. at
+  // UI-event rate -- not from process(), which just smooths routedForce1/
+  // routedForce2 toward these targets every sample (see their declaration
+  // in the constructor for why that's equivalent to routing the smoothed
+  // weights directly).
+  recomputeRoutedForce() {
+    for (let k = 0; k < this.n1; k++) {
+      let sum = 0;
+      const base = k * this.n1;
+      for (let j = 0; j < this.n1; j++) sum += this.forceRouter1[base + j] * this.targetWeights[j];
+      this.routedForce1Target[k] = sum;
+    }
+    for (let k = 0; k < this.n2; k++) {
+      let sum = 0;
+      const base = k * this.n1;
+      for (let j = 0; j < this.n1; j++) sum += this.forceRouter2[base + j] * this.targetWeights[j];
+      this.routedForce2Target[k] = sum;
     }
   }
 
@@ -322,8 +401,8 @@ class DHOProcessor extends AudioWorkletProcessor {
 
       const z1 = new Array(this.n1);
       for (let j = 0; j < this.n1; j++) {
-        this.currentWeights[j] +=
-          (this.targetWeights[j] - this.currentWeights[j]) * this.weightSmoothing;
+        this.routedForce1[j] +=
+          (this.routedForce1Target[j] - this.routedForce1[j]) * this.weightSmoothing;
         this.currentDampWeights[j] +=
           (this.targetDampWeights[j] - this.currentDampWeights[j]) * this.weightSmoothing;
         this.currentTensionModWeights[j] +=
@@ -331,16 +410,25 @@ class DHOProcessor extends AudioWorkletProcessor {
 
         const node = this.layer1[j];
 
+        // Layer 1 self-routes the same raw control weights every layer
+        // routes from -- a control-plane press on node j can excite other
+        // layer-1 nodes too, not just itself, mirroring forceRouter2 below
+        // (and parallel.py's per-layer force_router, applied to every
+        // layer, not just the last). The O(n^2) matvec itself runs in
+        // recomputeRoutedForce(); routedForce1[j] above is just a cheap O(n)
+        // smoothed read of that result.
+        const routedForce = this.routedForce1[j];
+
         // 'impulse' and 'pulse' modes drive energy directly (a one-shot bump
         // from a 'strike' message, or a periodic tick below) rather than
         // through a continuous force -- so `force` stays 0 for them here.
         let force = 0;
         if (this.excitationMode === 'sustained') {
-          force = this.currentWeights[j] * node.excitationGain;
+          force = routedForce * node.excitationGain;
         } else if (this.excitationMode === 'noise') {
-          force = this.currentWeights[j] * node.excitationGain * (Math.random() * 2 - 1);
+          force = routedForce * node.excitationGain * (Math.random() * 2 - 1);
         } else if (this.excitationMode === 'pulse' && pulseTick) {
-          node.energy += this.currentWeights[j] * node.excitationGain * PULSE_ENERGY_SCALE;
+          node.energy += routedForce * node.excitationGain * PULSE_ENERGY_SCALE;
         }
 
         // "increase damping" targeting adds a temporary boost on top of the
@@ -373,22 +461,23 @@ class DHOProcessor extends AudioWorkletProcessor {
         this.currentTensionModWeights2[k] +=
           (this.targetTensionModWeights2[k] - this.currentTensionModWeights2[k]) * this.weightSmoothing;
 
+        this.routedForce2[k] +=
+          (this.routedForce2Target[k] - this.routedForce2[k]) * this.weightSmoothing;
+
         // which layer-1 node(s) are being targeted also determines how much
         // *force* (not just tension) each layer-2 node receives, via its own
         // routing row -- so different input nodes excite different parts of
-        // layer 2, not just the same chord with a subtle tension tint.
-        let routedForce = 0;
-        const forceRow = this.forceRouter2[k];
-        if (forceRow) {
-          for (let j = 0; j < this.n1; j++) routedForce += forceRow[j] * this.currentWeights[j];
-        }
-        const force = routedForce * node.excitationGain;
+        // layer 2, not just the same chord with a subtle tension tint. Routed
+        // the same way as layer 1's routedForce above: the O(n^2) matvec
+        // lives in recomputeRoutedForce(), this is just the smoothed read.
+        const force = this.routedForce2[k] * node.excitationGain;
 
+        // tensionRouter routes z1 -- the actual audio-rate oscillator output
+        // from layer 1, not a smoothable control value -- so this matvec
+        // genuinely has to run every sample; there's no equivalent shortcut.
         let routed = 0;
-        const row = this.tensionRouter[k];
-        if (row) {
-          for (let j = 0; j < this.n1; j++) routed += row[j] * z1[j];
-        }
+        const tensionBase = k * this.n1;
+        for (let j = 0; j < this.n1; j++) routed += this.tensionRouter[tensionBase + j] * z1[j];
         routed *= modDepth;
 
         // layer 2's own tension-mod ("deformation") strip adds directly to

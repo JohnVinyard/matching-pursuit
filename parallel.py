@@ -84,13 +84,46 @@ APPLY_DAMP_AND_TENSION_MOD = True
 TENSION_MOD_SCALE = 0.001
 DAMP_MOD_SCALE = 0.001
 
-# if True, use UNetAnalysis instead of Analysis as the encoder: the
-# instrument latent comes from the U-Net's pooled bottleneck (replacing the
-# separate latents/latents_attn attention-pooling heads), and cs/tension_mod/
-# damp_mod are still derived (via the existing ControlSignalCreator heads)
-# from the U-Net's final, full-size decoder output instead of Analysis's
-# AntiCausalAnalysis output -- otherwise a drop-in replacement.
-USE_UNET_ENCODER = True
+# which analysis/encoder architecture InstrumentAutoencoder uses, one of:
+#   'unet'        -- UNetAnalysis: the instrument latent comes from the
+#                     U-Net's pooled bottleneck (replacing the separate
+#                     latents/latents_attn attention-pooling heads), and
+#                     cs/tension_mod/damp_mod are derived (via the existing
+#                     ControlSignalCreator heads) from the U-Net's final,
+#                     full-size decoder output.
+#   'conv'        -- Analysis: a dilated AntiCausalAnalysis conv stack (no
+#                     self-attention, despite the old flag name USE_UNET_
+#                     ENCODER=False implying otherwise); the instrument
+#                     latent is pooled from its output via the latents/
+#                     latents_attn attention-pooling heads.
+#   'transformer' -- TransformerAnalysis: a PyTorch port of
+#                     jax_scale_attention.AttentionEncoder -- self-attention
+#                     with no plain norm at all, only ScaleAwareNorm
+#                     (self-conditioned AdaLN) and QK-norm attention (see
+#                     that file's module docstring). Structured like 'conv':
+#                     pooled via the same latents/latents_attn heads.
+# 'conv' and 'transformer' are otherwise drop-in replacements for each
+# other and for 'unet'.
+ENCODER_ARCH = 'transformer'
+
+TRANSFORMER_N_LAYERS = 6
+TRANSFORMER_N_HEADS = 4
+# 'anticausal' (each frame sees itself and what follows, matching Analysis/
+# UNetAnalysis's own causality convention) or False (full, unmasked attention)
+TRANSFORMER_ANTICAUSAL = True
+# 'relative' (absolute level enters nowhere but the returned log_level, so
+# features are invariant to a global gain) or 'absolute' (also conditions on
+# each frame's absolute level, giving up that invariance)
+TRANSFORMER_LEVEL_MODE = 'relative'
+
+# if True (and ENCODER_ARCH is 'conv' or 'transformer', so the latents_attn
+# attention-pooling head is in use), unit_norm the attention-pooling weights
+# (attn) over the time axis before pooling (latents = torch.mean(l * attn,
+# dim=-1)) -- keeps the pooled instrument latent's scale independent of
+# however large/small latents_attn's raw ControlSignalCreator output happens
+# to be, rather than growing or shrinking with it. No effect when
+# ENCODER_ARCH is 'unet', since that path has no attn/latents_attn at all.
+USE_ATTENTION_NORM = True
 
 N_NODES = 32
 
@@ -258,7 +291,7 @@ class Analysis(nn.Module):
 
 class UNetAnalysis(nn.Module):
     """
-    Alternate encoder to Analysis (see USE_UNET_ENCODER): a 1D U-Net over
+    Alternate encoder to Analysis (see ENCODER_ARCH): a 1D U-Net over
     the same STFT-magnitude representation Analysis consumes. Exposes two
     outputs instead of one: a pooled bottleneck (the instrument latent,
     replacing the separate latents/latents_attn attention-pooling heads)
@@ -331,6 +364,240 @@ class UNetAnalysis(nn.Module):
         x = self.final(x)
 
         return bottleneck, x
+
+
+# --- TransformerAnalysis: PyTorch port of jax_scale_attention.py --------
+#
+# See that file's module docstring for the full rationale. In short: a
+# self-attention encoder for real-valued, wide-dynamic-range input, whose
+# only normalization is ScaleAwareNorm -- a self-conditioned AdaLN where
+# each token is RMS-normalized and the log of the RMS it divided out is
+# Fourier-embedded and used (with an optional conditioning vector) to
+# predict the normalized token's scale/shift -- and QK-norm attention,
+# where queries/keys are RMS-normalized per head (with a learned gain), so
+# attention logits stay bounded regardless of the stream's scale.
+
+# frames are floored this far (in energy; -80 dB) below the loudest frame
+# they can see; see TransformerAnalysis.forward
+RELATIVE_FLOOR = 1e-8
+
+
+def fourier_embed(s: torch.Tensor, lo: float, hi: float, n_freqs: int) -> torch.Tensor:
+    """
+    Embed `s` (any shape), clipped to [lo, hi] and rescaled to [-1, 1], as
+    (..., 2 * n_freqs + 1): itself, then sines and cosines at octave-spaced
+    frequencies (the finest resolving ~(hi - lo) / 2 ** (n_freqs + 1)).
+    """
+    u = (torch.clamp(s, lo, hi) - (hi + lo) / 2) / ((hi - lo) / 2)
+    freqs = (2.0 ** torch.arange(n_freqs, device=s.device, dtype=s.dtype)) * math.pi
+    angles = u[..., None] * freqs
+    return torch.cat([u[..., None], torch.sin(angles), torch.cos(angles)], dim=-1)
+
+
+def rms(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    return torch.sqrt(torch.mean(x ** 2, dim=-1) + eps)
+
+
+def rotary(x: torch.Tensor, base: float = 10000.) -> torch.Tensor:
+    """
+    Rotary position embedding, over the second-to-last axis (the token/time
+    axis). x: (..., n_tokens, n_heads, head_dim), head_dim even.
+    """
+    n, h, d = x.shape[-3:]
+    freqs = base ** (-torch.arange(0, d, 2, device=x.device, dtype=x.dtype) / d)
+    angles = torch.arange(n, device=x.device, dtype=x.dtype)[:, None] * freqs[None, :]
+    cos, sin = torch.cos(angles)[:, None, :], torch.sin(angles)[:, None, :]
+    x1, x2 = x[..., 0::2], x[..., 1::2]
+    return torch.stack([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1).reshape(x.shape)
+
+
+class ScaleAwareNorm(nn.Module):
+    """
+    Self-conditioned AdaLN. For one token x (..., dim):
+
+        r = rms(x)
+        gamma, beta = to_mod([fourier(log r), cond])
+        returns (x / r) * (1 + gamma) + beta
+
+    `to_mod` is zero-initialized, so this starts out as a plain RMSNorm.
+    """
+
+    def __init__(self, dim: int, cond_dim: int, n_freqs: int = 6, lo: float = -8., hi: float = 8.):
+        """lo, hi: the range of log rms the embedding resolves (clipped outside)"""
+        super().__init__()
+        self.n_freqs, self.lo, self.hi = n_freqs, lo, hi
+        self.to_mod = nn.Linear(2 * n_freqs + 1 + cond_dim, 2 * dim)
+        nn.init.zeros_(self.to_mod.weight)
+        nn.init.zeros_(self.to_mod.bias)
+
+    def forward(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+        """x: (..., dim); cond: (..., cond_dim), may be empty on the last axis"""
+        r = rms(x)
+        emb = fourier_embed(torch.log(r), self.lo, self.hi, self.n_freqs)
+        gamma, beta = self.to_mod(torch.cat([emb, cond], dim=-1)).chunk(2, dim=-1)
+        return (x / r[..., None]) * (1 + gamma) + beta
+
+
+class QKNormAttention(nn.Module):
+    """
+    Multi-head self-attention with QK-norm: queries and keys are
+    RMS-normalized per head (with a learned gain), so the attention logits
+    are bounded by a learned per-head temperature, whatever the scale of
+    the tokens. Values are not normalized, so they can still carry
+    magnitude.
+    """
+
+    def __init__(self, dim: int, n_heads: int, pair_dim: int):
+        super().__init__()
+        if dim % n_heads != 0 or (dim // n_heads) % 2 != 0:
+            raise ValueError('dim must split into n_heads heads of even size')
+        head_dim = dim // n_heads
+        self.n_heads = n_heads
+        self.qkv = nn.Linear(dim, 3 * dim)
+        self.out = nn.Linear(dim, dim)
+        self.q_gain = nn.Parameter(torch.ones(head_dim))
+        self.k_gain = nn.Parameter(torch.ones(head_dim))
+        # unit-RMS q and k have a dot product of up to head_dim, so start at
+        # the usual 1 / sqrt(head_dim) scaling
+        self.log_temperature = nn.Parameter(torch.full((n_heads,), -0.5 * math.log(head_dim)))
+        # per-head attention bias from the pairwise level-difference
+        # embedding; zero at init
+        self.level_bias = nn.Parameter(torch.zeros(n_heads, pair_dim))
+
+    def forward(self, x: torch.Tensor, mask: torch.Tensor, pair: torch.Tensor) -> torch.Tensor:
+        """
+        x: (b, n_tokens, dim)
+        mask: (n_tokens, n_tokens), True where query i may attend to key j
+        pair: (b, n_tokens, n_tokens, pair_dim), embedded level differences
+        """
+        b, n, dim = x.shape
+        q, k, v = self.qkv(x).chunk(3, dim=-1)
+        q, k, v = (t.view(b, n, self.n_heads, -1) for t in (q, k, v))
+
+        q = rotary(q / rms(q)[..., None] * self.q_gain)
+        k = rotary(k / rms(k)[..., None] * self.k_gain)
+
+        logits = torch.einsum('bihd,bjhd->bhij', q, k) * torch.exp(self.log_temperature)[None, :, None, None]
+        logits = logits + torch.einsum('bijf,hf->bhij', pair, self.level_bias)
+        logits = logits.masked_fill(~mask[None, None], float('-inf'))
+        weights = torch.softmax(logits, dim=-1)
+        y = torch.einsum('bhij,bjhd->bihd', weights, v).reshape(b, n, dim)
+        return self.out(y)
+
+
+class TransformerBlock(nn.Module):
+    def __init__(self, dim: int, n_heads: int, cond_dim: int, pair_dim: int):
+        super().__init__()
+        self.norm1 = ScaleAwareNorm(dim, cond_dim)
+        self.attention = QKNormAttention(dim, n_heads, pair_dim)
+        self.norm2 = ScaleAwareNorm(dim, cond_dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, 4 * dim), nn.GELU(), nn.Linear(4 * dim, dim))
+
+    def forward(
+            self, x: torch.Tensor, cond: torch.Tensor,
+            mask: torch.Tensor, pair: torch.Tensor) -> torch.Tensor:
+        """x: (b, n_tokens, dim), the residual stream; cond: (b, n_tokens, cond_dim)"""
+        x = x + self.attention(self.norm1(x, cond), mask, pair)
+        return x + self.mlp(self.norm2(x, cond))
+
+
+class TransformerAnalysis(nn.Module):
+    """
+    Alternate encoder to Analysis/UNetAnalysis (see ENCODER_ARCH): a PyTorch
+    port of jax_scale_attention.AttentionEncoder. Structured like Analysis
+    (not UNetAnalysis): returns a per-frame feature map, pooled into the
+    instrument latent by the existing latents/latents_attn attention-pooling
+    heads (see InstrumentAutoencoder), rather than exposing its own pooled
+    bottleneck. Also returns each frame's absolute log level (clipped to
+    [level_lo, level_hi]), unused by InstrumentAutoencoder today but kept
+    for parity with the jax original and potential future use (e.g. a
+    magnitude/loudness head that needs the level the per-frame RMS
+    normalization below removes).
+    """
+
+    def __init__(
+            self, n_samples: int, frame_size: int, channels: int,
+            n_layers: int = 6, n_heads: int = 4, anticausal: bool = True,
+            level_mode: str = 'relative', n_level_freqs: int = 6,
+            level_lo: float = -14., level_hi: float = 6.):
+        super().__init__()
+        if level_mode not in ('relative', 'absolute'):
+            raise ValueError(f'unknown level_mode {level_mode}')
+        self.n_samples = n_samples
+        self.frame_size = frame_size
+        self.window_size = frame_size * 4
+        self.channels = channels
+        self.n_coeffs = self.window_size // 2 + 1
+        self.anticausal = anticausal
+        self.level_mode = level_mode
+        self.n_level_freqs = n_level_freqs
+        self.level_lo, self.level_hi = level_lo, level_hi
+
+        embed_dim = 2 * n_level_freqs + 1
+        cond_dim = embed_dim * (2 if level_mode == 'absolute' else 1)
+        self.in_proj = nn.Linear(self.n_coeffs, channels)
+        self.level_proj = nn.Linear(cond_dim, channels)
+        self.blocks = nn.ModuleList([
+            TransformerBlock(channels, n_heads, cond_dim, embed_dim)
+            for _ in range(n_layers)
+        ])
+        self.final_norm = ScaleAwareNorm(channels, cond_dim)
+
+    def _embed(self, s: torch.Tensor, lo: float, hi: float) -> torch.Tensor:
+        return fourier_embed(s, lo, hi, self.n_level_freqs)
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        x: (batch, 1, n_samples), unnormalized
+        returns: features (batch, channels, n_frames), and each frame's
+            absolute log level (batch, n_frames), clipped to [level_lo, level_hi]
+        """
+        batch = x.shape[0]
+        spec = stft(x, ws=self.window_size, step=self.frame_size, pad=True).view(
+            batch, -1, self.n_coeffs)
+        n = spec.shape[1]
+        energy = torch.mean(spec ** 2, dim=-1)
+
+        if self.anticausal:
+            # each frame sees itself and what follows, as in Analysis/UNetAnalysis
+            mask = torch.triu(torch.ones(n, n, dtype=torch.bool, device=x.device))
+            peak, _ = torch.cummax(energy.flip(-1), dim=-1)
+            peak = peak.flip(-1)
+            # the mean energy of each frame's visible context: it and what follows
+            cum = torch.cumsum(energy.flip(-1), dim=-1).flip(-1)
+            counts = torch.arange(n, 0, -1, device=x.device, dtype=energy.dtype)
+            visible = cum / counts
+        else:
+            mask = torch.ones(n, n, dtype=torch.bool, device=x.device)
+            peak = energy.max(dim=-1, keepdim=True).values.expand(-1, n)
+            visible = energy.mean(dim=-1, keepdim=True).expand(-1, n)
+
+        # floor each frame's energy RELATIVE_FLOOR below the loudest frame it
+        # can see, rather than at an absolute value, so the floor scales with
+        # gain and relative levels (silence included) are exactly
+        # gain-invariant, and depend on nothing a frame can't see
+        floor = peak * RELATIVE_FLOOR + 1e-30
+        energy = energy + floor
+        log_level = 0.5 * torch.log(energy)
+        log_visible = 0.5 * torch.log(visible + floor)
+        rel_lo = 0.5 * math.log(RELATIVE_FLOOR) - 1
+
+        # each frame's level relative to its visible context (at most
+        # log(n) / 2: the context includes the frame itself)
+        cond = self._embed(log_level - log_visible, rel_lo, 0.5 * math.log(n))
+        if self.level_mode == 'absolute':
+            cond = torch.cat([self._embed(log_level, self.level_lo, self.level_hi), cond], dim=-1)
+        # pairwise level differences, key j minus query i
+        pair = self._embed(log_level[:, None, :] - log_level[:, :, None], rel_lo, -rel_lo)
+
+        h = self.in_proj(spec / torch.sqrt(energy)[..., None]) + self.level_proj(cond)
+
+        for block in self.blocks:
+            h = block(h, cond, mask, pair)
+
+        h = self.final_norm(h, cond)
+        return h.permute(0, 2, 1), torch.clamp(log_level, self.level_lo, self.level_hi)
 
 
 def make_tension_dictionary(
@@ -556,8 +823,15 @@ class InstrumentAutoencoder(nn.Module):
         influence_decay = torch.linspace(1, 0, self.n_frames) ** 2
         self.influence_decay = nn.Parameter(influence_decay)
 
-        if USE_UNET_ENCODER:
+        if ENCODER_ARCH == 'unet':
             self.analysis = UNetAnalysis(n_samples, control_rate, channels)
+        elif ENCODER_ARCH == 'transformer':
+            self.analysis = TransformerAnalysis(
+                n_samples, control_rate, channels,
+                n_layers=TRANSFORMER_N_LAYERS,
+                n_heads=TRANSFORMER_N_HEADS,
+                anticausal=TRANSFORMER_ANTICAUSAL,
+                level_mode=TRANSFORMER_LEVEL_MODE)
         else:
             self.analysis = Analysis(n_samples, control_rate, channels)
 
@@ -578,9 +852,11 @@ class InstrumentAutoencoder(nn.Module):
             for i in range(n_layers)
         ])
 
-        if not USE_UNET_ENCODER:
+        if ENCODER_ARCH != 'unet':
             # with UNetAnalysis, the pooled bottleneck is the instrument
-            # latent directly -- no separate attention-pooling heads needed
+            # latent directly -- no separate attention-pooling heads needed.
+            # 'conv' and 'transformer' both instead return a per-frame
+            # feature map, pooled here.
             self.latents = ControlSignalCreator(
                 channels, channels, n_to_keep=n_to_keep, sparsify=False)
 
@@ -631,13 +907,18 @@ class InstrumentAutoencoder(nn.Module):
                     hyper.to_tension.ln1.bias.uniform_(*tension_exponent_range)
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        if USE_UNET_ENCODER:
+        if ENCODER_ARCH == 'unet':
             latents, x = self.analysis(x)
         else:
-            x = self.analysis(x)
+            if ENCODER_ARCH == 'transformer':
+                x, _log_level = self.analysis(x)
+            else:
+                x = self.analysis(x)
 
             l = self.latents(x)
             attn = self.latents_attn(x)
+            if USE_ATTENTION_NORM:
+                attn = unit_norm(attn, dim=-1)
 
             # for now, just choose the very first latent.  This could
             # be an average
@@ -735,12 +1016,17 @@ class InstrumentAutoencoder(nn.Module):
         compare estimated vs. known parameters for synthetic examples -- not
         called by forward(), and does not change forward()'s behavior.
         """
-        if USE_UNET_ENCODER:
+        if ENCODER_ARCH == 'unet':
             latents, x = self.analysis(x)
         else:
-            x = self.analysis(x)
+            if ENCODER_ARCH == 'transformer':
+                x, _log_level = self.analysis(x)
+            else:
+                x = self.analysis(x)
             l = self.latents(x)
             attn = self.latents_attn(x)
+            if USE_ATTENTION_NORM:
+                attn = unit_norm(attn, dim=-1)
             latents = torch.mean(l * attn, dim=-1)
 
         cs = self.control(x)
@@ -2085,7 +2371,9 @@ def overfit_autoencoder(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: 
 # converting rather than copying -- see each helper's docstring below. There
 # is no shared source of truth between this and main.js, so keep the two in
 # lockstep by hand if either format changes.
-SHARE_VERSION_WEB = 1
+# v2 adds forceRouter1 (layer 1's own self-routing matrix, n x n -- see
+# _layer_web_nodes), matching main.js's SHARE_VERSION bump.
+SHARE_VERSION_WEB = 2
 SHARE_FILTER_TAPS = 32  # must match demos/dho-synth/main.js's FILTER_TAPS
 SHARE_ROUTER_QUANT_RANGE = 32  # must match main.js's ROUTER_QUANT_RANGE
 SHARE_EXCITATION_MODE_IDS = ['sustained', 'impulse', 'pulse', 'noise']
@@ -2126,8 +2414,7 @@ def _layer_web_nodes(
         layer: 'Layer',
         tension_offset: float,
         control_rate: int,
-        samplerate: int,
-        is_output_layer: bool) -> List[dict]:
+        samplerate: int) -> List[dict]:
     """
     Extracts one Layer's per-node params into the shape/units
     demos/dho-synth/main.js's Node class expects:
@@ -2148,15 +2435,11 @@ def _layer_web_nodes(
       reproduces the overall decay slope, not parallel.py's own (coarser,
       linearly-interpolated) envelope shape.
     - excitationGain has no analog in parallel.py (force_router's entries
-      already *are* the per-node gain, with no separate scalar on top). For
-      the web's layer 1, which has no self-routing matrix of its own, this
-      approximates `force_router`'s diagonal (how much a node's own incoming
-      force drives itself) as excitationGain, and drops the off-diagonal
-      cross-node terms entirely -- lost in translation, no destination slot
-      for them. For layer 2, whose full force_router is instead exported
-      as-is (see encode_share_state_url's force_router2), excitationGain is
-      just left at the web's own identity default (1.0) to avoid double-
-      applying gain.
+      already *are* the per-node gain, with no separate scalar on top): now
+      that both layers' full force_router matrices have a home in the web
+      format (forceRouter1/forceRouter2, see encode_share_state_url),
+      excitationGain is just left at the web's own identity default (1.0)
+      for every node, on both layers, to avoid double-applying gain.
     """
     n = layer.n_nodes
     with torch.no_grad():
@@ -2172,10 +2455,7 @@ def _layer_web_nodes(
         filt = filt.reshape(n, -1).cpu().numpy()
         filt_mix = layer.filt_mix.reshape(n, 2).cpu().numpy()
 
-        if is_output_layer:
-            excitation_gain = np.ones(n)
-        else:
-            excitation_gain = layer.force_router.reshape(n, n).diagonal().cpu().numpy()
+        excitation_gain = np.ones(n)
 
     return [
         dict(
@@ -2223,10 +2503,8 @@ def encode_share_state_url(controller: 'LayerController', samplerate: int = 2205
     ratio = (10.0 * samplerate) / controller.n_samples
     tension_offset = 2 * math.log10(ratio)
 
-    nodes1 = _layer_web_nodes(
-        layer1, tension_offset, controller.control_rate, samplerate, is_output_layer=False)
-    nodes2 = _layer_web_nodes(
-        layer2, tension_offset, controller.control_rate, samplerate, is_output_layer=True)
+    nodes1 = _layer_web_nodes(layer1, tension_offset, controller.control_rate, samplerate)
+    nodes2 = _layer_web_nodes(layer2, tension_offset, controller.control_rate, samplerate)
 
     with torch.no_grad():
         # the web's tensionRouter multiplies layer 1's *pre*-gain/tanh output;
@@ -2235,6 +2513,11 @@ def encode_share_state_url(controller: 'LayerController', samplerate: int = 2205
         # layer1's own output_gain roughly compensates for that extra
         # squashing stage so the ported FM depth is in the right ballpark.
         fm_scale = layer1.output_gain.reshape(-1)[0].item()
+        # layer 1's own self-routing (see _layer_web_nodes and main.js's
+        # forceRouter1) -- previously had no destination slot and was only
+        # approximated via its diagonal into excitationGain; now exported in
+        # full, same as layer 2's.
+        force_router1 = layer1.force_router.reshape(n, n).cpu().numpy()
         force_router2 = layer2.force_router.reshape(n, n).cpu().numpy()
         tension_router = layer2.tension_router.reshape(n, n).cpu().numpy() * fm_scale
 
@@ -2270,6 +2553,8 @@ def encode_share_state_url(controller: 'LayerController', samplerate: int = 2205
     for row in tension_router:
         body += encode_router_row(row)
     for row in force_router2:
+        body += encode_router_row(row)
+    for row in force_router1:
         body += encode_router_row(row)
 
     if n_clipped:

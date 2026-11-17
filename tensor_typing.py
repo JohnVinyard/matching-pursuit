@@ -249,6 +249,17 @@ def _check_rank(data: Any, dims: tuple[Any, ...]) -> None:
         )
 
 
+def _check_consistent(x: Tensor[*tuple[Any, ...]]) -> None:
+    """Data rank must match dims. jax.vmap / lax.scan on a Tensor silently break this."""
+    shape = _shape(x.data)
+    if len(shape) != len(x.dims):
+        raise DimError(
+            f"Tensor has dims {_fmt(x.dims)} but its data has shape {shape}. This happens "
+            "when a Tensor passes through jax.vmap or lax.scan, which remove an axis "
+            "without updating dims; use tensor_jax.vmap(fn, over=SomeDim) instead."
+        )
+
+
 def _transpose(data: Any, axes: tuple[int, ...]) -> Any:
     if axes == tuple(range(len(axes))):
         return data
@@ -285,6 +296,7 @@ def typed(tp: type[T], data: Any) -> T:
 def check(x: AnyTensor, tp: type[T]) -> T:
     """Runtime-verify that ``x`` fits ``tp`` (Identity matches anything), then narrow to it."""
     want = dims_of(tp)
+    _check_consistent(x)
     if len(want) != len(x.dims) or not all(map(_compatible, x.dims, want)):
         raise DimError(f"expected {_fmt(want)}, got {_fmt(x.dims)}")
     return cast(T, x)
@@ -340,6 +352,7 @@ def _plan_permutation(
 
 
 def _permute_dims(x: AnyTensor, dst: tuple[Any, ...]) -> AnyTensor:
+    _check_consistent(x)
     axes, result = _plan_permutation(x.dims, dst)
     return Tensor(_transpose(x.data, axes), result)
 

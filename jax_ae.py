@@ -106,6 +106,7 @@ from hyper_rnn import (
     AntiCausalBlock, batch_stream, fft_shift, flattened_multiband_spectrogram, leaky_integrator, max_norm,
     modified_damped_harmonic_oscillator, stft)
 from scalar_jax import gaussian_blur
+from jax_scale_attention import AttentionEncoder
 
 
 # ---------------------------------------------------------------------------
@@ -1295,8 +1296,8 @@ class Encoder(eqx.Module):
 
 
 class EventAutoencoder(eqx.Module):
-    encoder: Encoder
-    frame_norm: eqx.nn.LayerNorm
+    encoder: eqx.Module  # `Encoder` or `AttentionEncoder`
+    frame_norm: Optional[eqx.nn.LayerNorm]  # `Encoder` only
     to_magnitude: eqx.nn.Conv1d
     to_fine: eqx.nn.Conv1d
     to_event: eqx.nn.Conv1d
@@ -1321,11 +1322,18 @@ class EventAutoencoder(eqx.Module):
             generator: eqx.Module,
             min_magnitude: float,
             max_magnitude: float,
-            key):
+            key,
+            encoder: str = 'conv',
+            attention_layers: int = 6,
+            attention_heads: int = 4,
+            attention_mask: str = 'anticausal',
+            attention_levels: str = 'relative'):
         """
         generator: an event generator (`AtomGenerator` or
             `ResonanceGenerator`), mapping an event vector of size
             `event_dim` (and a random key) to `generator.size` samples
+        encoder: 'conv' (`Encoder`) or 'attention' (`AttentionEncoder`; see
+            `jax_scale_attention.py`)
         """
 
         self.n_samples = n_samples
@@ -1336,21 +1344,34 @@ class EventAutoencoder(eqx.Module):
         self.max_magnitude = max_magnitude
 
         keys = jax.random.split(key, 4)  # the LayerNorm needs no key
-        self.encoder = Encoder(
-            window // 2 + 1,
-            n_samples // hop,
-            channels,
-            pe_freqs,
-            dilations=(1, 2, 4, 8, 16, 32, 64, 1),
-            key=keys[0])
+        if encoder == 'attention':
+            # normalizes each frame itself, and ends in a (scale-aware) norm,
+            # so needs no frame_norm
+            self.encoder = AttentionEncoder(
+                window // 2 + 1,
+                channels,
+                n_layers=attention_layers,
+                n_heads=attention_heads,
+                anticausal=attention_mask == 'anticausal',
+                level_mode=attention_levels,
+                key=keys[0])
+            self.frame_norm = None
+        else:
+            self.encoder = Encoder(
+                window // 2 + 1,
+                n_samples // hop,
+                channels,
+                pe_freqs,
+                dilations=(1, 2, 4, 8, 16, 32, 64, 1),
+                key=keys[0])
 
-        # brings each frame's vector to unit scale, so the heads' biases
-        # can't swamp it
-        self.frame_norm = eqx.nn.LayerNorm(channels)
+            # brings each frame's vector to unit scale, so the heads' biases
+            # can't swamp it
+            self.frame_norm = eqx.nn.LayerNorm(channels)
 
-        # per-frame heads.  The magnitude head also sees the log of the
-        # residual's level, which the encoder's input normalization removes;
-        # see `analyze`
+        # per-frame heads.  The magnitude head also sees a log level the
+        # encoder's normalization removes: the whole residual's ('conv') or
+        # each frame's ('attention'); see `analyze`
         self.to_magnitude = eqx.nn.Conv1d(channels + 1, 1, 1, key=keys[1])
         self.to_fine = eqx.nn.Conv1d(channels, 1, 1, key=keys[2])
         self.to_event = eqx.nn.Conv1d(channels, event_dim, 1, key=keys[3])
@@ -1385,18 +1406,26 @@ class EventAutoencoder(eqx.Module):
         returns: magnitude logits (n_frames,), fine offsets in (0, 1)
             (n_frames,) and event vectors in (-1, 1) (n_frames, event_dim)
         """
-        # normalize the residual to unit RMS, so the encoder sees unit-scale
-        # input at every step, however much energy is left.  (Unnormalized,
-        # spectrogram bins average ~0.02-0.05, and the positional encoding,
-        # in [-1, 1], drowns them out.)
-        level = jnp.sqrt(jnp.mean(spec ** 2)) + 1e-8
-        x = self.encoder(spec / level)
-        x = jax.vmap(self.frame_norm, in_axes=1, out_axes=1)(x)
+        if self.frame_norm is None:
+            # `AttentionEncoder` normalizes each frame itself, and returns
+            # each frame's log level, so the magnitude head (and the frame
+            # selection that depends on it) sees the residual's per-frame
+            # loudness directly
+            x, log_level = self.encoder(spec)
+            log_level = log_level[None]
+        else:
+            # normalize the residual to unit RMS, so the encoder sees
+            # unit-scale input at every step, however much energy is left.
+            # (Unnormalized, spectrogram bins average ~0.02-0.05, and the
+            # positional encoding, in [-1, 1], drowns them out.)
+            level = jnp.sqrt(jnp.mean(spec ** 2)) + 1e-8
+            x = self.encoder(spec / level)
+            x = jax.vmap(self.frame_norm, in_axes=1, out_axes=1)(x)
 
-        # the magnitude head also sees the log of the level the input
-        # normalization removed, without which it couldn't tell a loud
-        # residual from a quiet one
-        log_level = jnp.broadcast_to(jnp.log(level), (1, x.shape[-1]))
+            # the magnitude head also sees the log of the level the input
+            # normalization removed, without which it couldn't tell a loud
+            # residual from a quiet one
+            log_level = jnp.broadcast_to(jnp.log(level), (1, x.shape[-1]))
         logits = self.to_magnitude(jnp.concatenate([x, log_level], axis=0))[0]
 
         fine = jax.nn.sigmoid(self.to_fine(x)[0])
@@ -1840,9 +1869,14 @@ def make_compute_loss(args):
     return compute_loss
 
 
-def main():
+def build_parser(training: bool = True) -> argparse.ArgumentParser:
+    """
+    The model and training flags.  `training=False` (as `gain_sweep.py`
+    uses) leaves out `--mode`, so only the model's flags need matching.
+    """
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--mode', choices=['train', 'overfit'], required=True)
+    if training:
+        parser.add_argument('--mode', choices=['train', 'overfit'], required=True)
     parser.add_argument('--batch-size', type=int, default=2, help='ignored in overfit mode')
     parser.add_argument('--n-samples', type=int, default=2 ** 17)
     parser.add_argument('--samplerate', type=int, default=22050)
@@ -1851,6 +1885,20 @@ def main():
     parser.add_argument('--spectrogram-exponent', type=float, default=1.,
                         help='1: magnitude spectrogram (default, as in iterativedecomposition.py); 2: power')
     parser.add_argument('--channels', type=int, default=128, help='encoder channels')
+    parser.add_argument('--encoder', choices=['conv', 'attention'], default='conv',
+                        help="'conv': the anti-causal dilated conv stack; 'attention': a transformer with "
+                             "scale-aware (self-conditioned AdaLN) norms and QK-norm attention, see "
+                             "jax_scale_attention.py")
+    parser.add_argument('--attention-layers', type=int, default=6, help="'attention' encoder only")
+    parser.add_argument('--attention-heads', type=int, default=4,
+                        help="'attention' encoder only; --channels / heads must be even")
+    parser.add_argument('--attention-mask', choices=['anticausal', 'full'], default='anticausal',
+                        help="'attention' encoder only: 'anticausal' (each frame sees itself and what "
+                             "follows, like the conv encoder) or 'full'")
+    parser.add_argument('--attention-levels', choices=['relative', 'absolute'], default='relative',
+                        help="'attention' encoder only: 'relative' keeps the encoder's features invariant "
+                             "to gain (only the magnitude head sees absolute level); 'absolute' also embeds "
+                             "each frame's absolute level into the features")
     parser.add_argument('--pe-freqs', type=int, default=16, help='positional encoding frequencies')
     parser.add_argument('--event-dim', type=int, default=16)
     parser.add_argument('--generator', choices=['resonance', 'atoms', 'parallel', 'multires', 'multires-full'], default='resonance',
@@ -1976,8 +2024,14 @@ def main():
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--collection', type=str, default='jax_ae')
     parser.add_argument('--port', type=int, default=9997)
-    args = parser.parse_args()
+    parser.add_argument('--save-path', type=str, default=None,
+                        help='if given, the model is saved here (eqx.tree_serialise_leaves) every '
+                             '--save-every steps; see gain_sweep.py')
+    parser.add_argument('--save-every', type=int, default=500)
+    return parser
 
+
+def validate_args(args):
     if args.n_samples % args.hop != 0:
         raise ValueError('--n-samples must be divisible by --hop')
     if args.generator == 'parallel' and args.n_samples % 512 != 0:
@@ -1989,39 +2043,8 @@ def main():
     if not 0 < args.min_magnitude < args.max_magnitude:
         raise ValueError('need 0 < --min-magnitude < --max-magnitude')
 
-    collection = LmdbCollection(path=args.collection)
 
-    def audio_loggers(names):
-        return loggers(
-            names,
-            'audio/wav',
-            lambda x: encode_audio(x, samplerate=args.samplerate),
-            collection)
-
-    orig_audio, recon_audio, random_audio = audio_loggers(['orig', 'recon', 'random-events'])
-
-    # the synthetic pair only exists when the self-supervised loss is on
-    if args.synthetic:
-        synthetic_audio, synthetic_recon_audio = audio_loggers(['synthetic', 'synthetic-recon'])
-        synthetic_loggers = [synthetic_audio, synthetic_recon_audio]
-    else:
-        synthetic_loggers = []
-
-    residual_logger, = loggers(
-        ['residual'],
-        SupportedContentType.Spectrogram.value,
-        lambda x: x,
-        collection,
-        NumpySerializer(),
-        NumpyDeserializer())
-
-    serve_conjure(
-        [orig_audio, recon_audio, random_audio, *synthetic_loggers, residual_logger],
-        port=args.port,
-        n_workers=1,
-        web_components_version='0.0.101')
-
-    model_key, generator_key, random_key = jax.random.split(jax.random.key(args.seed), 3)
+def build_model(args, model_key, generator_key) -> EventAutoencoder:
 
     if args.generator in ('resonance', 'parallel', 'multires', 'multires-full'):
         from config.dotenv import Config
@@ -2070,7 +2093,7 @@ def main():
             n_active_atoms=args.n_active_atoms,
             key=generator_key)
 
-    model = EventAutoencoder(
+    return EventAutoencoder(
         n_samples=args.n_samples,
         window=args.window,
         hop=args.hop,
@@ -2081,7 +2104,52 @@ def main():
         generator=generator,
         min_magnitude=args.min_magnitude,
         max_magnitude=args.max_magnitude,
-        key=model_key)
+        key=model_key,
+        encoder=args.encoder,
+        attention_layers=args.attention_layers,
+        attention_heads=args.attention_heads,
+        attention_mask=args.attention_mask,
+        attention_levels=args.attention_levels)
+
+
+def main():
+    args = build_parser().parse_args()
+    validate_args(args)
+
+    collection = LmdbCollection(path=args.collection)
+
+    def audio_loggers(names):
+        return loggers(
+            names,
+            'audio/wav',
+            lambda x: encode_audio(x, samplerate=args.samplerate),
+            collection)
+
+    orig_audio, recon_audio, random_audio = audio_loggers(['orig', 'recon', 'random-events'])
+
+    # the synthetic pair only exists when the self-supervised loss is on
+    if args.synthetic:
+        synthetic_audio, synthetic_recon_audio = audio_loggers(['synthetic', 'synthetic-recon'])
+        synthetic_loggers = [synthetic_audio, synthetic_recon_audio]
+    else:
+        synthetic_loggers = []
+
+    residual_logger, = loggers(
+        ['residual'],
+        SupportedContentType.Spectrogram.value,
+        lambda x: x,
+        collection,
+        NumpySerializer(),
+        NumpyDeserializer())
+
+    serve_conjure(
+        [orig_audio, recon_audio, random_audio, *synthetic_loggers, residual_logger],
+        port=args.port,
+        n_workers=1,
+        web_components_version='0.0.101')
+
+    model_key, generator_key, random_key = jax.random.split(jax.random.key(args.seed), 3)
+    model = build_model(args, model_key, generator_key)
 
     optimizer = optax.apply_if_finite(
         optax.chain(optax.clip(0.5), optax.adam(args.lr)),
@@ -2124,6 +2192,9 @@ def main():
     for i, batch in zip(itertools.count(), stream):
         random_key, step_key = jax.random.split(random_key)
         model, opt_state, loss, aux = train_step(model, opt_state, batch, step_key)
+
+        if args.save_path and i > 0 and i % args.save_every == 0:
+            eqx.tree_serialise_leaves(args.save_path, model)
 
         orig_audio(max_norm(np.asarray(batch[0])))
         recon_audio(max_norm(np.asarray(aux['recon'][0])))

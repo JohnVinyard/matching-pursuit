@@ -292,6 +292,13 @@ function randomRouters(n1, n2, sparsity) {
   return {
     // tensionRouter: how much layer1 node j's raw output shifts layer2 node k's tension
     tensionRouter: randomRouter(n2, n1, ...TENSION_ROUTER_RANGE, sparsity),
+    // forceRouter1: layer 1's own self-routing -- how much control-plane
+    // weight j (the same raw weight every layer routes from) drives layer-1
+    // node k's own excitation, mirroring parallel.py's per-layer
+    // `force_router` (every layer, not just the last, routes the shared
+    // control signal through its own n x n matrix). Previously layer 1 only
+    // ever got a direct, unrouted 1:1 pass of its own weight.
+    forceRouter1: randomRouter(n1, n1, 0, 1.4, sparsity),
     // forceRouter2: how much targeting/pressing layer1 node j drives layer2 node k's excitation
     forceRouter2: randomRouter(n2, n1, 0, 1.4, sparsity),
   };
@@ -390,6 +397,7 @@ function diagonalBiasedRouter(n2, n1, lo, hi, sparsity) {
 function physicalRouters(n1, n2, sparsity) {
   return {
     tensionRouter: diagonalBiasedRouter(n2, n1, ...TENSION_ROUTER_RANGE, sparsity),
+    forceRouter1: diagonalBiasedRouter(n1, n1, 0, 1.4, sparsity),
     forceRouter2: diagonalBiasedRouter(n2, n1, 0, 1.4, sparsity),
   };
 }
@@ -398,7 +406,7 @@ function physicalRouters(n1, n2, sparsity) {
 // A strategy supplies two independent generators:
 //   generateLayerParams(n, isModulatorLayer) -> per-node param array for one
 //     layer (called once for layer 1, once for layer 2)
-//   generateRouters(n1, n2, sparsity) -> { tensionRouter, forceRouter2 }
+//   generateRouters(n1, n2, sparsity) -> { tensionRouter, forceRouter1, forceRouter2 }
 // Keeping these separate (rather than one monolithic "generate everything"
 // call) is what lets the sparsity slider re-roll just the routing matrices
 // (regenerateRouters) under whichever strategy is active, without disturbing
@@ -441,6 +449,7 @@ function regenerateRouters() {
   const strategy = STRATEGIES[state.strategy];
   const routers = strategy.generateRouters(state.n1, state.n2, state.sparsity);
   lastParams.tensionRouter = routers.tensionRouter;
+  lastParams.forceRouter1 = routers.forceRouter1;
   lastParams.forceRouter2 = routers.forceRouter2;
   if (workletNode) {
     workletNode.port.postMessage({ type: 'setParams', params: routers });
@@ -456,11 +465,16 @@ function regenerateRouters() {
 // float32 since their ranges vary too much across strategies for cheap
 // linear quantization to be worth the complexity; the two things that don't
 // need much precision -- the 32 random FIR filter taps and 2-value filter
-// mix per node, and both n2xn1 routing matrices -- are quantized down to
+// mix per node, and all three routing matrices -- are quantized down to
 // int8/int16, which is most of the size savings (filter data alone would
 // otherwise be 4x bigger). Doesn't compress across the URL; not needed at
-// this size (a couple KB even at 16x16 nodes).
-const SHARE_VERSION = 1;
+// this size (a few KB even at 64x64 nodes).
+//
+// v2 adds forceRouter1 (layer 1's own self-routing matrix, n1xn1 -- see
+// randomRouters), so v1 links no longer decode (decodeShareState's version
+// check already rejects a mismatched version outright, rather than
+// misreading the new layout).
+const SHARE_VERSION = 2;
 const NODE_BYTE_LENGTH = 4 * 5 + FILTER_TAPS + 2; // 5 float32 scalars + int8 taps + int8 filterMix
 const ROUTER_QUANT_RANGE = 32; // generous headroom above any range we've used so far
 const EXCITATION_MODE_IDS = ['sustained', 'impulse', 'pulse', 'noise'];
@@ -491,7 +505,7 @@ function dequantizeI16(v, range) {
 }
 
 function shareByteLength(n1, n2) {
-  return 11 + (n1 + n2) * NODE_BYTE_LENGTH + n2 * n1 * 2 * 2;
+  return 11 + (n1 + n2) * NODE_BYTE_LENGTH + (n2 * n1 * 2 + n1 * n1) * 2;
 }
 
 function encodeNode(view, offset, p) {
@@ -577,6 +591,9 @@ function encodeShareState() {
   for (const row of lastParams.forceRouter2) {
     for (const v of row) { view.setInt16(offset, quantizeI16(v, ROUTER_QUANT_RANGE), true); offset += 2; }
   }
+  for (const row of lastParams.forceRouter1) {
+    for (const v of row) { view.setInt16(offset, quantizeI16(v, ROUTER_QUANT_RANGE), true); offset += 2; }
+  }
 
   return new Uint8Array(buffer);
 }
@@ -624,12 +641,13 @@ function decodeShareState(bytes) {
   }
   const tensionRouter = decodeRouter(n2, n1);
   const forceRouter2 = decodeRouter(n2, n1);
+  const forceRouter1 = decodeRouter(n1, n1);
 
   const reverbFile = reverbFileIdx < REVERB_FILES.length ? REVERB_FILES[reverbFileIdx] : null;
 
   return {
     n1, n2, strategy, excitationMode, pulseRate, sparsity, volume, modDepth, reverbFile, reverbMix,
-    params: { layer1, layer2, tensionRouter, forceRouter2 },
+    params: { layer1, layer2, tensionRouter, forceRouter1, forceRouter2 },
   };
 }
 
@@ -1066,7 +1084,8 @@ function renderParamsPanel(params) {
   renderNodeTable(document.getElementById('layer1Table'), 'Layer 1 (input / modulator)', params.layer1, true);
   renderNodeTable(document.getElementById('layer2Table'), 'Layer 2 (output / carrier)', params.layer2, true);
   renderMatrix(document.getElementById('tensionRouterGrid'), 'Tension router (row=layer2 node, col=layer1 node)', params.tensionRouter, ...TENSION_ROUTER_RANGE, 4);
-  renderMatrix(document.getElementById('forceRouterGrid'), 'Force router (row=layer2 node, col=layer1 node)', params.forceRouter2, 0, 1.4);
+  renderMatrix(document.getElementById('forceRouter1Grid'), 'Force router, layer 1 self-routing (row=target node, col=source node)', params.forceRouter1, 0, 1.4);
+  renderMatrix(document.getElementById('forceRouter2Grid'), 'Force router, layer 1 -> layer 2 (row=layer2 node, col=layer1 node)', params.forceRouter2, 0, 1.4);
 }
 
 function renderReverbInfo() {
@@ -1297,10 +1316,7 @@ function wireControls() {
 
   const startBtn = document.getElementById('startBtn');
   const randomizeBtn = document.getElementById('randomizeBtn');
-  const n1Slider = document.getElementById('n1Slider');
-  const n2Slider = document.getElementById('n2Slider');
-  const n1Label = document.getElementById('n1Label');
-  const n2Label = document.getElementById('n2Label');
+  const nodeCountSelect = document.getElementById('nodeCountSelect');
   const volumeSlider = document.getElementById('volumeSlider');
   const sparsitySlider = document.getElementById('sparsitySlider');
   const sparsityLabel = document.getElementById('sparsityLabel');
@@ -1321,6 +1337,10 @@ function wireControls() {
   // see the `loadedShare` branch there) from a shared link, if one was parsed
   // at script load.
   if (loadedShare) {
+    // the UI only ever generates/shares square instruments (n1 === n2 -- see
+    // nodeCountSelect below), but decodeShareState still reads them as two
+    // separate fields; a v2+ link should always have them equal, so either
+    // one picks the right <option>.
     state.n1 = loadedShare.n1;
     state.n2 = loadedShare.n2;
     state.strategy = loadedShare.strategy;
@@ -1328,8 +1348,7 @@ function wireControls() {
     state.pulseRate = loadedShare.pulseRate;
     state.sparsity = loadedShare.sparsity;
 
-    n1Slider.value = loadedShare.n1; n1Label.textContent = loadedShare.n1;
-    n2Slider.value = loadedShare.n2; n2Label.textContent = loadedShare.n2;
+    nodeCountSelect.value = loadedShare.n1;
     strategySelect.value = loadedShare.strategy;
     excitationModeSelect.value = loadedShare.excitationMode;
     pulseRateSlider.value = loadedShare.pulseRate;
@@ -1397,19 +1416,23 @@ function wireControls() {
     randomizeAll();
   });
 
+  // The instrument is always "square" (n1 === n2) -- a single node-count
+  // control, rather than independent layer-1/layer-2 sliders, picked from a
+  // short list of powers of two. 32/64 are untested territory for real-time
+  // performance (every routing matrix is n x n or n2 x n1, so the per-sample
+  // cost of all three routers combined scales with n^2) -- if the audio
+  // glitches/underruns at the higher counts, that's the likely reason.
   function reconfigure() {
-    state.n1 = parseInt(n1Slider.value, 10);
-    state.n2 = parseInt(n2Slider.value, 10);
-    n1Label.textContent = state.n1;
-    n2Label.textContent = state.n2;
+    const n = parseInt(nodeCountSelect.value, 10);
+    state.n1 = n;
+    state.n2 = n;
     resetPlanes();
     if (workletNode) {
       workletNode.port.postMessage({ type: 'configure', n1: state.n1, n2: state.n2 });
       randomizeAll();
     }
   }
-  n1Slider.addEventListener('input', reconfigure);
-  n2Slider.addEventListener('input', reconfigure);
+  nodeCountSelect.addEventListener('change', reconfigure);
 
   volumeSlider.addEventListener('input', () => {
     if (!workletNode) return;
