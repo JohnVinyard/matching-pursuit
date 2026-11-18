@@ -24,7 +24,7 @@ does. The encoder predicts a dense, symmetric stiffness matrix.
 import argparse
 import itertools
 import math
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 
 import equinox as eqx
 import jax
@@ -41,6 +41,9 @@ from goo_physical import (
     sample_physics, stabilize,
 )
 from hyper_rnn import AntiCausalBlock, batch_stream, flattened_multiband_spectrogram, max_norm, stft
+from jax_scale_attention import (
+    AttentionConfig, AttentionEncoder, add_attention_arguments, attention_config_from_args, make_attention_encoder,
+    pooled_log_level)
 
 
 class Guess(NamedTuple):
@@ -73,16 +76,52 @@ class Encoder(eqx.Module):
         return self.global_head(jnp.max(x, axis=-1)), self.force_head(x)
 
 
+class ScaleAwareEncoder(eqx.Module):
+    """
+    `Encoder`'s interface, with an `AttentionEncoder` (see
+    jax_scale_attention.py) in place of the conv stack.  Its features are
+    normalized (and, with level_mode='relative', invariant to gain), so both
+    heads also get the input's log level: the force head per frame (where
+    the strongest impulses are chosen), the global head (which predicts the
+    output gain) over the whole segment.
+    """
+    attention: AttentionEncoder
+    global_head: eqx.nn.MLP
+    force_head: eqx.nn.Conv1d
+    window: int = eqx.field(static=True)
+    hop: int = eqx.field(static=True)
+    exponent: float = eqx.field(static=True)
+
+    def __init__(self, window, hop, channels, n_global, n_force, config: AttentionConfig, key):
+        k1, k2, k3 = jax.random.split(key, 3)
+        self.attention = make_attention_encoder(window // 2 + 1, channels, config, k1)
+        self.global_head = eqx.nn.MLP(channels + 1, n_global, width_size=channels, depth=2, key=k2)
+        self.force_head = eqx.nn.Conv1d(channels + 1, n_force, 1, key=k3)
+        self.window, self.hop, self.exponent = window, hop, config.exponent
+
+    def __call__(self, audio):
+        # a power law, unlike log(x + eps), scales with gain
+        spec = stft(audio, self.window, self.hop, pad=True) ** self.exponent  # (frames, freqs)
+        x, log_level = self.attention(spec)
+        g = self.global_head(jnp.concatenate([jnp.max(x, axis=-1), pooled_log_level(log_level)[None]]))
+        return g, self.force_head(jnp.concatenate([x, log_level[None]], axis=0))
+
+
 class GooAutoencoder(eqx.Module):
-    encoder: Encoder
+    encoder: eqx.Module  # `Encoder` or `ScaleAwareEncoder`
     hf: HFGenerator
     cfg: GooConfig = eqx.field(static=True)
     n_impulses: int = eqx.field(static=True)
 
-    def __init__(self, cfg: GooConfig, hf: HFGenerator, window, hop, channels, dilations, n_impulses, key):
+    def __init__(self, cfg: GooConfig, hf: HFGenerator, window, hop, channels, dilations, n_impulses, key,
+                 attention: Optional[AttentionConfig] = None):
+        """attention: if given, a `ScaleAwareEncoder` replaces the conv `Encoder`"""
         self.cfg, self.hf, self.n_impulses = cfg, hf, n_impulses
-        self.encoder = Encoder(
-            window, hop, channels, self.n_physics_params + hf.n_params, cfg.n_nodes * cfg.dim, dilations, key)
+        n_global, n_force = self.n_physics_params + hf.n_params, cfg.n_nodes * cfg.dim
+        if attention is None:
+            self.encoder = Encoder(window, hop, channels, n_global, n_force, dilations, key)
+        else:
+            self.encoder = ScaleAwareEncoder(window, hop, channels, n_global, n_force, attention, key)
 
     @property
     def n_physics_params(self) -> int:
@@ -171,7 +210,9 @@ def parse_args(argv=None):
     parser.add_argument('--window', type=int, default=1024, help='spectrogram window (encoder input and mel loss)')
     parser.add_argument('--hop', type=int, default=256, help='spectrogram hop; also the control rate')
     parser.add_argument('--channels', type=int, default=128)
-    parser.add_argument('--dilations', type=int, nargs='+', default=[1, 2, 4, 8, 16, 32, 64, 1])
+    parser.add_argument('--dilations', type=int, nargs='+', default=[1, 2, 4, 8, 16, 32, 64, 1],
+                        help="'conv' encoder only")
+    add_attention_arguments(parser)
     # loss
     parser.add_argument('--loss', choices=['mel', 'multiband', 'both'], default='both')
     parser.add_argument('--compression', type=float, default=0.5, help='spectral magnitudes ** this')
@@ -204,7 +245,9 @@ def build(args):
 
     model_key, hf_key = jax.random.split(jax.random.key(args.seed))
     hf = make_hf_generator(args.hf, cfg, hf_key, n_modes=args.n_modes, n_filters=args.n_filters)
-    model = GooAutoencoder(cfg, hf, args.window, args.hop, args.channels, args.dilations, args.n_impulses, model_key)
+    model = GooAutoencoder(
+        cfg, hf, args.window, args.hop, args.channels, args.dilations, args.n_impulses, model_key,
+        attention=attention_config_from_args(args))
 
     spectral_loss = make_spectral_loss(args)
 

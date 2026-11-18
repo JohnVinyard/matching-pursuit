@@ -54,6 +54,18 @@ TENSION_EXPONENT_RANGE = (4.0, 9.0)
 # output
 SUM_LAYER_OUTPUTS = False
 
+# if False (--no-reverb), the wet branch at the end of the chain is dropped:
+# no room impulse response convolution, so the output is the (summed) DHO
+# output times the dry/wet mix's *dry* weight (and final_gain), exactly as
+# with reverb, minus the wet term.  Keeping the learned dry gain means the
+# only difference is the rooms, not the output level.  Applies in every
+# mode, including the synthetic targets of the self-supervised modes (whose
+# parameter loss then also ignores the room terms, and the wet weight).  For
+# checking how much the model leans on the rooms' own resonances rather than
+# the DHO model.  The reverb modules and room heads are still built (and
+# saved), just unused.
+USE_REVERB = True
+
 # if True, tension is a combination of fixed tension_dictionary atoms (see
 # make_tension_dictionary/compute_tension_from_dictionary); if False, tension
 # is produced directly as `compute_tension(raw_scalar)` (10 ** t), the way it
@@ -104,7 +116,7 @@ DAMP_MOD_SCALE = 0.001
 #                     pooled via the same latents/latents_attn heads.
 # 'conv' and 'transformer' are otherwise drop-in replacements for each
 # other and for 'unet'.
-ENCODER_ARCH = 'transformer'
+ENCODER_ARCH = 'conv'
 
 TRANSFORMER_N_LAYERS = 6
 TRANSFORMER_N_HEADS = 4
@@ -125,7 +137,7 @@ TRANSFORMER_LEVEL_MODE = 'relative'
 # ENCODER_ARCH is 'unet', since that path has no attn/latents_attn at all.
 USE_ATTENTION_NORM = True
 
-N_NODES = 32
+N_NODES = 16
 
 # analysis arch
 DO_NORM = False
@@ -153,7 +165,7 @@ MAX_NORM_BEFORE_LOSS = False
 # entropy_deficit), which pushes the target/recon spectrogram residual
 # toward unstructured, uniform noise, regardless of its scale -- ported
 # from jax_ae.py's --information-coeff. 0 disables it entirely.
-INFORMATION_COEFF = 1
+INFORMATION_COEFF = 0
 
 FILTER_SIZE = 256
 
@@ -175,6 +187,11 @@ N_FILTER_TAPS = 64
 # audible range, which is a worse failure mode than simply capping the
 # frequency.
 CLAMP_OMEGA_TO_NYQUIST = True
+
+
+def damping_nonlinearity(x: torch.Tensor) -> torch.Tensor:
+    return torch.sigmoid(x)
+    # return torch.clamp(x, 0, 1)
 
 
 def compute_tension(t: torch.Tensor) -> torch.Tensor:
@@ -954,7 +971,7 @@ class InstrumentAutoencoder(nn.Module):
 
             params: InstrumentDefinitionTensors = layer.forward(latents)
             diff = 1 - self.hyper_params.base_resonance
-            params.damping = self.hyper_params.base_resonance + (torch.sigmoid(params.damping) * diff * 0.9998)
+            params.damping = self.hyper_params.base_resonance + (damping_nonlinearity(params.damping) * diff * 0.9998)
             # params.mass = 1e-5 + F.softplus(params.mass)
             # params.mass = torch.abs(params.mass)
 
@@ -991,14 +1008,17 @@ class InstrumentAutoencoder(nn.Module):
 
         tm = torch.sum(tm, dim=1, keepdim=True)
 
-        rooms = torch.relu(self.room_mix.forward(latents))
-        mx = self.wet_dry.forward(latents)
+        if USE_REVERB:
+            rooms = torch.relu(self.room_mix.forward(latents))
+            mx = self.wet_dry.forward(latents)
 
-        wet = self.verb.forward(tm, rooms)
+            wet = self.verb.forward(tm, rooms)
 
-        stacked = torch.stack([tm, wet], dim=-1)
+            stacked = torch.stack([tm, wet], dim=-1)
 
-        mixed = torch.einsum('bctm,bm->bct', stacked, mx)
+            mixed = torch.einsum('bctm,bm->bct', stacked, mx)
+        else:
+            mixed = tm * self.wet_dry.forward(latents)[:, 0, None, None]
 
         mixed = mixed * self.final_gain
 
@@ -1087,9 +1107,12 @@ class InstrumentAutoencoder(nn.Module):
 
         tm = torch.sum(tm, dim=1, keepdim=True)
 
-        wet = self.verb.forward(tm, rooms)
-        stacked = torch.stack([tm, wet], dim=-1)
-        mixed = torch.einsum('bctm,bm->bct', stacked, mx)
+        if USE_REVERB:
+            wet = self.verb.forward(tm, rooms)
+            stacked = torch.stack([tm, wet], dim=-1)
+            mixed = torch.einsum('bctm,bm->bct', stacked, mx)
+        else:
+            mixed = tm * mx[:, 0, None, None]
         mixed = mixed * self.final_gain
 
         return mixed
@@ -1677,13 +1700,16 @@ class LayerController(nn.Module):
             outputs.append(tm)
 
         # DECISION: Does the conv reverb cause issues because it's outside the energy calculation?
-        # apply conv reverb
-        wet = self.verb.forward(tm, self.room_mix)
+        if USE_REVERB:
+            # apply conv reverb
+            wet = self.verb.forward(tm, self.room_mix)
 
-        # wet/dry reverb mix
-        x = torch.stack([tm, wet], dim=-1)
-        x = x * self.wet_dry_mix
-        tm = torch.sum(x, dim=-1)
+            # wet/dry reverb mix
+            x = torch.stack([tm, wet], dim=-1)
+            x = x * self.wet_dry_mix
+            tm = torch.sum(x, dim=-1)
+        else:
+            tm = tm * self.wet_dry_mix[0]
 
         if sum_output:
             tm = torch.sum(tm, dim=1, keepdim=True)
@@ -1868,6 +1894,9 @@ def synthesize_known_signal(
 
     tm = torch.sum(tm, dim=1, keepdim=True)
 
+    if not USE_REVERB:
+        return tm * wet_dry_mix[:, 0, None, None]
+
     wet = verb.forward(tm, rooms)
     stacked = torch.stack([tm, wet], dim=-1)
     mixed = torch.einsum('bctm,bm->bct', stacked, wet_dry_mix)
@@ -1929,9 +1958,16 @@ def instrument_param_loss(
         torch.abs(known_cs.sum(dim=1) - est_cs.sum(dim=1)).sum()
         + torch.abs(known_tension_mod.sum(dim=1) - est_tension_mod.sum(dim=1)).sum()
         + torch.abs(known_damp_mod.sum(dim=1) - est_damp_mod.sum(dim=1)).sum()
-        + torch.abs(known_rooms - est_rooms).sum()
-        + torch.abs(known_wet_dry - est_wet_dry).sum()
     )
+    # with --no-reverb, neither the known nor the estimated rooms, nor the
+    # wet weight, are heard, so there's nothing there to recover; the dry
+    # weight still is
+    if USE_REVERB:
+        loss = loss \
+            + torch.abs(known_rooms - est_rooms).sum() \
+            + torch.abs(known_wet_dry - est_wet_dry).sum()
+    else:
+        loss = loss + torch.abs(known_wet_dry[:, 0] - est_wet_dry[:, 0]).sum()
 
     for kp, ep in zip(known_params, est_params):
         known_mass = torch.sort(kp.mass, dim=1).values
@@ -2587,12 +2623,78 @@ def _copy_to_clipboard(text: str) -> bool:
         return False
 
 
+SHARE_HTML_PATH = 'parallel.html'
+SHARE_HTML_DEFAULT_BASE_URL = 'https://blog.cochlea.xyz/dho-synth'
+
+
+def _write_share_html(query: str, iteration: int, path: str = SHARE_HTML_PATH) -> None:
+    """
+    (Over)writes a tiny standalone HTML page with a clickable link to the web
+    demo loaded with `query` (a `?p=...` string from encode_share_state_url).
+    The base URL is editable via a text input; the link's displayed text is
+    an abbreviated form of the full URL, with a QR code (via the
+    qrcode-generator CDN script) for opening it on a phone.
+    """
+    import json
+    page = f'''<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>parallel share link</title>
+<style>
+  body {{ font-family: sans-serif; margin: 2em; }}
+  input {{ width: 40em; max-width: 100%; font-family: monospace; }}
+  a {{ font-family: monospace; }}
+  #qr svg {{ width: 320px; max-width: 100%; height: auto; }}
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
+</head>
+<body>
+<label>Base URL <input id="base" type="text" value="{SHARE_HTML_DEFAULT_BASE_URL}"></label>
+<p>Iteration {iteration}: <a id="link" href="#" target="_blank" rel="noopener"></a></p>
+<div id="qr"></div>
+<script>
+  const query = {json.dumps(query)};
+  const base = document.getElementById('base');
+  const link = document.getElementById('link');
+  function abbreviate(url) {{
+    const i = url.indexOf('?p=');
+    const head = url.slice(0, i + 3);
+    const p = url.slice(i + 3);
+    return p.length <= 24 ? url : head + p.slice(0, 12) + '\\u2026' + p.slice(-8);
+  }}
+  function update() {{
+    const url = base.value.trim() + query;
+    link.href = url;
+    link.textContent = abbreviate(url);
+    link.title = url;
+    const qrEl = document.getElementById('qr');
+    try {{
+      // type 0 = smallest QR version that fits; 'L' = max data capacity
+      const qr = qrcode(0, 'L');
+      qr.addData(url);
+      qr.make();
+      qrEl.innerHTML = qr.createSvgTag({{ cellSize: 4, margin: 4, scalable: true }});
+    }} catch (e) {{
+      qrEl.textContent = 'QR code unavailable: ' + e;
+    }}
+  }}
+  base.addEventListener('input', update);
+  update();
+</script>
+</body>
+</html>
+'''
+    with open(path, 'w') as f:
+        f.write(page)
+
+
 # how often (in iterations) overfit_osc emits a share link for the
 # instrument it's currently fitting; see encode_share_state_url
 SHARE_EXPORT_EVERY = 5000
 
 
-def overfit_osc(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int):
+def overfit_osc(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int, share_html: bool = False):
 
     control_rate = 512
 
@@ -2659,6 +2761,8 @@ def overfit_osc(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int):
                 query = encode_share_state_url(model)
                 print(f'[share] iteration {iteration}: {query}')
                 _copy_to_clipboard(query)
+                if share_html:
+                    _write_share_html(query, iteration)
             except Exception as e:
                 print(f'[share] failed to export share link at iteration {iteration}: {e}')
 
@@ -2732,8 +2836,18 @@ if __name__ == '__main__':
     parser = ArgumentParser()
     parser.add_argument(
         '--mode', choices=['train', 'overfit', 'overfit_direct', 'self_supervised', 'self_supervised_only', 'test'], required=True)
+    parser.add_argument(
+        '--no-reverb', action='store_true',
+        help="drop the reverb's wet branch (room impulse response convolution) at the end of the "
+             "chain, keeping only the dry signal at its learned dry gain, in every mode (see USE_REVERB)")
+    parser.add_argument(
+        '--share-html', action='store_true',
+        help=f'overfit_direct only: (over)write {SHARE_HTML_PATH} with a clickable share link each time one is exported')
 
     args = parser.parse_args()
+
+    # module scope, so this rebinds the global every function reads
+    USE_REVERB = not args.no_reverb
 
     n_to_keep = N_TO_KEEP
 
@@ -2774,7 +2888,8 @@ if __name__ == '__main__':
             n_nodes=N_NODES,
             n_samples=2 ** 17,
             n_layers=2,
-            n_to_keep=N_TO_KEEP)
+            n_to_keep=N_TO_KEEP,
+            share_html=args.share_html)
     elif args.mode == 'test':
         batch = 3
         dim = 64

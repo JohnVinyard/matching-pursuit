@@ -19,6 +19,10 @@ import optax
 from conjure import LmdbCollection, loggers, serve_conjure
 from conjure.logger import encode_audio
 
+from jax_scale_attention import (
+    AttentionConfig, AttentionEncoder, add_attention_arguments, attention_config_from_args, make_attention_encoder,
+    pooled_log_level)
+
 
 # ---------------------------------------------------------------------------
 # physics: an arbitrary-dimension network of masses connected by springs,
@@ -447,9 +451,11 @@ class ConvBlock(eqx.Module):
 
 
 class PhysicsGuesser(eqx.Module):
-    blocks: list
+    blocks: list                         # conv encoder (empty with attention)
+    attention: Optional[AttentionEncoder]
     global_head: eqx.nn.MLP
     force_head: eqx.nn.Conv1d
+    attention_exponent: float = eqx.field(static=True)
     n_nodes: int = eqx.field(static=True)
     dim: int = eqx.field(static=True)
     n_samples: int = eqx.field(static=True)
@@ -460,15 +466,34 @@ class PhysicsGuesser(eqx.Module):
     damping_range: Tuple[float, float] = eqx.field(static=True)
     radius_range: Tuple[float, float] = eqx.field(static=True)
 
-    def __init__(self, n_mels, n_nodes, dim, n_samples, hop_length, hidden, n_layers, cfg, key):
+    def __init__(self, n_mels, n_nodes, dim, n_samples, hop_length, hidden, n_layers, cfg, key,
+                 attention: Optional[AttentionConfig] = None):
+        """
+        attention: if given, an `AttentionEncoder` (see
+            jax_scale_attention.py) replaces the conv stack.  Its features
+            are normalized (and, with level_mode='relative', invariant to
+            gain), but this synth has no output gain, so the predicted
+            forces must reproduce the target's level: both heads also get
+            the input's log level, the force head per frame and the global
+            head over the whole segment.
+        """
         keys = jax.random.split(key, n_layers + 2)
-        channels = [n_mels] + [hidden] * n_layers
-        self.blocks = [ConvBlock(channels[i], channels[i + 1], 5, keys[i]) for i in range(n_layers)]
+        if attention is None:
+            channels = [n_mels] + [hidden] * n_layers
+            self.blocks = [ConvBlock(channels[i], channels[i + 1], 5, keys[i]) for i in range(n_layers)]
+            self.attention = None
+            self.attention_exponent = 1.0
+            head_in = hidden
+        else:
+            self.blocks = []
+            self.attention = make_attention_encoder(n_mels, hidden, attention, keys[0])
+            self.attention_exponent = attention.exponent
+            head_in = hidden + 1
 
         n_pairs = n_nodes * (n_nodes - 1) // 2
         global_out = n_nodes * dim + n_pairs + n_nodes + n_nodes + n_nodes + 1
-        self.global_head = eqx.nn.MLP(hidden, global_out, width_size=hidden, depth=2, key=keys[-2])
-        self.force_head = eqx.nn.Conv1d(hidden, n_nodes, 1, key=keys[-1])
+        self.global_head = eqx.nn.MLP(head_in, global_out, width_size=hidden, depth=2, key=keys[-2])
+        self.force_head = eqx.nn.Conv1d(head_in, n_nodes, 1, key=keys[-1])
 
         self.n_nodes, self.dim = n_nodes, dim
         self.n_samples, self.hop_length = n_samples, hop_length
@@ -479,11 +504,19 @@ class PhysicsGuesser(eqx.Module):
         self.radius_range = cfg.radius_range
 
     def __call__(self, mel: jnp.ndarray) -> PhysicalParams:
-        x = mel
-        for block in self.blocks:
-            x = block(x)
-
-        g = self.global_head(jnp.mean(x, axis=-1))
+        """mel: (n_mels, n_frames), log1p-compressed (see `make_mel_fn`)"""
+        if self.attention is None:
+            x = mel
+            for block in self.blocks:
+                x = block(x)
+            g = self.global_head(jnp.mean(x, axis=-1))
+        else:
+            # undo log1p (whose +1 doesn't scale with gain), and compress
+            # with a power law instead
+            spec = jnp.expm1(mel).T ** self.attention_exponent    # (n_frames, n_mels)
+            x, log_level = self.attention(spec)
+            g = self.global_head(jnp.concatenate([jnp.mean(x, axis=-1), pooled_log_level(log_level)[None]]))
+            x = jnp.concatenate([x, log_level[None]], axis=0)
         n, d = self.n_nodes, self.dim
         n_pairs = n * (n - 1) // 2
 
@@ -573,6 +606,7 @@ def main():
                               'spectrogram regardless of this choice.')
     parser.add_argument('--hidden-channels', type=int, default=32)
     parser.add_argument('--n-conv-layers', type=int, default=3)
+    add_attention_arguments(parser)
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--log-every', type=int, default=25)
     parser.add_argument('--sample-every', type=int, default=1, help='log audio to conjure every N steps')
@@ -629,7 +663,7 @@ def main():
         n_mels=args.n_mels, n_nodes=n_nodes, dim=args.dim,
         n_samples=args.n_samples, hop_length=args.hop_length,
         hidden=args.hidden_channels, n_layers=args.n_conv_layers,
-        cfg=cfg, key=model_key,
+        cfg=cfg, key=model_key, attention=attention_config_from_args(args),
     )
 
     optimizer = optax.adam(args.lr)

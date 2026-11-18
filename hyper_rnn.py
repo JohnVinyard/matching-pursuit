@@ -11,6 +11,7 @@
 # --rnn tanh --output-mode dho                                         notes:
 # --rnn complex --output-mode complex --complex-nonlinearity none      notes: poor recon, lots of buzz
 # --rnn complex --output-mode complex --complex-nonlinearity modtanh   notes:
+# --rnn ssm                                                            notes:
 
 """
 Same idea as `parallel.py`, but in jax, and with a much simpler
@@ -809,7 +810,10 @@ class RNNWeights(eqx.Module):
     dho: Optional[DHOParams] = None  # 'dho' output mode only
 
 
-def execute_rnn(weights: Union[RNNWeights, 'ComplexRNNWeights'], control: jnp.ndarray, key=None) -> jnp.ndarray:
+def execute_rnn(
+        weights: Union[RNNWeights, 'ComplexRNNWeights', 'SSMWeights'],
+        control: jnp.ndarray,
+        key=None) -> jnp.ndarray:
     """
     control: (control_channels, n_steps)
     key: required only for output modes that need noise
@@ -819,10 +823,13 @@ def execute_rnn(weights: Union[RNNWeights, 'ComplexRNNWeights'], control: jnp.nd
     `OutputMode`), and blocks are overlap-added with a hop of `step_size`, so
     the output has no discontinuities at block boundaries.
 
-    Complex RNN weights are executed by `execute_complex_rnn`.
+    Complex RNN weights are executed by `execute_complex_rnn`, and SSM weights
+    by `execute_ssm`.
     """
     if isinstance(weights, ComplexRNNWeights):
         return execute_complex_rnn(weights, control)
+    if isinstance(weights, SSMWeights):
+        return execute_ssm(weights, control)
 
     mode = OUTPUT_MODES[weights.output_mode]
     hidden_dim = weights.w_hh.shape[0]
@@ -869,6 +876,10 @@ def overlap_add(blocks: jnp.ndarray, step_size: int) -> jnp.ndarray:
 # can't blow up, and at nu = 0 it's ~0.982 per frame (a decay to 1% over
 # ~250 frames, ~1.5s at the default step size).
 COMPLEX_DECAY_OFFSET = 4.0
+
+# ln(1000): a mode's amplitude falls by 60dB over T60 seconds when its
+# per-sample decay is LN_1000 / (T60 * samplerate)
+LN_1000 = float(np.log(1000.))
 
 
 class ComplexRNNWeights(eqx.Module):
@@ -922,6 +933,47 @@ def execute_complex_rnn(weights: ComplexRNNWeights, control: jnp.ndarray) -> jnp
     return overlap_add(blocks, step_size)
 
 
+# ---------------------------------------------------------------------------
+# the generated instrument, alternative: an exact, diagonal, linear
+# state-space model (SSM), stepped once per block
+
+class SSMWeights(eqx.Module):
+    w_in: jnp.ndarray      # complex, (control_channels, hidden): each channel's excitation of each mode
+    log_pole: jnp.ndarray  # complex, (hidden,): -alpha + j * theta, *per sample*
+    step_size: int = eqx.field(static=True)
+
+
+def execute_ssm(weights: SSMWeights, control: jnp.ndarray) -> jnp.ndarray:
+    """
+    control: (control_channels, n_steps), real
+    returns: (n_steps * step_size,)
+
+    The same diagonal, linear recurrence as `execute_complex_rnn`, but the
+    poles are defined per audio sample, and each block's samples are the
+    exact continuation of each mode from its state, rather than a learned
+    (free) mapping from state to a windowed block:
+
+        state[t]          = pole ** step_size * state[t - 1] + control_t @ w_in
+        y[t * L + j]      = Re(sum(state[t] * pole ** j)),  j in [0, L)
+
+    This is exactly the per-sample SSM x[n] = pole * x[n - 1] + B u[n],
+    y[n] = Re(sum(x[n])), with control impulses at the first sample of each
+    block, so consecutive blocks join up with no window and no overlap-add.
+    The recurrence is still only run once per block (n_steps sequential
+    steps); within a block, every sample is computed in parallel.
+    """
+    within = jnp.exp(weights.log_pole[:, None] * jnp.arange(weights.step_size)[None, :])  # (hidden, L)
+    per_block = jnp.exp(weights.log_pole * weights.step_size)                              # (hidden,)
+
+    def step(state, control_t):
+        state = per_block * state + control_t @ weights.w_in
+        return state, state
+
+    hidden_dim = weights.log_pole.shape[0]
+    _, states = jax.lax.scan(step, jnp.zeros(hidden_dim, dtype=jnp.complex64), control.T)
+    return jnp.real(states @ within).reshape(-1)
+
+
 class HyperRNN(eqx.Module):
     analysis: Analysis
     latents: ControlSignalCreator
@@ -931,7 +983,7 @@ class HyperRNN(eqx.Module):
     to_w_hh: ParameterGenerator
     to_radius: Optional[ParameterGenerator]  # 'tanh' RNN only
     to_bias: Optional[ParameterGenerator]    # 'tanh' RNN only
-    to_w_out: ParameterGenerator
+    to_w_out: Optional[ParameterGenerator]   # not used by the 'ssm' RNN
     to_dho: Optional[ParameterGenerator]     # 'dho' output mode only
 
     hidden_dim: int = eqx.field(static=True)
@@ -940,6 +992,13 @@ class HyperRNN(eqx.Module):
     output_mode: str = eqx.field(static=True)
     rnn: str = eqx.field(static=True)
     complex_nonlinearity: str = eqx.field(static=True)
+    # 'ssm' RNN only, see `rnn_weights`
+    samplerate: int = eqx.field(static=True)
+    ssm_min_hz: float = eqx.field(static=True)
+    ssm_max_hz: float = eqx.field(static=True)
+    ssm_freq_spread: float = eqx.field(static=True)
+    ssm_min_t60: float = eqx.field(static=True)
+    ssm_max_t60: float = eqx.field(static=True)
 
     def __init__(
             self,
@@ -952,10 +1011,18 @@ class HyperRNN(eqx.Module):
             hard_sparsify: bool = False,
             output_mode: str = 'complex',
             rnn: str = 'tanh',
-            complex_nonlinearity: str = 'none'):
+            complex_nonlinearity: str = 'none',
+            samplerate: int = 22050,
+            ssm_min_hz: float = 40.,
+            ssm_max_hz: float = 9000.,
+            ssm_freq_spread: float = 1.,
+            ssm_min_t60: float = 0.02,
+            ssm_max_t60: float = 8.):
 
         if rnn == 'complex' and output_mode != 'complex':
             raise ValueError("the complex RNN always outputs via an inverse STFT ('complex' output mode)")
+        if rnn == 'ssm' and complex_nonlinearity != 'none':
+            raise ValueError("the SSM is linear; it doesn't support a complex nonlinearity")
 
         self.hidden_dim = hidden_dim
         self.control_channels = control_channels
@@ -963,6 +1030,12 @@ class HyperRNN(eqx.Module):
         self.output_mode = output_mode
         self.rnn = rnn
         self.complex_nonlinearity = complex_nonlinearity
+        self.samplerate = samplerate
+        self.ssm_min_hz = ssm_min_hz
+        self.ssm_max_hz = ssm_max_hz
+        self.ssm_freq_spread = ssm_freq_spread
+        self.ssm_min_t60 = ssm_min_t60
+        self.ssm_max_t60 = ssm_max_t60
 
         keys = jax.random.split(key, 9)
 
@@ -986,10 +1059,11 @@ class HyperRNN(eqx.Module):
             key=keys[3],
             subtract_mean=hard_sparsify)
 
-        if rnn == 'complex':
+        if rnn in ('complex', 'ssm'):
             # complex weights are generated as (real, imaginary) pairs; the
             # recurrent weights are diagonal, generated as a (decay, angle)
-            # pair per unit, see `rnn_weights`
+            # pair per unit, or, for the SSM, a (frequency, decay) pair, see
+            # `rnn_weights`
             self.to_w_in = ParameterGenerator(channels, control_channels * hidden_dim * 2, keys[4])
             self.to_w_hh = ParameterGenerator(channels, hidden_dim * 2, keys[5])
             self.to_radius = None
@@ -1000,8 +1074,13 @@ class HyperRNN(eqx.Module):
             self.to_radius = ParameterGenerator(channels, 1, keys[6])
             self.to_bias = ParameterGenerator(channels, hidden_dim, keys[7])
         # for the complex RNN, output_size is (step_size + 1) * 2: the real
-        # and imaginary parts of each unit's contribution to each STFT bin
-        self.to_w_out = ParameterGenerator(channels, hidden_dim * self.output_size, keys[8])
+        # and imaginary parts of each unit's contribution to each STFT bin.
+        # The SSM has no output weights: each mode's output is fixed by its
+        # pole, and its amplitude and phase are already set by w_in
+        if rnn == 'ssm':
+            self.to_w_out = None
+        else:
+            self.to_w_out = ParameterGenerator(channels, hidden_dim * self.output_size, keys[8])
 
         # the oscillators' masses, tensions, decays, etc.; the head's bias
         # starts each channel at its own pitch and decay
@@ -1018,8 +1097,35 @@ class HyperRNN(eqx.Module):
         """Size of each RNN step's output, see `RNNWeights.w_out`"""
         return OUTPUT_MODES[self.output_mode].output_size(self.step_size)
 
-    def rnn_weights(self, latent: jnp.ndarray) -> Union[RNNWeights, ComplexRNNWeights]:
+    def rnn_weights(self, latent: jnp.ndarray) -> Union[RNNWeights, ComplexRNNWeights, SSMWeights]:
         h = self.hidden_dim
+
+        if self.rnn == 'ssm':
+            # Each mode rests on a fixed, log-spaced frequency grid and may
+            # move at most ssm_freq_spread semitones: the bank is
+            # overcomplete, so the hypernetwork mostly selects modes (via
+            # w_in and decay), rather than searching for frequencies by
+            # gradient descent, which is badly conditioned.
+            w_in = self.to_w_in(latent).reshape(2, self.control_channels, h)
+            freq, decay = self.to_w_hh(latent).reshape(2, h)
+
+            grid = jnp.asarray(np.geomspace(self.ssm_min_hz, self.ssm_max_hz, h), dtype=jnp.float32)
+            hz = grid * 2. ** (jnp.tanh(freq) * self.ssm_freq_spread / 12.)
+            hz = jnp.minimum(hz, 0.49 * self.samplerate)
+            theta = 2 * jnp.pi * hz / self.samplerate
+
+            log_min, log_max = np.log(self.ssm_min_t60), np.log(self.ssm_max_t60)
+            t60 = jnp.exp(log_min + jax.nn.sigmoid(decay) * (log_max - log_min))
+            alpha = LN_1000 / (t60 * self.samplerate)
+
+            # scale each mode to (roughly) unit energy, so long and short
+            # modes start on an equal footing
+            norm = jnp.sqrt(-jnp.expm1(-2 * alpha))
+            return SSMWeights(
+                w_in=(w_in[0] + 1j * w_in[1]) * norm,
+                log_pole=-alpha + 1j * theta,
+                step_size=self.step_size,
+            )
 
         if self.rnn == 'complex':
             w_in = self.to_w_in(latent).reshape(2, self.control_channels, h)
@@ -1337,13 +1443,29 @@ def main():
     parser.add_argument('--channels', type=int, default=128, help='analysis network channels')
     parser.add_argument('--control-channels', type=int, default=32)
     parser.add_argument('--hidden-dim', type=int, default=128, help='generated RNN hidden size')
-    parser.add_argument('--rnn', choices=['tanh', 'complex'], default='tanh',
+    parser.add_argument('--rnn', choices=['tanh', 'complex', 'ssm'], default='tanh',
                         help="'tanh' is a single-layer tanh RNN with a full recurrent matrix; "
                              "'complex' is a linear RNN with complex-valued weights and a diagonal "
                              "recurrence (each unit a decaying, phase-advancing resonator, so every "
                              "recurrent step is a convolution), whose units map to complex STFT "
                              "frames, materialized via an inverse STFT. 'complex' requires "
-                             "--output-mode complex (the default)")
+                             "--output-mode complex (the default). 'ssm' is the same diagonal, "
+                             "linear recurrence, but with per-sample poles (frequency and decay), "
+                             "and each block rendered as the exact continuation of each mode, with "
+                             "no learned output weights, window or overlap-add; it's an exact, "
+                             "audio-rate state-space model, stepped once per block. 'ssm' ignores "
+                             "--output-mode; see the --ssm-* options")
+    parser.add_argument('--ssm-min-hz', type=float, default=40.,
+                        help="'ssm' only: lowest frequency of the modes' (log-spaced) resting grid")
+    parser.add_argument('--ssm-max-hz', type=float, default=9000.,
+                        help="'ssm' only: highest frequency of the modes' resting grid")
+    parser.add_argument('--ssm-freq-spread', type=float, default=1.,
+                        help="'ssm' only: how far, in semitones, each mode may move from its "
+                             "place on the grid")
+    parser.add_argument('--ssm-min-t60', type=float, default=0.02,
+                        help="'ssm' only: shortest mode decay time (to -60dB), in seconds")
+    parser.add_argument('--ssm-max-t60', type=float, default=8.,
+                        help="'ssm' only: longest mode decay time (to -60dB), in seconds")
     parser.add_argument('--complex-nonlinearity', choices=['none', 'modtanh'], default='none',
                         help="'complex' RNN only: 'none' keeps the recurrence linear; 'modtanh' "
                              "squashes each unit's magnitude with tanh, keeping its phase")
@@ -1427,6 +1549,8 @@ def main():
         raise ValueError('--n-samples must be divisible by --step-size')
     if args.rnn == 'complex' and args.output_mode != 'complex':
         parser.error('--rnn complex requires --output-mode complex')
+    if args.rnn == 'ssm' and args.complex_nonlinearity != 'none':
+        parser.error('--rnn ssm is linear, and requires --complex-nonlinearity none')
     if args.self_supervised and args.rnn != 'tanh':
         parser.error("--self-supervised only supports --rnn tanh")
     if args.self_supervised and not 0 < args.synthetic_min_t60 <= args.synthetic_max_t60:
@@ -1481,7 +1605,13 @@ def main():
         hard_sparsify=args.sparsity == 'topk',
         output_mode=args.output_mode,
         rnn=args.rnn,
-        complex_nonlinearity=args.complex_nonlinearity)
+        complex_nonlinearity=args.complex_nonlinearity,
+        samplerate=args.samplerate,
+        ssm_min_hz=args.ssm_min_hz,
+        ssm_max_hz=args.ssm_max_hz,
+        ssm_freq_spread=args.ssm_freq_spread,
+        ssm_min_t60=args.ssm_min_t60,
+        ssm_max_t60=args.ssm_max_t60)
 
     # if we are "hard" sparsifying, then don't bother with sparsity loss
     if args.sparsity == 'topk':

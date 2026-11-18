@@ -26,6 +26,10 @@ from argparse import ArgumentParser
 
 from util.weight_init import make_initializer
 
+# the PyTorch port of jax_scale_attention.AttentionEncoder lives in
+# parallel.py; shared rather than copied, so the two stay in step
+from parallel import TransformerAnalysis
+
 Solution = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 
 MASS_COEFF = 1
@@ -35,6 +39,30 @@ DO_NORM = False
 CHANNELS = 256
 SPARSIFY = False
 SOFT_SPARSE = False
+
+# which encoder hears the audio, as in parallel.py:
+#   'conv'        -- Analysis: a dilated AntiCausalAnalysis conv stack
+#   'transformer' -- parallel.TransformerAnalysis: self-attention whose only
+#                     normalization is ScaleAwareNorm (self-conditioned
+#                     AdaLN) and QK-norm attention; see jax_scale_attention.py
+# either way, the instrument latent is pooled from its per-frame output by
+# the latents/latents_attn heads, and the control signals are derived from it
+ENCODER_ARCH = 'conv'
+
+TRANSFORMER_N_LAYERS = 6
+TRANSFORMER_N_HEADS = 4
+# True: each frame sees itself and what follows (like Analysis); False: full,
+# unmasked attention
+TRANSFORMER_ANTICAUSAL = True
+# 'relative' (absolute level enters nowhere but the returned log level --
+# unused here -- so features are invariant to a global gain) or 'absolute'
+# (also conditions on each frame's absolute level, giving up that invariance)
+TRANSFORMER_LEVEL_MODE = 'relative'
+
+# if True, unit_norm the attention-pooling weights (latents_attn's output)
+# over time before pooling the instrument latent, so the latent's scale
+# doesn't grow or shrink with however large that raw output happens to be
+USE_ATTENTION_NORM = True
 
 
 def compute_tension(t: torch.Tensor) -> torch.Tensor:
@@ -297,7 +325,15 @@ class InstrumentAutoencoder(nn.Module):
         influence_decay = torch.linspace(1, 0, self.n_frames) ** 2
         self.influence_decay = nn.Parameter(influence_decay)
 
-        self.analysis = Analysis(n_samples, control_rate, channels)
+        if ENCODER_ARCH == 'transformer':
+            self.analysis = TransformerAnalysis(
+                n_samples, control_rate, channels,
+                n_layers=TRANSFORMER_N_LAYERS,
+                n_heads=TRANSFORMER_N_HEADS,
+                anticausal=TRANSFORMER_ANTICAUSAL,
+                level_mode=TRANSFORMER_LEVEL_MODE)
+        else:
+            self.analysis = Analysis(n_samples, control_rate, channels)
 
         self.hyper_networks = nn.ModuleList([
             InstrumentHyperNetwork(channels, n_nodes, filter_size, attack_size, attack_control_frames)
@@ -323,13 +359,25 @@ class InstrumentAutoencoder(nn.Module):
         self.room_mix = ParameterGenerator(channels, self.verb.n_rooms)
         self.wet_dry = ParameterGenerator(channels, 2)
 
-        self.apply(init_func)
+        # init_func (small uniform weights, zero biases) everywhere but a
+        # TransformerAnalysis, whose own init it would overwrite: its
+        # ScaleAwareNorms' modulation layers are zero-initialized, so each
+        # starts out as a plain RMSNorm.  (Child by child, in the same order
+        # self.apply would visit them, so 'conv' initializes as before.)
+        for child in self.children():
+            if not isinstance(child, TransformerAnalysis):
+                child.apply(init_func)
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        x = self.analysis(x)
+        if ENCODER_ARCH == 'transformer':
+            x, _log_level = self.analysis(x)
+        else:
+            x = self.analysis(x)
 
         l = self.latents(x)
         attn = self.latents_attn(x)
+        if USE_ATTENTION_NORM:
+            attn = unit_norm(attn, dim=-1)
 
         # for now, just choose the very first latent.  This could
         # be an average

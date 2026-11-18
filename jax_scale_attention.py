@@ -33,6 +33,7 @@ up that invariance, for when absolute level means something.
 """
 
 import math
+from typing import NamedTuple, Optional
 
 import equinox as eqx
 import jax
@@ -279,3 +280,60 @@ class AttentionEncoder(eqx.Module):
 
         x = jax.vmap(self.final_norm)(x, cond)
         return x.T, jnp.clip(log_level, self.level_lo, self.level_hi)
+
+
+# ---------------------------------------------------------------------------
+# shared plumbing for models that offer `AttentionEncoder` as an alternative
+# encoder (`claude_jax_physical.py`, `goo_physical_train.py`)
+
+class AttentionConfig(NamedTuple):
+    n_layers: int
+    n_heads: int
+    anticausal: bool
+    level_mode: str
+    # spectral magnitudes are raised to this power before the encoder sees
+    # them: a power law (unlike log(x + eps) or log1p) scales with gain, so
+    # the encoder's level handling stays exact, while still compressing
+    # each frame's spectral tilt
+    exponent: float
+
+
+def add_attention_arguments(parser, default_encoder: str = 'conv'):
+    parser.add_argument('--encoder', choices=['conv', 'attention'], default=default_encoder,
+                        help="'attention': a transformer with scale-aware (self-conditioned AdaLN) norms "
+                             "and QK-norm attention; see jax_scale_attention.py")
+    parser.add_argument('--attention-layers', type=int, default=6, help="'attention' encoder only")
+    parser.add_argument('--attention-heads', type=int, default=4,
+                        help="'attention' encoder only; channels / heads must be even")
+    parser.add_argument('--attention-mask', choices=['anticausal', 'full'], default='anticausal',
+                        help="'attention' encoder only: 'anticausal' (each frame sees itself and what "
+                             "follows) or 'full'")
+    parser.add_argument('--attention-levels', choices=['relative', 'absolute'], default='relative',
+                        help="'attention' encoder only: 'relative' keeps the encoder's features invariant "
+                             "to gain (absolute level reaches only the heads, as an explicit log level); "
+                             "'absolute' also embeds each frame's absolute level into the features")
+    parser.add_argument('--attention-exponent', type=float, default=0.5,
+                        help="'attention' encoder only: spectral magnitudes ** this, as its input")
+
+
+def attention_config_from_args(args) -> Optional[AttentionConfig]:
+    """None for `--encoder conv`"""
+    if args.encoder != 'attention':
+        return None
+    return AttentionConfig(
+        n_layers=args.attention_layers,
+        n_heads=args.attention_heads,
+        anticausal=args.attention_mask == 'anticausal',
+        level_mode=args.attention_levels,
+        exponent=args.attention_exponent)
+
+
+def make_attention_encoder(n_coeffs: int, channels: int, config: AttentionConfig, key) -> AttentionEncoder:
+    return AttentionEncoder(
+        n_coeffs, channels, n_layers=config.n_layers, n_heads=config.n_heads, key=key,
+        anticausal=config.anticausal, level_mode=config.level_mode)
+
+
+def pooled_log_level(log_level: jnp.ndarray) -> jnp.ndarray:
+    """(n_frames,) per-frame log levels -> () the log RMS over all frames"""
+    return 0.5 * (jax.nn.logsumexp(2 * log_level) - math.log(log_level.shape[-1]))
