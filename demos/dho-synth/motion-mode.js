@@ -39,6 +39,9 @@ export async function startMotionMode(overlayEl) {
   const thresholdLabel = overlayEl.querySelector('#motion-threshold-label');
   const arcSlider = overlayEl.querySelector('#motion-arc');
   const arcLabel = overlayEl.querySelector('#motion-arc-label');
+  const strikeGainSlider = overlayEl.querySelector('#motion-strike-gain');
+  const strikeGainLabel = overlayEl.querySelector('#motion-strike-gain-label');
+  let strikeGain = 1; // linear, from the dB slider; strikes only, not holds
 
   // ---- debug log (temporary) --------------------------------------------
   const debugEl = overlayEl.querySelector('#motion-debug');
@@ -116,7 +119,7 @@ export async function startMotionMode(overlayEl) {
   });
   motion.addEventListener('strike', (e) => {
     const { position, strength } = e.detail;
-    bridge.strikeAt(position, strength);
+    bridge.strikeAt(position, strength * strikeGain);
     log(`strike node ${nodeAt(position)} pos ${position.toFixed(2)} strength ${strength.toFixed(2)}` +
       ` peak ${e.detail.peakRate.toFixed(1)} rad/s`, 'strike');
     flashUntil[nodeAt(position)] = performance.now() + FLASH_MS;
@@ -154,6 +157,14 @@ export async function startMotionMode(overlayEl) {
   };
   arcSlider.addEventListener('input', onArc);
   onArc();
+
+  const onStrikeGain = () => {
+    const db = parseFloat(strikeGainSlider.value);
+    strikeGain = 10 ** (db / 20);
+    strikeGainLabel.textContent = `${db > 0 ? '+' : ''}${db} dB`;
+  };
+  strikeGainSlider.addEventListener('input', onStrikeGain);
+  onStrikeGain();
 
   // once a second: sample rates, peak flick speed, audio state -- shows
   // whether sensors are delivering at all and how close flicks get to the
@@ -226,6 +237,7 @@ export async function startMotionMode(overlayEl) {
       headingSelect.removeEventListener('change', onHeading);
       thresholdSlider.removeEventListener('input', onThreshold);
       arcSlider.removeEventListener('input', onArc);
+      strikeGainSlider.removeEventListener('input', onStrikeGain);
       document.removeEventListener('visibilitychange', onVisibility);
       wakeLock?.release().catch(() => {});
       holds.clear();
