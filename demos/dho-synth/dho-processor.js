@@ -469,6 +469,20 @@ class DHOProcessor extends AudioWorkletProcessor {
         }
         this.layer1[k].energy += routed * STRIKE_ENERGY_SCALE * this.inputGain;
       }
+      // ...and layer 2 too, through forceRouter2, the same routing its
+      // continuous drive uses. Layer 1 is only heard as FM on layer 2, so a
+      // strike that skipped layer 2 was silent unless layer 2 was already
+      // ringing from a held press. (The trained engines' strike above has
+      // always landed on both layers.)
+      for (let k = 0; k < this.n2; k++) {
+        let routed = 0;
+        const base = k * this.n1;
+        for (let j = 0; j < this.n1 && j < msg.weights.length; j++) {
+          routed += this.forceRouter2[base + j] * msg.weights[j];
+        }
+        const node = this.layer2[k];
+        node.energy += routed * node.excitationGain * STRIKE_ENERGY_SCALE * this.inputGain;
+      }
     } else if (msg.type === 'setExcitationMode') {
       this.excitationMode = msg.mode;
     } else if (msg.type === 'setPulseRate') {
