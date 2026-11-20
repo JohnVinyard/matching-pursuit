@@ -1145,9 +1145,30 @@ function buildPlanes() {
     planes: { energyPlane, dampingPlane, tensionModPlane },
     state,
     ensureAudio,
+    startAudio,
+    strikeAt,
     getWorkletNode: () => workletNode,
     getAudioContext: () => audioCtx,
   };
+}
+
+// A strike at normalized position x along layer 1's row, scaled by
+// `strength` (0..1) -- for inputs that measure how hard they hit (motion
+// mode's flick speed), unlike the energy plane's fixed-strength crossings.
+// Sent in every excitation mode: an explicit hit is a hit, and the legacy
+// engine's strike handler bumps energy regardless of mode.
+function strikeAt(x, strength) {
+  if (!workletNode) return;
+  const weights = tentWeights(x, state.n1).map((w) => w * strength);
+  workletNode.port.postMessage({ type: 'strike', weights });
+}
+
+async function startAudio() {
+  await ensureAudio();
+  if (audioCtx.state === 'suspended') await audioCtx.resume();
+  const startBtn = document.getElementById('startBtn');
+  startBtn.textContent = 'Audio running';
+  startBtn.disabled = true;
 }
 
 function resetPlanes() {
@@ -1427,6 +1448,28 @@ function wireFullscreenMode() {
   });
 }
 
+// Motion mode (motion-mode.js, on top of the instrument-agnostic
+// motion-input.js) plays the phone like a drumstick: pointing selects a
+// layer-1 node, a downward flick strikes it, holding the screen sustains.
+// Lazily imported like the other modes; reaches the synth only through
+// window.DHOSynth (energy plane setPointer/clearPointer, strikeAt).
+function wireMotionMode() {
+  const enterBtn = document.getElementById('enterMotionBtn');
+  const overlay = document.getElementById('motion-overlay');
+  const exitBtn = document.getElementById('motion-exit');
+  let motionModule = null;
+
+  enterBtn.addEventListener('click', async () => {
+    overlay.hidden = false;
+    motionModule = motionModule || await import('./motion-mode.js');
+    await motionModule.startMotionMode(overlay);
+  });
+  exitBtn.addEventListener('click', () => {
+    motionModule?.stopMotionMode();
+    overlay.hidden = true;
+  });
+}
+
 // Mic input (mic-input.js) is a separate module, loaded lazily via dynamic
 // import only when actually enabled, following the same pattern as AR mode.
 // Unlike AR mode it's not a full-screen takeover: it's a toggle that hands
@@ -1465,6 +1508,7 @@ function wireControls() {
   wireARMode();
   wireMicInput();
   wireFullscreenMode();
+  wireMotionMode();
 
   const startBtn = document.getElementById('startBtn');
   const randomizeBtn = document.getElementById('randomizeBtn');
@@ -1560,12 +1604,7 @@ function wireControls() {
     scopeModeBtn.textContent = next === 'waveform' ? 'Spectrogram' : 'Waveform';
   });
 
-  startBtn.addEventListener('click', async () => {
-    await ensureAudio();
-    if (audioCtx.state === 'suspended') await audioCtx.resume();
-    startBtn.textContent = 'Audio running';
-    startBtn.disabled = true;
-  });
+  startBtn.addEventListener('click', startAudio);
 
   randomizeBtn.addEventListener('click', () => {
     randomizeAll();

@@ -34,7 +34,12 @@ At each of a fixed number of steps:
        complex FFT coefficients and a gamma envelope, then a room; these
        events are half the segment long.  Or (`--generator multires-full`,
        see `MultiResolutionFullGenerator`) every band at once, in a
-       constant-Q time/frequency tiling, then a room.  The result is normalized to unit
+       constant-Q time/frequency tiling, then a room.  Or (`--generator
+       siren`, see `SirenGenerator`) a SIREN (sine-activated coordinate
+       network) evaluated at every sample, over a learned positional
+       encoding shared by all events, with weights generated from the
+       event vector by a hypernetwork, under a gamma envelope, then a
+       room.  The result is normalized to unit
        (L2) norm, so the event vector describes only the event's character,
        then scaled by the magnitude, circularly FFT-shifted by `fine * hop`
        samples (fine position; the buffer has a hop of zero padding, so
@@ -100,7 +105,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-from conjure import LmdbCollection, SupportedContentType, NumpySerializer, NumpyDeserializer, loggers, serve_conjure
+from conjure import SqliteCollection, SupportedContentType, NumpySerializer, NumpyDeserializer, loggers, serve_conjure
 from conjure.logger import encode_audio
 
 from hyper_rnn import (
@@ -1427,6 +1432,206 @@ class MultiResolutionFullGenerator(eqx.Module):
 # ---------------------------------------------------------------------------
 # model
 
+# see SirenGenerator.__init__: at init, the hypernetwork's deltas vary
+# across (uniform random) event vectors with std ~0.042; this brings that
+# to ~1 / sqrt(3), the std of the base weights' U(-1, 1) * bound (measured)
+HYPER_DELTA_INIT_SCALE = 13.6
+
+
+def siren_bound(fan_in: int, w0: float) -> float:
+    """SIREN's (Sitzmann et al.) init: weights ~ U(-b, b), b = sqrt(6 / fan_in) / w0"""
+    return float(np.sqrt(6. / fan_in) / w0)
+
+
+def siren_network(layers, pe: jnp.ndarray, w0: float) -> jnp.ndarray:
+    """
+    SirenGenerator's network: sine layers, then a linear output layer.
+    layers: [(W, b)]; pe: (n_samples, in_dim); returns (n_samples,)
+    """
+    x = pe
+    for w, b in layers[:-1]:
+        x = jnp.sin(w0 * (x @ w.T + b))
+    w, b = layers[-1]
+    return (x @ w.T + b)[:, 0]
+
+
+class SirenGenerator(eqx.Module):
+    """
+    `--generator siren`: a NeRF/SIREN-style coordinate network, evaluated at
+    every sample of the event, whose weights a hypernetwork generates from
+    the event vector.
+
+    1. A positional encoding of each sample index i, shared by every event
+       (and every generated network), and learned: the normalized time
+       i / n_samples, then sin and cos of 2 pi f_k i + phi_k for `n_pe`
+       frequencies f_k (initialized log-spaced from `min_hz` to 0.45 of
+       the sample rate) and phases phi_k (initialized at 0).  It doesn't
+       depend on the event, so `prepare` computes it once per batch (as
+       the context the other generators use for shared banks).
+       The frequencies are learned in log space, in units of
+       `pe_freq_scale`: the phase's gradient with respect to f is i, up to
+       n_samples, so unscaled, these few parameters' gradients (norm ~600
+       at init) would dominate the global norm that the optimizer clips
+       (~180 for everything else).  At 0.1 that's ~60, and since Adam moves
+       each parameter ~lr per step whatever its gradient's scale, log f
+       moves ~lr * 0.1 per step: at 1e-4, ~10k steps to cross the initial
+       spacing between neighboring frequencies (~0.1).  As in
+       `sawtooth`, the phase is computed from i = 1024 j + k, not i * f in
+       float32, which over 2 ** 17 samples loses most of the fractional
+       digits.
+    2. The network: `n_layers` sine layers, sin(w0 * (W x + b)), of width
+       `width`, then a linear output layer to one sample.  Its weights are
+       a shared base, SIREN-initialized (U(-b, b), b = sqrt(6 / fan_in) /
+       w0, which keeps every layer's pre-activations ~ arcsine-distributed
+       at any depth), plus a per-event delta from the hypernetwork, scaled
+       per layer by `hyper_gain * b`.  Base plus delta, rather than the
+       hypernetwork generating the weights outright, so that every event's
+       network starts out as a well-conditioned SIREN while differing from
+       the others by a comparable amount.  The delta is the hypernetwork's
+       output for the event minus its output for the zero vector: most of
+       its output at init is the same for every event (its hidden layers'
+       relus have a positive mean), which would just be a second base, so
+       the zero event's network is exactly the base.
+    3. The hypernetwork (an MLP of the event vector) outputs every layer's
+       delta (W and b), flattened, plus the event's controls: a gamma
+       envelope (as in `MultiResolutionGenerator`), and a room and dry/wet
+       mix (`apply_room`).
+    4. The network's output times the envelope, then the room.  `render`
+       normalizes the result to unit norm, as for every generator.
+
+    The network runs over all n_samples samples for every event, so its
+    activations (n_samples x width per layer) are recomputed in the
+    backward pass (`jax.checkpoint`) rather than stored for every step of
+    the greedy decomposition.
+    """
+    pe_log_freqs: jnp.ndarray
+    pe_phases: jnp.ndarray
+    base: list  # [(W, b)] per layer, sine layers then the output layer
+    hyper: eqx.nn.MLP
+
+    n_samples: int = eqx.field(static=True)
+    n_rooms: int = eqx.field(static=True)
+    rooms: jnp.ndarray
+    w0: float = eqx.field(static=True)
+    hyper_gain: float = eqx.field(static=True)
+    pe_freq_scale: float = eqx.field(static=True)
+    bounds: Tuple[float, ...] = eqx.field(static=True)
+    shapes: Tuple[Tuple[int, int], ...] = eqx.field(static=True)
+    shape_range: Tuple[float, float] = eqx.field(static=True)
+    duration_range: Tuple[float, float] = eqx.field(static=True)
+
+    def __init__(
+            self,
+            event_dim: int,
+            n_samples: int,
+            rooms: np.ndarray,
+            samplerate: int,
+            key,
+            n_layers: int = 3,
+            width: int = 32,
+            n_pe: int = 64,
+            w0: float = 30.,
+            hyper_width: int = 256,
+            hyper_gain: float = 1.,
+            min_hz: float = 20.,
+            pe_freq_scale: float = 0.1,
+            shape_range: Tuple[float, float] = (1., 4.),
+            duration_range: Optional[Tuple[float, float]] = None):
+        """
+        rooms: (n_rooms, n_samples)
+        n_layers: sine layers (the output layer is one more)
+        width: the sine layers' width
+        n_pe: learned positional-encoding frequencies (2 * n_pe + 1 inputs)
+        w0: the sine layers' frequency scale
+        hyper_gain: each event's weight delta, relative to the base's init
+            scale
+        duration_range: the envelope's mean duration, in samples; by
+            default 256 to n_samples
+        """
+        self.n_samples = n_samples
+        self.n_rooms = rooms.shape[0]
+        self.rooms = jnp.asarray(rooms)
+        self.w0 = w0
+        self.hyper_gain = hyper_gain
+        self.pe_freq_scale = pe_freq_scale
+        self.shape_range = shape_range
+        self.duration_range = duration_range or (256., float(n_samples))
+
+        in_dim = 2 * n_pe + 1
+        dims = [in_dim] + [width] * n_layers + [1]
+        self.shapes = tuple((dims[l + 1], dims[l]) for l in range(len(dims) - 1))
+        self.bounds = tuple(siren_bound(fan_in, w0) for _, fan_in in self.shapes)
+
+        k_hyper, *k_base = jax.random.split(key, len(self.shapes) + 1)
+        base = []
+        for (out_dim, fan_in), bound, k in zip(self.shapes, self.bounds, k_base):
+            kw, kb = jax.random.split(k)
+            base.append((
+                jax.random.uniform(kw, (out_dim, fan_in), minval=-bound, maxval=bound),
+                jax.random.uniform(kb, (out_dim,), minval=-bound, maxval=bound)))
+        self.base = base
+
+        # learned in units of pe_freq_scale, around log-spaced initial values
+        lo, hi = np.log(min_hz / samplerate), np.log(0.45)
+        self.pe_log_freqs = jnp.linspace(lo, hi, n_pe) / pe_freq_scale
+        self.pe_phases = jnp.zeros(n_pe)
+
+        n_weights = sum(o * i + o for o, i in self.shapes)
+        # the deltas, then the envelope's 2 params, then the room's logits
+        # and the dry/wet mix's 2
+        hyper = eqx.nn.MLP(event_dim, n_weights + 2 + self.n_rooms + 2,
+                           width_size=hyper_width, depth=2, key=k_hyper)
+        # scaled so the deltas vary across events about as much as the base
+        # weights do (see HYPER_DELTA_INIT_SCALE)
+        last = hyper.layers[-1]
+        hyper = eqx.tree_at(lambda m: m.layers[-1].weight, hyper, last.weight * HYPER_DELTA_INIT_SCALE)
+        self.hyper = hyper
+
+    @property
+    def size(self) -> int:
+        return self.n_samples
+
+    def positional_encoding(self) -> jnp.ndarray:
+        """(n_samples, 2 * n_pe + 1), shared by every event"""
+        f = jnp.exp(self.pe_log_freqs * self.pe_freq_scale)[None, :]
+        i = jnp.arange(self.n_samples)
+        j, k = (i // 1024).astype(f.dtype)[:, None], (i % 1024).astype(f.dtype)[:, None]
+        frac = lambda x: x - jnp.floor(x)
+        cycles = frac(j * frac(1024 * f) + k * f)
+        angles = 2 * jnp.pi * cycles + self.pe_phases[None, :]
+        t = (i / self.n_samples).astype(f.dtype)[:, None]
+        return jnp.concatenate([t, jnp.sin(angles), jnp.cos(angles)], axis=-1)
+
+    def prepare(self):
+        """the shared positional encoding, computed once for every event"""
+        return self.positional_encoding()
+
+    def weights(self, deltas: jnp.ndarray):
+        """the flattened deltas -> [(W, b)] per layer: the base plus each delta, scaled"""
+        layers, offset = [], 0
+        for (w, b), (out_dim, fan_in), bound in zip(self.base, self.shapes, self.bounds):
+            scale = self.hyper_gain * bound
+            dw = deltas[offset:offset + out_dim * fan_in].reshape(out_dim, fan_in)
+            offset += out_dim * fan_in
+            db = deltas[offset:offset + out_dim]
+            offset += out_dim
+            layers.append((w + scale * dw, b + scale * db))
+        return layers
+
+    def network(self, layers, pe: jnp.ndarray) -> jnp.ndarray:
+        """(n_samples, 2 * n_pe + 1) -> (n_samples,), recomputed in the backward pass"""
+        return jax.checkpoint(siren_network, static_argnums=(2,))(layers, pe, self.w0)
+
+    def __call__(self, event: jnp.ndarray, key=None, context=None) -> jnp.ndarray:
+        pe = self.positional_encoding() if context is None else context
+        out = self.hyper(event)
+        n_weights = out.shape[0] - 4 - self.n_rooms
+        layers = self.weights(out[:n_weights] - self.hyper(jnp.zeros_like(event))[:n_weights])
+        signal = self.network(layers, pe)
+        envelope = gamma_envelope(out[n_weights:n_weights + 2], self.n_samples, self.shape_range, self.duration_range)
+        return apply_room(signal * envelope, out[n_weights + 2:], self.rooms)
+
+
 class Encoder(eqx.Module):
     """
     Anti-causal, dilated, gated conv stack (as in `hyper_rnn.Analysis`), fed
@@ -2080,7 +2285,8 @@ def build_parser(training: bool = True) -> argparse.ArgumentParser:
                              "learned per-node frequency); 'control_rate': the original leaky-integrated energy "
                              "envelope times a carrier, impulses only (see ParallelGenerator)")
     parser.add_argument('--event-dim', type=int, default=16)
-    parser.add_argument('--generator', choices=['resonance', 'atoms', 'parallel', 'multires', 'multires-full'], default='resonance',
+    parser.add_argument('--generator', choices=['resonance', 'atoms', 'parallel', 'multires', 'multires-full', 'siren'],
+                        default='resonance',
                         help="'resonance': enveloped noise -> damped harmonic oscillator resonance -> "
                              "dry/filtered mix -> room -> dry/wet mix; events are --n-samples long. "
                              "'atoms': a sparse sum of dictionary atoms, --atom-size long. "
@@ -2094,13 +2300,25 @@ def build_parser(training: bool = True) -> argparse.ArgumentParser:
                              "'multires-full': every event uses all --n-levels bands, each with the same "
                              "budget of values in a constant-Q time/frequency tiling (magnitudes over noise "
                              "above --complex-levels), its own gamma envelope and a relative gain, then a "
-                             "room; --n-samples // 2 long")
+                             "room; --n-samples // 2 long. "
+                             "'siren': a SIREN evaluated per sample over a learned positional encoding shared "
+                             "by all events, its weights generated from the event vector by a hypernetwork, "
+                             "under a gamma envelope, then a room; --n-samples long")
     parser.add_argument('--n-levels', type=int, default=6,
                         help="'multires' only: resolutions (octave bands) the router chooses between; "
                              "the smallest band is (--n-samples // 2) / 2 ** (n_levels - 1) samples")
     parser.add_argument('--complex-levels', type=int, default=1,
                         help="'multires-full' only: how many of the lowest bands generate complex values "
                              "(their own phase), rather than magnitudes over noise")
+    parser.add_argument('--siren-layers', type=int, default=3,
+                        help="'siren' only: sine layers in each event's generated network")
+    parser.add_argument('--siren-width', type=int, default=32, help="'siren' only: the sine layers' width")
+    parser.add_argument('--siren-pe-freqs', type=int, default=64,
+                        help="'siren' only: learned positional-encoding frequencies, shared by every event")
+    parser.add_argument('--siren-w0', type=float, default=30., help="'siren' only: the sine layers' frequency scale")
+    parser.add_argument('--siren-hyper-gain', type=float, default=1.,
+                        help="'siren' only: each event's generated weight delta, relative to the shared base "
+                             "network's SIREN init scale")
     parser.add_argument('--n-atoms', type=int, default=2048, help="'atoms' only: dictionary size")
     parser.add_argument('--atom-size', type=int, default=4096, help="'atoms' only: the event's length")
     parser.add_argument('--n-active-atoms', type=int, default=16,
@@ -2202,7 +2420,8 @@ def build_parser(training: bool = True) -> argparse.ArgumentParser:
                              "the event head's range), equal magnitudes, evenly spaced")
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--seed', type=int, default=0)
-    parser.add_argument('--collection', type=str, default='jax_ae')
+    parser.add_argument('--collection', type=str, default='jax_ae.sqlite',
+                        help="the conjure collection's SQLite file (logged audio and spectrograms)")
     parser.add_argument('--port', type=int, default=9997)
     parser.add_argument('--save-path', type=str, default=None,
                         help='if given, the model is saved here (eqx.tree_serialise_leaves) every '
@@ -2226,7 +2445,7 @@ def validate_args(args):
 
 def build_model(args, model_key, generator_key) -> EventAutoencoder:
 
-    if args.generator in ('resonance', 'parallel', 'multires', 'multires-full'):
+    if args.generator in ('resonance', 'parallel', 'multires', 'multires-full', 'siren'):
         from config.dotenv import Config
         # multires events are half the segment long, and so are its rooms
         room_size = args.n_samples // 2 if args.generator.startswith('multires') else args.n_samples
@@ -2254,6 +2473,18 @@ def build_model(args, model_key, generator_key) -> EventAutoencoder:
             rooms=rooms,
             complex_levels=args.complex_levels,
             key=generator_key)
+    elif args.generator == 'siren':
+        generator = SirenGenerator(
+            event_dim=args.event_dim,
+            n_samples=args.n_samples,
+            rooms=rooms,
+            samplerate=args.samplerate,
+            key=generator_key,
+            n_layers=args.siren_layers,
+            width=args.siren_width,
+            n_pe=args.siren_pe_freqs,
+            w0=args.siren_w0,
+            hyper_gain=args.siren_hyper_gain)
     elif args.generator == 'resonance':
         generator = ResonanceGenerator(
             event_dim=args.event_dim,
@@ -2297,7 +2528,11 @@ def main():
     args = build_parser().parse_args()
     validate_args(args)
 
-    collection = LmdbCollection(path=args.collection)
+    # SQLite, not LMDB: conjure's LmdbCollection is opened without locking and
+    # shared, via fork, with serve_conjure's gunicorn workers, so a worker
+    # reading the feed while training writes could segfault.  SqliteCollection
+    # opens a connection per process (WAL mode), so that's safe
+    collection = SqliteCollection(path=args.collection)
 
     def audio_loggers(names):
         return loggers(

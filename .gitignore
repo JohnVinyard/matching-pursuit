@@ -107,3 +107,8 @@ worker_config.json
 *.html
 
 parallel.html
+
+# conjure SQLite collections (and their WAL/shared-memory files)
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
