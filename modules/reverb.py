@@ -73,7 +73,10 @@ class NeuralReverb(nn.Module):
         print(f'Processed {len(to_process)} impulse responses')
         
         audio = np.concatenate(audio, axis=0)
-        return NeuralReverb(n_samples, audio.shape[0], audio)
+        verb = NeuralReverb(n_samples, audio.shape[0], audio)
+        # which file each room came from, in glob (i.e. room index) order
+        verb.files = [pathlib.Path(p).name for p in to_process]
+        return verb
 
     def compute_mix(self, reverb_mix: torch.Tensor) -> torch.Tensor:
         # choose a linear mixture of "rooms"

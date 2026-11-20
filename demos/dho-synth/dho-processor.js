@@ -64,6 +64,12 @@ class Node {
     this.filterMix = [1, 0]; // [dry, filtered]
     this.filterHistory = new Float32Array(FILTER_TAPS);
     this.filterPos = 0;
+
+    // 'resonator' engine state (see stepResonator): the complex phasor z,
+    // and any strike force waiting to be added on the next sample
+    this.zr = 0;
+    this.zi = 0;
+    this.pendingDrive = 0;
   }
 }
 
@@ -132,6 +138,122 @@ const TENSION_MOD_MAX = 0.2;
 //     breath/turbulence model (wind instruments).
 const STRIKE_ENERGY_SCALE = 3;
 const PULSE_ENERGY_SCALE = 0.4;
+
+// Engines -- which model the processor runs, set per instrument via
+// setParams' `engine` (see defaultEngine):
+//   legacy    -- the original web-native model above (envelope x cosine,
+//                continuous force), used for instruments randomized here
+//                and for v2 share links.  Behavior unchanged, apart from
+//                the omega floor/ceiling below.
+//   envelope  -- an instrument trained in parallel.py with --integrator
+//                control_rate: the same envelope x cosine oscillator, but
+//                with parallel.py's output stages (layer 1's tanh(gain) *
+//                output_gain before it becomes FM, layer 2 summed with its
+//                output_gain rather than averaged) and force scaling.
+//   resonator -- trained with --integrator sample_rate: each node is a
+//                true resonator, z = exp(-alpha + i*omega) * z + drive /
+//                mass, output Re(z) + (x / omega) Im(z) (parallel.py's
+//                sample_rate_oscillator), driven by the trained mix of
+//                strike / noise / bow excitations.
+// Trained engines also carry the training run's clock (timeScale, the
+// factor between parallel.py's synthetic time and real seconds, and
+// trainSampleRate) so the oscillator's static damping term and the
+// excitations' energy match training, and `forceScale`, the trained force
+// a full press (weight 1) maps to.
+function defaultEngine() {
+  return {
+    type: 'legacy',
+    trainSampleRate: 22050,
+    controlRate: 512,
+    timeScale: 1,
+    forceScale: 1,
+    excitationMix: [1, 0, 0], // [strike, noise, bow]
+    bowHz: 100,
+    outputGain1: 1,
+    outputGain2: 1,
+  };
+}
+
+// parallel.py's MIN_OMEGA_HZ: the lowest frequency a node rings at
+const MIN_OMEGA_HZ = 20;
+// parallel.py caps omega at 0.95 of its own (training) Nyquist
+const MAX_OMEGA_FRACTION = 0.95;
+
+// the polyBLEP correction for a unit step at phase 0 (sample_rate_dho.poly_blep)
+function polyBlep(t, dt) {
+  if (t < dt) {
+    const a = t / dt;
+    return 2 * a - a * a - 1;
+  }
+  if (t > 1 - dt) {
+    const b = (t - 1) / dt;
+    return b * b + 2 * b + 1;
+  }
+  return 0;
+}
+
+// A trained instrument's FIR taps are defined at the training rate; at
+// another playback rate the same taps would span a different length of
+// time and filter a different band.  Resample them (linearly -- they're
+// low-pass by construction, see compute_filters) to the playback rate,
+// scaled by 1 / ratio so the passband gain stays the same.
+function resampleTaps(taps, ratio) {
+  if (Math.abs(ratio - 1) < 1e-6) return Float32Array.from(taps);
+  const m = Math.max(1, Math.round(taps.length * ratio));
+  const out = new Float32Array(m);
+  for (let t = 0; t < m; t++) {
+    const pos = t / ratio;
+    const i = Math.floor(pos);
+    const frac = pos - i;
+    const a = i < taps.length ? taps[i] : 0;
+    const b = i + 1 < taps.length ? taps[i + 1] : 0;
+    out[t] = (a + frac * (b - a)) / ratio;
+  }
+  return out;
+}
+
+// Training never produced anything above its own Nyquist (FM sidebands
+// above it alias back down there), so when playing faster than the
+// training rate, a trained instrument's output is low-passed there: a
+// 4th-order Butterworth, as two biquads.  null when not needed.
+const BUTTERWORTH_Q = [0.5412, 1.3066];
+function makeOutputFilter(engine) {
+  if (engine.type === 'legacy' || sampleRate <= engine.trainSampleRate * 1.01) return null;
+  const w0 = (2 * Math.PI * 0.5 * engine.trainSampleRate) / sampleRate;
+  const cos = Math.cos(w0);
+  return BUTTERWORTH_Q.map((q) => {
+    const alpha = Math.sin(w0) / (2 * q);
+    const a0 = 1 + alpha;
+    return {
+      b0: (1 - cos) / 2 / a0, b1: (1 - cos) / a0, b2: (1 - cos) / 2 / a0,
+      a1: (-2 * cos) / a0, a2: (1 - alpha) / a0,
+      s1: 0, s2: 0,
+    };
+  });
+}
+function applyOutputFilter(stages, x) {
+  if (!stages) return x;
+  for (const st of stages) {
+    // transposed direct form II
+    const y = st.b0 * x + st.s1;
+    st.s1 = st.b1 * x - st.a1 * y + st.s2;
+    st.s2 = st.b2 * x - st.a2 * y;
+    x = y;
+  }
+  return x;
+}
+
+// Linear below LIMIT_KNEE, then a tanh shoulder up to 1: a safety limiter
+// for the trained engines' output, which (unlike legacy's per-node-average
+// mix) is meant to peak around 1, where a plain tanh would already be
+// audibly saturating.
+const LIMIT_KNEE = 0.8;
+function softLimit(x) {
+  const a = Math.abs(x);
+  if (a <= LIMIT_KNEE) return x;
+  const y = LIMIT_KNEE + (1 - LIMIT_KNEE) * Math.tanh((a - LIMIT_KNEE) / (1 - LIMIT_KNEE));
+  return x < 0 ? -y : y;
+}
 
 class DHOProcessor extends AudioWorkletProcessor {
   static get parameterDescriptors() {
@@ -240,6 +362,12 @@ class DHOProcessor extends AudioWorkletProcessor {
     this.pulseRate = 100; // Hz
     this.pulsePhase = 0;
 
+    this.engine = defaultEngine();
+    this.outputFilter = null;
+    // the 'resonator' engine's bow (sawtooth) phase, in cycles -- one bow
+    // for the whole instrument, as in parallel.py
+    this.bowPhase = 0;
+
     this.port.onmessage = (event) => this.handleMessage(event.data);
   }
 
@@ -267,6 +395,17 @@ class DHOProcessor extends AudioWorkletProcessor {
       this.currentTensionModWeights2 = new Float32Array(this.n2);
     } else if (msg.type === 'setParams') {
       const p = msg.params;
+      if (p.engine) {
+        // a different model's state means nothing to the new one -- start silent
+        this.engine = { ...defaultEngine(), ...p.engine };
+        this.outputFilter = makeOutputFilter(this.engine);
+        for (const node of [...this.layer1, ...this.layer2]) {
+          node.energy = 0;
+          node.zr = 0;
+          node.zi = 0;
+          node.pendingDrive = 0;
+        }
+      }
       this.applyNodeParams(this.layer1, p.layer1);
       this.applyNodeParams(this.layer2, p.layer2);
       if (p.tensionRouter) this.tensionRouter = flattenRouter(p.tensionRouter, this.n2, this.n1);
@@ -289,6 +428,31 @@ class DHOProcessor extends AudioWorkletProcessor {
       const n = msg.layer === 2 ? this.n2 : this.n1;
       for (let j = 0; j < n && j < msg.weights.length; j++) {
         target[j] = msg.weights[j];
+      }
+    } else if (msg.type === 'strike' && this.engine.type !== 'legacy') {
+      // trained engines: a strike is parallel.py's impulse excitation -- the
+      // routed force, landing on *both* layers (each through its own force
+      // router, as every layer routes the shared forces in parallel.py).
+      // The resonator weights it by the trained strike share and adds it
+      // as the next sample's drive; the envelope engine adds force / mass
+      // to the envelope, as one frame of parallel.py's `sequential` does.
+      const eng = this.engine;
+      const scale = this.inputGain * eng.forceScale;
+      const layers = [[this.layer1, this.forceRouter1], [this.layer2, this.forceRouter2]];
+      for (const [nodes, router] of layers) {
+        for (let k = 0; k < nodes.length; k++) {
+          let routed = 0;
+          const base = k * this.n1;
+          for (let j = 0; j < this.n1 && j < msg.weights.length; j++) {
+            routed += router[base + j] * msg.weights[j];
+          }
+          const force = routed * scale * nodes[k].excitationGain;
+          if (eng.type === 'resonator') {
+            nodes[k].pendingDrive += force * eng.excitationMix[0];
+          } else {
+            nodes[k].energy += force / nodes[k].mass;
+          }
+        }
       }
     } else if (msg.type === 'strike') {
       // one-shot energy bump for 'impulse' mode -- applied immediately
@@ -325,7 +489,13 @@ class DHOProcessor extends AudioWorkletProcessor {
       if (src.dampMod !== undefined) n.dampMod = src.dampMod;
       if (src.excitationGain !== undefined) n.excitationGain = src.excitationGain;
       if (src.gain !== undefined) n.gain = src.gain;
-      if (src.filterTaps !== undefined) n.filterTaps = Float32Array.from(src.filterTaps);
+      if (src.filterTaps !== undefined) {
+        n.filterTaps = this.engine.type === 'legacy'
+          ? Float32Array.from(src.filterTaps)
+          : resampleTaps(src.filterTaps, sampleRate / this.engine.trainSampleRate);
+        n.filterHistory = new Float32Array(n.filterTaps.length);
+        n.filterPos = 0;
+      }
       if (src.filterMix !== undefined) n.filterMix = src.filterMix;
     }
   }
@@ -352,13 +522,17 @@ class DHOProcessor extends AudioWorkletProcessor {
   }
 
   applyFilter(node, x) {
+    // usually FILTER_TAPS long, but a trained instrument's taps are
+    // resampled to the playback rate (see applyNodeParams)
+    const taps = node.filterTaps;
+    const m = taps.length;
     node.filterHistory[node.filterPos] = x;
     let filt = 0;
-    for (let m = 0; m < FILTER_TAPS; m++) {
-      const idx = (node.filterPos - m + FILTER_TAPS) % FILTER_TAPS;
-      filt += node.filterTaps[m] * node.filterHistory[idx];
+    for (let i = 0; i < m; i++) {
+      const idx = (node.filterPos - i + m) % m;
+      filt += taps[i] * node.filterHistory[idx];
     }
-    node.filterPos = (node.filterPos + 1) % FILTER_TAPS;
+    node.filterPos = (node.filterPos + 1) % m;
     return filt;
   }
 
@@ -376,9 +550,8 @@ class DHOProcessor extends AudioWorkletProcessor {
     const beta = lambda > 1e-8 ? (1 - alpha) / lambda : dt;
     node.energy = alpha * node.energy + beta * (force / node.mass);
 
-    const shapeAlpha = 1 / (2 * node.mass);
-    const tensionEff = Math.pow(10, node.tensionExp + node.tensionMod);
-    const omega = Math.sqrt(Math.abs(tensionEff - shapeAlpha * shapeAlpha));
+    const shapeAlpha = this.engine.timeScale / (2 * node.mass);
+    const omega = this.nodeOmega(node, shapeAlpha, dt);
     const phi = Math.atan2(shapeAlpha, omega);
 
     let cosPhi = Math.cos(phi);
@@ -399,7 +572,50 @@ class DHOProcessor extends AudioWorkletProcessor {
     return a * node.energy * Math.cos(node.phase - phi);
   }
 
+  // A node's angular frequency in rad/s: sqrt(|tension - shapeAlpha^2|),
+  // floored at MIN_OMEGA_HZ and capped below Nyquist -- parallel.py's
+  // compute_omega.  Trained engines cap at the *training* run's Nyquist,
+  // since the model never heard anything above it (and running a node
+  // above the playback Nyquist would alias).
+  nodeOmega(node, shapeAlpha, dt) {
+    const tensionEff = Math.pow(10, node.tensionExp + node.tensionMod);
+    let omega = Math.sqrt(Math.abs(tensionEff - shapeAlpha * shapeAlpha));
+    const nyquist = this.engine.type === 'legacy'
+      ? 0.5 / dt
+      : Math.min(0.5 / dt, 0.5 * this.engine.trainSampleRate);
+    const maxOmega = 2 * Math.PI * MAX_OMEGA_FRACTION * nyquist;
+    const minOmega = 2 * Math.PI * MIN_OMEGA_HZ;
+    if (omega < minOmega) omega = minOmega;
+    if (omega > maxOmega) omega = maxOmega;
+    return omega;
+  }
+
+  // 'resonator' engine: one sample of parallel.py's sample_rate_oscillator,
+  //   z[n] = exp(-alpha + i * omega * dt) * z[n-1] + drive[n] / mass
+  //   out  = Re(z) + (x / omega) * Im(z),   x = timeScale / (2 * mass)
+  // alpha is the node's decay rate (dampLambda, 1/sec, plus any gesture
+  // boost) per sample.  x and omega are both in real-time units here (the
+  // share export scales tension by timeScale^2), so x / omega is the same
+  // ratio as in training.
+  stepResonator(node, drive, dt) {
+    const lambda = Math.abs(node.dampLambda + node.dampMod);
+    const decay = Math.exp(-lambda * dt);
+    const shapeAlpha = this.engine.timeScale / (2 * node.mass);
+    const omega = this.nodeOmega(node, shapeAlpha, dt);
+    const c = Math.cos(omega * dt) * decay;
+    const s = Math.sin(omega * dt) * decay;
+    const b = (drive + node.pendingDrive) / node.mass;
+    node.pendingDrive = 0;
+    const zr = c * node.zr - s * node.zi + b;
+    const zi = s * node.zr + c * node.zi;
+    node.zr = zr;
+    node.zi = zi;
+    return zr + (shapeAlpha / omega) * zi;
+  }
+
   process(inputs, outputs, parameters) {
+    if (this.engine.type !== 'legacy') return this.processTrained(outputs, parameters);
+
     const output = outputs[0];
     const channel = output[0];
     const masterGain = parameters.masterGain[0];
@@ -540,6 +756,143 @@ class DHOProcessor extends AudioWorkletProcessor {
     }
 
     // mirror to any additional output channels (e.g. stereo)
+    for (let c = 1; c < output.length; c++) {
+      output[c].set(channel);
+    }
+    return true;
+  }
+
+  // The trained engines ('envelope', 'resonator'; see defaultEngine):
+  // parallel.py's LayerController.forward, per sample.  Both layers are
+  // driven by the same control weights through their own force routers;
+  // layer 1's output, tanh(filtered * gain) * output_gain, is routed into
+  // layer 2's log10 tension as FM; layer 2's per-node tanh(filtered * gain)
+  // * output_gain is summed (not averaged) into the output.
+  processTrained(outputs, parameters) {
+    const output = outputs[0];
+    const channel = output[0];
+    const masterGain = parameters.masterGain[0];
+    const modDepth = parameters.modDepth[0];
+    const inputGain = parameters.inputGain[0];
+    this.inputGain = inputGain;
+    const dt = 1 / sampleRate;
+    const eng = this.engine;
+    const resonator = eng.type === 'resonator';
+    const forceScale = inputGain * eng.forceScale;
+
+    // parallel.py scales noise and bow so one control frame of either
+    // carries a strike's energy (1 / sqrt(control_rate), plus sqrt(3) to
+    // make each unit variance).  Running faster than the training rate, a
+    // resonator's per-sample decay is proportionally smaller, so it
+    // accumulates more of a sustained drive: noise power by rateScale^-1,
+    // a periodic (bow) drive's amplitude by rateScale^-1.  Undo both.
+    const rateScale = eng.trainSampleRate / sampleRate;
+    const sustainScale = 1 / Math.sqrt(eng.controlRate);
+    const noiseScale = Math.sqrt(3) * sustainScale * Math.sqrt(rateScale) * eng.excitationMix[1];
+    const bowScale = Math.sqrt(3) * sustainScale * rateScale * eng.excitationMix[2];
+    // the bow's rate, capped as sample_rate_dho.sawtooth_excitation does
+    // (to [1e-5, 0.5] cycles per *training* sample)
+    const bowHz = Math.min(Math.max(eng.bowHz, 1e-5 * eng.trainSampleRate), 0.5 * eng.trainSampleRate);
+    const bowInc = Math.min(bowHz * dt, 0.5);
+    // the envelope engine's continuous force: parallel.py adds force / mass
+    // to the envelope once per control frame, i.e. trainSampleRate /
+    // controlRate times a second (see stepNode's units)
+    const envelopeForceScale = eng.trainSampleRate / eng.controlRate;
+
+    const z1 = this.z1 && this.z1.length === this.n1 ? this.z1 : (this.z1 = new Float64Array(this.n1));
+
+    for (let i = 0; i < channel.length; i++) {
+      let pulseTick = false;
+      if (!resonator && this.excitationMode === 'pulse') {
+        this.pulsePhase += this.pulseRate * dt;
+        if (this.pulsePhase >= 1) {
+          this.pulsePhase -= 1;
+          pulseTick = true;
+        }
+      }
+
+      let saw = 0;
+      if (resonator && bowScale !== 0) {
+        this.bowPhase += bowInc;
+        this.bowPhase -= Math.floor(this.bowPhase);
+        saw = 2 * this.bowPhase - 1 - polyBlep(this.bowPhase, bowInc);
+      }
+
+      // the drive for one node, from its routed (smoothed) control weight
+      const step = (node, routed) => {
+        const force = routed * forceScale * node.excitationGain;
+        if (resonator) {
+          let drive = 0;
+          if (force !== 0) {
+            drive = force * (noiseScale * (Math.random() * 2 - 1) + bowScale * saw);
+          }
+          return this.stepResonator(node, drive, dt);
+        }
+        let f = 0;
+        if (this.excitationMode === 'sustained') {
+          f = force * envelopeForceScale;
+        } else if (this.excitationMode === 'noise') {
+          f = force * envelopeForceScale * (Math.random() * 2 - 1);
+        } else if (this.excitationMode === 'pulse' && pulseTick) {
+          node.energy += force / node.mass;
+        }
+        return this.stepNode(node, f, dt);
+      };
+
+      for (let j = 0; j < this.n1; j++) {
+        this.routedForce1[j] +=
+          (this.routedForce1Target[j] - this.routedForce1[j]) * this.weightSmoothing;
+        this.currentDampWeights[j] +=
+          (this.targetDampWeights[j] - this.currentDampWeights[j]) * this.weightSmoothing;
+        this.currentTensionModWeights[j] +=
+          (this.targetTensionModWeights[j] - this.currentTensionModWeights[j]) * this.weightSmoothing;
+        const node = this.layer1[j];
+
+        const savedDampMod = node.dampMod;
+        node.dampMod = savedDampMod + this.currentDampWeights[j] * DAMP_MOD_MAX;
+        const savedTensionMod = node.tensionMod;
+        node.tensionMod = savedTensionMod + this.currentTensionModWeights[j] * TENSION_MOD_MAX;
+        const raw1 = step(node, this.routedForce1[j]);
+        node.tensionMod = savedTensionMod;
+        node.dampMod = savedDampMod;
+
+        const filt1 = this.applyFilter(node, raw1);
+        const blended1 = node.filterMix[0] * raw1 + node.filterMix[1] * filt1;
+        z1[j] = Math.tanh(blended1 * node.gain) * eng.outputGain1;
+      }
+
+      let sample = 0;
+      for (let k = 0; k < this.n2; k++) {
+        const node = this.layer2[k];
+        this.currentDampWeights2[k] +=
+          (this.targetDampWeights2[k] - this.currentDampWeights2[k]) * this.weightSmoothing;
+        this.currentTensionModWeights2[k] +=
+          (this.targetTensionModWeights2[k] - this.currentTensionModWeights2[k]) * this.weightSmoothing;
+        this.routedForce2[k] +=
+          (this.routedForce2Target[k] - this.routedForce2[k]) * this.weightSmoothing;
+
+        let routed = 0;
+        const tensionBase = k * this.n1;
+        for (let j = 0; j < this.n1; j++) routed += this.tensionRouter[tensionBase + j] * z1[j];
+        routed *= modDepth;
+
+        const savedMod = node.tensionMod;
+        node.tensionMod = savedMod + routed + this.currentTensionModWeights2[k] * TENSION_MOD_MAX;
+        const savedDampMod2 = node.dampMod;
+        node.dampMod = savedDampMod2 + this.currentDampWeights2[k] * DAMP_MOD_MAX;
+        const raw2 = step(node, this.routedForce2[k]);
+        node.dampMod = savedDampMod2;
+        node.tensionMod = savedMod;
+
+        const filt = this.applyFilter(node, raw2);
+        const blended = node.filterMix[0] * raw2 + node.filterMix[1] * filt;
+        sample += Math.tanh(blended * node.gain);
+      }
+
+      const y = applyOutputFilter(this.outputFilter, sample * eng.outputGain2 * masterGain);
+      channel[i] = softLimit(y);
+    }
+
     for (let c = 1; c < output.length; c++) {
       output[c].set(channel);
     }

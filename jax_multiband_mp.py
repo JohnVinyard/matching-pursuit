@@ -387,7 +387,7 @@ def main():
                         help='atom length in the lowest band, in samples.  It doubles with each band, '
                              'so every atom spans the same duration')
     parser.add_argument('--n-atoms', type=int, default=256, help='atoms per band')
-    parser.add_argument('--n-steps', type=int, default=32, help='matching pursuit steps per band')
+    parser.add_argument('--n-steps', type=int, default=64, help='matching pursuit steps per band')
     parser.add_argument('--coeff-schedule', choices=list(COEFF_SCHEDULES), default='constant',
                         help='how the number of complex coefficients used by the search grows with '
                              "band index k: 'constant' (base), 'sublinear' (base * sqrt(k + 1)), "

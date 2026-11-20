@@ -432,8 +432,12 @@ function randomizeAll() {
     layer1: strategy.generateLayerParams(state.n1, true),
     layer2: strategy.generateLayerParams(state.n2, false),
     ...strategy.generateRouters(state.n1, state.n2, state.sparsity),
+    // randomized instruments always run the web-native model, even if a
+    // trained one was loaded before
+    engine: defaultEngine(),
   };
   lastParams = params;
+  syncExcitationModeUI();
   if (workletNode) {
     workletNode.port.postMessage({ type: 'setParams', params });
   }
@@ -474,10 +478,66 @@ function regenerateRouters() {
 // randomRouters), so v1 links no longer decode (decodeShareState's version
 // check already rejects a mismatched version outright, rather than
 // misreading the new layout).
-const SHARE_VERSION = 2;
+//
+// v3 adds the engine (see dho-processor.js's defaultEngine) right after the
+// v2 header: a type byte, and for trained instruments (exported by
+// parallel.py's encode_share_state_url) the training run's clock, force
+// scale, learned excitation mix/bow rate and output gains.  v2 links still
+// decode, as the 'legacy' engine.  v3 also stores each router with its
+// own float32 scale (its largest |entry|) ahead of its int16 entries, in
+// place of v2's fixed +-ROUTER_QUANT_RANGE: ~25x finer steps for the
+// usual ~+-1 entries, which matters for FM -- a tension router error is a
+// pitch error, and that drifts phase audibly fast at heavy FM depths.
+const SHARE_VERSION = 3;
 const NODE_BYTE_LENGTH = 4 * 5 + FILTER_TAPS + 2; // 5 float32 scalars + int8 taps + int8 filterMix
 const ROUTER_QUANT_RANGE = 32; // generous headroom above any range we've used so far
-const EXCITATION_MODE_IDS = ['sustained', 'impulse', 'pulse', 'noise'];
+// 'learned' is only valid for the 'resonator' engine, whose excitation is
+// the trained strike/noise/bow mix rather than a UI choice
+const EXCITATION_MODE_IDS = ['sustained', 'impulse', 'pulse', 'noise', 'learned'];
+const ENGINE_TYPES = ['legacy', 'envelope', 'resonator'];
+// u8 type, then (trained only) u16 trainSampleRate, u16 controlRate, and
+// float32 timeScale, forceScale, excitationMix[3], bowHz, outputGain1, outputGain2
+const TRAINED_ENGINE_BYTE_LENGTH = 2 + 2 + 4 * 8;
+
+// mirrors dho-processor.js's defaultEngine (the processor merges whatever
+// it's sent over its own defaults, so this is just for the main thread's
+// bookkeeping)
+function defaultEngine() {
+  return {
+    type: 'legacy',
+    trainSampleRate: 22050,
+    controlRate: 512,
+    timeScale: 1,
+    forceScale: 1,
+    excitationMix: [1, 0, 0],
+    bowHz: 100,
+    outputGain1: 1,
+    outputGain2: 1,
+  };
+}
+
+function currentEngineType() {
+  return lastParams && lastParams.engine ? lastParams.engine.type : 'legacy';
+}
+
+// The 'resonator' engine's excitation is learned, so the select is pinned
+// to 'learned' and disabled; every other engine gets the usual choices.
+function syncExcitationModeUI() {
+  const select = document.getElementById('excitationModeSelect');
+  const resonator = currentEngineType() === 'resonator';
+  if (resonator) {
+    state.excitationMode = 'learned';
+  } else if (state.excitationMode === 'learned') {
+    state.excitationMode = 'sustained';
+  }
+  if (select) {
+    select.value = state.excitationMode;
+    select.disabled = resonator;
+  }
+  if (workletNode) {
+    workletNode.port.postMessage({ type: 'setExcitationMode', mode: state.excitationMode });
+  }
+}
 
 function quantizeU8(v, lo, hi) {
   return Math.max(0, Math.min(255, Math.round(((v - lo) / (hi - lo)) * 255)));
@@ -504,8 +564,37 @@ function dequantizeI16(v, range) {
   return (v / 32767) * range;
 }
 
-function shareByteLength(n1, n2) {
-  return 11 + (n1 + n2) * NODE_BYTE_LENGTH + (n2 * n1 * 2 + n1 * n1) * 2;
+function shareByteLength(n1, n2, engineType) {
+  const engineBytes = 1 + (engineType === 'legacy' ? 0 : TRAINED_ENGINE_BYTE_LENGTH);
+  return 11 + engineBytes + (n1 + n2) * NODE_BYTE_LENGTH + (n2 * n1 * 2 + n1 * n1) * 2 + 3 * 4;
+}
+
+function encodeEngine(view, offset, engine) {
+  view.setUint8(offset, Math.max(0, ENGINE_TYPES.indexOf(engine.type))); offset += 1;
+  if (engine.type === 'legacy') return offset;
+  view.setUint16(offset, engine.trainSampleRate, true); offset += 2;
+  view.setUint16(offset, engine.controlRate, true); offset += 2;
+  for (const v of [
+    engine.timeScale, engine.forceScale, ...engine.excitationMix,
+    engine.bowHz, engine.outputGain1, engine.outputGain2,
+  ]) {
+    view.setFloat32(offset, v, true); offset += 4;
+  }
+  return offset;
+}
+
+function decodeEngine(view, offset) {
+  const engine = defaultEngine();
+  engine.type = ENGINE_TYPES[view.getUint8(offset)] || 'legacy'; offset += 1;
+  if (engine.type === 'legacy') return { engine, offset };
+  engine.trainSampleRate = view.getUint16(offset, true); offset += 2;
+  engine.controlRate = view.getUint16(offset, true); offset += 2;
+  const f = [];
+  for (let i = 0; i < 8; i++) { f.push(view.getFloat32(offset, true)); offset += 4; }
+  [engine.timeScale, engine.forceScale] = f;
+  engine.excitationMix = f.slice(2, 5);
+  [engine.bowHz, engine.outputGain1, engine.outputGain2] = f.slice(5);
+  return { engine, offset };
 }
 
 function encodeNode(view, offset, p) {
@@ -564,7 +653,8 @@ function encodeShareState() {
   if (!lastParams) return null;
   const n1 = state.n1;
   const n2 = state.n2;
-  const buffer = new ArrayBuffer(shareByteLength(n1, n2));
+  const engine = lastParams.engine || defaultEngine();
+  const buffer = new ArrayBuffer(shareByteLength(n1, n2, engine.type));
   const view = new DataView(buffer);
   let offset = 0;
 
@@ -582,17 +672,20 @@ function encodeShareState() {
   view.setUint8(offset, quantizeU8(volume, 0, 10)); offset += 1;
   view.setUint8(offset, quantizeLogU8(modDepth, 0.1, 10)); offset += 1;
   view.setUint8(offset, quantizeU8(state.reverb.mix, 0, 1)); offset += 1;
+  offset = encodeEngine(view, offset, engine);
 
   for (const p of lastParams.layer1) offset = encodeNode(view, offset, p);
   for (const p of lastParams.layer2) offset = encodeNode(view, offset, p);
-  for (const row of lastParams.tensionRouter) {
-    for (const v of row) { view.setInt16(offset, quantizeI16(v, ROUTER_QUANT_RANGE), true); offset += 2; }
-  }
-  for (const row of lastParams.forceRouter2) {
-    for (const v of row) { view.setInt16(offset, quantizeI16(v, ROUTER_QUANT_RANGE), true); offset += 2; }
-  }
-  for (const row of lastParams.forceRouter1) {
-    for (const v of row) { view.setInt16(offset, quantizeI16(v, ROUTER_QUANT_RANGE), true); offset += 2; }
+  for (const router of [lastParams.tensionRouter, lastParams.forceRouter2, lastParams.forceRouter1]) {
+    let scale = 0;
+    for (const row of router) for (const v of row) scale = Math.max(scale, Math.abs(v));
+    scale = scale || 1;
+    view.setFloat32(offset, scale, true); offset += 4;
+    // quantize against the float32-rounded scale the decoder will see
+    scale = view.getFloat32(offset - 4, true);
+    for (const row of router) {
+      for (const v of row) { view.setInt16(offset, quantizeI16(v, scale), true); offset += 2; }
+    }
   }
 
   return new Uint8Array(buffer);
@@ -602,7 +695,7 @@ function decodeShareState(bytes) {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   let offset = 0;
   const version = view.getUint8(offset); offset += 1;
-  if (version !== SHARE_VERSION) throw new Error(`unsupported share link version ${version}`);
+  if (version !== 2 && version !== 3) throw new Error(`unsupported share link version ${version}`);
   const n1 = view.getUint8(offset); offset += 1;
   const n2 = view.getUint8(offset); offset += 1;
   const strategy = view.getUint8(offset) === 1 ? 'physical' : 'random'; offset += 1;
@@ -613,6 +706,13 @@ function decodeShareState(bytes) {
   const volume = dequantizeU8(view.getUint8(offset), 0, 10); offset += 1;
   const modDepth = dequantizeLogU8(view.getUint8(offset), 0.1, 10); offset += 1;
   const reverbMix = dequantizeU8(view.getUint8(offset), 0, 1); offset += 1;
+
+  let engine = defaultEngine();
+  if (version >= 3) {
+    const r = decodeEngine(view, offset);
+    engine = r.engine;
+    offset = r.offset;
+  }
 
   const layer1 = [];
   for (let i = 0; i < n1; i++) {
@@ -628,11 +728,16 @@ function decodeShareState(bytes) {
   }
 
   function decodeRouter(n2_, n1_) {
+    let scale = ROUTER_QUANT_RANGE;
+    if (version >= 3) {
+      scale = view.getFloat32(offset, true);
+      offset += 4;
+    }
     const router = [];
     for (let k = 0; k < n2_; k++) {
       const row = [];
       for (let j = 0; j < n1_; j++) {
-        row.push(dequantizeI16(view.getInt16(offset, true), ROUTER_QUANT_RANGE));
+        row.push(dequantizeI16(view.getInt16(offset, true), scale));
         offset += 2;
       }
       router.push(row);
@@ -647,14 +752,14 @@ function decodeShareState(bytes) {
 
   return {
     n1, n2, strategy, excitationMode, pulseRate, sparsity, volume, modDepth, reverbFile, reverbMix,
-    params: { layer1, layer2, tensionRouter, forceRouter1, forceRouter2 },
+    params: { layer1, layer2, tensionRouter, forceRouter1, forceRouter2, engine },
   };
 }
 
 // Input gain, in dB.  Kept out of the binary share format (so existing v2
 // links, and the ones parallel.py's encode_share_state_url writes, still
-// decode) and carried as its own optional `g` query parameter instead,
-// omitted at 0 dB.
+// decode) and carried as its own optional `g` parameter instead, omitted
+// at 0 dB.
 const INPUT_GAIN_DB_RANGE = [-40, 20];
 
 function dbToGain(db) {
@@ -672,25 +777,40 @@ function buildShareUrl() {
   const encoded = bytesToBase64Url(bytes);
   const db = currentInputGainDb();
   const gain = db !== 0 ? `&g=${db}` : '';
-  return `${location.origin}${location.pathname}?p=${encoded}${gain}`;
+  return `${location.origin}${location.pathname}#p=${encoded}${gain}`;
+}
+
+// Share links carry `p` (and `g`) in the fragment, `#p=...&g=...`: browsers
+// never send the fragment to the server, so its request-line limits (~8KB
+// on most servers/CDNs) don't cap the instrument's size.  Links from before
+// that carried them in the query string, `?p=...`, which still works; the
+// fragment wins if both are present.
+function shareParam(name) {
+  const fromHash = new URLSearchParams(location.hash.replace(/^#/, '')).get(name);
+  return fromHash !== null ? fromHash : new URLSearchParams(location.search).get(name);
 }
 
 // Parsed once at script load (before any UI/audio setup) so the page can
-// restore a shared instrument on load. `?p=...` doesn't get rewritten as
+// restore a shared instrument on load. The link doesn't get rewritten as
 // you tweak things afterward -- it's a snapshot, not a live-synced URL.
 let loadedShare = null;
 try {
-  const p = new URLSearchParams(location.search).get('p');
+  const p = shareParam('p');
   if (p) loadedShare = decodeShareState(base64UrlToBytes(p));
 } catch (err) {
   console.error('Failed to parse shared instrument link:', err);
 }
 
-// `?g=<dB>`: the input gain, independent of `p` (see buildShareUrl), so it
+// Opening a different share link in the same tab only changes the
+// fragment, which doesn't reload the page -- so reload, to load the new
+// instrument rather than silently keep playing the old one.
+window.addEventListener('hashchange', () => location.reload());
+
+// `g=<dB>`: the input gain, independent of `p` (see buildShareUrl), so it
 // can also be added by hand to any link, e.g. one from parallel.py
 let loadedInputGainDb = 0;
 {
-  const g = parseFloat(new URLSearchParams(location.search).get('g'));
+  const g = parseFloat(shareParam('g'));
   if (Number.isFinite(g)) {
     loadedInputGainDb = Math.min(INPUT_GAIN_DB_RANGE[1], Math.max(INPUT_GAIN_DB_RANGE[0], g));
   }
@@ -739,6 +859,7 @@ async function ensureAudio() {
   if (loadedShare) {
     lastParams = loadedShare.params;
     workletNode.port.postMessage({ type: 'setParams', params: lastParams });
+    syncExcitationModeUI();
     renderParamsPanel(lastParams);
     workletNode.parameters.get('masterGain').setValueAtTime(loadedShare.volume, audioCtx.currentTime);
     workletNode.parameters.get('modDepth').setValueAtTime(loadedShare.modDepth, audioCtx.currentTime);
@@ -989,8 +1110,11 @@ function buildPlanes() {
     (weights) => {
       // only meaningful in 'impulse' mode -- the continuous 'excite' weights
       // above still update in every mode (used for visuals, and as the
-      // amplitude source for 'pulse' mode's periodic ticks in the processor)
-      if (state.excitationMode === 'impulse' && workletNode) {
+      // amplitude source for 'pulse' mode's periodic ticks in the processor).
+      // A trained resonator always strikes too: its learned excitation mix
+      // weights the strike against the held noise/bow drive.
+      const strikes = state.excitationMode === 'impulse' || currentEngineType() === 'resonator';
+      if (strikes && workletNode) {
         workletNode.port.postMessage({ type: 'strike', weights });
       }
     },
@@ -1381,6 +1505,7 @@ function wireControls() {
     nodeCountSelect.value = loadedShare.n1;
     strategySelect.value = loadedShare.strategy;
     excitationModeSelect.value = loadedShare.excitationMode;
+    excitationModeSelect.disabled = loadedShare.params.engine.type === 'resonator';
     pulseRateSlider.value = loadedShare.pulseRate;
     pulseRateLabel.textContent = `${loadedShare.pulseRate.toFixed(0)} Hz`;
     sparsitySlider.value = loadedShare.sparsity;

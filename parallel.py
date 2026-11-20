@@ -239,8 +239,9 @@ INTEGRATOR = 'control_rate'
 # energy as one strike of the same force (see sample_rate_oscillator), so
 # the softmax weights trade off like-for-like.  With --integrator
 # control_rate none of this is heard: that path only integrates an envelope.
-# Share links don't carry either yet.  (The web demo's bow is a pulse
-# train at pulseRate Hz, not a sawtooth.)
+# Share links (v3) carry both, and the web demo's 'resonator' engine
+# reproduces all three excitations: a press strikes, holding drives noise
+# and bow (see encode_share_state_url).
 EXCITATIONS = ('impulse', 'noise', 'bow')
 
 # if True, InstrumentAutoencoder starts each hypernetwork head at a plausible
@@ -2753,10 +2754,32 @@ def overfit_autoencoder(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: 
 # lockstep by hand if either format changes.
 # v2 adds forceRouter1 (layer 1's own self-routing matrix, n x n -- see
 # _layer_web_nodes), matching main.js's SHARE_VERSION bump.
-SHARE_VERSION_WEB = 2
+# v3 adds the engine block (main.js's encodeEngine): which oscillator model
+# to run ('envelope' for INTEGRATOR='control_rate', 'resonator' for
+# 'sample_rate'), the training clock, force scale, learned excitation mix /
+# bow rate and the output gains, so the web plays this model rather than
+# its own.
+SHARE_VERSION_WEB = 3
 SHARE_FILTER_TAPS = 32  # must match demos/dho-synth/main.js's FILTER_TAPS
-SHARE_ROUTER_QUANT_RANGE = 32  # must match main.js's ROUTER_QUANT_RANGE
-SHARE_EXCITATION_MODE_IDS = ['sustained', 'impulse', 'pulse', 'noise']
+SHARE_EXCITATION_MODE_IDS = ['sustained', 'impulse', 'pulse', 'noise', 'learned']
+SHARE_ENGINE_TYPES = ['legacy', 'envelope', 'resonator']
+# main.js's STRIKE_PEAK: the control weight of a full, centered press
+SHARE_STRIKE_PEAK = 1.6
+# must match main.js's REVERB_FILES, in order (the index is what's shared)
+SHARE_REVERB_FILES = [
+    'Block Inside.wav', 'Bottle Hall.wav', 'Cement Blocks 1.wav', 'Cement Blocks 2.wav',
+    'Chateau de Logne, Outside.wav', 'Conic Long Echo Hall.wav', 'Deep Space.wav',
+    'Derlon Sanctuary.wav', 'Direct Cabinet N1.wav', 'Direct Cabinet N2.wav',
+    'Direct Cabinet N3.wav', 'Direct Cabinet N4.wav', 'Five Columns Long.wav',
+    'Five Columns.wav', 'French 18th Century Salon.wav', 'Going Home.wav',
+    'Greek 7 Echo Hall.wav', 'Highly Damped Large Room.wav', 'In The Silo Revised.wav',
+    'In The Silo.wav', 'Large Bottle Hall.wav', 'Large Long Echo Hall.wav',
+    'Large Wide Echo Hall.wav', 'Masonic Lodge.wav', 'Musikvereinsaal.wav',
+    'Narrow Bumpy Space.wav', 'Nice Drum Room.wav', 'On a Star.wav', 'Parking Garage.wav',
+    'Rays.wav', 'Right Glass Triangle.wav', 'Ruby Room.wav', 'Scala Milan Opera Hall.wav',
+    'Small Drum Room.wav', 'Small Prehistoric Cave.wav', 'St Nicolaes Church.wav',
+    'Trig Room.wav', 'Vocal Duo.wav',
+]
 
 
 def _share_quantize_u8(v: float, lo: float, hi: float) -> int:
@@ -2820,6 +2843,9 @@ def _layer_web_nodes(
       format (forceRouter1/forceRouter2, see encode_share_state_url),
       excitationGain is just left at the web's own identity default (1.0)
       for every node, on both layers, to avoid double-applying gain.
+    - mass is unchanged, but the web's static damping term x = 1 / (2 *
+      mass) is scaled by the engine's timeScale, the same clock ratio, so
+      x and omega stay in the same proportion as here.
     """
     n = layer.n_nodes
     with torch.no_grad():
@@ -2860,9 +2886,8 @@ def encode_share_state_url(controller: 'LayerController', samplerate: int = 2205
     one), matching the web demo's topology, and the direct (non-dictionary)
     tension path (USE_TENSION_DICTIONARY=False).
 
-    Deliberately does not touch reverb (reverb file index 255 = "none"; the
-    web leaves whatever IR is currently loaded alone in that case) and
-    leaves sparsity/pulseRate/volume/modDepth at harmless defaults -- none of
+    Reverb is approximated by the single strongest room (see below).
+    sparsity/pulseRate/modDepth are left at harmless defaults -- none of
     those describe the instrument itself, only UI/performance state that a
     share link can't usefully carry anyway (see this section's docstring re:
     LayerController.forces).
@@ -2878,68 +2903,113 @@ def encode_share_state_url(controller: 'LayerController', samplerate: int = 2205
     # parallel.py's oscillator phase runs on a `linspace(0, 10, n_samples)`
     # clock, independent of `samplerate` -- i.e. its physics clock advances
     # `ratio` physics-seconds per real second. The web's clock always tracks
-    # real time 1:1, so matching omega = sqrt(tension - ...) requires scaling
-    # tension (and hence tensionExp, in log space) by ratio**2.
-    ratio = (10.0 * samplerate) / controller.n_samples
+    # real time 1:1, so matching omega = sqrt(tension - x ** 2) requires
+    # scaling tension (and hence tensionExp, in log space) by ratio**2, and
+    # x by ratio (the web does that itself, as the engine's timeScale).
+    dt = (layer1.t[1] - layer1.t[0]).item()
+    ratio = dt * samplerate
     tension_offset = 2 * math.log10(ratio)
 
     nodes1 = _layer_web_nodes(layer1, tension_offset, controller.control_rate, samplerate)
     nodes2 = _layer_web_nodes(layer2, tension_offset, controller.control_rate, samplerate)
 
     with torch.no_grad():
-        # the web's tensionRouter multiplies layer 1's *pre*-gain/tanh output;
-        # parallel.py's tension_modifier is layer 1's *fully processed*
-        # output (post filter-mix, tanh(gain), output_gain). Scaling by
-        # layer1's own output_gain roughly compensates for that extra
-        # squashing stage so the ported FM depth is in the right ballpark.
-        fm_scale = layer1.output_gain.reshape(-1)[0].item()
-        # layer 1's own self-routing (see _layer_web_nodes and main.js's
-        # forceRouter1) -- previously had no destination slot and was only
-        # approximated via its diagonal into excitationGain; now exported in
-        # full, same as layer 2's.
-        force_router1 = layer1.force_router.reshape(n, n).cpu().numpy()
-        force_router2 = layer2.force_router.reshape(n, n).cpu().numpy()
-        tension_router = layer2.tension_router.reshape(n, n).cpu().numpy() * fm_scale
+        # parallel.py's routers are (source, target) -- einsum('bct,bcd->bdt')
+        # -- while the web's rows are targets, so all three are transposed.
+        # The trained engines apply layer 1's tanh(gain) * output_gain
+        # before its output becomes FM, as here, so tension_router goes
+        # over as-is.
+        force_router1 = layer1.force_router.reshape(n, n).T.cpu().numpy()
+        force_router2 = layer2.force_router.reshape(n, n).T.cpu().numpy()
+        tension_router = layer2.tension_router.reshape(n, n).T.cpu().numpy()
+        # the web scales FM by modDepth, whose neutral 1.0 doesn't land on
+        # its (log) u8 grid -- divide out the value it will actually decode
+        mod_depth_q = _share_quantize_log_u8(1.0, 0.1, 10)
+        tension_router = tension_router / 10 ** (mod_depth_q / 255 * 2 - 1)
+
+        # a full press on the web maps to the largest force the instrument
+        # is currently being driven with
+        force_scale = controller.materialize_forces().max().item() / SHARE_STRIKE_PEAK
+        if force_scale <= 0:
+            force_scale = 1.0 / SHARE_STRIKE_PEAK
+
+        excitation_mix = torch.softmax(controller.excitation_logits.reshape(-1), dim=-1).tolist()
+        # sample_rate_oscillator's bow rate, sqrt(bow_tension) * dt / (2 pi)
+        # cycles per sample
+        bow_hz = math.sqrt(compute_tension(controller.bow_t_raw).item()) * ratio / (2 * math.pi)
+
+        output_gain1 = layer1.output_gain.reshape(-1)[0].item()
+        output_gain2 = layer2.output_gain.reshape(-1)[0].item() * controller.final_gain.item()
+
+        # Reverb: the web has one (loudness-normalized) IR and a dry/wet
+        # crossfade, so take only the room with the largest |room_mix|
+        # weight, and set the crossfade from its rough share of the output:
+        # |wet * weight| * ||IR|| against |dry|.  The dry level is then
+        # restored through output_gain2, so the dry signal matches exactly
+        # and only the wet level is approximate.
+        dry_w, wet_w = controller.wet_dry_mix.tolist()
+        reverb_idx, reverb_mix = 255, 0.0
+        if USE_REVERB:
+            room = int(torch.argmax(torch.abs(controller.room_mix.reshape(-1))).item())
+            name = getattr(controller.verb, 'files', [None] * (room + 1))[room]
+            if name in SHARE_REVERB_FILES:
+                ir_norm = torch.norm(controller.verb.rooms[room]).item()
+                wet_level = abs(wet_w * controller.room_mix.reshape(-1)[room].item()) * ir_norm
+                reverb_mix = min(0.95, wet_level / (abs(dry_w) + wet_level + 1e-12))
+                reverb_idx = SHARE_REVERB_FILES.index(name)
+        # the mix travels as a u8, so compensate for the value the web will
+        # actually decode
+        reverb_mix = _share_quantize_u8(reverb_mix, 0, 1) / 255
+        output_gain2 *= dry_w / (1 - reverb_mix)
+        # likewise the volume (master gain): 1.0 doesn't land on its u8 grid
+        volume_q = _share_quantize_u8(1.0, 0, 10)
+        output_gain2 /= volume_q / 255 * 10
+
+    engine = 'resonator' if INTEGRATOR == 'sample_rate' else 'envelope'
+    # parallel.py's forces are sparse, single-frame events, so the envelope
+    # engine starts in strike mode; the resonator's excitation is learned
+    excitation_mode = 'learned' if engine == 'resonator' else 'impulse'
 
     header = struct.pack(
         '<BBBBBBBBBBB',
         SHARE_VERSION_WEB,
         n, n,
         0,  # strategy: 'random' -- only affects future Randomize clicks, not this instrument
-        SHARE_EXCITATION_MODE_IDS.index('sustained'),
-        255,  # reverb file index: none selected -- see docstring above
+        SHARE_EXCITATION_MODE_IDS.index(excitation_mode),
+        reverb_idx,
         _share_quantize_u8(0.5, 0, 0.95),  # sparsity: unused once an explicit instrument is loaded
         _share_quantize_u8(100, 20, 400),  # pulseRate: unused unless excitationMode='pulse'
-        _share_quantize_u8(0.6, 0, 10),  # volume: a reasonable default master gain
-        _share_quantize_log_u8(1.0, 0.1, 10),  # modDepth: neutral default
-        _share_quantize_u8(0.0, 0, 1),  # reverbMix: harmless with no reverb file selected
+        volume_q,  # volume: ~unity (compensated above) -- output_gain2 already sets the level
+        mod_depth_q,  # modDepth: ~neutral (compensated above)
+        _share_quantize_u8(reverb_mix, 0, 1),
+    )
+    # the v3 engine block (main.js's encodeEngine)
+    header += struct.pack(
+        '<BHH8f',
+        SHARE_ENGINE_TYPES.index(engine),
+        samplerate,
+        controller.control_rate,
+        ratio,
+        force_scale,
+        *excitation_mix,
+        bow_hz,
+        output_gain1,
+        output_gain2,
     )
 
     body = bytearray(header)
     for node in nodes1 + nodes2:
         body += _share_encode_node(**node)
 
-    n_clipped = 0
-
-    def encode_router_row(row) -> bytes:
-        nonlocal n_clipped
-        packed = bytearray()
-        for v in row:
-            if abs(v) > SHARE_ROUTER_QUANT_RANGE:
-                n_clipped += 1
-            packed += struct.pack('<h', _share_quantize_i16(v, SHARE_ROUTER_QUANT_RANGE))
-        return packed
-
-    for row in tension_router:
-        body += encode_router_row(row)
-    for row in force_router2:
-        body += encode_router_row(row)
-    for row in force_router1:
-        body += encode_router_row(row)
-
-    if n_clipped:
-        print(f'[share] warning: {n_clipped} routing weight(s) exceeded the quantization '
-              f'range (+/-{SHARE_ROUTER_QUANT_RANGE}) and were clipped')
+    # v3: each router is its float32 scale (largest |entry|), then its
+    # entries as int16 against that scale (main.js's encodeShareState)
+    for router in (tension_router, force_router2, force_router1):
+        scale = float(np.abs(router).max()) or 1.0
+        scale = struct.unpack('<f', struct.pack('<f', scale))[0]
+        body += struct.pack('<f', scale)
+        for row in router:
+            for v in row:
+                body += struct.pack('<h', _share_quantize_i16(v, scale))
 
     encoded = base64.urlsafe_b64encode(bytes(body)).decode('ascii').rstrip('=')
     return f'?p={encoded}'
