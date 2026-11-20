@@ -651,11 +651,28 @@ function decodeShareState(bytes) {
   };
 }
 
+// Input gain, in dB.  Kept out of the binary share format (so existing v2
+// links, and the ones parallel.py's encode_share_state_url writes, still
+// decode) and carried as its own optional `g` query parameter instead,
+// omitted at 0 dB.
+const INPUT_GAIN_DB_RANGE = [-40, 20];
+
+function dbToGain(db) {
+  return Math.pow(10, db / 20);
+}
+
+function currentInputGainDb() {
+  const slider = document.getElementById('inputGainSlider');
+  return slider ? parseFloat(slider.value) : 0;
+}
+
 function buildShareUrl() {
   const bytes = encodeShareState();
   if (!bytes) return null;
   const encoded = bytesToBase64Url(bytes);
-  return `${location.origin}${location.pathname}?p=${encoded}`;
+  const db = currentInputGainDb();
+  const gain = db !== 0 ? `&g=${db}` : '';
+  return `${location.origin}${location.pathname}?p=${encoded}${gain}`;
 }
 
 // Parsed once at script load (before any UI/audio setup) so the page can
@@ -667,6 +684,16 @@ try {
   if (p) loadedShare = decodeShareState(base64UrlToBytes(p));
 } catch (err) {
   console.error('Failed to parse shared instrument link:', err);
+}
+
+// `?g=<dB>`: the input gain, independent of `p` (see buildShareUrl), so it
+// can also be added by hand to any link, e.g. one from parallel.py
+let loadedInputGainDb = 0;
+{
+  const g = parseFloat(new URLSearchParams(location.search).get('g'));
+  if (Number.isFinite(g)) {
+    loadedInputGainDb = Math.min(INPUT_GAIN_DB_RANGE[1], Math.max(INPUT_GAIN_DB_RANGE[0], g));
+  }
 }
 
 async function ensureAudio() {
@@ -704,6 +731,7 @@ async function ensureAudio() {
   wetGain.connect(analyser);
   analyser.connect(audioCtx.destination);
 
+  workletNode.parameters.get('inputGain').setValueAtTime(dbToGain(currentInputGainDb()), audioCtx.currentTime);
   workletNode.port.postMessage({ type: 'configure', n1: state.n1, n2: state.n2 });
   workletNode.port.postMessage({ type: 'setExcitationMode', mode: state.excitationMode });
   workletNode.port.postMessage({ type: 'setPulseRate', rate: state.pulseRate });
@@ -1318,6 +1346,8 @@ function wireControls() {
   const randomizeBtn = document.getElementById('randomizeBtn');
   const nodeCountSelect = document.getElementById('nodeCountSelect');
   const volumeSlider = document.getElementById('volumeSlider');
+  const inputGainSlider = document.getElementById('inputGainSlider');
+  const inputGainLabel = document.getElementById('inputGainLabel');
   const sparsitySlider = document.getElementById('sparsitySlider');
   const sparsityLabel = document.getElementById('sparsityLabel');
   const modDepthSlider = document.getElementById('modDepthSlider');
@@ -1433,6 +1463,18 @@ function wireControls() {
     }
   }
   nodeCountSelect.addEventListener('change', reconfigure);
+
+  const formatDb = (db) => `${db > 0 ? '+' : ''}${db.toFixed(1)} dB`;
+  inputGainSlider.min = INPUT_GAIN_DB_RANGE[0];
+  inputGainSlider.max = INPUT_GAIN_DB_RANGE[1];
+  inputGainSlider.value = loadedInputGainDb;
+  inputGainLabel.textContent = formatDb(loadedInputGainDb);
+  inputGainSlider.addEventListener('input', () => {
+    const db = parseFloat(inputGainSlider.value);
+    inputGainLabel.textContent = formatDb(db);
+    if (!workletNode) return;
+    workletNode.parameters.get('inputGain').setValueAtTime(dbToGain(db), audioCtx.currentTime);
+  });
 
   volumeSlider.addEventListener('input', () => {
     if (!workletNode) return;

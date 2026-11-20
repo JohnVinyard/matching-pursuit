@@ -26,8 +26,9 @@ At each of a fixed number of steps:
        (`--generator atoms`) a sparse, linear combination of a learned
        dictionary of raw-sample atoms.  Or (`--generator parallel`, see
        `ParallelGenerator`) `parallel.py`'s whole pipeline: hard-sparse
-       control signals driving layers of routed, modified damped harmonic
-       oscillators, then a room.  Or (`--generator multires`, see
+       control signals driving layers of routed damped harmonic
+       oscillators (by default, resonators run per sample, each driven by
+       its own mix of strikes, noise and a bowed sawtooth), then a room.  Or (`--generator multires`, see
        `MultiResolutionGenerator`) a router's (straight-through) choice of
        one of several octave bands, whose expert generates that band's
        complex FFT coefficients and a gamma envelope, then a room; these
@@ -103,8 +104,8 @@ from conjure import LmdbCollection, SupportedContentType, NumpySerializer, Numpy
 from conjure.logger import encode_audio
 
 from hyper_rnn import (
-    AntiCausalBlock, batch_stream, fft_shift, flattened_multiband_spectrogram, leaky_integrator, max_norm,
-    modified_damped_harmonic_oscillator, stft)
+    PARALLEL_DT, AntiCausalBlock, batch_stream, fft_shift, flattened_multiband_spectrogram, leaky_integrator,
+    max_norm, modified_damped_harmonic_oscillator, stft)
 from scalar_jax import gaussian_blur
 from jax_scale_attention import AttentionEncoder
 
@@ -619,6 +620,58 @@ def sparse_control(x: jnp.ndarray, n_to_keep: int) -> jnp.ndarray:
     return jnp.zeros_like(flat).at[indices].set(flat[indices]).reshape(x.shape)
 
 
+def linear_recurrence(a: jnp.ndarray, b: jnp.ndarray) -> jnp.ndarray:
+    """
+    h[n] = a[n] * h[n - 1] + b[n], h[-1] = 0, along the last axis, as a
+    parallel (associative) scan; a and b may be complex.  The combine only
+    multiplies by a's (|a| <= 1 here), never divides, so -- unlike
+    `parallel.py`'s cumprod/cumsum trick -- both passes stay finite for any
+    damping.  (`leaky_integrator` is the real special case b = a * forces.)
+    """
+    def combine(left, right):
+        a1, b1 = left
+        a2, b2 = right
+        return a1 * a2, a2 * b1 + b2
+
+    _, h = jax.lax.associative_scan(combine, (a, b), axis=-1)
+    return h
+
+
+def poly_blep(t: jnp.ndarray, dt: jnp.ndarray) -> jnp.ndarray:
+    """the polyBLEP correction for a unit step at phase 0, for phase t in [0, 1) advancing dt per sample"""
+    a = t / dt
+    b = (t - 1) / dt
+    return jnp.where(t < dt, 2 * a - a * a - 1, jnp.where(t > 1 - dt, b * b + 2 * b + 1, 0.))
+
+
+def sawtooth(cycles_per_sample: jnp.ndarray, n_samples: int) -> jnp.ndarray:
+    """
+    A polyBLEP-antialiased sawtooth in [-1, 1], one per row of a constant
+    frequency.
+
+    cycles_per_sample: (n,), clipped to [1e-5, 0.5]
+    returns: (n, n_samples)
+
+    The phase, frac(i * f), isn't a float32 running sum (over 2 ** 17
+    samples, that loses most of its fractional digits), but is computed
+    directly, splitting i = 1024 * j + k: frac(j * frac(1024 f) + k * f),
+    where 1024 f is exact, and j * frac(1024 f) and k * f both stay below
+    ~512, so the phase error is ~1e-5 cycles.  The gradient with respect
+    to f is still i (frac's derivative is 1).
+    """
+    f = jnp.clip(cycles_per_sample, 1e-5, 0.5)[:, None]
+    i = jnp.arange(n_samples)
+    j, k = (i // 1024).astype(f.dtype), (i % 1024).astype(f.dtype)
+    frac = lambda x: x - jnp.floor(x)
+    t = frac(j * frac(1024 * f) + k * f)
+    return 2 * t - 1 - poly_blep(t, f)
+
+
+# how each node's (routed) forces become its audio-rate drive, under the
+# sample-rate integrator (see ParallelGenerator.excitation)
+EXCITATIONS = ('impulse', 'noise', 'bow')
+
+
 class ParallelLayerHeads(eqx.Module):
     """
     One layer's `InstrumentHyperNetwork`, from `parallel.py`: everything that
@@ -634,11 +687,13 @@ class ParallelLayerHeads(eqx.Module):
     to_filters_mix: eqx.nn.Linear
     to_force_router: eqx.nn.Linear
     to_tension_router: eqx.nn.Linear
+    to_excitation_mix: eqx.nn.Linear
+    to_bow_tension: eqx.nn.Linear
 
     n_nodes: int = eqx.field(static=True)
     n_filter_taps: int = eqx.field(static=True)
 
-    def __init__(self, width: int, n_nodes: int, n_filter_taps: int, key):
+    def __init__(self, width: int, n_nodes: int, n_filter_taps: int, key, fm_init_depth: float = 0.3):
         keys = jax.random.split(key, 11)
         self.n_nodes = n_nodes
         self.n_filter_taps = n_filter_taps
@@ -663,13 +718,33 @@ class ParallelLayerHeads(eqx.Module):
             keys[2], n_nodes, weight_scale=4.,
             bias=jax.random.uniform(keys[10], (n_nodes,), minval=-3., maxval=3.))
         self.to_gain = head(keys[3], n_nodes)
-        self.to_output_gain = head(keys[4], 1)
+        # output gain starts at 1, not ~0 (+-0.03, either sign): for the last
+        # layer that's immaterial (the event is unit-normed), but every
+        # earlier layer reaches the output only as FM, through this gain
+        self.to_output_gain = head(keys[4], 1, bias=jnp.ones(1))
         self.to_filters = head(keys[5], n_nodes * n_filter_taps)
         self.to_filters_mix = head(keys[6], n_nodes * 2)
         # as in `parallel.py`'s `Layer`: forces start (nearly) routed to their
-        # own nodes, and the layer-to-layer tension (FM) routing starts small
+        # own nodes, and so does the layer-to-layer tension (FM) routing, at
+        # `fm_init_depth`.  At 0 (and with the output gain at ~0.03), the
+        # FM was ~1e-5 log10 units deep, and an earlier layer's gradients
+        # 1e3-1e6x smaller than the last layer's; at 0.3, its peak FM is
+        # ~0.25 log10 units of tension (a ~1.33x frequency swing at the
+        # loudest moments, decaying with the earlier layer), and its
+        # gradients within ~1-50x of the last layer's
         self.to_force_router = head(keys[7], n_nodes * n_nodes, weight_scale=0.1, bias=eye)
-        self.to_tension_router = head(keys[8], n_nodes * n_nodes, weight_scale=0.1, bias=0. * eye)
+        self.to_tension_router = head(keys[8], n_nodes * n_nodes, weight_scale=0.1, bias=fm_init_depth * eye)
+
+        # the sample-rate integrator's excitation (unused by the control-rate
+        # one).  Keys folded in from `key`, rather than split along with the
+        # rest, so the heads above initialize exactly as they did before.
+        # Each node's drive is a mix of EXCITATIONS, starting even
+        self.to_excitation_mix = head(jax.random.fold_in(key, 1), n_nodes * len(EXCITATIONS), bias=jnp.zeros(n_nodes * len(EXCITATIONS)))
+        # and the bow's frequency, as a log10 tension over the same range as
+        # the nodes', each node's bow starting at its own node's tension
+        # (same bias), so a bowed node starts out driven at its own pitch
+        self.to_bow_tension = head(
+            jax.random.fold_in(key, 2), n_nodes, weight_scale=4., bias=self.to_tension.bias)
 
     def __call__(self, h: jnp.ndarray, base_resonance: float, tension_range: Tuple[float, float]) -> dict:
         n = self.n_nodes
@@ -683,7 +758,9 @@ class ParallelLayerHeads(eqx.Module):
             filter_taps=self.to_filters(h).reshape(n, self.n_filter_taps),
             filters_mix=self.to_filters_mix(h).reshape(n, 2),
             force_router=self.to_force_router(h).reshape(n, n),
-            tension_router=self.to_tension_router(h).reshape(n, n))
+            tension_router=self.to_tension_router(h).reshape(n, n),
+            excitation_mix=jax.nn.softmax(self.to_excitation_mix(h).reshape(n, len(EXCITATIONS)), axis=-1),
+            bow_log_tension=lo + jax.nn.sigmoid(self.to_bow_tension(h)) * (hi - lo))
 
 
 class ParallelGenerator(eqx.Module):
@@ -699,17 +776,37 @@ class ParallelGenerator(eqx.Module):
            (`sparse_control`),
         2. for each of `n_layers` layers of `n_nodes` oscillators, the
            layer's definition (`ParallelLayerHeads`): mass, tension, damping,
-           gains, low-pass filters, and force and tension routing,
+           gains, low-pass filters, force and tension routing, and (for the
+           sample-rate integrator) each node's excitation: a mix of impulse,
+           noise and bow, and the bow's frequency,
         3. a room choice and a dry/wet mix, as in `ResonanceGenerator`.
 
     Each layer (`parallel.py`'s `execute_parallel_layer`): the forces are
-    routed to the nodes, divided by mass and accumulated by a leaky
-    integrator at the control rate (`leaky_integrator`, with the node's
-    damping plus the damping modulation), upsampled to samples, and that
-    energy envelope scales a damped harmonic oscillator's carrier (in place
-    of its exponential decay).  Its tension is modulated, in log10 space, by
-    the tension modulation, and by the previous layer's output, routed (FM).
-    Each node is mixed with itself through its own short low-pass filter,
+    routed to the nodes.  Its tension is modulated, in log10 space, by the
+    tension modulation, and by the previous layer's output, routed (FM).
+    Then, by `integrator`:
+
+      - 'sample_rate' (`parallel.py --integrator sample_rate`): each node is
+        a resonator, a complex one-pole filter run per sample as a parallel
+        scan (`linear_recurrence`), decaying by the node's damping plus the
+        damping modulation (per control frame, spread evenly over its
+        samples) and rotating at its (modulated, per-sample) frequency.  It's
+        driven by an audio-rate excitation built from the forces (see
+        `excitation`): a strike at the start of each frame, white noise
+        under the forces (blown), or a sawtooth at the node's bow frequency
+        under the forces (bowed/scraped), mixed per node.  The resonator
+        hears the drive's content near its own frequency, so a bow's
+        harmonics excite whichever nodes they land near.
+      - 'control_rate' (the original): the forces, divided by mass, are
+        accumulated by a leaky integrator at the control rate
+        (`leaky_integrator`), upsampled to samples, and that energy envelope
+        scales a damped harmonic oscillator's carrier (in place of its
+        exponential decay).  Anything in the drive faster than the control
+        rate is lost, so the excitation heads go unused.
+
+    With impulses only, the two agree: a strike is a decaying sinusoid, at
+    amplitude force / mass, with the same frequency and decay.  Each node is
+    then mixed with itself through its own short low-pass filter,
     soft-clipped with a gain, and scaled by the layer's output gain.  The
     last layer's nodes are summed, then the room is applied.  Events are
     `n_samples` long.
@@ -740,6 +837,7 @@ class ParallelGenerator(eqx.Module):
     mass_coeff: float = eqx.field(static=True)
     base_resonance: float = eqx.field(static=True)
     tension_range: Tuple[float, float] = eqx.field(static=True)
+    integrator: str = eqx.field(static=True)
 
     def __init__(
             self,
@@ -759,7 +857,9 @@ class ParallelGenerator(eqx.Module):
             mass_coeff: float = 0.01,
             base_resonance: float = 0.02,
             tension_range: Tuple[float, float] = (1., 8.),
-            width: int = 256):
+            width: int = 256,
+            integrator: str = 'sample_rate',
+            fm_init_depth: float = 0.3):
         """
         rooms: (n_rooms, n_samples)
         control_frames: the control signals span the event's first
@@ -769,9 +869,16 @@ class ParallelGenerator(eqx.Module):
         n_forces, n_modulations: how many nonzero elements the force and
             the (each of the) tension/damping modulation planes keep
         modulation_scale: the tension (log10) and damping modulations' scale
+        integrator: 'sample_rate' or 'control_rate' (see the class docstring)
+        fm_init_depth: the tension (FM) router's initial diagonal, i.e., how
+            strongly each node of one layer modulates the same node of the
+            next, at init (see `ParallelLayerHeads`)
         """
         if n_samples % control_rate != 0:
             raise ValueError('n_samples must be divisible by control_rate')
+        if integrator not in ('sample_rate', 'control_rate'):
+            raise ValueError(f'unknown integrator {integrator}')
+        self.integrator = integrator
         keys = jax.random.split(key, 6 + n_layers)
         self.n_samples = n_samples
         self.n_nodes = n_nodes
@@ -792,7 +899,7 @@ class ParallelGenerator(eqx.Module):
         self.to_tension_mod = eqx.nn.Linear(width, control_size, key=keys[2])
         self.to_damp_mod = eqx.nn.Linear(width, control_size, key=keys[3])
         self.layers = [
-            ParallelLayerHeads(width, n_nodes, n_filter_taps, keys[6 + i]) for i in range(n_layers)]
+            ParallelLayerHeads(width, n_nodes, n_filter_taps, keys[6 + i], fm_init_depth) for i in range(n_layers)]
         self.to_room = eqx.nn.Linear(width, rooms.shape[0], key=keys[4])
         self.to_room_mix = eqx.nn.Linear(width, 2, key=keys[5])
         self.rooms = jnp.asarray(rooms)
@@ -833,19 +940,79 @@ class ParallelGenerator(eqx.Module):
         """(n_nodes, n_frames) -> (n_nodes, n_samples), linearly"""
         return jax.image.resize(x, (x.shape[0], self.n_samples), method='linear')
 
-    def layer(self, p: dict, forces, tension_mod, damp_mod, previous) -> jnp.ndarray:
+    def excitation(self, p: dict, forces: jnp.ndarray, key) -> jnp.ndarray:
+        """
+        Each node's audio-rate drive, from its (routed) control-rate forces:
+        a per-node mix (`p['excitation_mix']`, a softmax over EXCITATIONS) of
+          - impulse: each frame's force as a single sample at the start of
+            the frame (struck/plucked)
+          - noise: white noise under the forces, linearly interpolated
+            (blown, with the forces as breath pressure)
+          - bow: a sawtooth at the node's bow frequency under the forces
+            (bowed/scraped, the forces as bow pressure).  A forced sawtooth
+            approximates real bowing, which self-oscillates through
+            nonlinear feedback.
+        Noise and bow are scaled so a frame of either, at a constant force,
+        carries the same energy as one strike of that force (unit variance
+        over `control_rate` samples, times 1 / sqrt(control_rate)), so the
+        mix weighs like against like.
+
+        p: the layer's definition
+        forces: (n_nodes, n_frames), routed
+        returns: (n_nodes, n_samples)
+        """
+        n = self.n_samples
+        impulse = jnp.zeros((*forces.shape, self.control_rate)).at[..., 0].set(forces).reshape(self.n_nodes, n)
+
+        envelope = self.upsample(forces) / np.sqrt(self.control_rate)
+        noise = envelope * jax.random.uniform(key, envelope.shape, minval=-1., maxval=1.) * np.sqrt(3.)
+        # the bow's frequency as the nodes' is: radians per (PARALLEL_DT)
+        # time unit, sqrt(10 ** log_tension), to cycles per sample
+        bow_cycles = 10. ** (p['bow_log_tension'] / 2) * PARALLEL_DT / (2 * np.pi)
+        bow = envelope * sawtooth(bow_cycles, n) * np.sqrt(3.)
+
+        mix = p['excitation_mix']
+        return mix[:, :1] * impulse + mix[:, 1:2] * noise + mix[:, 2:] * bow
+
+    def resonate(self, drive: jnp.ndarray, damping: jnp.ndarray, log_tension: jnp.ndarray, mass: jnp.ndarray):
+        """
+        The sample-rate integrator: z[n] = exp(-alpha[n] + i omega[n] dt)
+        z[n - 1] + drive[n] / mass, read out the way
+        `modified_damped_harmonic_oscillator` is, so a strike sounds the same.
+
+        drive: (n_nodes, n_samples)
+        damping: (n_nodes, n_frames), the per-control-frame decay factor
+        log_tension: (n_nodes, 1) or (n_nodes, n_samples)
+        mass: (n_nodes, 1)
+        returns: (n_nodes, n_samples)
+        """
+        # the per-frame decay factor, spread evenly over the frame's samples
+        alpha = self.upsample(-jnp.log(jnp.clip(damping, 1e-6, 1.)) / self.control_rate)
+
+        # `modified_damped_harmonic_oscillator`'s frequency: radians per
+        # PARALLEL_DT, clipped below Nyquist (and floored, since the
+        # read-out divides by it)
+        x = 1. / (2 * mass)
+        omega = jnp.sqrt(jnp.abs(10. ** log_tension - x ** 2))
+        omega = jnp.clip(omega, 1e-3, 0.95 * np.pi / PARALLEL_DT)
+
+        a = jnp.exp(jax.lax.complex(-alpha, jnp.broadcast_to(omega * PARALLEL_DT, alpha.shape)))
+        z = linear_recurrence(a, (drive / mass).astype(a.dtype))
+        # energy * cos(theta - phi) / cos(phi), with tan(phi) = x / omega
+        return z.real + (x / omega) * z.imag
+
+    def layer(self, p: dict, forces, tension_mod, damp_mod, previous, key) -> jnp.ndarray:
         """
         `parallel.py`'s `execute_parallel_layer`.
 
         p: the layer's definition, from `ParallelLayerHeads`
         previous: the previous layer's output, (n_nodes, n_samples), or None
+        key: for the noise excitation
         returns: (n_nodes, n_samples)
         """
         forces = p['force_router'].T @ forces
         damping = jnp.clip(p['damping'][:, None] + damp_mod, 0., 1.)
         mass = p['mass'][:, None] * self.mass_coeff
-
-        energy = self.upsample(leaky_integrator(forces / mass, damping))
 
         # modulations accumulate in log10 space; the base tension's
         # exponent is bounded, so this is the only unbounded exponential
@@ -853,9 +1020,13 @@ class ParallelGenerator(eqx.Module):
         if previous is not None:
             log_tension = log_tension + p['tension_router'].T @ previous
 
-        # the (modified) damped harmonic oscillator: the energy envelope
-        # replaces the decay
-        z = modified_damped_harmonic_oscillator(energy, log_tension, mass)
+        if self.integrator == 'sample_rate':
+            z = self.resonate(self.excitation(p, forces, key), damping, log_tension, mass)
+        else:
+            energy = self.upsample(leaky_integrator(forces / mass, damping))
+            # the (modified) damped harmonic oscillator: the energy envelope
+            # replaces the decay
+            z = modified_damped_harmonic_oscillator(energy, log_tension, mass)
 
         # each node's own low-pass filter (`parallel.py`'s `compute_filters`:
         # taps upsampled in the frequency domain, so nothing above their own
@@ -869,10 +1040,13 @@ class ParallelGenerator(eqx.Module):
 
     def __call__(self, event: jnp.ndarray, key=None, context=None) -> jnp.ndarray:
         p = self.parameters(event)
+        if key is None:
+            key = jax.random.key(0)
+        keys = jax.random.split(key, len(p['layers']))
 
         out = None
-        for layer in p['layers']:
-            out = self.layer(layer, p['forces'], p['tension_mod'], p['damp_mod'], out)
+        for layer, k in zip(p['layers'], keys):
+            out = self.layer(layer, p['forces'], p['tension_mod'], p['damp_mod'], out, k)
         dry = out.sum(axis=0)
 
         # the room, as in `ResonanceGenerator`
@@ -1900,6 +2074,11 @@ def build_parser(training: bool = True) -> argparse.ArgumentParser:
                              "to gain (only the magnitude head sees absolute level); 'absolute' also embeds "
                              "each frame's absolute level into the features")
     parser.add_argument('--pe-freqs', type=int, default=16, help='positional encoding frequencies')
+    parser.add_argument('--parallel-integrator', choices=['sample_rate', 'control_rate'], default='sample_rate',
+                        help="--generator parallel only: 'sample_rate': each node is a resonator run per sample, "
+                             "driven by a learned per-node mix of impulses, noise and a bowed sawtooth (at a "
+                             "learned per-node frequency); 'control_rate': the original leaky-integrated energy "
+                             "envelope times a carrier, impulses only (see ParallelGenerator)")
     parser.add_argument('--event-dim', type=int, default=16)
     parser.add_argument('--generator', choices=['resonance', 'atoms', 'parallel', 'multires', 'multires-full'], default='resonance',
                         help="'resonance': enveloped noise -> damped harmonic oscillator resonance -> "
@@ -1907,7 +2086,8 @@ def build_parser(training: bool = True) -> argparse.ArgumentParser:
                              "'atoms': a sparse sum of dictionary atoms, --atom-size long. "
                              "'parallel': parallel.py's whole pipeline (sparse control signals driving "
                              "layers of routed, modified damped harmonic oscillators, then a room), "
-                             "configured by ParallelGenerator's constructor defaults; --n-samples long. "
+                             "configured by ParallelGenerator's constructor defaults and --parallel-integrator; "
+                             "--n-samples long. "
                              "'multires': a router picks one of --n-levels octave bands (straight-through), "
                              "whose expert generates its complex FFT coefficients and a gamma envelope, "
                              "then a room -> dry/wet mix; --n-samples // 2 long. "
@@ -2057,7 +2237,8 @@ def build_model(args, model_key, generator_key) -> EventAutoencoder:
             event_dim=args.event_dim,
             n_samples=args.n_samples,
             rooms=rooms,
-            key=generator_key)
+            key=generator_key,
+            integrator=getattr(args, 'parallel_integrator', 'sample_rate'))
     elif args.generator == 'multires':
         generator = MultiResolutionGenerator(
             event_dim=args.event_dim,

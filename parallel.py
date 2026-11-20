@@ -37,6 +37,7 @@ from argparse import ArgumentParser
 from matplotlib import pyplot as plt
 
 from util.weight_init import make_initializer
+from sample_rate_dho import impulse_excitation, linear_recurrence, noise_excitation, sawtooth_excitation
 
 Solution = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 
@@ -188,6 +189,90 @@ N_FILTER_TAPS = 64
 # frequency.
 CLAMP_OMEGA_TO_NYQUIST = True
 
+# the lowest frequency a node can ring at, in Hz at 22050 Hz (the rate the
+# web demo and share links assume).  omega = sqrt(|tension - x ** 2|), with
+# x = damping / (2 * mass), is exactly 0 wherever tension == x ** 2 -- which
+# FM, sweeping tension every sample, crosses easily once a small mass makes
+# x ** 2 ~ tension -- and there both the output's x / omega term and sqrt's
+# gradient are infinite, so the forward pass and every gradient go NaN.
+# Flooring omega here keeps both finite (x / omega <= x / floor) and, being
+# a clamp, just zeroes omega's gradient below it.  20 Hz is below anything
+# audible as pitch, so it shouldn't change how working nodes sound.
+MIN_OMEGA_HZ = 20.
+MIN_OMEGA_SAMPLERATE = 22050
+
+# where the oscillators' excitation is integrated (--integrator):
+#   'control_rate' -- `sequential` leaky-integrates the forces into an
+#                     envelope at control rate, which is linearly
+#                     interpolated to audio rate and multiplied by a
+#                     sinusoid (damped_harmonic_oscillator).  Anything in
+#                     the drive faster than the control rate is lost.
+#   'sample_rate'  -- each node is a true resonator, run at audio rate as a
+#                     parallel scan (see sample_rate_oscillator and
+#                     sample_rate_dho.py): damping and tension (including
+#                     the routed, audio-rate FM) apply per sample, and the
+#                     drive is a learned mix of audio-rate excitations (see
+#                     EXCITATIONS).
+#                     Same parameters, same output form, so the two can be
+#                     A/B'd directly.
+INTEGRATOR = 'control_rate'
+
+# 'sample_rate' only: the excitations the (routed) control-rate forces can
+# drive each node with.  Which one -- or what blend -- is no longer a CLI
+# choice: it's part of the instrument, learned like every other instrument
+# parameter.  Both the blend and the bow frequency are ONE value for the
+# whole instrument, shared by every node of every layer
+# (InstrumentAutoencoder.excitation_mix / to_bow_tension, from the latent;
+# LayerController.excitation_logits / bow_t_raw in overfit_direct), to
+# match the web demo, which has a single, global excitation mode and a
+# single bow (pulse) rate, and couldn't emulate per-node ones.
+# instrument.excitation_mix holds the softmax weights over:
+#   'impulse' -- a strike at the start of each control frame (struck/plucked)
+#   'noise'   -- white noise under the same forces, linearly interpolated
+#                (blown, the forces as breath pressure).  The resonator
+#                band-limits it around each node's (modulated) frequency.
+#   'bow'     -- a sawtooth (stick-slip) at the instrument's bow frequency
+#                (instrument.bow_tension), under the same forces as bow
+#                pressure (bowed/scraped).  Its harmonics excite whichever
+#                nodes they land near.
+# Noise and bow are scaled so one control frame of either carries the same
+# energy as one strike of the same force (see sample_rate_oscillator), so
+# the softmax weights trade off like-for-like.  With --integrator
+# control_rate none of this is heard: that path only integrates an envelope.
+# Share links don't carry either yet.  (The web demo's bow is a pulse
+# train at pulseRate Hz, not a sawtooth.)
+EXCITATIONS = ('impulse', 'noise', 'bow')
+
+# if True, InstrumentAutoencoder starts each hypernetwork head at a plausible
+# operating point (see InstrumentHyperNetwork.init_operating_point), by
+# setting its bias, rather than at ~0.  At init the encoder's latent is
+# tiny (rms ~1e-4), so every head outputs ~its bias, and init_func zeroes
+# them all: gains, output gains, filter/noise/bow mixes, routers, wet/dry and
+# mass all start at ~1e-5, the output at ~1e-19, and most gradients below
+# Adam's eps (1e-8), where Adam's steps shrink to nothing -- layer 0's
+# exactly zero.  (to_tension's bias was already set this way.)
+INIT_OPERATING_POINT = True
+
+# Every layer but the last is heard only as FM on the next layer's tension
+# (unless SUM_LAYER_OUTPUTS), through tanh(x * gains) * output_gain and an
+# identity tension_router.  At init the drive is small (the untrained
+# encoder's forces peak ~0.005, Layer's directly-optimized ones ~0.01), so
+# with gains ~1 that output -- the FM depth, in log10 units of tension --
+# peaks at only ~0.02-0.08, and with --integrator sample_rate those layers'
+# gradients are 1e3-1e5x smaller than the last layer's.  So, with that
+# integrator, their gains start FM_LAYER_GAIN times higher, U(0.5, 1.5) *
+# FM_LAYER_GAIN: at 15, peak FM is ~0.25 log10.  Not with control_rate:
+# there FM moves omega * t directly, so the earlier layers' tension
+# gradients are already larger than the last layer's, and the boost made a
+# 40-step check train worse (51% of the starting loss vs 32%).  The tanh still bounds the output, so the most FM
+# a layer can apply (~output_gain, i.e. ~1 log10) is unchanged.  1 turns it
+# off.  (jax_ae.ParallelGenerator's equivalent fix sets its tension router
+# and output gain instead: there those, not the drive, were the small terms.)
+FM_LAYER_GAIN = 15.
+# the same, for overfit_direct's Layers, whose initial drive is ~10x
+# smaller still (FM peak ~0.002 at gains ~1): 150 puts it at ~0.27 log10
+FM_LAYER_GAIN_DIRECT = 150.
+
 
 def damping_nonlinearity(x: torch.Tensor) -> torch.Tensor:
     return torch.sigmoid(x)
@@ -241,9 +326,17 @@ class InstrumentDefinitionTensors:
     force_router: torch.Tensor
     tension_router: torch.Tensor
     damping: torch.Tensor
-    noise_mix: torch.Tensor
     gains: torch.Tensor
     output_gain: torch.Tensor
+    # see EXCITATIONS.  Both are one value for the whole instrument, shared
+    # across layers, so they're set by whoever owns the whole instrument
+    # (InstrumentAutoencoder, LayerController), not by each layer's
+    # hypernetwork:
+    # softmax weights over EXCITATIONS, (batch, 1, 3)
+    excitation_mix: torch.Tensor = None
+    # the bow frequency, as a real-space tension (omega ** 2, in the same
+    # units as `tension`), (batch, 1, 1)
+    bow_tension: torch.Tensor = None
 
     def display_shapes(self):
         print(f'''
@@ -254,7 +347,8 @@ class InstrumentDefinitionTensors:
             {self.force_router.shape}
             {self.tension_router.shape}
             {self.damping.shape}
-            {self.noise_mix.shape}
+            {self.excitation_mix.shape}
+            {self.bow_tension.shape}
             {self.output_gain.shape}
         ''')
 
@@ -718,7 +812,34 @@ class InstrumentHyperNetwork(nn.Module):
         self.force_router = ParameterGenerator(latent_dim, self.router_size)
         self.tension_router = ParameterGenerator(latent_dim, self.router_size)
 
-        self.noise_mix = ParameterGenerator(latent_dim, n_nodes * 2)
+        # the excitation blend and bow frequency are per instrument, not per
+        # layer, so they live on InstrumentAutoencoder (see EXCITATIONS)
+
+    @torch.no_grad()
+    def init_operating_point(self):
+        """
+        Start each head at the same kind of instrument `Layer`'s directly-
+        optimized parameters and random_synthetic_instrument start from,
+        via its bias (at init, each head's output is ~its bias; see
+        INIT_OPERATING_POINT):
+          - mass: |m_raw| ~ U(0, 1), as Layer, so 1 / (2 * mass) no longer
+            dwarfs sqrt(tension) and the drive isn't divided by ~1e-5
+          - gains, output_gain: U(0.5, 1.5), as Layer and synthetic
+          - force_router, tension_router: identity, as Layer and synthetic
+          - filters_mix: (dry 1, filtered 0) -- the one departure: Layer and
+            synthetic use U(-0.01, 0.01), which would scale every layer's
+            output by ~1e-2 again
+        to_tension is set by InstrumentAutoencoder, as before.
+        """
+        n = self.n_nodes
+        eye = torch.eye(n, device=self.gain.ln1.bias.device).flatten()
+        self.to_masses.ln1.bias.uniform_(-1, 1)
+        self.gain.ln1.bias.uniform_(0.5, 1.5)
+        self.output_gain.ln1.bias.uniform_(0.5, 1.5)
+        self.force_router.ln1.bias.copy_(eye)
+        self.tension_router.ln1.bias.copy_(eye)
+        self.filters_mix.ln1.bias.view(n, 2).copy_(
+            torch.tensor([1., 0.], device=eye.device).expand(n, 2))
 
     def forward(self, latent: torch.Tensor) -> InstrumentDefinitionTensors:
         batch, latent_dim = latent.shape
@@ -746,7 +867,6 @@ class InstrumentHyperNetwork(nn.Module):
         tr = self.tension_router(latent).view(
             batch, self.n_nodes, self.n_nodes)
 
-        nm = self.noise_mix(latent).view(batch, self.n_nodes, 2)
 
         return InstrumentDefinitionTensors(
             mass=mass,
@@ -756,9 +876,8 @@ class InstrumentHyperNetwork(nn.Module):
             filters_mix=mx,
             force_router=fr,
             tension_router=tr,
-            noise_mix=nm,
             gains=g,
-            output_gain=og
+            output_gain=og,
         )
 
 
@@ -893,6 +1012,11 @@ class InstrumentAutoencoder(nn.Module):
         self.room_mix = ParameterGenerator(channels, self.verb.n_rooms)
         self.wet_dry = ParameterGenerator(channels, 2)
 
+        # one excitation blend and one bow frequency (a direct `10 ** t`
+        # tension) for the whole instrument (see EXCITATIONS)
+        self.excitation_mix = ParameterGenerator(channels, len(EXCITATIONS))
+        self.to_bow_tension = ParameterGenerator(channels, 1)
+
         # used only when SUM_LAYER_OUTPUTS is True, to scale/mix each layer's
         # own output into the final signal, instead of using only the last
         # layer's output
@@ -922,6 +1046,36 @@ class InstrumentAutoencoder(nn.Module):
             for hyper in self.hyper_networks:
                 with torch.no_grad():
                     hyper.to_tension.ln1.bias.uniform_(*tension_exponent_range)
+
+        # likewise, start the instrument's bow frequency somewhere in the
+        # same range as node tensions, so the bow's harmonics can land on
+        # nodes from the start (see EXCITATIONS)
+        with torch.no_grad():
+            self.to_bow_tension.ln1.bias.uniform_(*tension_exponent_range)
+
+        if INIT_OPERATING_POINT:
+            for hyper in self.hyper_networks:
+                hyper.init_operating_point()
+            with torch.no_grad():
+                if INTEGRATOR == 'sample_rate' and not SUM_LAYER_OUTPUTS:
+                    for hyper in self.hyper_networks[:-1]:
+                        hyper.gain.ln1.bias.uniform_(0.5 * FM_LAYER_GAIN, 1.5 * FM_LAYER_GAIN)
+                # rooms, as synthetic: U(0, 1) (through a relu); the dry
+                # path fully on, and some reverb
+                self.room_mix.ln1.bias.uniform_(0, 1)
+                self.wet_dry.ln1.bias.copy_(torch.tensor([1., 0.5]))
+                # an even blend of EXCITATIONS
+                self.excitation_mix.ln1.bias.zero_()
+
+    def compute_excitation(self, latents: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        (batch, latent_dim) -> the instrument-wide excitation (see
+        EXCITATIONS): softmax weights, (batch, 1, len(EXCITATIONS)), and bow
+        tension, (batch, 1, 1)
+        """
+        mix = torch.softmax(self.excitation_mix(latents), dim=-1)[:, None, :]
+        bow_tension = compute_tension(self.to_bow_tension(latents))[:, None, :]
+        return mix, bow_tension
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         if ENCODER_ARCH == 'unet':
@@ -967,9 +1121,13 @@ class InstrumentAutoencoder(nn.Module):
             initial_displacement=self._id
         )
 
+        excitation_mix, bow_tension = self.compute_excitation(latents)
+
         for layer in self.hyper_networks:
 
             params: InstrumentDefinitionTensors = layer.forward(latents)
+            params.excitation_mix = excitation_mix
+            params.bow_tension = bow_tension
             diff = 1 - self.hyper_params.base_resonance
             params.damping = self.hyper_params.base_resonance + (damping_nonlinearity(params.damping) * diff * 0.9998)
             # params.mass = 1e-5 + F.softplus(params.mass)
@@ -1053,9 +1211,12 @@ class InstrumentAutoencoder(nn.Module):
         t = self.tension(x) * TENSION_MOD_SCALE
         d = self.damp(x) * DAMP_MOD_SCALE
 
+        excitation_mix, bow_tension = self.compute_excitation(latents)
         params_list = []
         for layer in self.hyper_networks:
             params: InstrumentDefinitionTensors = layer.forward(latents)
+            params.excitation_mix = excitation_mix
+            params.bow_tension = bow_tension
             diff = 1 - self.hyper_params.base_resonance
             params.damping = self.hyper_params.base_resonance + (torch.sigmoid(params.damping) * diff * 0.9998)
             params_list.append(params)
@@ -1145,8 +1306,9 @@ def execute_parallel_layer(
 
     mass = instrument.mass * hyper.mass_coeff   
 
-    energy = sequential(forces / mass, d)
-    energy = interpolate_last_axis(energy, desired_size=hyper.n_samples)
+    if INTEGRATOR == 'control_rate':
+        energy = sequential(forces / mass, d)
+        energy = interpolate_last_axis(energy, desired_size=hyper.n_samples)
 
     # the problem with this idea is that the spectrum here is not
     # variable over time
@@ -1178,15 +1340,28 @@ def execute_parallel_layer(
     if log_modifier is not None:
         tension = tension * compute_tension(log_modifier)
 
-    x = damped_harmonic_oscillator(
-        energy=energy,
-        time=static.time,
-        mass=mass,
-        damping=static.damping,
-        tension=tension,
-        initial_displacement=static.initial_displacement,
-        clamp_to_nyquist=CLAMP_OMEGA_TO_NYQUIST,
-    )
+    if INTEGRATOR == 'sample_rate':
+        x = sample_rate_oscillator(
+            hyper=hyper,
+            static=static,
+            forces=forces,
+            damping=d,
+            mass=mass,
+            tension=tension,
+            excitation_mix=instrument.excitation_mix,
+            bow_tension=instrument.bow_tension,
+        )
+    else:
+        x = damped_harmonic_oscillator(
+            energy=energy,
+            time=static.time,
+            mass=mass,
+            damping=static.damping,
+            tension=tension,
+            initial_displacement=static.initial_displacement,
+            clamp_to_nyquist=CLAMP_OMEGA_TO_NYQUIST,
+            min_omega_per_sample=min_omega_per_sample(),
+        )
 
     filt = fft_convolve(x, ensure_last_axis_length(
         unit_norm(instrument.filters), desired_size=hyper.n_samples))
@@ -1255,6 +1430,34 @@ def stft(
 
 
 @torch.jit.script
+def compute_omega(
+        tension: torch.Tensor,
+        x: torch.Tensor,
+        dt: torch.Tensor,
+        min_omega_per_sample: float,
+        clamp_to_nyquist: bool) -> torch.Tensor:
+    """
+    A node's angular frequency, in radians per synthetic time unit,
+    sqrt(|tension - x ** 2|), floored at min_omega_per_sample / dt (radians
+    per sample -> per time unit; see MIN_OMEGA_HZ: unfloored, it's 0 at
+    tension == x ** 2, and both the output and the gradient go NaN) and, if
+    clamp_to_nyquist, capped below Nyquist.  dt: the synthetic time step
+    per sample.  Shared by both integrators; the settings are arguments
+    because it's scripted (no module globals).
+    """
+    min_omega = min_omega_per_sample / dt
+    omega = torch.sqrt(torch.maximum(torch.abs(tension - (x ** 2)), min_omega ** 2))
+    if clamp_to_nyquist:
+        omega = torch.minimum(omega, 0.95 * math.pi / dt)
+    return omega
+
+
+def min_omega_per_sample() -> float:
+    """MIN_OMEGA_HZ in radians per sample, for compute_omega"""
+    return 2 * math.pi * MIN_OMEGA_HZ / MIN_OMEGA_SAMPLERATE
+
+
+@torch.jit.script
 def damped_harmonic_oscillator(
         energy: torch.Tensor,
         time: torch.Tensor,
@@ -1262,16 +1465,12 @@ def damped_harmonic_oscillator(
         damping: torch.Tensor,
         tension: torch.Tensor,
         initial_displacement: torch.Tensor,
-        clamp_to_nyquist: bool
+        clamp_to_nyquist: bool,
+        min_omega_per_sample: float
 ) -> torch.Tensor:
     x = (damping / (2 * mass))
 
-    omega = torch.sqrt(torch.abs(tension - (x ** 2)))
-
-    if clamp_to_nyquist:
-        dt = time[1] - time[0]
-        nyquist = 0.95 * math.pi / dt
-        omega = torch.minimum(omega, nyquist)
+    omega = compute_omega(tension, x, time[1] - time[0], min_omega_per_sample, clamp_to_nyquist)
 
     phi = torch.atan2(
         (x * initial_displacement),
@@ -1282,6 +1481,92 @@ def damped_harmonic_oscillator(
     # z = a * torch.exp(-x * time) * torch.cos(omega * time - phi)
     z = a * energy * torch.cos(omega * time - phi)
     return z
+
+
+def sample_rate_oscillator(
+        hyper: HyperParameters,
+        static: StaticTensors,
+        forces: torch.Tensor,
+        damping: torch.Tensor,
+        mass: torch.Tensor,
+        tension: torch.Tensor,
+        excitation_mix: torch.Tensor = None,
+        bow_tension: torch.Tensor = None) -> torch.Tensor:
+    """
+    INTEGRATOR = 'sample_rate': the same parameters as the control-rate path
+    (`sequential` + damped_harmonic_oscillator), integrated per sample.
+
+    forces: (batch, nodes, n_frames), already routed
+    damping: (batch, nodes, n_frames), the per-control-frame decay
+        multiplier `sequential` applies
+    mass: (batch, nodes, 1)
+    tension: (batch, nodes, 1) or (batch, nodes, n_samples), modifiers
+        (tension_mod, routed FM) already applied
+    excitation_mix: (batch, 1, 3) (or (batch, nodes, 3)), softmax weights
+        over EXCITATIONS
+    bow_tension: (batch, 1, 1) (or (batch, nodes, 1)), the bow frequency
+        (see EXCITATIONS)
+    With neither given (e.g. a Layer run on its own), strikes only.
+    returns: (batch, nodes, n_samples)
+
+    Each node is a phasor z, rotating by omega and decaying by alpha each
+    sample, kicked by the drive:
+
+        z[n] = exp(-alpha[n] + i * omega[n] * dt) * z[n - 1] + drive[n] / mass
+
+    run as a parallel scan (sample_rate_dho.linear_recurrence).  The
+    parameters map over unchanged:
+      - damping d per control frame -> alpha = -log(d) / control_rate per
+        sample, linearly interpolated, so damp_mod lands per sample
+      - omega: exactly damped_harmonic_oscillator's, sqrt(|tension - x^2|)
+        with x = static damping / (2 * mass), clamped below Nyquist, in
+        parallel.py's synthetic time units (static.time), times dt to make
+        it radians per sample.  Tension may vary per sample, so the routed
+        FM is applied at audio rate, with phase integrated.
+      - output: damped_harmonic_oscillator's a * E * cos(theta - phi) is,
+        expanded, E * (cos(theta) + (x / omega) * sin(theta)), i.e.
+        Re(z) + (x / omega) * Im(z): the same form, with the envelope E and
+        phase theta now coming out of the resonator.
+    So with an all-impulse excitation_mix, a strike sounds as before -- a decaying
+    sinusoid at amplitude force / mass -- but the drive is now heard
+    through the node's resonance, which is what lets noise (and later,
+    other audio-rate drives) excite it physically.
+    """
+    n = hyper.n_samples
+    control_rate = n // hyper.n_frames
+    dt = static.time[1] - static.time[0]
+
+    strike = impulse_excitation(forces, n)
+    if excitation_mix is None:
+        drive = strike
+    else:
+        # a strike puts force ** 2 of energy into a frame; unit-variance
+        # noise under the same (interpolated) force puts ~control_rate *
+        # force ** 2, and a unit sawtooth (variance 1/3) a third of that.
+        # Scale both down to the strike's, so excitation_mix's weights
+        # compare like-for-like (as jax_ae.ParallelGenerator.excitation does)
+        sustain_scale = 1 / math.sqrt(control_rate)
+        breath = noise_excitation(forces, n) * sustain_scale
+        # the bow's frequency, in the same units as the nodes' (radians per
+        # synthetic time unit, uncapped by mass), to cycles per sample.
+        # sawtooth_excitation integrates phase (in float64) and caps the
+        # rate at Nyquist; passing sample_rate=1 means "per sample"
+        bow_cycles = torch.sqrt(bow_tension) * dt / (2 * math.pi)
+        bow_cycles = bow_cycles.expand(*forces.shape[:2], 1)
+        bow = sawtooth_excitation(forces, bow_cycles, sample_rate=1, n=n) * (math.sqrt(3) * sustain_scale)
+        drive = torch.einsum(
+            'bctm,bcm->bct', torch.stack([strike, breath, bow], dim=-1), excitation_mix)
+    drive = drive / mass
+
+    alpha = -torch.log(torch.clamp(damping, 1e-6, 1.)) / control_rate
+    alpha = interpolate_last_axis(alpha, desired_size=n)
+
+    x = static.damping / (2 * mass)
+    omega = compute_omega(tension, x, dt, min_omega_per_sample(), CLAMP_OMEGA_TO_NYQUIST)
+
+    alpha, omega_per_sample = torch.broadcast_tensors(alpha, omega * dt)
+    z = linear_recurrence(torch.complex(-alpha, omega_per_sample), drive)
+    return z.real + (x / omega) * z.imag
 
 
 @torch.jit.script
@@ -1480,9 +1765,6 @@ class Layer(nn.Module):
         self.tension_router = nn.Parameter(torch.zeros(
             1, self.n_nodes, self.n_nodes).uniform_(-0.01, 0.01) + torch.eye(self.n_nodes, self.n_nodes))
 
-        self.noise_mix = nn.Parameter(
-            torch.zeros(1, self.n_nodes, 2).uniform_(-1, 1))
-
         self.gain = nn.Parameter(torch.zeros(1, self.n_nodes).uniform_(0.5, 1.5))
         self.output_gain = nn.Parameter(torch.zeros(1, 1).uniform_(0.5, 1.5))
 
@@ -1505,7 +1787,15 @@ class Layer(nn.Module):
             forces: torch.Tensor,
             tension_modifier: torch.Tensor = None,
             damp_mod: torch.Tensor = None,
-            tension_mod: torch.Tensor = None) -> torch.Tensor:
+            tension_mod: torch.Tensor = None,
+            excitation_mix: torch.Tensor = None,
+            bow_tension: torch.Tensor = None) -> torch.Tensor:
+        """
+        excitation_mix: (1, 1, len(EXCITATIONS)) softmax weights, and
+        bow_tension: (1, 1, 1), the instrument-wide excitation shared by
+            every layer (LayerController.excitation_logits/bow_t_raw); only
+            heard with --integrator sample_rate
+        """
 
         hyper = HyperParameters(
             n_samples=self.n_samples,
@@ -1535,9 +1825,10 @@ class Layer(nn.Module):
             force_router=self.force_router,
             tension_router=self.tension_router,
             damping=self.damp,
-            noise_mix=self.noise_mix,
             gains=self.gain,
-            output_gain=self.output_gain
+            output_gain=self.output_gain,
+            excitation_mix=excitation_mix,
+            bow_tension=bow_tension,
         )
 
         x, _ = execute_parallel_layer(
@@ -1596,9 +1887,21 @@ class LayerController(nn.Module):
                 tension_dict_seed=randint(0, int(1e5)) + i)
             for i in range(self.n_layers)
         ])
+        # only the last layer is mixed into the output; the rest are heard
+        # as FM, so start them louder (see FM_LAYER_GAIN_DIRECT)
+        if INTEGRATOR == 'sample_rate':
+            with torch.no_grad():
+                for layer in self.layers[:-1]:
+                    layer.gain.mul_(FM_LAYER_GAIN_DIRECT)
 
         self.mix = nn.Parameter(torch.zeros(
             self.n_layers).uniform_(-0.01, 0.01))
+
+        # one excitation blend and bow frequency for the whole instrument,
+        # shared by every layer (see EXCITATIONS): logits, starting as an
+        # even blend, and a log10 tension somewhere in the nodes' range
+        self.excitation_logits = nn.Parameter(torch.zeros(1, 1, len(EXCITATIONS)))
+        self.bow_t_raw = nn.Parameter(torch.zeros(1, 1, 1).uniform_(*TENSION_EXPONENT_RANGE))
 
         # a single scalar gain, shared across every layer instance (unlike
         # each Layer's own per-layer output_gain, applied node-wise inside
@@ -1687,6 +1990,9 @@ class LayerController(nn.Module):
         dm = self.materialize_damping_mod()
         tension_mod = self.materialize_tension_mod()
 
+        excitation_mix = torch.softmax(self.excitation_logits, dim=-1)
+        bow_tension = compute_tension(self.bow_t_raw)
+
         tm = None
         outputs = []
         for i, layer in enumerate(self.layers):
@@ -1695,7 +2001,9 @@ class LayerController(nn.Module):
                 forces=sparse_forces,
                 tension_modifier=tm,
                 damp_mod=dm,
-                tension_mod=tension_mod
+                tension_mod=tension_mod,
+                excitation_mix=excitation_mix,
+                bow_tension=bow_tension,
             )
             outputs.append(tm)
 
@@ -1768,14 +2076,32 @@ def information_loss(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     return entropy_deficit(residual)
 
 
+def random_synthetic_excitation(batch_size: int, device) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    one random excitation per instrument (see EXCITATIONS): a blend,
+    (batch, 1, 3), and a bow tension, (batch, 1, 1)
+    """
+    mix = torch.softmax(
+        torch.zeros(batch_size, 1, len(EXCITATIONS), device=device).uniform_(-2, 2), dim=-1)
+    bow_tension = compute_tension(
+        torch.zeros(batch_size, 1, 1, device=device).uniform_(*TENSION_EXPONENT_RANGE))
+    return mix, bow_tension
+
+
 def random_synthetic_instrument(
         batch_size: int,
         n_nodes: int,
         filter_size: int,
         base_resonance: float,
         device,
-        n_filter_taps: int = N_FILTER_TAPS) -> InstrumentDefinitionTensors:
+        n_filter_taps: int = N_FILTER_TAPS,
+        excitation: Tuple[torch.Tensor, torch.Tensor] = None) -> InstrumentDefinitionTensors:
     """
+    excitation: (excitation_mix, bow_tension), from
+    random_synthetic_excitation -- pass the same one to every layer, so the
+    synthetic instrument has a single excitation like the model's.  If None,
+    this layer draws its own.
+
     Randomly samples one layer's worth of known InstrumentDefinitionTensors
     for self_supervised's synthetic-data parameter-recovery loss. Ranges
     mirror Layer's own randomly-initialized parameters (i.e. "what a
@@ -1801,9 +2127,12 @@ def random_synthetic_instrument(
     force_router = torch.zeros(batch_size, n_nodes, n_nodes, device=device).uniform_(-0.01, 0.01) + eye
     tension_router = torch.zeros(batch_size, n_nodes, n_nodes, device=device).uniform_(-0.01, 0.01) + eye
 
-    noise_mix = torch.zeros(batch_size, n_nodes, 2, device=device).uniform_(-1, 1)
     gains = torch.zeros(batch_size, n_nodes, device=device).uniform_(0.5, 1.5)
     output_gain = torch.zeros(batch_size, 1, device=device).uniform_(0.5, 1.5)
+
+    if excitation is None:
+        excitation = random_synthetic_excitation(batch_size, device)
+    excitation_mix, bow_tension = excitation
 
     return InstrumentDefinitionTensors(
         mass=mass,
@@ -1813,9 +2142,10 @@ def random_synthetic_instrument(
         force_router=force_router,
         tension_router=tension_router,
         damping=damping,
-        noise_mix=noise_mix,
         gains=gains,
-        output_gain=output_gain
+        output_gain=output_gain,
+        excitation_mix=excitation_mix,
+        bow_tension=bow_tension,
     )
 
 
@@ -1943,7 +2273,11 @@ def instrument_param_loss(
       fields, so this does not check whether e.g. the right mass got
       paired with the right damping within a node.
 
-    filters/filters_mix/noise_mix are left out of this loss for now: they're
+    excitation_mix and bow_tension are one value per instrument (shared by
+    every layer), so they have no node permutation to worry about: compared
+    directly, once (bow tension in log-space, as tension below).
+
+    filters/filters_mix are left out of this loss for now: they're
     vector-valued per node, so there's no simple scalar sort key, and a real
     fix needs actual bipartite (Hungarian) matching on a combined per-node
     descriptor -- left for later rather than papering over it with an
@@ -1968,6 +2302,12 @@ def instrument_param_loss(
             + torch.abs(known_wet_dry - est_wet_dry).sum()
     else:
         loss = loss + torch.abs(known_wet_dry[:, 0] - est_wet_dry[:, 0]).sum()
+
+    loss = loss \
+        + torch.abs(known_params[0].excitation_mix - est_params[0].excitation_mix).sum() \
+        + torch.abs(
+            torch.log10(known_params[0].bow_tension + 1e-8)
+            - torch.log10(est_params[0].bow_tension + 1e-8)).sum()
 
     for kp, ep in zip(known_params, est_params):
         known_mass = torch.sort(kp.mass, dim=1).values
@@ -2158,10 +2498,12 @@ def self_supervised(batch_size: int, n_nodes: int, n_samples: int, n_layers: int
         known_cs, known_tension_mod, known_damp_mod = random_synthetic_control_signals(
             batch_size=batch.shape[0], n_nodes=n_nodes, n_frames=n_frames,
             device=batch.device)
+        known_excitation = random_synthetic_excitation(batch.shape[0], batch.device)
         known_params = [
             random_synthetic_instrument(
                 batch_size=batch.shape[0], n_nodes=n_nodes, filter_size=filter_size,
-                base_resonance=base_resonance, device=batch.device)
+                base_resonance=base_resonance, device=batch.device,
+                excitation=known_excitation)
             for _ in range(n_layers)
         ]
         known_rooms = torch.zeros(
@@ -2268,10 +2610,12 @@ def self_supervised_only(batch_size: int, n_nodes: int, n_samples: int, n_layers
         known_cs, known_tension_mod, known_damp_mod = random_synthetic_control_signals(
             batch_size=batch_size, n_nodes=n_nodes, n_frames=n_frames,
             device=device)
+        known_excitation = random_synthetic_excitation(batch_size, device)
         known_params = [
             random_synthetic_instrument(
                 batch_size=batch_size, n_nodes=n_nodes, filter_size=filter_size,
-                base_resonance=base_resonance, device=device)
+                base_resonance=base_resonance, device=device,
+                excitation=known_excitation)
             for _ in range(n_layers)
         ]
         known_rooms = torch.zeros(
@@ -2694,6 +3038,19 @@ def _write_share_html(query: str, iteration: int, path: str = SHARE_HTML_PATH) -
 SHARE_EXPORT_EVERY = 5000
 
 
+def signed_control_image(x: torch.Tensor) -> torch.Tensor:
+    """
+    A signed (batch, nodes, frames) control signal (damp_mod, tension_mod)
+    as a [0, 1] image for the Spectrogram logger, which expects magnitudes:
+    (batch, 2 * nodes, frames), the positive part in the top half of the
+    rows and the negative part (flipped to positive) in the bottom half,
+    node i at rows i and nodes + i.  Scaled by the largest |value|, so the
+    image shows shape, not level (overfit_osc prints the level).
+    """
+    x = x / (x.abs().max() + 1e-12)
+    return torch.cat([torch.relu(x), torch.relu(-x)], dim=1)
+
+
 def overfit_osc(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int, share_html: bool = False):
 
     control_rate = 512
@@ -2717,6 +3074,18 @@ def overfit_osc(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int, sha
             NumpyDeserializer()
         )
 
+        # the damping and tension mods actually applied (materialized:
+        # scaled and sparsified), as signed_control_image: rises in the top
+        # half of the rows, falls in the bottom half
+        dmod, tmod = conjure.loggers(
+            ['dampmod', 'tensionmod'],
+            SupportedContentType.Spectrogram.value,
+            lambda x: x.data.cpu().numpy()[0],
+            collection,
+            NumpySerializer(),
+            NumpyDeserializer()
+        )
+
         rnd,  = conjure.loggers(
             ['random'],
             SupportedContentType.Audio.value,
@@ -2725,7 +3094,7 @@ def overfit_osc(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int, sha
             IdentitySerializer(),
             IdentityDeserializer())
 
-        return [frce, rnd]
+        return [frce, dmod, tmod, rnd]
 
     def training_loop_hook(
             iteration: int,
@@ -2742,9 +3111,8 @@ def overfit_osc(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int, sha
         #     for g in optim.param_groups:
         #         g['lr'] = LEARNING_RATE
 
-        # TODO: index loggers by name
-        rnd_logger = loggers[-1]
-        frce_logger = loggers[-2]
+        # in logger_factory's order
+        frce_logger, dmod_logger, tmod_logger, rnd_logger = loggers
 
         with torch.no_grad():
             # highly-sparse (4-16 events) random control signal, to sanity
@@ -2755,6 +3123,17 @@ def overfit_osc(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int, sha
             f = model.materialize_forces(do_upsample=False)
             f = f / (f.max() + 1e-12)
             frce_logger(f)
+
+            dm = model.materialize_damping_mod()
+            tm = model.materialize_tension_mod()
+            dmod_logger(signed_control_image(dm))
+            tmod_logger(signed_control_image(tm))
+            # the images are normalized, so print the levels: damp_mod is
+            # added to each node's per-frame damping multiplier, tension_mod
+            # to its log10 tension (0.1 is ~a whole tone)
+            print(
+                f'damp_mod max |.| {dm.abs().max().item():.3g} ({int((dm != 0).sum())} nonzero), '
+                f'tension_mod max |.| {tm.abs().max().item():.3g} ({int((tm != 0).sum())} nonzero)')
 
         if iteration > 0 and iteration % SHARE_EXPORT_EVERY == 0:
             try:
@@ -2841,6 +3220,9 @@ if __name__ == '__main__':
         help="drop the reverb's wet branch (room impulse response convolution) at the end of the "
              "chain, keeping only the dry signal at its learned dry gain, in every mode (see USE_REVERB)")
     parser.add_argument(
+        '--integrator', choices=['control_rate', 'sample_rate'], default=INTEGRATOR,
+        help='where the oscillators integrate their excitation (see INTEGRATOR)')
+    parser.add_argument(
         '--share-html', action='store_true',
         help=f'overfit_direct only: (over)write {SHARE_HTML_PATH} with a clickable share link each time one is exported')
 
@@ -2848,6 +3230,7 @@ if __name__ == '__main__':
 
     # module scope, so this rebinds the global every function reads
     USE_REVERB = not args.no_reverb
+    INTEGRATOR = args.integrator
 
     n_to_keep = N_TO_KEEP
 

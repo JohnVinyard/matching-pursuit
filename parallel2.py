@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Tuple, Callable
+from typing import Tuple, Callable, Iterable
 
 from conjure import LmdbCollection, loggers, serve_conjure
 from torch import nn
@@ -29,15 +29,16 @@ from util.weight_init import make_initializer
 # the PyTorch port of jax_scale_attention.AttentionEncoder lives in
 # parallel.py; shared rather than copied, so the two stay in step
 from parallel import TransformerAnalysis
+from sample_rate_dho import linear_recurrence
 
 Solution = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 
 MASS_COEFF = 1
-BASE_RESONANCE = 0.95
+BASE_RESONANCE = 0.01
 FORWARD_FORCE = False
 DO_NORM = False
 CHANNELS = 256
-SPARSIFY = False
+SPARSIFY = True
 SOFT_SPARSE = False
 
 # which encoder hears the audio, as in parallel.py:
@@ -64,9 +65,51 @@ TRANSFORMER_LEVEL_MODE = 'relative'
 # doesn't grow or shrink with however large that raw output happens to be
 USE_ATTENTION_NORM = True
 
+# raw tension t enters the oscillator as 10 ** t (see compute_tension).
+# time runs 0 -> 10 over the whole segment (2 ** 17 samples, ~5.9s), so
+# t in (4, 9) puts sqrt(tension) at ~27 Hz to ~8.5 kHz.  Same range as
+# parallel.py's
+TENSION_EXPONENT_RANGE = (4.0, 9.0)
+
+# Start each hypernetwork head (and the direct mode's parameters) at an
+# audible instrument instead of at ~0: see InstrumentHyperNetwork.
+# init_operating_point.  At init the latent is tiny, so each head outputs
+# ~its bias, and init_func zeroes the biases -- mass ~0 (the drive divided
+# by ~0), gains and the attack envelope ~0 (no sound), tension 10 ** 0 = 1
+# (well below audible)
+INIT_OPERATING_POINT = True
+
 
 def compute_tension(t: torch.Tensor) -> torch.Tensor:
     return 10**t
+
+
+def compute_mass(m_raw: torch.Tensor) -> torch.Tensor:
+    """
+    As parallel.py's: positive, and bounded away from 0.  (Was `t * m`, the
+    product of two raw head outputs, which is ~1e-10 at init and can be any
+    sign; the drive is divided by mass, so that overflowed.)
+    """
+    return 1e-5 + torch.abs(m_raw)
+
+
+def compute_damping(d_raw: torch.Tensor, base_resonance: float) -> torch.Tensor:
+    """per-sample decay factor in (base_resonance, 1)"""
+    return base_resonance + torch.clamp(d_raw, 0, 1) * (1 - base_resonance)
+
+
+def control_signal(x: torch.Tensor, do_sparsify: bool, n_to_keep: int) -> torch.Tensor:
+    """
+    The non-negative (optionally sparse) control signal ControlSignalCreator
+    derives from its conv's output; shared with the direct mode's
+    LayerController, which applies it to directly-optimized tensors
+    """
+    # x = torch.abs(x)
+    # x = x - x.mean()
+    x = torch.relu(x)
+    if do_sparsify:
+        x = sparsify(x, n_to_keep=n_to_keep)
+    return x
 
 
 @dataclass
@@ -216,6 +259,33 @@ class InstrumentHyperNetwork(nn.Module):
         self.force_router = ParameterGenerator(latent_dim, self.router_size)
         self.tension_router = ParameterGenerator(latent_dim, self.router_size)
 
+    @torch.no_grad()
+    def init_operating_point(self):
+        """
+        Set each head's bias (its output, at init) to the instrument the
+        direct mode's Layer starts from:
+          - mass: |m_raw| ~ U(0, 1)
+          - tension: t_raw ~ U(TENSION_EXPONENT_RANGE)
+          - gains: U(0.5, 1.5)
+          - attack: an envelope decaying linearly from 1 to 0
+          - force_router, tension_router: identity
+          - filters_mix: dry 1, filtered 0
+        damping and the filters keep their zero bias (damping halfway
+        between base_resonance and 1; filters are unit-normed anyway).
+        """
+        n = self.n_nodes
+        device = self.gain.ln1.bias.device
+        eye = torch.eye(n, device=device).flatten()
+        self.to_masses.ln1.bias.uniform_(-1, 1)
+        self.to_tension.ln1.bias.uniform_(*TENSION_EXPONENT_RANGE)
+        self.gain.ln1.bias.uniform_(0.5, 1.5)
+        self.attack.ln1.bias.view(n, self.attack_control_frames).copy_(
+            torch.linspace(1, 0, self.attack_control_frames, device=device).expand(n, -1))
+        self.force_router.ln1.bias.copy_(eye)
+        self.tension_router.ln1.bias.copy_(eye)
+        self.filters_mix.ln1.bias.view(n, 2).copy_(
+            torch.tensor([1., 0.], device=device).expand(n, 2))
+
     def forward(self, latent: torch.Tensor) -> InstrumentDefinitionTensors:
         batch, latent_dim = latent.shape
 
@@ -235,7 +305,7 @@ class InstrumentHyperNetwork(nn.Module):
             batch, self.n_nodes, self.n_nodes)
 
         return InstrumentDefinitionTensors(
-            mass=t * m,
+            mass=compute_mass(m),
             tension=t,
             damping=d,
             filters=filt,
@@ -263,14 +333,7 @@ class ControlSignalCreator(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = F.pad(x, (0, 7))
         x = self.network(x)
-
-        x = torch.abs(x)
-        x = x - x.mean()
-        x = torch.relu(x)
-
-        if self.sparsify:
-            x = sparsify(x, n_to_keep=self.n_to_keep)
-        return x
+        return control_signal(x, self.sparsify, self.n_to_keep)
 
 
 init_func = make_initializer(0.04)
@@ -287,7 +350,7 @@ class InstrumentAutoencoder(nn.Module):
             channels: int,
             filter_size: int,
             n_to_keep: int,
-            base_resonance: float = 0.5,
+            base_resonance: float = BASE_RESONANCE,
             attack_size: int = 512,
             attack_control_frames: int = 4):
 
@@ -368,6 +431,15 @@ class InstrumentAutoencoder(nn.Module):
             if not isinstance(child, TransformerAnalysis):
                 child.apply(init_func)
 
+        if INIT_OPERATING_POINT:
+            for hyper in self.hyper_networks:
+                hyper.init_operating_point()
+            with torch.no_grad():
+                # rooms through a relu: U(0, 1); wet/dry through a softmax:
+                # mostly dry
+                self.room_mix.ln1.bias.uniform_(0, 1)
+                self.wet_dry.ln1.bias.copy_(torch.tensor([1., 0.5]))
+
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         if ENCODER_ARCH == 'transformer':
             x, _log_level = self.analysis(x)
@@ -388,7 +460,170 @@ class InstrumentAutoencoder(nn.Module):
         t = self.tension(x)
         d = self.damp(x)
 
-        tm = None
+        static = StaticTensors(
+            time=self.t,
+            damping=self.d,
+            initial_displacement=self._id
+        )
+
+        mixed = render(
+            hyper=self.hyper_params,
+            static=static,
+            layers=[layer.forward(latents) for layer in self.hyper_networks],
+            forces=cs,
+            damp_mod=d,
+            tension_mod=t,
+            verb=self.verb,
+            room_mix=self.room_mix.forward(latents),
+            wet_dry=self.wet_dry.forward(latents))
+
+        return cs, mixed
+
+
+def render(
+        hyper: HyperParameters,
+        static: StaticTensors,
+        layers: Iterable[InstrumentDefinitionTensors],
+        forces: torch.Tensor,
+        damp_mod: torch.Tensor,
+        tension_mod: torch.Tensor,
+        verb: NeuralReverb,
+        room_mix: torch.Tensor,
+        wet_dry: torch.Tensor) -> torch.Tensor:
+    """
+    Everything after the encoder/hypernetwork: run the layers in series
+    (each layer's output modulating the next one's tension), sum the nodes,
+    and mix in reverb.  Shared by InstrumentAutoencoder and the direct
+    mode's LayerController, so the two always synthesize identically.
+
+    layers: each with *raw* damping (compute_damping is applied here)
+    room_mix, wet_dry: raw, (batch, n_rooms) and (batch, 2)
+    """
+    tm = None
+    for params in layers:
+        params.damping = compute_damping(params.damping, hyper.base_resonance)
+        tm, routed = execute_parallel_layer(
+            instrument=params,
+            hyper=hyper,
+            static=static,
+            forces=forces,
+            damp_mod=damp_mod,
+            tension_mod=tension_mod,
+            tension_modifier=tm
+        )
+        if FORWARD_FORCE:
+            forces = routed
+
+    tm = torch.sum(tm, dim=1, keepdim=True)
+
+    rooms = torch.relu(room_mix)
+    mx = torch.softmax(wet_dry, dim=-1)
+
+    wet = verb.forward(tm, rooms)
+    stacked = torch.stack([tm, wet], dim=-1)
+    return torch.einsum('bctm,bm->bct', stacked, mx)
+
+
+class Layer(nn.Module):
+    """
+    One layer's instrument, as directly-optimized tensors: the same raw
+    values an InstrumentHyperNetwork head would output, initialized to its
+    init_operating_point (plus a little noise where that's constant, to
+    break symmetry between nodes)
+    """
+    def __init__(self, n_nodes: int, filter_size: int, attack_control_frames: int):
+        super().__init__()
+        eye = torch.eye(n_nodes)[None]
+        self.m_raw = nn.Parameter(torch.zeros(1, n_nodes, 1).uniform_(-1, 1))
+        self.t_raw = nn.Parameter(torch.zeros(1, n_nodes, 1).uniform_(*TENSION_EXPONENT_RANGE))
+        self.d_raw = nn.Parameter(torch.zeros(1, n_nodes, 1).uniform_(-1, 1))
+        self.gains = nn.Parameter(torch.zeros(1, n_nodes).uniform_(0.5, 1.5))
+        self.filters = nn.Parameter(torch.zeros(1, n_nodes, filter_size).uniform_(-1, 1))
+        self.filters_mix = nn.Parameter(
+            torch.tensor([1., 0.]).repeat(1, n_nodes, 1) + torch.zeros(1, n_nodes, 2).uniform_(-0.01, 0.01))
+        self.attack = nn.Parameter(
+            torch.linspace(1, 0, attack_control_frames).repeat(1, n_nodes, 1)
+            + torch.zeros(1, n_nodes, attack_control_frames).uniform_(-0.01, 0.01))
+        self.force_router = nn.Parameter(eye + torch.zeros(1, n_nodes, n_nodes).uniform_(-0.01, 0.01))
+        self.tension_router = nn.Parameter(eye + torch.zeros(1, n_nodes, n_nodes).uniform_(-0.01, 0.01))
+
+    def forward(self) -> InstrumentDefinitionTensors:
+        return InstrumentDefinitionTensors(
+            mass=compute_mass(self.m_raw),
+            tension=self.t_raw,
+            damping=self.d_raw,
+            filters=self.filters,
+            filters_mix=self.filters_mix,
+            attack=self.attack,
+            force_router=self.force_router,
+            tension_router=self.tension_router,
+            gains=self.gains)
+
+
+class LayerController(nn.Module):
+    """
+    InstrumentAutoencoder with the encoder and hypernetworks removed: the
+    instrument (one Layer per layer), its control signals (forces and the
+    damping/tension modulations), and the reverb mix are all optimized
+    directly, and synthesized by the same `render`.  If this fits a segment
+    and the autoencoder doesn't, the trouble is in the encoder/hypernetwork,
+    not the physics.
+
+    The control signals go through control_signal, as ControlSignalCreator's
+    outputs do (forces sparsified iff SPARSIFY; the modulations always, to 16)
+    """
+    def __init__(
+            self,
+            n_samples: int,
+            n_nodes: int,
+            control_rate: int,
+            n_layers: int,
+            filter_size: int,
+            n_to_keep: int,
+            base_resonance: float = 0.5,
+            attack_size: int = 512,
+            attack_control_frames: int = 4):
+        super().__init__()
+        self.n_samples = n_samples
+        self.n_nodes = n_nodes
+        self.n_frames = n_samples // control_rate
+        self.n_to_keep = n_to_keep
+
+        self.hyper_params = HyperParameters(
+            n_samples=n_samples,
+            n_frames=self.n_frames,
+            control_rate=control_rate,
+            attack_size=attack_size,
+            base_resonance=base_resonance,
+            mass_coeff=MASS_COEFF
+        )
+
+        self.register_buffer('d', torch.zeros(1, n_nodes, 1).fill_(1))
+        self.register_buffer('_id', torch.zeros(1, n_nodes, 1).fill_(1))
+        self.register_buffer('t', torch.linspace(0, 10, n_samples))
+
+        self.layers = nn.ModuleList([
+            Layer(n_nodes, filter_size, attack_control_frames) for _ in range(n_layers)])
+
+        # raw control signals: control_signal keeps |x| - mean(|x|), so
+        # roughly the larger half of the frames start active.  U(-0.01, 0.01)
+        # puts the output at about the autoencoder's level at init (rms
+        # ~0.02 vs ~0.03); U(-1, 1) saturates every node's tanh
+        self.forces = nn.Parameter(torch.zeros(1, n_nodes, self.n_frames).uniform_(-0.01, 0.01))
+        # the modulations add directly to damping and to the tension
+        # exponent, so start them small
+        self.damp_mod = nn.Parameter(torch.zeros(1, n_nodes, self.n_frames).uniform_(-0.01, 0.01))
+        self.tension_mod = nn.Parameter(torch.zeros(1, n_nodes, self.n_frames).uniform_(-0.01, 0.01))
+
+        self.verb = NeuralReverb.from_directory(
+            Config.impulse_response_path(), samplerate=22050, n_samples=n_samples)
+        self.room_mix = nn.Parameter(torch.zeros(1, self.verb.n_rooms).uniform_(0, 1))
+        self.wet_dry = nn.Parameter(torch.tensor([[1., 0.5]]))
+
+    def forward(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        cs = control_signal(self.forces, SPARSIFY, self.n_to_keep)
+        d = control_signal(self.damp_mod, True, 16)
+        t = control_signal(self.tension_mod, True, 16)
 
         static = StaticTensors(
             time=self.t,
@@ -396,43 +631,16 @@ class InstrumentAutoencoder(nn.Module):
             initial_displacement=self._id
         )
 
-        for layer in self.hyper_networks:
-
-            params: InstrumentDefinitionTensors = layer.forward(latents)
-            diff = 1 - self.hyper_params.base_resonance
-            params.damping = self.hyper_params.base_resonance + (torch.sigmoid(params.damping) * diff)
-
-            if FORWARD_FORCE:
-                tm, cs = execute_parallel_layer(
-                    instrument=params,
-                    hyper=self.hyper_params,
-                    static=static,
-                    forces=cs,
-                    damp_mod=d,
-                    tension_mod=t,
-                    tension_modifier=tm
-                )
-            else:
-                tm, _cs = execute_parallel_layer(
-                    instrument=params,
-                    hyper=self.hyper_params,
-                    static=static,
-                    forces=cs,
-                    damp_mod=d,
-                    tension_mod=t,
-                    tension_modifier=tm
-                )
-
-        tm = torch.sum(tm, dim=1, keepdim=True)
-
-        rooms = torch.relu(self.room_mix.forward(latents))
-        mx = torch.softmax(self.wet_dry.forward(latents), dim=-1)
-
-        wet = self.verb.forward(tm, rooms)
-
-        stacked = torch.stack([tm, wet], dim=-1)
-
-        mixed = torch.einsum('bctm,bm->bct', stacked, mx)
+        mixed = render(
+            hyper=self.hyper_params,
+            static=static,
+            layers=[layer.forward() for layer in self.layers],
+            forces=cs,
+            damp_mod=d,
+            tension_mod=t,
+            verb=self.verb,
+            room_mix=self.room_mix,
+            wet_dry=self.wet_dry)
 
         return cs, mixed
 
@@ -603,65 +811,25 @@ def damped_harmonic_oscillator(
 
 def chunked_parallel(
         forces: torch.Tensor,
-        damping: torch.Tensor,
-        chunk_size: int = 2048) -> torch.Tensor:
+        damping: torch.Tensor) -> torch.Tensor:
     """
-    Numerically stable parallel scan for the recurrence
-    o[i] = (f[i] + o[i-1]) * d[i].
+    o[i] = (f[i] + o[i-1]) * d[i], i.e. o[i] = d[i] o[i-1] + d[i] f[i], via
+    sample_rate_dho.linear_recurrence.
 
-    The naive cumprod/cumsum reformulation of this recurrence (`a[i]=d[i]`,
-    `b[i]=d[i]*f[i]`, `p=cumprod(d)`, `o=p*cumsum(b/p)`) is exact in
-    infinite precision, but in float32 it fails once cumprod(damping)
-    decays into the subnormal range: dividing by a subnormal `p` overflows
-    to inf, which then poisons every later step via the running cumsum.
-    This happens well before `p` reaches exact zero (e.g. a damping rate
-    corresponding to lambda=80 at 44.1kHz starts producing non-finite
-    output around N=65536 samples, long before cumprod itself underflows
-    to exactly 0).
+    This used to be a chunked cumprod/cumsum scan dividing by cumprod(d)
+    over 2048-sample chunks.  With d = 0.75 (overfit's base_resonance 0.5,
+    sigmoid(0)) that cumprod underflows to exactly 0 within ~300 samples,
+    so the *forward* pass was inf/NaN; with d = 0.975 it's ~3e-23 by the
+    end of a chunk, finite going forward but overflowing in the backward
+    pass.  linear_recurrence does the same scan with log-space cumsums over
+    chunks short enough that exp(-S) stays bounded, and combines chunks
+    without dividing, so both passes stay finite.
 
-    The fix is the standard chunked/blocked parallel scan used in chunked
-    linear-attention/SSM implementations: run the cumprod/cumsum trick
-    independently within fixed-size chunks (small enough that `p` never
-    leaves the normal float32 range), then propagate the running state
-    across chunk boundaries with a short sequential loop over chunks
-    (n_samples / chunk_size steps, not n_samples steps).
+    d is clamped to [1e-6, 1]: a damping modulation can push it above 1
+    (which would grow without bound), and log(0) has no gradient.
     """
-    orig_len = forces.shape[-1]
-    pad = (-orig_len) % chunk_size
-
-    if pad > 0:
-        forces = F.pad(forces, (0, pad))
-        damping = F.pad(damping, (0, pad), value=1.0)
-
-    batch_shape = forces.shape[:-1]
-    n_chunks = forces.shape[-1] // chunk_size
-
-    f = forces.reshape(*batch_shape, n_chunks, chunk_size)
-    d = damping.reshape(*batch_shape, n_chunks, chunk_size)
-
-    # within-chunk parallel scan (chunk_size is chosen small enough that
-    # `p` stays within the normal float32 range, so no epsilon is needed)
-    b = d * f
-    p = torch.cumprod(d, dim=-1)
-    s = torch.cumsum(b / p, dim=-1)
-    local_out = p * s
-
-    # state to carry from the end of one chunk into the next: total decay
-    # factor and final output value of each chunk
-    chunk_damp_total = p[..., -1]
-    chunk_final_local = local_out[..., -1]
-
-    # sequential scan *across chunks only* (n_chunks steps, not n_samples)
-    carry = torch.zeros_like(chunk_damp_total[..., 0])
-    carries = []
-    for c in range(n_chunks):
-        carries.append(carry)
-        carry = carry * chunk_damp_total[..., c] + chunk_final_local[..., c]
-    carry_in = torch.stack(carries, dim=-1)
-
-    out = local_out + carry_in[..., None] * p
-    out = out.reshape(*batch_shape, n_chunks * chunk_size)
-    return out[..., :orig_len]
+    d = torch.clamp(damping, 1e-6, 1)
+    return linear_recurrence(torch.log(d), d * forces)
 
 
 def loss_func(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
@@ -780,11 +948,46 @@ def overfit_autoencoder(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: 
     )
 
 
+def overfit_direct(n_nodes: int, n_samples: int, n_layers: int, n_to_keep: int):
+    """
+    overfit_autoencoder's twin, without the encoder/hypernetwork (see
+    LayerController): same segment, loss, sparsity penalty, base_resonance
+    and learning rate
+    """
+    model = LayerController(
+        n_samples=n_samples,
+        n_nodes=n_nodes,
+        control_rate=512,
+        n_layers=n_layers,
+        filter_size=32,
+        n_to_keep=n_to_keep).to(device)
+
+    def model_eval(model: LayerController, _, target: torch.Tensor):
+        control_signal, recon = model.forward()
+
+        sparsity = (control_signal > 0).sum() / control_signal.numel()
+        print(sparsity.item())
+
+        sparsity_coeff = 0 if SPARSIFY else 1
+        loss = loss_func(target, recon) + (l0_norm(control_signal) * 1e-3 * sparsity_coeff)
+        return recon, loss
+
+    overfit_model(
+        n_samples=n_samples,
+        model=model,
+        loss_func=loss_func,
+        model_eval=model_eval,
+        collection_name='parallel2',
+        learning_rate=1e-4,
+        port=9998
+    )
+
+
 if __name__ == '__main__':
 
     parser = ArgumentParser()
     parser.add_argument(
-        '--mode', choices=['train', 'overfit'], required=True)
+        '--mode', choices=['train', 'overfit', 'overfit_direct'], required=True)
 
     args = parser.parse_args()
 
@@ -797,6 +1000,12 @@ if __name__ == '__main__':
             n_to_keep=64)
     elif args.mode == 'overfit':
         overfit_autoencoder(
+            n_nodes=32,
+            n_samples=2 ** 17,
+            n_layers=2,
+            n_to_keep=64)
+    elif args.mode == 'overfit_direct':
+        overfit_direct(
             n_nodes=32,
             n_samples=2 ** 17,
             n_layers=2,
