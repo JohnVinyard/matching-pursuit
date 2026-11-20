@@ -317,6 +317,7 @@ export class MotionInput extends EventTarget {
     this.tracker = new MotionTracker(options);
     this.source = null;
     this.sourceName = null;
+    this.counts = { orientation: 0, rotationRate: 0 }; // samples received, for diagnostics
   }
 
   get options() {
@@ -343,10 +344,12 @@ export class MotionInput extends EventTarget {
   async start() {
     this.stop();
     const onOrientation = (q, t) => {
+      this.counts.orientation++;
       const frame = this.tracker.updateOrientation(q, t);
       this.dispatchEvent(new CustomEvent('frame', { detail: frame }));
     };
     const onRotationRate = (w, t) => {
+      this.counts.rotationRate++;
       const strike = this.tracker.updateRotationRate(w, t);
       if (strike) this.dispatchEvent(new CustomEvent('strike', { detail: strike }));
     };

@@ -40,6 +40,21 @@ export async function startMotionMode(overlayEl) {
   const arcSlider = overlayEl.querySelector('#motion-arc');
   const arcLabel = overlayEl.querySelector('#motion-arc-label');
 
+  // ---- debug log (temporary) --------------------------------------------
+  const debugEl = overlayEl.querySelector('#motion-debug');
+  debugEl.replaceChildren();
+  function log(msg, kind = '') {
+    const line = document.createElement('div');
+    line.className = kind;
+    line.textContent = `${(performance.now() / 1000).toFixed(2)} ${msg}`;
+    debugEl.prepend(line);
+    while (debugEl.childNodes.length > 60) debugEl.lastChild.remove();
+  }
+  const onWindowError = (e) => log(`error: ${e.message} (${e.filename?.split('/').pop()}:${e.lineno})`, 'err');
+  const onRejection = (e) => log(`unhandled rejection: ${e.reason?.message || e.reason}`, 'err');
+  window.addEventListener('error', onWindowError);
+  window.addEventListener('unhandledrejection', onRejection);
+
   const motion = new MotionInput({
     heading: headingSelect.value,
     strikeThreshold: parseFloat(thresholdSlider.value),
@@ -74,6 +89,7 @@ export async function startMotionMode(overlayEl) {
   let lastFrame = { position: 0.5, heading: 0, elevation: 0 };
   function onPadDown(e) {
     e.preventDefault();
+    log(`hold start at pos ${lastFrame.position.toFixed(2)}`);
     pad.setPointerCapture(e.pointerId);
     holds.add(e.pointerId);
     pad.classList.add('active');
@@ -82,6 +98,7 @@ export async function startMotionMode(overlayEl) {
   function onPadUp(e) {
     holds.delete(e.pointerId);
     if (holds.size) return;
+    log('hold end');
     pad.classList.remove('active');
     bridge.planes.energyPlane.clearPointer(POINTER_ID);
   }
@@ -100,6 +117,8 @@ export async function startMotionMode(overlayEl) {
   motion.addEventListener('strike', (e) => {
     const { position, strength } = e.detail;
     bridge.strikeAt(position, strength);
+    log(`strike node ${nodeAt(position)} pos ${position.toFixed(2)} strength ${strength.toFixed(2)}` +
+      ` peak ${e.detail.peakRate.toFixed(1)} rad/s`, 'strike');
     flashUntil[nodeAt(position)] = performance.now() + FLASH_MS;
     navigator.vibrate?.(Math.round(8 + 20 * strength));
   });
@@ -114,7 +133,9 @@ export async function startMotionMode(overlayEl) {
       motion.recenter();
     } catch (err) {
       status.textContent = String(err.message || err);
+      log(`heading switch failed: ${err.message || err}`, 'err');
     }
+    log(`heading source: ${motion.sourceName}`);
   };
   headingSelect.addEventListener('change', onHeading);
 
@@ -134,10 +155,26 @@ export async function startMotionMode(overlayEl) {
   arcSlider.addEventListener('input', onArc);
   onArc();
 
+  // once a second: sample rates, peak flick speed, audio state -- shows
+  // whether sensors are delivering at all and how close flicks get to the
+  // strike threshold
+  let lastCounts = { orientation: 0, rotationRate: 0 };
+  let peakSpeed = 0;
+  const statsTimer = setInterval(() => {
+    const c = motion.counts;
+    const ctx = bridge.getAudioContext();
+    log(`orient ${c.orientation - lastCounts.orientation}/s gyro ${c.rotationRate - lastCounts.rotationRate}/s` +
+      ` peak speed ${peakSpeed.toFixed(1)} (threshold ${motion.options.strikeThreshold})` +
+      ` | audio ${ctx ? ctx.state : 'none'}`, 'stats');
+    lastCounts = { ...c };
+    peakSpeed = 0;
+  }, 1000);
+
   // ---- render loop ------------------------------------------------------
   let rafHandle = null;
   function frame() {
     rafHandle = requestAnimationFrame(frame);
+    peakSpeed = Math.max(peakSpeed, motion.tracker.speed);
     if (cells.length !== bridge.state.n1) buildStrip();
     const now = performance.now();
     const pointed = nodeAt(lastFrame.position);
@@ -178,6 +215,9 @@ export async function startMotionMode(overlayEl) {
     motion,
     teardown() {
       cancelAnimationFrame(rafHandle);
+      clearInterval(statsTimer);
+      window.removeEventListener('error', onWindowError);
+      window.removeEventListener('unhandledrejection', onRejection);
       motion.stop();
       pad.removeEventListener('pointerdown', onPadDown);
       pad.removeEventListener('pointerup', onPadUp);
@@ -195,14 +235,31 @@ export async function startMotionMode(overlayEl) {
   };
 
   frame();
-  status.textContent = 'Starting sensors…';
-  await bridge.startAudio();
-  requestWakeLock();
+  status.textContent = 'Starting sensors\u2026';
   try {
-    await motion.start();
+    await bridge.startAudio();
+    const ctx = bridge.getAudioContext();
+    log(`audio ${ctx.state} @ ${ctx.sampleRate} Hz, engine ${bridge.currentEngineType?.() ?? '?'},` +
+      ` excitation ${bridge.state.excitationMode}, n1 ${bridge.state.n1}`);
+    bridge.getWorkletNode()?.addEventListener('processorerror', (e) => log(`worklet error: ${e.message || e}`, 'err'));
+  } catch (err) {
+    log(`audio start failed: ${err.message || err}`, 'err');
+  }
+  requestWakeLock();
+  if (navigator.permissions?.query) {
+    for (const name of ['accelerometer', 'gyroscope', 'magnetometer']) {
+      navigator.permissions.query({ name })
+        .then((r) => log(`permission ${name}: ${r.state}`))
+        .catch((err) => log(`permission ${name}: query failed (${err.message})`));
+    }
+  }
+  try {
+    const name = await motion.start();
+    log(`sensors started: ${name}`);
     motion.recenter();
   } catch (err) {
     status.textContent = String(err.message || err);
+    log(`sensor start failed: ${err.message || err}`, 'err');
   }
 }
 

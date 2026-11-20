@@ -1147,6 +1147,7 @@ function buildPlanes() {
     ensureAudio,
     startAudio,
     strikeAt,
+    currentEngineType,
     getWorkletNode: () => workletNode,
     getAudioContext: () => audioCtx,
   };
